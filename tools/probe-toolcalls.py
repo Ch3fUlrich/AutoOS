@@ -62,6 +62,7 @@ from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     legs_to_probe,  # shared with probe-recall/probe-effort (policy, free-only)
     load_agent_module as _load_agent_module,
     load_overlay,
+    make_post as _common_make_post,
     now_iso as _now_iso,
     post_with_retry,
     save_overlay,
@@ -89,15 +90,6 @@ TOOLS_MENTION = re.compile(r"(?i)\b(tool|function)s?\b")
 
 # Assignable, so tests need no real network wait.
 _sleep = time.sleep
-
-
-# ---------------------------------------------------------------------------
-# legs_to_probe / _skip_reason: the shared leg selection of
-# tools/probe_common.py (policy.leg_rules deny, free legs only per D18,
-# unavailable_now self-heal). This probe keeps its own make_post / 400 body
-# classification below: probe_common.make_post returns a bare 'HTTP 400' and
-# would lose the 'tools unsupported' verdict.
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -282,48 +274,36 @@ def record_verdict(overlay, leg, value, detail, trials, passes, at):
 # reads the key and the timestamp are tools/probe_common.py's.
 # ---------------------------------------------------------------------------
 
-def _error_token(status, body):
-    """The fixed error text for a failed call: the status, plus the one fact a
-    400's body is allowed to carry on into it."""
-    if status == 400 and TOOLS_MENTION.search(body):
+def _classify_error(exc):
+    """The fixed token for a failed call whose body is allowed to carry one
+    fact: an HTTP 400 that says the leg has no tool/function support.
+
+    This is the classifier handed to tools/probe_common.py's make_post(), which
+    now owns the urlopen loop. Only a 400's body is read at all; it is read
+    only to pick the token, and only the token is returned — never the body,
+    never an exception's text (a provider body carries org/project ids and
+    internal hosts, and the error text is printed and stored in the overlay
+    detail). Returning None lets the common post report the bare status.
+    """
+    if exc.code != 400:
+        return None
+    body = exc.read(500).decode("utf-8", "replace")
+    if TOOLS_MENTION.search(body):
         return TOOLS_UNSUPPORTED
-    return "HTTP %d" % status
+    return None
 
 
 def make_post(gateway_url, key, timeout=180):
     """A real `post(body) -> (status, parsed_json_or_None, error_text)`.
 
-    Not tools/probe_common.py's `make_post`: here an HTTP 400 that says the leg
-    has no tool/function support is a verdict, so this is the one post that
-    reads the error body at all. It reads it only to pick `_error_token` and
-    returns that token — never the body, never an exception's text. A provider
-    body carries org/project ids and internal hosts, and the error text is
-    printed and stored in the overlay detail.
+    A thin wrapper over tools/probe_common.py's make_post: this is the one
+    probe for which a 400's body is a verdict (no tool/function support), so
+    it is the one caller that passes the body-reading `_classify_error` hook
+    above. Everything else - the request, the transport handling, never
+    returning a provider body - is the shared post's one implementation.
     """
-    def post(body):
-        data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            gateway_url, data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + key})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.status
-                raw = resp.read()
-        except urllib.error.HTTPError as exc:
-            # Only a 400's body can say anything about tool support; no other
-            # status is worth reading the provider's text for.
-            text = (exc.read(500).decode("utf-8", "replace")
-                    if exc.code == 400 else "")
-            return exc.code, None, _error_token(exc.code, text)
-        except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
-            return "ERR", None, "transport error: %s" % type(exc).__name__
-        try:
-            parsed = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError as exc:
-            return status, None, "invalid JSON body: %s" % exc
-        return status, parsed, None
-    return post
+    return _common_make_post(gateway_url, key, timeout=timeout,
+                             classify_error=_classify_error)
 
 
 def main(argv=None) -> int:

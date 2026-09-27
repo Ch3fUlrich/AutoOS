@@ -72,14 +72,20 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
 
+# The shared by-path loader for tools/registry.py; tools/ is added to sys.path
+# only when it is missing, so importing this module from another tool (or the
+# test suite loading THIS file by path) still resolves it.
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+from registry_loader import load_registry_tool  # noqa: E402 - tools/ added above
+
 ROOT = Path(__file__).resolve().parent.parent
-REGISTRY_TOOL_PATH = ROOT / "tools" / "registry.py"
 GATEWAYS = ("omniroute", "litellm")
 SURFACES = ("opencode", "zed", "openhands")
 REQUIRED = {"id": str, "name": str, "context": int, "output": int, "surfaces": dict}
@@ -158,16 +164,6 @@ def load_catalog(path):
     return _validate_models(models, str(path))
 
 
-def _load_registry_tool():
-    """Import tools/registry.py by path (its name is not a valid module
-    identifier) - the same importlib-by-path technique that tool's own
-    _load_sync_router_tiers() uses for tools/sync-router-tiers.py."""
-    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def load_from_registry(path):
     """The validated model list, in picker order - sourced from catalog/ai-
     registry.json via tools/registry.py's render_ide() (routing v2 spec 3.2
@@ -183,7 +179,7 @@ def load_from_registry(path):
         registry_doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
-    registry = _load_registry_tool()
+    registry = load_registry_tool()
     try:
         rendered = registry.render_ide(registry_doc)
     except ValueError as exc:

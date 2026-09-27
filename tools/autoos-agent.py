@@ -28,8 +28,9 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed unless
---allow-training. A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
+sensitive 1M leg is off, so --allow-training is accepted for
+compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
 resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
 subcommand uses): `state` input_required refuses with exit 2 and the plan's
@@ -360,6 +361,97 @@ def _is_v2_card(parsed: dict) -> bool:
     return False
 
 
+# SPAWNCAP (S2). A client advertises shell/write in the registry
+# (clients.<id>.capabilities); a task that needs one is refused before dispatch
+# rather than started on a client that cannot do it, and auto-choice skips such
+# a client. The only explicit card kinds/roles that ask for shell+write: a v2
+# kind of implement/debug/bulk, or a v1 role=implement.
+CAPABILITY_EDITING_KINDS = frozenset({"implement", "debug", "bulk"})
+
+
+def client_capabilities(name: str, registry: dict | None = None) -> dict:
+    """One client's declared {shell, write}; a missing entry reads as both False."""
+    if registry is None:
+        registry = load_registry(REGISTRY_PATH)
+    declared = ((registry.get("clients") or {}).get(name) or {}).get("capabilities") or {}
+    return {"shell": bool(declared.get("shell")), "write": bool(declared.get("write"))}
+
+
+def _parsed_card_fields(text) -> dict | None:
+    """routing.parse_card's output for `text`, or None for an empty/malformed one.
+
+    A malformed card is build_plan's to report (its own CardError message, with
+    the existing "(see: ... list)" suffix); the capability gate must not shadow it.
+    """
+    try:
+        parsed = routing.parse_card(text or "")
+    except routing.CardError:
+        return None
+    return parsed or None
+
+
+def required_capabilities(args) -> tuple:
+    """The shell/write capabilities this run's task needs, in a fixed order.
+
+    `--isolate` means the worker writes to its clone and uses git, so both are
+    needed. Otherwise only an EXPLICIT editing card is a write request: a v2
+    `kind` of implement/debug/bulk, or a v1 `role=implement`. An absent, empty,
+    malformed, read-only (review/research/plan) or defaults-only card (e.g.
+    `privacy=sensitive` alone) asks for nothing - being explicit is what makes a
+    run a write run.
+    """
+    if getattr(args, "isolate", False):
+        return ("shell", "write")
+    parsed = _parsed_card_fields(getattr(args, "card", None))
+    if not parsed:
+        return ()
+    if _is_v2_card(parsed):
+        if parsed.get("kind") in CAPABILITY_EDITING_KINDS:
+            return ("shell", "write")
+        return ()
+    if parsed.get("role") == "implement":
+        return ("shell", "write")
+    return ()
+
+
+def _client_order() -> list:
+    """The preference order auto-choice walks: opencode first, then
+    autoos_clients.CLIENTS' own order."""
+    return ["opencode"] + [name for name in clients.CLIENTS if name != "opencode"]
+
+
+def choose_client(required: tuple, registry: dict | None = None) -> str | None:
+    """The first client declaring every capability in `required`, or None.
+
+    With no requirement this is `opencode` - exactly today's default.
+    """
+    if not required:
+        return "opencode"
+    for name in _client_order():
+        caps = client_capabilities(name, registry)
+        if all(caps.get(cap) for cap in required):
+            return name
+    return None
+
+
+def capability_refusal(name: str, required: tuple, registry: dict | None = None) -> str | None:
+    """Why `name` cannot take this run, or None when it declares every capability.
+
+    Names the missing capability and the clients that do have it, so the
+    operator can reroute without guessing.
+    """
+    caps = client_capabilities(name, registry)
+    missing = [cap for cap in required if not caps.get(cap)]
+    if not missing:
+        return None
+    capable = [other for other in _client_order()
+               if all(client_capabilities(other, registry).get(cap) for cap in missing)]
+    return ("client %s cannot run this task: it lacks %s (declares shell=%s, write=%s). "
+            "Clients with %s: %s" % (
+                name, " and ".join(missing), str(caps["shell"]).lower(), str(caps["write"]).lower(),
+                " and ".join(missing), ", ".join(capable) or "none"))
+
+
 class RouteInputRequired(ValueError):
     """A v2 card's resolver plan is input_required: no route survives the filters."""
 
@@ -368,11 +460,18 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
-def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) -> dict:
+def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
+                      exclude_routes: set | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
     "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
     `route` subcommand and the MCP `route` tool, so `run` and `route` can never
     disagree about the same card.
+
+    `exclude_routes` (SPAWNCAP, S2) drops the named route ids from the registry
+    the resolver sees, so a provider-stopped attempt is never picked again when
+    the run falls through to the next route. The registry is copied, never
+    mutated; the returned route is marked ``resolver: True`` so cmd_run knows
+    the run was resolver-routed (the v1/--tier paths are not).
 
     `state` "input_required" (no route survived the filters) raises
     RouteInputRequired with the plan's own reason; "deferred" raises
@@ -388,6 +487,12 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) 
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     registry = load_registry(REGISTRY_PATH)
+    if exclude_routes:
+        # A copy, so the shared load_registry() cache (and the caller's own
+        # reference) never loses the routes a previous attempt needs recorded.
+        registry = dict(registry)
+        registry["routes"] = {rid: route for rid, route in (registry.get("routes") or {}).items()
+                              if rid not in exclude_routes}
     overlay = load_overlay(MEASURED_OVERLAY_PATH)
     track_record = track.load(TRACK_RECORD)
     client_state = measure_mod.client_state(clients)
@@ -413,9 +518,14 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None) 
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
+    # "effort" is the rung the resolver scored (spec 5.2); track_entry stamps it
+    # into the record so p_success can match the resolver's bucket+effort query.
+    # An explicit --model override may have replaced the combo above, but the
+    # resolver's bucket, reason and effort still describe the card's plan.
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
-            "bucket": result["bucket"], "class": route_class}
+            "bucket": result["bucket"], "class": route_class, "resolver": True,
+            "effort": result.get("effort")}
 
 
 class PrivacyRefused(ValueError):
@@ -444,11 +554,13 @@ def sensitive_combo_refusal(combo: str, registry: dict):
     return None
 
 
-def resolve_route(args, cfg: dict, client) -> dict:
+def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
     """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
     explicit --model replaced the card's combo must still land on private-safe
-    legs only (--allow-training keeps its documented, logged escape)."""
-    route = resolve_route_unchecked(args, cfg, client)
+    legs only (--allow-training keeps its compatibility escape, which now only
+    waives that explicit-override check - it no longer unlocks a trainable leg,
+    since 2026-09-27)."""
+    route = resolve_route_unchecked(args, cfg, client, exclude_routes)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
         # model, which may train on prompts - never for a sensitive task.
@@ -463,9 +575,12 @@ def resolve_route(args, cfg: dict, client) -> dict:
     return route
 
 
-def resolve_route_unchecked(args, cfg: dict, client) -> dict:
+def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
     """Tier/model/combo for this run: an explicit --tier, a v2 card through the
-    resolver (RUNV2), or a v1 card through select_combo."""
+    resolver (RUNV2), or a v1 card through select_combo.
+
+    ``exclude_routes`` is forwarded to _resolve_route_v2 only (SPAWNCAP, S2):
+    the v1/--tier paths have a single combo and never fall through."""
     # --model names a gateway combo for opencode and the gateway clients; for
     # agy/claude/qoder it is the client's own model id and is not checked here.
     override = args.model if client.gateway else None
@@ -477,7 +592,7 @@ def resolve_route_unchecked(args, cfg: dict, client) -> dict:
                 "review": args.tier == 3}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
-        return _resolve_route_v2(args, parsed, cfg, override)
+        return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
     card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
@@ -488,9 +603,18 @@ def resolve_route_unchecked(args, cfg: dict, client) -> dict:
             "privacy": card["privacy"], "review": card["role"] == "review"}
 
 
-def build_plan(args, cfg: dict) -> dict:
+def build_plan(args, cfg: dict, exclude_routes: set | None = None,
+               sandbox: dict | None = None) -> dict:
+    """The full run plan for `args`.
+
+    ``exclude_routes`` (SPAWNCAP, S2) is passed through to the resolver so a
+    fallthrough re-run does not pick a route that already stopped. ``sandbox``
+    reuses an existing clone (same path/branch) instead of naming a new one -
+    a fallthrough re-runs in the same checkout, so its WIP commit and its work
+    stay on one branch.
+    """
     client = clients.CLIENTS[args.client]
-    route = resolve_route(args, cfg, client)
+    route = resolve_route(args, cfg, client, exclude_routes)
     depth, max_depth = clients.child_depth(os.environ, args.max_depth)
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
@@ -525,24 +649,34 @@ def build_plan(args, cfg: dict) -> dict:
     else:
         agent = client.name
         level = "ask" if not args.auto else ("read" if route["review"] else "edit")
+        if client.name == "qoder" and level != "read":
+            # qoder writes with bypass_permissions (no other headless write mode
+            # exists) - only inside a private clone, where the leak check applies.
+            # Not only "edit": --no-auto ("ask") ran with no flag and no sandbox
+            # (review of 6622d29). qodercli has no path fence of its own, so the
+            # containment prompt + leak check are the controls; writes outside
+            # the parent checkout (e.g. $HOME) are not detected.
+            args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
         if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
+        if client.name == "qoder":
+            model = model or clients.QODER_DEFAULT_MODEL
         model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    sandbox = None
     if args.isolate:
-        # The readable prefix stays; the random suffix keeps two spawns in the
-        # same second (same task) from naming the same clone (bug 1).
-        slug = slugify(args.task)
-        uniq = unique_suffix()
-        name = "%s-%s-%s-%s" % (os.path.basename(ROOT), stamp, slug, uniq)
-        # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
-        # its own .git, so opencode resolves it as its own project root.
-        sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                   "branch": "agent/%s-%s-%s" % (stamp, slug, uniq)}
+        if sandbox is None:
+            # The readable prefix stays; the random suffix keeps two spawns in the
+            # same second (same task) from naming the same clone (bug 1).
+            slug = slugify(args.task)
+            uniq = unique_suffix()
+            name = "%s-%s-%s-%s" % (os.path.basename(ROOT), stamp, slug, uniq)
+            # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
+            # its own .git, so opencode resolves it as its own project root.
+            sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
+                       "branch": "agent/%s-%s-%s" % (stamp, slug, uniq)}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -925,7 +1059,26 @@ PROVIDER_STOP_MARKERS = (
     # "Error: No active credentials for provider: sambanova." as its error line
     # then exited 1 instead of 8 -- a provider stop, not a normal exit.
     "no active credentials for provider",
+    # SPAWNCAP (S2, 2026-09-27): the gateway's own 503 ALL_TARGETS_SKIPPED
+    # ("no route's legs are currently servable") is a provider stop like any
+    # other - the run was cut off and can fall through to the next route.
+    "all targets were skipped by pre-dispatch filters",
+    # FUP form of the qoder credits stop above; other clients word it without
+    # "your personal".
+    "credits exhausted",
 )
+
+# SPAWNCAP (S2): how many times a provider-stopped resolver-routed --isolate
+# run re-runs the same task on the next route before it gives up with exit 8.
+MAX_FALLTHROUGH = 2
+
+
+def fallthrough_line(combo: str, stop: str, next_combo: str) -> str:
+    """The one line printed when a provider-stopped attempt falls through.
+
+    Pure, so the exact wording is pinned by a test rather than by the caller.
+    """
+    return "provider stop on %s: %s -> falling through to %s" % (combo, stop, next_combo)
 
 # WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
 # text containing a marker mid-run - a brief or lesson quoting a past 429 -
@@ -978,15 +1131,17 @@ def _porcelain_path_is_logs(p: str) -> bool:
 
 
 def _filtered_parent_status(root: str) -> dict:
-    """{path-part: XY} of `git status --porcelain --untracked-files=no`, logs/ excluded.
+    """{path-part: XY} of `git status --porcelain --untracked-files=all`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
     so logs/ paths are the spawner's own, never a worker's leak. Only entries
     where EVERY path is under logs/ drop; a rename with one side outside
     (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
     """
+    # Untracked files count too: a worker with write rights (qoder
+    # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
-                        "--untracked-files=no"], capture_output=True, text=True)
+                        "--untracked-files=all"], capture_output=True, text=True)
     out = {}
     if r.returncode != 0:
         return out
@@ -1259,10 +1414,12 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     else the v1 tier prefix's class.
 
     Only a card or --tier run carries a combo (--free is keyless); a gateway
-    run's served leg, effort and tokens are unknown to this process, so they
-    are recorded as unknown/0 until the resolver measures them. rc is the same
-    value the run exits with, the NO-OP (5) and LEAK (7, failure class
-    "containment") overrides included.
+    run's served leg and tokens are unknown to this process, so they are
+    recorded as unknown/0 until the resolver measures them. The effort is the
+    rung RUNV2's route carries (``route["effort"]``) when there is one, else
+    "unknown". rc is the same value the run exits with, the NO-OP (5), the
+    headless refusal (6, failure class "refusal") and the LEAK (7, failure
+    class "containment") overrides included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -1279,20 +1436,29 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     if not klass:
         return None
     card = route.get("card") or {}
+    # RUNV2's plan() carries the rung the resolver scored; a route whose leg is
+    # not a reasoning model carries effort None and the resolver reads that as
+    # "none". A v1/--tier route has no effort key at all: its record is stamped
+    # "unknown", which p_success matches against any queried rung (REVFIX).
+    if "effort" in route:
+        effort = route.get("effort") or "none"
+    else:
+        effort = "unknown"
     return {
         "route": route["combo"],
         "class": klass,
         "served_leg": "unknown",
         "bucket": route.get("bucket") or card.get("bucket_hint") or "unknown",
-        "effort": "unknown",
+        "effort": effort,
         "tokens_in": 0,
         "tokens_out": 0,
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
         "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
-                          ("containment" if rc == 7 else
-                           ("provider" if rc == 8 else "logic")))),
+                          ("refusal" if rc == 6 else
+                           ("containment" if rc == 7 else
+                            ("provider" if rc == 8 else "logic"))))),
     }
 
 
@@ -1544,6 +1710,346 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     return ClientExit(rc, tail.decode("utf-8", "replace"), found[0] if found else None)
 
 
+# --- the host-wide worker registry (`ps`) ---------------------------------
+# One directory per host, shared by every worktree and clone: a spawned
+# worker's own track record lives where the operator can find it, not in the
+# clone it runs in. AUTOOS_WORKERS_DIR wins (the tests use it); otherwise the
+# main checkout - the parent of git's common dir - so an --isolate clone (its
+# own .git) inherits the parent's dir through the child env cmd_run exports.
+
+def utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_iso(text):
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# Windows process queries (V1/V2, ps final review): os.kill(pid, 0) is signal
+# 0, which on Windows is CTRL_C_EVENT - GenerateConsoleCtrlEvent - so it would
+# Ctrl+C a live worker and read it as dead. Query the process instead. One
+# OpenProcess handle answers both _pid_alive and _proc_starttime.
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_ACCESS_DENIED = 5
+STILL_ACTIVE = 259
+
+_WIN_KERNEL32 = None
+
+
+def _win_value_types():
+    """The ctypes value types _win_liveness passes by reference - the ONE source
+    for both the declared prototypes and the call arguments."""
+    import ctypes
+    from ctypes import wintypes
+    return wintypes.DWORD, ctypes.c_ulonglong
+
+
+def _win_kernel32():
+    """kernel32 with explicit Win32 signatures, configured once per process.
+
+    ctypes assumes a C ``int`` return, so a 64-bit HANDLE with a high bit set
+    would come back truncated and then be CloseHandle'd as a different, invalid
+    value. Declare restype/argtypes once and cache the DLL, never per call.
+    """
+    global _WIN_KERNEL32
+    if _WIN_KERNEL32 is not None:
+        return _WIN_KERNEL32
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    exit_code_t, stamp_t = _win_value_types()
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(exit_code_t)]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    # A FILETIME is two little-endian DWORDs = one 64-bit integer: declared as
+    # c_ulonglong so the prototype matches the byref() the caller passes (a
+    # POINTER(FILETIME) prototype rejects byref(c_ulonglong) with ArgumentError).
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(stamp_t) for _ in range(4)]
+    k32.GetProcessTimes.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    _WIN_KERNEL32 = k32
+    return k32
+
+
+def _win_liveness(pid):
+    """(alive, creation_time) of a Windows pid, or (False, None) when gone.
+
+    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) with a NULL handle and
+    ERROR_ACCESS_DENIED means the process exists but belongs to someone else:
+    alive, start time unknown. GetExitCodeProcess == STILL_ACTIVE keeps it
+    alive; GetProcessTimes' creation FILETIME (as an int) is the pid-reuse
+    guard's start time, None when the process exists but its times are
+    unreadable. Never touches a signal.
+    """
+    import ctypes
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False, None
+    k32 = _win_kernel32()
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return (ctypes.get_last_error() == ERROR_ACCESS_DENIED), None
+    try:
+        exit_code_t, stamp_t = _win_value_types()
+        code = exit_code_t()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
+            return False, None
+        stamps = [stamp_t() for _ in range(4)]
+        if k32.GetProcessTimes(handle, *(ctypes.byref(s) for s in stamps)):
+            return True, stamps[0].value
+        return True, None
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _proc_starttime(pid):
+    """The process's start time: field 22 (clock ticks) of /proc/<pid>/stat on
+    POSIX, or the GetProcessTimes creation FILETIME (as an int) on Windows;
+    None when it cannot be read.
+
+    The reuse guard: a recycled pid is a different process, so its start time
+    no longer matches the one a record stored when it was alive.
+    """
+    if os.name == "nt":
+        return _win_liveness(pid)[1]
+    try:
+        with io.open("/proc/%d/stat" % int(pid), encoding="utf-8") as fh:
+            data = fh.read()
+    except (OSError, ValueError, TypeError):
+        return None
+    rparen = data.rfind(")")
+    if rparen < 0:
+        return None
+    fields = data[rparen + 1:].split()
+    idx = 22 - 3  # /proc field 3 is the first token after the command name
+    if len(fields) <= idx:
+        return None
+    try:
+        return int(fields[idx])
+    except ValueError:
+        return None
+
+
+def workers_dir() -> str:
+    override = os.environ.get("AUTOOS_WORKERS_DIR")
+    if override:
+        path = override
+    else:
+        base = None
+        try:
+            out = subprocess.run(["git", "rev-parse", "--path-format=absolute",
+                                  "--git-common-dir"],
+                                 cwd=ROOT, capture_output=True, text=True)
+            common = out.stdout.strip()
+            if out.returncode == 0 and common:
+                base = os.path.dirname(common)
+        except (OSError, subprocess.SubprocessError):
+            base = None
+        path = os.path.join(base or ROOT, "logs", "workers")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def _write_worker_record(path: str, record: dict) -> None:
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+    os.replace(tmp, path)
+
+
+def _worker_record_start(plan: dict, args, directory: str):
+    """Write the live record; return (id, record) for the ended rewrite."""
+    wid = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
+    pid = os.getpid()
+    task = (args.task or "").splitlines()
+    record = {"id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
+              "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
+              "client": plan.get("client"), "model": plan.get("model"),
+              "route": (plan.get("route") or {}).get("combo") or "",
+              "title": args.title or "", "cwd": plan.get("cwd"),
+              "sandbox": (plan.get("sandbox") or {}).get("path", ""),
+              "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]}
+    _write_worker_record(os.path.join(directory, wid + ".json"), record)
+    return wid, record
+
+
+def _worker_record_end(directory: str, wid: str, record: dict, rc) -> None:
+    record = dict(record, ended=utc_now_iso(), rc=(int(rc) if rc is not None else None))
+    _write_worker_record(os.path.join(directory, wid + ".json"), record)
+
+
+def _pid_alive(pid) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) here is CTRL_C_EVENT, not a probe (V1).
+        return _win_liveness(pid)[0]
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:  # alive, owned by someone else
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _worker_state(record: dict) -> str:
+    if record.get("ended"):
+        return "exited rc=%s" % record.get("rc")
+    pid = record.get("pid")
+    if pid is None or not _pid_alive(pid):
+        return "died"
+    pid_start = record.get("pid_start")
+    if pid_start is not None:
+        current = _proc_starttime(pid)
+        # A live pid whose start time cannot be read now (permissions, a
+        # GetProcessTimes failure) skips the reuse guard: unknown is not a
+        # mismatch, and list_workers' contract is to still call it running.
+        if current is not None and current != pid_start:
+            return "died"
+    return "running"
+
+
+def _fmt_elapsed(seconds) -> str:
+    if seconds is None:
+        return "?"
+    secs = max(0, int(seconds))
+    if secs < 60:
+        return "%ds" % secs
+    mins, secs = divmod(secs, 60)
+    if mins < 60:
+        return "%dm%02ds" % (mins, secs)
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return "%dh%02dm" % (hours, mins)
+    days, hours = divmod(hours, 24)
+    return "%dd%02dh" % (days, hours)
+
+
+def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
+    """Every spawned worker in ``directory`` as rows, newest last.
+
+    state is "running" (alive, start time matches - the pid-reuse guard),
+    "died" (gone or a recycled pid) or "exited rc=N". Records with no ``ended``
+    whose process cannot be checked are not judged here; the pid-reuse guard is
+    skipped only when a live pid's start time is unreadable (a Windows process
+    owned by another user), which still counts as running. A record whose ended
+    time (or, for a died worker, whose started time) is older than 7 days is
+    deleted. A corrupt record is skipped, never raised on.
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif not isinstance(now, datetime.datetime):
+        now = _parse_iso(now) or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    cutoff = now - datetime.timedelta(days=7)
+    rows = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        try:
+            state = _worker_state(record)
+        except Exception:  # noqa: BLE001 - one unjudgeable record never breaks ps
+            state = "unknown"
+        started = _parse_iso(record.get("started"))
+        ended = _parse_iso(record.get("ended"))
+        age_ref = ended if ended is not None else (started if state == "died" else None)
+        if age_ref is not None and age_ref < cutoff:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        if state.startswith("exited") and not include_ended:
+            continue
+        ref_end = ended if ended is not None else now
+        secs = (ref_end - started).total_seconds() if started is not None else None
+        rows.append({"id": record.get("id"), "state": state,
+                     "elapsed": _fmt_elapsed(secs), "elapsed_seconds": secs,
+                     "client": record.get("client") or "", "model": record.get("model") or "",
+                     "lane": record.get("session_tag") or "", "pid": record.get("pid"),
+                     "title": record.get("title") or "", "task": record.get("task_head") or "",
+                     "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
+                     "started": record.get("started"), "ended": record.get("ended"),
+                     "rc": record.get("rc"), "depth": record.get("depth")})
+    rows.sort(key=lambda r: (r.get("started") or "", r.get("id") or ""))
+    return rows
+
+
+ENDED_VISIBLE_WINDOW = datetime.timedelta(hours=24)
+
+
+def visible_workers(directory: str, include_ended: bool = False, now=None) -> list:
+    """The rows both ps surfaces show (V3 ps final review).
+
+    `list_workers` with the one ``--all`` window the CLI and the MCP tool
+    share: with include_ended, an ended row is shown only when it *ended*
+    within the last 24 h - a long run that ended an hour ago is in, a short
+    one that ended three days ago is out. Running and died rows always pass;
+    without include_ended exited rows are already gone from `list_workers`.
+    ``now`` is a datetime, an ISO string or None (as in `list_workers`).
+    """
+    rows = list_workers(directory, now=now, include_ended=include_ended)
+    if not include_ended:
+        return rows
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif not isinstance(now, datetime.datetime):
+        now = _parse_iso(now) or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - ENDED_VISIBLE_WINDOW
+    return [r for r in rows if not r["state"].startswith("exited")
+            or (_parse_iso(r["ended"]) or cutoff) > cutoff]
+
+
+def _print_worker_table(rows: list) -> None:
+    head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "LANE", "PID", "TITLE/TASK"]
+    cells = [[r["id"], r["state"], r["elapsed"] or "-", r["client"], r["model"],
+              r["lane"], str(r["pid"] or ""), r["title"] or r["task"] or ""] for r in rows]
+    widths = [max(len(head[i]), max(len(c[i]) for c in cells)) for i in range(len(head))]
+    width = shutil.get_terminal_size((120, 24)).columns
+    avail = max(15, width - sum(widths[:-1]) - 2 * (len(head) - 1))
+    widths[-1] = min(widths[-1], avail)
+    fmt = "  ".join("%-" + str(w) + "s" for w in widths)
+    print(fmt % tuple(head))
+    for cell in cells:
+        cell = list(cell)
+        cell[-1] = cell[-1][:widths[-1]]
+        print(fmt % tuple(cell))
+
+
+def cmd_ps(args) -> int:
+    directory = workers_dir()
+    rows = visible_workers(directory, include_ended=args.all)
+    if args.json:
+        print(json.dumps({"workers": rows, "dir": directory}, indent=1))
+        return 0
+    if not rows:
+        print("no workers running")
+        return 0
+    _print_worker_table(rows)
+    return 0
+
+
 def cmd_run(args, cfg: dict) -> int:
     # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
     # when the caller names an inbox - a run with no AUTOOS_AGENT_INBOX set is
@@ -1561,6 +2067,25 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    # SPAWNCAP (S2): decide the client from the task's shell/write needs before
+    # anything is planned or started. An explicit --client that lacks one is
+    # refused with the capable clients named; with no --client the first capable
+    # one is chosen (opencode, today's default when nothing is required).
+    required = required_capabilities(args)
+    registry = None
+    if required:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError) as exc:
+            return refuse("cannot load client capabilities: %s" % exc)
+    if args.client is None:
+        args.client = choose_client(required, registry)
+        if args.client is None:
+            return refuse("no client declares %s, which this task needs" % " and ".join(required))
+    else:
+        refusal = capability_refusal(args.client, required, registry)
+        if refusal is not None:
+            return refuse(refusal)
     client = clients.CLIENTS[args.client]
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
@@ -1586,9 +2111,6 @@ def cmd_run(args, cfg: dict) -> int:
     route = plan["route"]
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
-    if route["reason"].endswith("allow-training"):
-        print("autoos-agent: --allow-training: sensitive work goes to %s, whose leg trains on "
-              "prompts (logged)." % route["combo"], file=sys.stderr)
     uses_key = client.gateway and not args.free
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
@@ -1649,6 +2171,9 @@ def cmd_run(args, cfg: dict) -> int:
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
+    # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
+    # burned, so a fallthrough re-run never picks one of them again.
+    excluded_routes = set()
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
     # WIPfix provider-stop check has the child's tail. A --joinable launcher
@@ -1656,32 +2181,100 @@ def cmd_run(args, cfg: dict) -> int:
     # mid-flight score, so it is never captured and never stop-checked or
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
-    run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                        capture=capture)
-    client_tail = getattr(run_rc, "tail", "") or ""
-    rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
-    child_rc = rc  # the WIP message names the client's own rc, not a verdict override
-    if refusal is not None:
-        print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
-    # A provider stop is a failure even though the client often exited 0: it
-    # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
-    # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
-    # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
-    # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
-    # them - the provider_stop() tail check still gates the upgrade, and other
-    # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
-    # reach here with a provider-stop line.
-    # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
-    # provider-stopped exits 8 with failure_class "provider" (agy measured:
-    # jetski refusal + AGY_ERROR 429, R-gateway-12).
-    # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
-    # a promo client whose tail is a provider stop does not get a false probe.
-    stop = provider_stop(client_tail)
-    if stop is not None and rc in (0, 3, 6):
-        print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
-        rc = 8
-    if rc == 0 and client.promo:
-        clients.record_probe(client.name)
+    while True:
+        # Worker registry (ps): one record per attempt (a SPAWNCAP fallthrough
+        # is its own record), live for the whole run, so `ps` shows this spawn
+        # from any checkout. The child inherits the dir so a nested spawn in an
+        # --isolate clone (its own .git) records in the same host-wide place.
+        # A registry problem (disk full, read-only dir, a ctypes error) never
+        # stops the client or replaces its rc: the run then shows as died.
+        workers = worker_id = worker_rec = None
+        try:
+            workers = workers_dir()
+            env["AUTOOS_WORKERS_DIR"] = workers
+            worker_id, worker_rec = _worker_record_start(plan, args, workers)
+        except Exception as exc:  # noqa: BLE001
+            print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
+        attempt_start = time.time()
+        run_rc = None
+        try:
+            run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                                capture=capture)
+        finally:
+            if worker_id is not None:
+                try:
+                    _worker_record_end(workers, worker_id, worker_rec, run_rc)
+                except OSError as exc:
+                    print("autoos-agent: could not update worker record %s: %s"
+                          % (worker_id, exc), file=sys.stderr)
+        client_tail = getattr(run_rc, "tail", "") or ""
+        rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
+        child_rc = rc  # the WIP message names the client's own rc, not a verdict override
+        if refusal is not None:
+            print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
+        # A provider stop is a failure even though the client often exited 0: it
+        # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
+        # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+        # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
+        # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
+        # them - the provider_stop() tail check still gates the upgrade, and other
+        # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
+        # reach here with a provider-stop line.
+        # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
+        # provider-stopped exits 8 with failure_class "provider" (agy measured:
+        # jetski refusal + AGY_ERROR 429, R-gateway-12).
+        # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
+        # a promo client whose tail is a provider stop does not get a false probe.
+        stop = provider_stop(client_tail)
+        if stop is not None and rc in (0, 3, 6):
+            print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
+            rc = 8
+        if rc == 0 and client.promo:
+            clients.record_probe(client.name)
+        # SPAWNCAP (S2): a provider-stopped resolver-routed --isolate run
+        # re-runs the SAME task in the SAME sandbox on the next route (WIPfix
+        # preserved the work but stranded it on a dead route). At most
+        # MAX_FALLTHROUGH re-runs; a --joinable/--tier/v1 run keeps today's
+        # immediate exit 8 (its combo is not the resolver's to replace).
+        if not (stop is not None and plan["route"].get("resolver") and plan["sandbox"]
+                and not args.joinable and len(excluded_routes) < MAX_FALLTHROUGH):
+            break
+        next_plan = None
+        try:
+            next_plan = build_plan(args, cfg,
+                                   exclude_routes=excluded_routes | {plan["route"]["combo"]},
+                                   sandbox=plan["sandbox"])
+        except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
+                ValueError):
+            next_plan = None  # no route left (or unplannable): exit 8 below
+        next_combo = ((next_plan or {}).get("route") or {}).get("combo")
+        if not next_combo or next_combo == plan["route"]["combo"]:
+            break
+        # Preserve this stopped attempt before leaving its checkout: the
+        # re-run shares the sandbox (and its branch), so the WIP commit is
+        # what the final `take it:` and the track record see.
+        sb = plan["sandbox"]
+        changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                 capture_output=True, text=True).stdout.strip()
+        if changed and not plan["route"].get("review"):
+            wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
+            if wip_sha:
+                print("WIP-COMMITTED: %s" % wip_sha)
+        excluded_routes.add(plan["route"]["combo"])
+        # REVFIX: each provider-stopped attempt is its own observation, not
+        # just the final plan's. Without this the dead route looked healthy
+        # (no fail record), so the resolver kept handing it the work.
+        stopped = track_entry(plan, rc, time.time() - attempt_start)
+        if stopped is not None:
+            record_run(TRACK_RECORD, stopped)
+        print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
+        plan = next_plan
+        # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
+        # and session tag), not the stopped route's (qoder review 2026-09-27).
+        env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
+        env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        if uses_key:
+            env["AUTOOS_OMNIROUTE_KEY"] = key
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
@@ -1721,7 +2314,10 @@ def cmd_run(args, cfg: dict) -> int:
             print(message)
             rc = override
         # Every finished --isolate run is a track-record observation (spec §5.6).
-        tracked = track_entry(plan, rc, time.time() - start)
+        # REVFIX review 2: the survivor's latency is its OWN attempt, not the
+        # cumulative `start` that also spans the dead attempts (each of which
+        # already recorded its own sample above).
+        tracked = track_entry(plan, rc, time.time() - attempt_start)
         if tracked is not None:
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
@@ -1742,6 +2338,12 @@ def main(argv=None) -> int:
                                  "gateway (OR4); its own flags follow `usage`, e.g. "
                                  "`usage --since 1h --by provider,lane`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
+    ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
+                                   "worktrees and clones); deletes records that ended "
+                                   "(or died) more than 7 days ago")
+    ps.add_argument("--all", action="store_true",
+                    help="also show exited workers from the last 24 h")
+    ps.add_argument("--json", action="store_true", help="print the rows as JSON")
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
@@ -1750,8 +2352,10 @@ def main(argv=None) -> int:
                      help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
                           "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
-                     help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
-    run.add_argument("--client", choices=sorted(clients.CLIENTS), default="opencode")
+                     help="accepted for compatibility; since 2026-09-27 the only 1M leg is off, so this no longer unlocks a route")
+    run.add_argument("--client", choices=sorted(clients.CLIENTS), default=None,
+                     help="agent CLI to spawn (default: the first client that declares the "
+                          "capabilities the task needs, opencode when it needs none)")
     run.add_argument("--joinable", action="store_true",
                      help="claude only: a background session you can join through Remote Control")
     run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")
@@ -1798,6 +2402,8 @@ def main(argv=None) -> int:
         return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
+    if args.cmd == "ps":
+        return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 

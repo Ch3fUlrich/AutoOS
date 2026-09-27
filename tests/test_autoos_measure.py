@@ -43,6 +43,14 @@ FIXTURE = {
     "tests/c.Tests.ps1": "# c suite\n",
     "tests/test_maintenance.py": "# maintenance suite\n",
     "tests/test_utility.py": "# utility suite\n",
+    #   engine/decision_engine.py, tests/test_decision_engine.py
+    #   multi-token stem match: the test file's content never spells the
+    #   source path, so only the name-token intersection can cover it
+    "engine/decision_engine.py": "def decide():\n    return 1\n",
+    "tests/test_decision_engine.py": ("# a test for the decision engine; it never "
+                                      "spells the source path\n"
+                                      "def test_decide():\n"
+                                      "    assert True\n"),
 }
 BLOB = b"\x00\x01\x02\x03\x00"
 
@@ -186,6 +194,27 @@ class TestsFeatureTests(RepoTestCase):
         self.assertEqual(f["sources"]["tests"], "none")
         self.assertIsNone(m._covered(repo, ["lib/util.py"],
                                      ["tests/test_utility.py"]))
+
+    def test_generic_stem_tokens_do_not_cover_unrelated_tests(self):
+        # REVFIX review 10: a touched docs/test_plan.md yields the token
+        # "test", so the first test file in tracked order "covered" it. The
+        # generic tokens (test/tests/py/ps1/sh) must not count as a match.
+        self.assertIsNone(
+            m._covered(str(self.repo), ["docs/test_plan.md"],
+                       ["tests/test_alpha.py"]))
+
+    def test_a_multi_token_stem_matches_by_token_intersection(self):
+        # REVFIX: the stem "decision_engine" was compared whole against the
+        # test name's tokens, so tests/test_decision_engine.py did not cover
+        # engine/decision_engine.py unless its content named the path. The
+        # fixture's content deliberately does not, so this pins the name rule.
+        repo = str(self.repo)
+        self.assertEqual(
+            m._covered(repo, ["engine/decision_engine.py"],
+                       ["tests/test_decision_engine.py"]),
+            "tests/test_decision_engine.py")
+        f = m.measure({"paths": ["engine"]}, repo, "brief")
+        self.assertTrue(f["tests"])
 
 
 class FanoutTests(RepoTestCase):

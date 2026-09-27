@@ -9,6 +9,8 @@ vault.yml
 !*.example.yml
 !*.example.json
 configuration/api-keys.yml
+# backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
+configuration/api-keys.yml.*
 
 # ─── Downloaded installers and vendor binaries ──────────────────────────────
 installs/

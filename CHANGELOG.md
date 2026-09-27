@@ -29,6 +29,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (preflight guards); a failed state write leaves no state file; `off` without
   a state file still stops a standby on the port; the Ctrl-C path waits a
   short health window; TERM->KILL is tested.
+### Changed — t1-orchestrator keeps a free gemini leg (T1FREE, 2026-09-27)
+
+- **`catalog/ai-registry.json`** + renders: `gemini/gemini-3.8-flash` appended to `t1-orchestrator` and `t1-orchestrator-free-only`, so the default model of start-stack, the installer and OpenHands stays servable while OpenRouter, DeepSeek and cheapinference credit is out; `t1-orchestrator-clean`, `spark-1.3-contributor`, `deepseek-v4.1-flash` and the cheaperinference pins stay omitted. Open: `t1-orchestrator-paid` (LiteLLM picker) has no leg until MUSEAPI.
+
+### Changed — review fixes + OpenRouter off, `deepseek-v4.1-flash` native with effort ladder (PROVFIX, 2026-09-27)
+
+- **`catalog/ai-registry.json`**: `providers.openrouter.available: false` — the operator's DSMAX decision (2026-09-27T15:05:54Z via L0): a re-probe hit 401 "insufficient credits" even for BYOK, so the provider is off entirely (not just per-leg); this also covers `openrouter/meta/muse-spark-1.3-contributor` (Muse is reachable as the free Zen leg through the opencode client only). `routes.deepseek-v4.1-flash` dropped the OpenRouter leg for native `deepseek/deepseek-flash` → `opencode-zen/deepseek-v4.1-flash`, and `models.deepseek-flash` gained `reasoning: true` plus the native `effort_ladder` `["none","low","high","max"]` (restoring `#low`/`#high`/`#max` while it lasted). Then `providers.deepseek` hit 402 Insufficient Balance (2026-09-27T16:4xZ, `available: false`): the native leg is gated too, so `routes.deepseek-v4.1-flash` has no servable leg left and FAILS CLOSED like `t1`/spark — its combo is omitted and its IDE/opencode/LiteLLM/OpenHands entries are removed until the balance is topped up (the ladder stays in `models.deepseek-flash`, so the aliases re-render unchanged). `t2-worker-clean`/`t3-driver-clean` still serve via `mistral-small`; `t2-worker`/`t3-driver` serve gemini/antigravity/cheap-inference/mistral. `routes.<t1-orchestrator|t1-orchestrator-clean|spark-1.3-contributor>` have no servable gateway leg left (Zen is client-bound, OpenRouter is off), so those three combos are omitted and their client models removed. `routes.deepseek-v4.1-flash` (`openhands_profile`) gets `reasoning: true`.
+- **`tools/registry.py`**: `leg_rule_for()` now matches a leg under its canonical `omniroute_id` spelling as well as the raw string, so a providers-key spelling such as `cheapinference/glm-4.5-air` hits `deny-cheaperinference` (finding 3).
+- **`tools/sync-router-tiers.py`**: `provider_maps_from_dict()` emits name keys in a first pass and only adds an `omniroute_id` key when absent, matching `resolve_leg`'s name-first precedence (finding 4).
+- **`tests/helpers/check-provider-registry.py`**: asserts no provider name equals another provider's `omniroute_id`, and compares the `docs/api-keys.md` provider-id column against each non-null `omniroute_id` (findings 4, 5).
+- **`docs/api-keys.md`**, **`configuration/omniroute/combos.json`**, **`catalog/ide-models.json`**, **`opencode.jsonc`**, **`configuration/litellm/config.yaml`**, **`configuration/openhands/tier-profiles.json`**, **`docs/models.md`**, **`.agents/skills/unattended-orchestration/unattended-orchestration.md`**: review prose/comment corrections (findings 1, 2, 6, 7), the `free-ai` provider-id cell, combos/tier/IDE/openhands regenerated for the DSMAX change, and the effort aliases re-rendered per surface.
+- **`tests/test_registry_render.py`**, **`tests/test_registry.py`**: `free_ai/` AND `free-ai/` both asserted absent from every `-clean` combo (finding 11); the `$comment` provenance assertion on `routes.t2-worker.unavailable_legs["openrouter/openai/gpt-oss-120b"]` re-added (finding 12).
+
+### Changed — cheaperinference re-enabled (3 legs), cerebras off, built-in `free-ai`, native DeepSeek first (PROV, 2026-09-27)
+
+- **`catalog/ai-registry.json`**: cheaperinference re-enabled with a small balance (the 10:12Z "no top-up" note is withdrawn): only `cheaperinference/kimi-k3`, `cheaperinference/glm-5.2` and `cheaperinference/minimax-m2.7` may serve (`policy.leg_rules` allow entries, then a trailing `deny-cheaperinference`); `cheaperinference/glm-4.5-air` is route-gated in `t2-worker`/`t3-driver` and `cheaperinference/deepseek-v4-flash` keeps its `t2-worker` gate. `cerebras.available: false` (no free tier, no credits; its legs stay in the data, route-gated, so the intent is visible). `free_ai` gains `model_prefix: "free-ai"` and moves its `omniroute_id` to the built-in OmniRoute connection `free-ai`: registry legs stay `free_ai/qwen7b` while gateway combos spell `free-ai/qwen7b` (same shape as `antigravity` → `agy`), and `apply` addresses the existing built-in connection instead of registering a duplicate. `routes.deepseek-v4.1-flash` now leads with the native `deepseek/deepseek-flash` leg before `openrouter/deepseek/deepseek-v4.1-flash`.
+- **`configuration/omniroute/combos.json`**: two pinned single-leg combos `cheaperinference/glm-5.2` and `cheaperinference/kimi-k3`; `t2-worker` gains `cheaperinference/kimi-k3`; `t3-driver` gains `cheaperinference/glm-5.2`, `cheaperinference/kimi-k3` and `cheaperinference/minimax-m2.7`; the free-only combos spell `free-ai/qwen7b`.
+- **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`opencode.jsonc`**, **`docs/models.md`**: regenerated from the registry (`registry.py render …`); the new `cheaperinference/glm-5.2` and `cheaperinference/kimi-k3` managed blocks/IDE models appear, and the native DeepSeek leg is first. The `deepseek-v4.1-flash` lead leg changed from `openrouter/deepseek/deepseek-v4.1-flash` (which supplied the `low/high/max` effort ladder) to `deepseek/deepseek-flash` (empty ladder at the time), so opencode/Zed temporarily dropped `#low/#high/#max` on that id — restored natively in PROVFIX (DSMAX).
+- **Reverted**: the OpenRouter BYOK `openrouter/openai/gpt-oss-120b` un-gate (C) was reverted after a re-probe hit 401 (credits exhausted), so `t2-worker` keeps its `available: false` gate; the per-leg allow rule stays in place, and the un-gate's `3/3` measurement note is removed. Pinned assertions re-pinned in **`tests/test_registry_render.py`**, **`tests/test_registry.py`**, **`tests/linux/17-ai-routing.sh`**, **`tests/linux/33-documentation.sh`**, **`tests/run-tests.ps1`**.
+
+### Fixed — `provider_maps_from_dict` keys transport by providers-key or `omniroute_id` (PROV, 2026-09-27)
+
+- **`tools/sync-router-tiers.py`**: each provider's LiteLLM transport is now keyed by both its providers key and its `omniroute_id` (deduplicated), because `resolve_leg()` accepts either as a leg prefix. This lets `free_ai/qwen7b` keep `litellm_prefix: openai` + `api_base: https://api.free.ai/v1` + `FREE_AI_API_KEY` even though the gateway catalog names the model `free-ai/qwen7b`; the config is unchanged and the registry comment now matches it. Mirrored in **`tests/helpers/check-provider-registry.py::expected_by_omni`** and asserted in **`tests/test_sync_router_tiers_registry.py`**.
+### Fixed — review batch: dropped track records, per-attempt fallthrough records, shared registry loader (REVFIX, S1-S2, 2026-09-27)
+
+- **`tools/autoos_track.py`**: `FAILURES` now names `containment` and `provider`, so a `record_run()` for a LEAK (rc 7) or a provider stop (rc 8) is no longer rejected by `validate()` and silently dropped — every `failure_class` `tools/autoos-agent.py`'s `track_entry()` emits is accepted.
+- **`tools/autoos-agent.py`**: each provider-stopped attempt in the `--isolate` fallthrough loop writes its own `track_entry`/`record_run` (gate fail, failure_class `provider`, its own route), not only the final plan; `tests/test_autoos_spawner.py::ProviderStopFallthroughTests` asserts one track line per attempt.
+- **`tools/autoos_measure.py`**: coverage matches on whole tokens, so a test name covering any token of a multi-token stem counts as covered.
+- **`tools/registry_loader.py`** (new): the one importlib-by-path loader for `tools/registry.py`; `tools/sync-ide-models.py`, `tools/audit-router.py`, `tools/mirror-litellm-env.py` and `tools/sync-openhands-profiles.py` import it instead of each carrying an identical copy. `tools/sync-router-tiers.py` guards its `sys.path.insert` against duplicates. `tools/probe_common.py:make_post()` gains a `classify_error` hook and `tools/probe-toolcalls.py`'s forked post is deleted.
+- **Tests**: `tests/test_registry_loader.py` (new, wired into both suites), the suite-wiring guard `tests/test_suite_wiring.py` (every `tests/test_*.py` must be named by a harness), and the `sk-test-dummy` fixture in `tests/linux/34-ai-services.sh` is renamed `TEST-ONLY-fake-litellm-key` (secret-scanner false positive); its three duplicated loopback HTTP servers become one `_svc_loopback_server` helper.
+
+### Added — route by client shell/write capability, fall through on a provider stop (SPAWNCAP, S2, 2026-09-27)
+
+- **`catalog/ai-registry.json`**, **`catalog/ai-registry.schema.json`**: every client now declares `capabilities` (`shell`, `write`); new `$defs.capabilities` requires both and forbids extras, and `$defs.client` requires it. opencode/claude/codex/gemini/qwen declare `true/true`; agy and qoder declare `false/false` (source: the `HEADLESS_REFUSAL_MARKERS` refusals and qoder's `--permission-mode dont_ask, no shell`, `docs/agent-protocol.md:160`).
+- **`tools/autoos-agent.py`**: `run` now refuses *before* anything is planned or started when the task needs `shell`/`write` and the named `--client` lacks one (exit 2, naming the missing capability and the clients that have it); with no `--client` it picks the first capable client (`choose_client`, `opencode` when nothing is required). A run needs shell or write when `--isolate` is set or the card is *explicit* editing (`kind` implement/debug/bulk; v1 `role=implement`); an absent, read-only (`review`/`research`/`plan`) or defaults-only card is never gated, so the existing qoder/privacy tests keep their behaviour.
+- **`tools/autoos-agent.py`**: a provider-stopped resolver-routed `--isolate` run now WIP-commits the stopped attempt and re-runs the same task in the **same sandbox** on the next route (at most 2 fallthroughs), instead of stranding the work on a dead route. Each fallthrough is logged exactly as `provider stop on <route>: <marker> -> falling through to <next>`; the gateway's `ALL_TARGETS_SKIPPED` ("all targets were skipped by pre-dispatch filters") and `credits exhausted` join the provider-stop markers. A `--tier`/v1-card/`--joinable` run keeps today's immediate exit 8.
+- Tests: `tests/test_autoos_spawner.py::ClientCapabilityTests` and `::ProviderStopFallthroughTests`.
+
+### Changed — `tests/run-tests.sh` refuses an unfiltered local run (FULLGUARD, 2026-09-27)
+
+- **`tests/run-tests.sh`**, **`.github/workflows/ci.yml`**, **`tests/linux/01-test-harness.sh`**, **`AGENTS.md`**, **`docs/`**: an unfiltered local run now exits 2 and names `--filter` / `AUTOOS_FULL_SUITE=1`; CI sets the opt-in so its one full run is unchanged (the full suite's shellcheck once OOM-killed a 16 GB host, R-host-08).
+### Changed — orchestration skill cut to 30 level rules (S1, 2026-09-27)
+
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: ~130 topic rules become 30 rules (R-orch-13 different-family review before every ready, operator 2026-09-27T14:3xZ) grouped by level (`router` L0, `coord` L1, `orch` L2, `worker` L3); mechanical rules point to `autoos-agent.py heartbeat`, the resolver and `registry.py` instead of restating them. New rules from 2026-09-27 lessons: sudo/root changes always get the Sonnet final, test fakes follow the real tool's contract, data lanes grep all of `tests/` for changed ids. **`references/rule-map.md`** maps every old id; **`tests/test_skill_rules.py`** fails when a cited `R-` id resolves nowhere.
+
+### Added — Free.ai free provider restores `t3-driver-free-only` (FREEAI, 2026-09-27)
+
+- **`catalog/ai-registry.json`**, **`configuration/omniroute/combos.json`**, **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`configuration/openhands/tier-profiles.json`**, **`opencode.jsonc`**, **`docs/models.md`**, **`configuration/omniroute/apply.sh`**, **`configuration/api-keys.example.yml`**, **`docs/api-keys.md`**: Free.ai (`free_ai`, model `qwen7b`, OpenAI-compatible at `https://api.free.ai/v1`; 30k tokens/day, 10 rpm, public/may train) joins as the last leg of `t2-worker-free-only` and the only leg of `t3-driver-free-only`, restoring the latter as a servable combo; never private-safe and never in a `*-clean` route. `apply.sh`'s existing-id regex widens to `[a-z0-9_-]+` so the underscored `omniroute_id` stays idempotent.
+### Changed — Antigravity Hub sets up chrome-sandbox itself via sudo (agysb)
+
+- **`lib/linux/install.sh`**: `antigravity_sandbox_note` is now
+  `antigravity_sandbox_setup` (operator decision 2026-09-27: this one step may
+  run sudo). When the kernel needs the SUID helper it re-checks
+  `chrome-sandbox` (regular file, no symlink, 1 hard link), skips an already
+  root-owned 4755 helper, prints the would-run line under `--dry-run`, and
+  otherwise runs `sudo -n chown root:root` + `sudo -n chmod 4755` with
+  `setup.sh --yes` (plain `sudo`, so it may prompt, on an interactive TTY
+  without `--yes`); a missing/failed sudo prints the two commands for the
+  operator and never fails the install. NEVER `--no-sandbox`.
+- **TOCTOU fix**: each privileged step re-checks inside the one root process
+  (`find -P` on a still-regular single-link file, chmod only on a file root
+  owns), so a symlink swapped in after the check can no longer escalate;
+  anything else falls back to the printed commands.
+
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)

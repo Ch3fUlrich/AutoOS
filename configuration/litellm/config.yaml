@@ -2,14 +2,16 @@
 # docs/models.md), which tracks free-tier churn automatically. Use this when
 # you want LiteLLM instead: same tier names, static chains.
 #
-# Cost efficiency is the design goal, hence the 3-level hierarchy:
-#   t1-orchestrator      orchestration — Muse Spark 1.3 family, xhigh effort.
+# Cost efficiency is the design goal, hence the 2-level hierarchy:
 #   t2-worker      smart second level — strong reasoning, free quotas.
 #   t3-driver      daily driver — codegen, research, review, lint. Cheapest.
 #   tierN-paid paid escalation for tierN, tried in listed order.
 #
-# Paid rule: orchestrator escalation is muse-spark-1.3-contributor, else
-# deepseek-v4.1-flash. Nothing expensive is routed by default.
+# Paid rule: escalation is deepseek-v4.1-flash on direct DeepSeek. Nothing
+# expensive is routed by default. OpenRouter is off entirely (provider-level
+# available: false, DSMAX 2026-09-27), so the muse-spark-1.3 orchestration
+# tiers (t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor,
+# t2-orchestrator) have no leg LiteLLM can address and get no group.
 #
 # 2026-09 corrections (OmniRoute re-audit): Cerebras no-card 1M/day is GONE
 # ($5 credit, card required) — dropped. Groq llama-3.3-70b left free tier
@@ -28,56 +30,6 @@
 # Key guide: docs/api-keys.md
 
 model_list:
-  # ── t1-orchestrator: orchestration, spark-first ──────────────────────────────
-  # OpenRouter contributor only ($0.10/$0.20 per 1M — cheapest paid anywhere).
-  # Zen promo and Meta direct removed 2026-09: Zen 402s without balance and an
-  # unset META_API_KEY fails LiteLLM startup validation (SchemaError) breaking
-  # the whole t1-orchestrator group — see docs/verification.md.
-  # xhigh = highest reasoning-effort tier of the 1.3 family. Effort is a
-  # caller-side control, not a model ID (Zed: reasoning_effort "xhigh";
-  # Muse Code: Max level). The aliases above resolve to the 1.3 family.
-  # AUTOOS-MANAGED-START t1-orchestrator
-  - model_name: t1-orchestrator
-    litellm_params:
-      model: openrouter/meta/muse-spark-1.3-contributor
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END t1-orchestrator
-
-  # ── t1-orchestrator-clean: orchestration, gateway-only legs stripped ────────
-  # Same Muse Spark leg as t1-orchestrator; the registry route's antigravity/
-  # cc legs have no LiteLLM transport.
-  # AUTOOS-MANAGED-START t1-orchestrator-clean
-  - model_name: t1-orchestrator-clean
-    litellm_params:
-      model: openrouter/meta/muse-spark-1.3-contributor
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END t1-orchestrator-clean
-
-  # ── spark-1.3-contributor: bare alias onto the same leg ────────────────────
-  # AUTOOS-MANAGED-START spark-1.3-contributor
-  - model_name: spark-1.3-contributor
-    litellm_params:
-      model: openrouter/meta/muse-spark-1.3-contributor
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END spark-1.3-contributor
-
-  # ── t1-orchestrator-paid: OpenRouter contributor only (hand-curated) ──────
-  # Funded-first: Zen 402s without balance, so a group led by it is a dead
-  # end (measured 2026-09-22). OpenRouter is the leg that actually answers
-  # today. Meta direct removed 2026-09-23 (same reason as t1-orchestrator).
-  - model_name: t1-orchestrator-paid
-    litellm_params:
-      model: openrouter/meta/muse-spark-1.3-contributor
-      api_key: os.environ/OPENROUTER_API_KEY
-
-  # ── t2-orchestrator: orchestration on the cheap DeepSeek leg ───────────────
-  # AUTOOS-MANAGED-START t2-orchestrator
-  - model_name: t2-orchestrator
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END t2-orchestrator
-
   # ── t2-worker: smart second level, free quotas ─────────────────────────
   # Mirror of registry routes.t2-worker (single source of truth), kept in sync
   # by tools/sync-router-tiers.py: the markers below delimit a machine-owned
@@ -88,26 +40,10 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t2-worker
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
   # AUTOOS-MANAGED-START t2-worker-clean
-  - model_name: t2-worker-clean
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t2-worker-clean
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -125,19 +61,19 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   # AUTOOS-MANAGED-END t2-worker-free-only
 
   # ── t2-worker-paid / t3-driver-paid: the escalation must actually answer ────
-  # Lead with the OpenRouter leg: it is a deployment DISTINCT from the tier
-  # chains, so LiteLLM cooling the shared `deepseek/deepseek-flash`
-  # deployment (cooldown_time below) cannot turn the escalation into a
-  # dead-end. Direct deepseek second. Zen removed 2026-09 (402s without
-  # balance). Measured 2026-09-22: a deepseek-first group answered
-  # 200/402/402 as the shared deployment cooled; this ordering is stable.
-  - model_name: t2-worker-paid
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
+  # Direct DeepSeek only: the OpenRouter leg that used to lead (a deployment
+  # distinct from the tier chains, so a cooled shared `deepseek/deepseek-flash`
+  # could not dead-end the escalation) went with OpenRouter itself
+  # (DSMAX 2026-09-27). The group now shares that deployment with the tier
+  # chains. Zen removed 2026-09 (402s without balance).
   - model_name: t2-worker-paid
     litellm_params:
       model: deepseek/deepseek-flash
@@ -152,10 +88,6 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
       rpm: 2
@@ -165,19 +97,23 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver-clean
   - model_name: t3-driver-clean
     litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t3-driver-clean
-    litellm_params:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
   # AUTOOS-MANAGED-END t3-driver-clean
 
-  # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
-  - model_name: t3-driver-paid
+  # ── t3-driver-free-only: zero spend ────────────────────────────────────────
+  # Mirror of registry routes.t3-driver-free-only MINUS the gateway-only legs.
+  # The groq/cerebras qwen legs are dead through the gateway (OR1d, 2026-09-27);
+  # free_ai/qwen7b is the only servable leg left.
+  # AUTOOS-MANAGED-START t3-driver-free-only
+  - model_name: t3-driver-free-only
     litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
+  # AUTOOS-MANAGED-END t3-driver-free-only
+
+  # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
   - model_name: t3-driver-paid
     litellm_params:
       model: deepseek/deepseek-flash
@@ -203,13 +139,27 @@ model_list:
       additional_drop_params: ["strict"]
   # AUTOOS-MANAGED-END t4-rag
 
-  # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
-  # AUTOOS-MANAGED-START deepseek-v4.1-flash
-  - model_name: deepseek-v4.1-flash
+  # ── t1-orchestrator: orchestrator-1M, free gemini fallback while OpenRouter/DeepSeek off ─────────
+  # AUTOOS-MANAGED-START t1-orchestrator
+  - model_name: t1-orchestrator
     litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END deepseek-v4.1-flash
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  # AUTOOS-MANAGED-END t1-orchestrator
+
+  # ── t1-orchestrator-free-only: zero spend, gemini free leg ──────────────────────
+  # AUTOOS-MANAGED-START t1-orchestrator-free-only
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  # AUTOOS-MANAGED-END t1-orchestrator-free-only
+
+  # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
+  # deepseek-v4.1-flash omitted: providers.deepseek 402 (2026-09-27T16:4xZ),
+  # no servable leg left - re-add the managed block when topped up.
 
   # AUTOOS-MANAGED-START gemini-3.8-flash
   - model_name: gemini-3.8-flash
@@ -217,6 +167,9 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   # AUTOOS-MANAGED-END gemini-3.8-flash
+
+  # ── cheaperinference pinned single-model aliases ───────────────────────────
+
 
 router_settings:
   # simple-shuffle: deterministic and DB-less. `usage-based-routing-v2` tracks
@@ -231,10 +184,9 @@ router_settings:
   allowed_fails: 3
   cooldown_time: 120 # cool a 429ing deployment for 2 min, serve from the rest
   fallbacks:
-    - t1-orchestrator: [t1-orchestrator-paid]
     - t2-worker: [t2-worker-paid]
     - t3-driver: [t3-driver-paid]
-    - t4-rag: [t1-orchestrator-paid] # trial-key RAG fails over to the paid orchestrator
+    - t4-rag: [t2-worker-paid] # trial-key RAG fails over to the paid escalation
 
 litellm_settings:
   drop_params: true # heterogeneous providers reject unknown params; drop, don't fail

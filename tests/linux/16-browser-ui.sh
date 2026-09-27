@@ -412,3 +412,371 @@ PY
     assert_contains "$out" "already in progress"
 fi
 
+# ─── Logins and keys: write-only secrets (GET/POST /api/secrets) ────────────
+# The browser UI can SET a value in the git-ignored configuration/api-keys.yml
+# but can never read one back. These cases drive the module-level functions
+# directly - Handler helpers all take `self`, so a Handler-level call would pass
+# the body AS self and raise TypeError; classify() and usb_create_response set
+# the same precedent. AUTOOS_KEYS_FILE points every write at a throwaway file,
+# so the repository's real, git-ignored api-keys.yml is never opened.
+
+if it "the browser UI writes a key 0600 and backs up the old file"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+code, body = secrets_post_response({"id": "qoder_pat", "value": "test-value-not-real"}, "127.0.0.1")
+if code != 200 or not keys.exists():
+    bad.append("missing-file write: code=%s body=%s" % (code, body))
+if keys.exists():
+    mode = keys.stat().st_mode & 0o777
+    if mode != 0o600:
+        bad.append("new file mode %o, want 600" % mode)
+    if "test-value-not-real" not in keys.read_text(encoding="utf-8"):
+        bad.append("value not stored")
+if list(root.glob("api-keys.yml.autoos-backup-*")):
+    bad.append("a backup was made when there was nothing to back up")
+
+before = "# note\nqoder_pat: 'old'\ngroq: 'keep' # trailing\n"
+keys.write_text(before, encoding="utf-8")
+code, body = secrets_post_response({"id": "qoder_pat", "value": "test-value-replaced"}, "127.0.0.1")
+text = keys.read_text(encoding="utf-8")
+backups = sorted(root.glob("api-keys.yml.autoos-backup-*"))
+if code != 200:
+    bad.append("update code=%s body=%s" % (code, body))
+if "test-value-replaced" not in text or "old" in text:
+    bad.append("value was not replaced in place")
+if "# note" not in text or "groq: 'keep' # trailing" not in text:
+    bad.append("neighbouring lines were lost")
+if len(backups) != 1:
+    bad.append("expected 1 backup, got %d" % len(backups))
+else:
+    if backups[0].read_text(encoding="utf-8") != before:
+        bad.append("backup is not the original bytes")
+    bmode = backups[0].stat().st_mode & 0o777
+    if bmode != 0o600:
+        bad.append("backup mode %o, want 600" % bmode)
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI treats setting the same value again as a no-op"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+secrets_post_response({"id": "groq", "value": "test-value-same"}, "127.0.0.1")
+before = keys.read_bytes()
+n0 = len(list(root.glob("api-keys.yml.autoos-backup-*")))
+
+code, body = secrets_post_response({"id": "groq", "value": "test-value-same"}, "127.0.0.1")
+n1 = len(list(root.glob("api-keys.yml.autoos-backup-*")))
+if code != 200 or not body.get("unchanged"):
+    bad.append("identical value: code=%s body=%s" % (code, body))
+if keys.read_bytes() != before:
+    bad.append("an identical value rewrote the file")
+if n1 != n0:
+    bad.append("an identical value made a backup (%d -> %d)" % (n0, n1))
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI rejects a bad secret id or value and writes nothing"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib, hashlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+keys.write_text("groq: 'test-value-existing'\n", encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+cases = [
+    {"id": "not_a_key", "value": "x"},
+    {"id": "groq", "value": ""},
+    {"id": "groq", "value": "has\nnewline"},
+    {"id": "groq", "value": "has\rreturn"},
+    {"id": "groq", "value": "has\x00nul"},
+    {"id": "groq", "value": "  padded"},
+    {"id": "groq", "value": "REPLACE_WITH_your_key"},
+    {"id": "groq", "value": "replace_with_x"},
+    {"id": "groq", "value": "has'quote"},
+    {"id": "groq", "value": 'has"double'},
+    {"id": "groq", "value": 123},
+    {"id": "groq", "value": "x" * 4097},
+    {},
+]
+digest = hashlib.sha256(keys.read_bytes()).hexdigest()
+for body in cases:
+    code, payload = secrets_post_response(body, "127.0.0.1")
+    if code != 400:
+        bad.append("accepted %r with code %s" % (body, code))
+    if hashlib.sha256(keys.read_bytes()).hexdigest() != digest:
+        bad.append("the file changed after rejecting %r" % (body,))
+        break
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI matches keys exact-case and leaves differently-cased lines alone"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response, configured_ids
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+keys.write_text("GROQ: 'x'\n", encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+have_before = configured_ids()
+if "groq" in have_before:
+    bad.append("configured_ids() returned 'groq' for uppercase GROQ line")
+
+code, body = secrets_post_response({"id": "groq", "value": "test-value-case"}, "127.0.0.1")
+text = keys.read_text(encoding="utf-8")
+if code != 200:
+    bad.append("case-sensitive POST code=%s body=%s" % (code, body))
+if "GROQ: 'x'" not in text:
+    bad.append("the uppercase GROQ line was altered")
+if "groq: 'test-value-case'" not in text:
+    bad.append("lowercase groq line was not appended")
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI counts only column-0 keys and treats an indented line as data"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response, configured_ids
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+original = "some_block:\n  groq: nested_value\nmistral: real_value\n"
+keys.write_text(original, encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+have = configured_ids()
+if "groq" in have:
+    bad.append("an indented groq line read as a configured key")
+if "mistral" not in have:
+    bad.append("a column-0 mistral line did not read as configured")
+
+code, body = secrets_post_response({"id": "groq", "value": "test-value-col0"}, "127.0.0.1")
+if code != 200:
+    bad.append("column-0 POST code=%s body=%s" % (code, body))
+text = keys.read_text(encoding="utf-8")
+if "  groq: nested_value\n" not in text:
+    bad.append("the indented groq line was not left byte-identical")
+if text != original + "groq: 'test-value-col0'\n":
+    bad.append("the new key did not land at column 0 at the end of the file")
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI sets secrets only from loopback unless opted in"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib, hashlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+keys.write_text("groq: 'test-value-existing'\n", encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+os.environ.pop("AUTOOS_SERVE_REMOTE_SECRETS", None)
+bad = []
+
+digest = hashlib.sha256(keys.read_bytes()).hexdigest()
+code, payload = secrets_post_response({"id": "groq", "value": "test-value-remote"}, "10.1.2.3")
+if code != 403:
+    bad.append("non-loopback got %s, want 403" % code)
+if hashlib.sha256(keys.read_bytes()).hexdigest() != digest:
+    bad.append("a refused remote write changed the file")
+
+os.environ["AUTOOS_SERVE_REMOTE_SECRETS"] = "1"
+code, payload = secrets_post_response({"id": "groq", "value": "test-value-remote"}, "10.1.2.3")
+if code != 200:
+    bad.append("opted-in remote got %s, want 200" % code)
+del os.environ["AUTOOS_SERVE_REMOTE_SECRETS"]
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI reports set/missing without ever sending a value"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib, json
+sys.path.insert(0, "lib/linux")
+from serve import secrets_payload, provider_status, SECRET_KEYS
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+keys.write_text(
+    "groq: 'test-value-present'\n"
+    "qoder_pat: REPLACE_WITH_your_token\n",
+    encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+payload = secrets_payload("127.0.0.1")
+by_id = {s["id"]: s for s in payload["secrets"]}
+for key in ("id", "name", "group", "configured", "apply"):
+    if key not in by_id["groq"]:
+        bad.append("row is missing %r" % key)
+if by_id["groq"]["configured"] is not True:
+    bad.append("a real value read as missing")
+if by_id["qoder_pat"]["configured"] is not False:
+    bad.append("a REPLACE_WITH placeholder read as configured")
+if by_id["opencode_password"]["configured"] is not False:
+    bad.append("an absent key read as configured")
+if set(by_id) != set(SECRET_KEYS):
+    bad.append("the payload drifted from the SECRET_KEYS allowlist")
+if payload["file"] != "configuration/api-keys.yml":
+    bad.append("file field = %r" % payload["file"])
+if payload["writable"] is not True:
+    bad.append("a loopback payload is not writable")
+if "test-value-present" in json.dumps(payload):
+    bad.append("the payload leaked a value")
+if secrets_payload("10.1.2.3")["writable"] is not False:
+    bad.append("a non-loopback payload claims writable")
+
+keys.unlink()
+if any(s["configured"] for s in secrets_payload("127.0.0.1")["secrets"]):
+    bad.append("a missing keys file still reports configured keys")
+
+for row in provider_status():
+    if not set(("id", "name", "configured")) <= set(row):
+        bad.append("provider_status lost the shape the STATE.providers fallback needs")
+        break
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI sets values write-only through /api/secrets"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import re, pathlib
+html = pathlib.Path("web/index.html").read_text(encoding="utf-8")
+bad = []
+
+start = html.find("logins and keys, write-only (GET/POST /api/secrets)")
+end = html.find("AI services: live status + the existing setup actions", start)
+if start < 0 or end < 0:
+    print("could not locate the secrets frontend block")
+    raise SystemExit(0)
+block = html[start:end]
+
+if 'data-target-card="cardProviders"' not in html:
+    bad.append("no pill targets cardProviders")
+if 'id="cardProviders"' not in html:
+    bad.append("no card id=cardProviders")
+if "Logins and keys" not in html:
+    bad.append("the card/pill was not renamed to Logins and keys")
+if not all(name in block for name in ("renderProviders", "providerRow", "saveSecret")):
+    bad.append("renderProviders/providerRow/saveSecret is missing")
+if 'api("/api/secrets")' not in block:
+    bad.append("the page does not call /api/secrets")
+if "STATE.providers" not in block:
+    bad.append("no fallback to STATE.providers for an older server")
+if 'method: "POST"' not in block:
+    bad.append("the save path is not a POST")
+if 'type="password"' not in block:
+    bad.append("the input is not type=password")
+if 'autocomplete="new-password"' not in block:
+    bad.append("the input invites the browser to autofill a saved secret")
+if "d.error" not in block:
+    bad.append("a server refusal (e.g. 403) is not shown to the reader")
+# Strip comments before the persistence/logging check: the block's own comment
+# says a value never reaches localStorage, and a bare mention is not a call.
+code_only = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+code_only = re.sub(r"//[^\n]*", "", code_only)
+if any(tok in code_only for tok in ("localStorage", "sessionStorage", "document.cookie")):
+    bad.append("the secrets block persists to storage or cookies")
+if "console." in code_only:
+    bad.append("the secrets block logs")
+
+# The only write into an element's .value is the post-save clear.
+for m in re.finditer(r"\.value\s*=\s*([^;\n]+)", block):
+    if m.group(1).strip() not in ('""', "''"):
+        bad.append("a value is written back into the DOM: %s" % m.group(0).strip())
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI refuses a key file that is not git-ignored"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, subprocess, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+repo = pathlib.Path(tempfile.mkdtemp(prefix="autoos-secrepo-"))
+subprocess.run(["git", "init", "-q", str(repo)], check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+keys = repo / "api-keys.yml"
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+code, payload = secrets_post_response({"id": "groq", "value": "test-value-tracked"}, "127.0.0.1")
+if code != 409:
+    bad.append("an unignored in-repo key file got %s, want 409" % code)
+if keys.exists():
+    bad.append("the refused write still created the file")
+
+(repo / ".gitignore").write_text("api-keys.yml\n", encoding="utf-8")
+code, payload = secrets_post_response({"id": "groq", "value": "test-value-ignored"}, "127.0.0.1")
+if code != 200 or not keys.exists():
+    bad.append("an ignored in-repo key file got %s (exists=%s)" % (code, keys.exists()))
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+

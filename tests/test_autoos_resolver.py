@@ -872,11 +872,11 @@ class FallThroughTests(unittest.TestCase):
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
         # Every model in the real catalog is tool_calls unproven today (no
-        # probe has proven one yet); marking deepseek/deepseek-flash proven
-        # in the overlay is enough to keep t2-worker-clean alive, even
-        # though its other legs (mistral/mistral-small-latest included)
-        # stay unproven.
-        overlay = {"legs": {"deepseek/deepseek-flash": {
+        # probe has proven one yet); marking mistral/mistral-small-latest
+        # proven in the overlay is enough to keep t2-worker-clean alive, even
+        # though its other legs (deepseek/deepseek-flash included, provider-
+        # gated 402 since 2026-09-27T16:4xZ) stay unproven.
+        overlay = {"legs": {"mistral/mistral-small-latest": {
             "tool_calls": {"value": "proven", "source": "test"}}}}
         survivors, removed = r.filter_routes(card, features, client_state,
                                              registry, overlay)
@@ -1953,8 +1953,11 @@ class PlanTests(unittest.TestCase):
         tool_calls proven for at least one private-safe leg, but
         logs/routing/measured.json (the real probe's overlay) is
         git-ignored and absent on a fresh clone or in CI. Marks
-        deepseek/deepseek-flash proven (deepseek-direct, private-safe: paid
-        tier, trains_on_prompts false, no model-level override) and every
+        mistral/mistral-small-latest proven (mistral direct, private-safe:
+        paid tier, trains_on_prompts false, no model-level override;
+        deepseek/deepseek-flash was the proven leg until providers.deepseek
+        went 402/unavailable 2026-09-27T16:4xZ - an unavailable leg never
+        survives the filters no matter what the overlay says) and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
         ["value"]``) -- so this test never depends on that file."""
@@ -1962,7 +1965,7 @@ class PlanTests(unittest.TestCase):
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
-        overlay["legs"]["deepseek/deepseek-flash"] = {"tool_calls": {"value": "proven"}}
+        overlay["legs"]["mistral/mistral-small-latest"] = {"tool_calls": {"value": "proven"}}
         return overlay
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
@@ -2148,7 +2151,7 @@ class GatewayOrderTests(unittest.TestCase):
         # (tools/autoos_resolver.py usable_legs) still holds it for an
         # implement (agentic) card over the now-larger real registry, using
         # the same inline overlay shape PlanTests._inline_toolcalls_overlay
-        # builds (deepseek/deepseek-flash proven, every other real leg
+        # builds (mistral/mistral-small-latest proven, every other real leg
         # explicitly unproven).
         registry = self.registry()
         overlay = PlanTests._inline_toolcalls_overlay(registry)
@@ -2163,10 +2166,10 @@ class GatewayOrderTests(unittest.TestCase):
         self.assertIsNotNone(result["route"], result)
         # result["leg"] is the route's first *usable* leg (per-leg tool_calls
         # filter already applied by usable_legs/score_route), not merely its
-        # first serving one - every leg but deepseek/deepseek-flash is
+        # first serving one - every leg but mistral/mistral-small-latest is
         # explicitly unproven in this overlay, so that is the only leg an
         # agentic (implement) card may land on.
-        self.assertEqual(result["leg"], "deepseek/deepseek-flash")
+        self.assertEqual(result["leg"], "mistral/mistral-small-latest")
 
 
 class DecomposeTests(unittest.TestCase):
@@ -2490,6 +2493,54 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         after, _ = self.filter(now=self.dt(2026, 10, 1, 9, 5, 0))
         self.assertNotIn("r-quota", before)
         self.assertIn("r-quota", after)
+
+
+class FreeAiResolverTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): free_ai declares only rpm/tpd (no tpm), so
+    the resolver's request-size filter never skips its qwen7b leg - a
+    need_tokens*1.3 that exceeds the daily 30k cap must NOT be mistaken for a
+    tpm skip. And because free_ai is a free, may-train public pool, a
+    privacy=sensitive card disqualifies every route carrying it."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        cls.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True,
+                             "reason": ""}}
+
+    def test_free_ai_declares_only_rpm_and_tpd(self):
+        entry = self.registry["providers"]["free_ai"]["limits"]["qwen7b"]
+        self.assertEqual(entry["rpm"], 10)
+        self.assertEqual(entry["tpd"], 30000)
+        self.assertNotIn("tpm", entry)
+
+    def test_provider_tpm_is_none_for_free_ai(self):
+        self.assertIsNone(
+            r.provider_tpm("free_ai", "qwen7b", self.registry))
+
+    def test_a_need_above_the_daily_cap_is_not_skipped_by_a_tpm_filter(self):
+        # 30000 * 1.3 = 39000 > tpd 30000, but tpd is data-only today: the leg
+        # stays because provider_tpm() reads only tpm and free_ai has none.
+        route = self.registry["routes"]["t3-driver-free-only"]
+        card = {"kind": "review", "privacy": "public"}
+        legs, skipped, _ = r.usable_legs(
+            route, card, {"need_tokens": 30000}, self.state(),
+            self.registry, {})
+        self.assertIn(("free_ai", "qwen7b"), legs)
+        self.assertNotIn("free_ai/qwen7b", skipped)
+
+    def test_a_sensitive_card_removes_routes_carrying_free_ai(self):
+        card = {"kind": "review", "privacy": "sensitive"}
+        survivors, removed = r.filter_routes(
+            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        self.assertNotIn("t3-driver-free-only", survivors)
+        self.assertIn("t3-driver-free-only", removed)
+        joined = " ".join(removed["t3-driver-free-only"])
+        self.assertIn("privacy: free_ai/qwen7b", joined)
 
 
 if __name__ == "__main__":

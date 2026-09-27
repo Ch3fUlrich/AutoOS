@@ -21,9 +21,26 @@ FIELDS = ("route", "class", "served_leg", "bucket", "effort", "tokens_in",
           "tokens_out", "cost", "latency_s", "gate", "failure_class")
 CLASSES = ("free", "cheap", "mid", "frontier")
 BUCKETS = ("unknown", "S0", "S1", "S2", "S3", "S4")
-EFFORTS = ("unknown", "none", "low", "medium", "high", "xhigh", "max")
+# "minimal" is a rung of autoos_resolver.CANONICAL_EFFORT_ORDER, so a resolver
+# route can hand it to track_entry(); omitting it dropped the record (REVFIX2).
+EFFORTS = ("unknown", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 GATES = ("pass", "fail")
-FAILURES = (None, "logic", "capability")
+# Every failure_class autoos-agent.py's track_entry() emits: rc 5 -> capability,
+# rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
+# rc 8 -> provider. Omitting one made validate() reject the record and
+# record_run() silently drop it (REVFIX).
+FAILURES = (None, "logic", "capability", "containment", "provider", "refusal")
+
+# Failure classes that are NOT the route's own answer quality, per spec
+# §5.7: `containment` (rc 7: wrote outside its sandbox), `provider` (rc 8:
+# quota or gateway stop) and `refusal` (rc 6: the client could not prompt
+# headlessly). These stay in the file for availability and escalation, but the
+# Beta estimate must ignore them (REVFIX review 3). Every other fail class -
+# `logic` (wrong result, failing test), `capability` (fabricated report, no
+# edit, broken tool calls, context overflow), and None (a legacy record from
+# before classes were stamped) - counts against p: fail closed, an unstamped
+# failure still moves the estimate.
+NON_QUALITY_FAILURES = ("containment", "provider", "refusal")
 
 
 def _text(name, value):
@@ -121,12 +138,21 @@ def p_success(records: list, route: str, route_class: str, bucket: str,
     fall back to ``(class, bucket, effort)``; with none there, to the
     class/bucket prior. ``source`` is ``"route"`` | ``"class"`` | ``"prior"``.
     A missing prior raises ValueError (fail closed).
+
+    A record whose effort was not known when it was written is stamped
+    ``"unknown"`` and matches any queried rung, so a legacy record still moves
+    p (REVFIX review 1). Per spec 5.7 only the route's OWN answer quality
+    counts: ``containment``, ``provider`` and ``refusal`` records are
+    availability observations, kept for escalation but not charged against p;
+    any other fail (``logic``, ``capability``, or an unstamped legacy None)
+    enters the Beta denominator (REVFIX review 3).
     """
     alpha, beta = _prior(priors, route_class, bucket)
 
     def matching(pred):
         return [r for r in records
-                if r.get("bucket") == bucket and r.get("effort") == effort and pred(r)]
+                if r.get("bucket") == bucket
+                and r.get("effort") in (effort, "unknown") and pred(r)]
 
     observed = matching(lambda r: r.get("route") == route)
     if observed:
@@ -135,5 +161,7 @@ def p_success(records: list, route: str, route_class: str, bucket: str,
         observed = matching(lambda r: r.get("class") == route_class)
         source = "class" if observed else "prior"
     passes = sum(1 for r in observed if r.get("gate") == "pass")
-    failures = sum(1 for r in observed if r.get("gate") == "fail")
+    failures = sum(1 for r in observed
+                   if r.get("gate") == "fail"
+                   and r.get("failure_class") not in NON_QUALITY_FAILURES)
     return (alpha + passes) / (alpha + beta + passes + failures), source

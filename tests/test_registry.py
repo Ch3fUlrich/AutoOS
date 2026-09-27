@@ -856,6 +856,9 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
     def test_missing_available_on_a_provider_is_flagged(self):
         reg = mutated()
+        # DSMAX 2026-09-27 switched openrouter off at the provider level, so
+        # drop that flag before asserting rule 8 fires on the missing one.
+        del reg["providers"]["openrouter"]["available"]
         reg["providers"]["openrouter"]["unavailable_until"] = "2026-10-01T09:05:00Z"
         problems = registry.check_registry(reg)
         self.assertTrue(
@@ -890,13 +893,16 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
 
 class OpenRouterByokLegTests(unittest.TestCase):
-    """L0 2026-09-27: openrouter/openai/gpt-oss-120b BYOK leg on t2-worker."""
+    """Operator 2026-09-27T13:5xZ measured the openrouter/openai/gpt-oss-120b
+    BYOK leg 200 on 3/3 trials and briefly un-gated it, but the L0 C change was
+    reverted the same day (a re-probe hit 401 credits exhausted), so t2-worker
+    keeps its `available: false` gate until the operator sets BYOK Prioritized
+    and a fresh probe passes. The per-leg allow rule is kept in place."""
 
     @classmethod
     def setUpClass(cls):
         cls.reg = load_registry()
         cls.t2_worker_legs = cls.reg["routes"]["t2-worker"]["legs"]
-        cls.unavailable_legs = cls.reg["routes"]["t2-worker"].get("unavailable_legs", {})
 
     def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
         idx = self.t2_worker_legs.index("openrouter/openai/gpt-oss-120b")
@@ -915,21 +921,54 @@ class OpenRouterByokLegTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
 
-    def test_leg_is_unavailable_via_unavailable_legs_entry(self):
-        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
-        self.assertIsNotNone(entry)
-        self.assertIs(entry.get("available"), False)
-
-    def test_leg_is_unavailable_now(self):
-        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
-        self.assertIsNotNone(entry)
-        self.assertTrue(registry.unavailable_now(
-            entry, datetime.now(timezone.utc)))
+    def test_t2_worker_gates_the_leg_until_byok_is_prioritized(self):
+        # C was reverted: the leg stays `available: false` until the operator
+        # sets BYOK Prioritized and a fresh probe passes (probe-toolcalls.py
+        # skips legs listed here).
+        entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
+            "openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
+        self.assertFalse(entry["available"])
 
     def test_unavailable_entry_has_the_l0_comment(self):
-        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
-        self.assertIn("$comment", entry)
-        self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
+        """PROV finding 12: the route-level gate must carry its provenance
+        ($comment), not only the boolean flag - the removed gate-comment test's
+        contract (D20: an unmeasured lesson is not a rule)."""
+        entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
+            "openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
+        comment = entry.get("$comment")
+        self.assertIsInstance(comment, str, "$comment provenance is missing")
+        self.assertTrue(comment.strip())
+        self.assertIn("2026-09-27T03:39Z", comment)
+        self.assertIn("probe-toolcalls.py", comment)
+
+    def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
+        listing = 0
+        for rid, route in self.reg["routes"].items():
+            if "openrouter/openai/gpt-oss-120b" not in (route.get("legs") or []):
+                continue
+            listing += 1
+            kept = registry.gateway_legs(route, self.reg)
+            self.assertNotIn("openrouter/openai/gpt-oss-120b", kept, rid)
+        self.assertGreater(listing, 0)
+
+    def test_other_openrouter_legs_stay_denied(self):
+        # The BYOK allow is per-leg; the blanket deny-openrouter still gates
+        # every other openrouter leg (first match wins).
+        for leg in ("openrouter/google/gemini-3.8-flash",
+                    "openrouter/qwen/qwen3.8-235b"):
+            self.assertTrue(registry.leg_denied(leg, self.reg), leg)
+
+    def test_leg_rule_records_the_reverted_byok_answer(self):
+        # The allow rule survives the revert (a per-leg allow before the blanket
+        # deny-openrouter), but it carries the operator's 03:39Z answer note,
+        # not the reverted C measurement.
+        rules = self.reg["policy"]["leg_rules"]
+        rule = next(r for r in rules if r["id"] == "allow-openrouter-gpt-oss-byok")
+        self.assertIn("BYOK", rule["reason"])
+        self.assertNotIn("3/3", rule["reason"])
+        self.assertIn("2026-09-27T03:39Z", rule["source"])
 
 
 class LegRulesTests(unittest.TestCase):
@@ -1014,6 +1053,34 @@ class LegRulesTests(unittest.TestCase):
         }
         got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
         self.assertEqual(got, cases)
+
+    def test_providers_key_spelling_matches_the_omniroute_id_rule(self):
+        """PROV finding 3: resolve_leg() accepts either the providers key or a
+        provider's omniroute_id, so leg_rules must gate BOTH spellings. A leg
+        written with the providers key (cheapinference/…) must hit the rule
+        written against the canonical id (cheaperinference/*)."""
+        # both spellings of the denied leg are denied
+        self.assertTrue(registry.leg_denied("cheapinference/glm-4.5-air", self.reg))
+        self.assertTrue(registry.leg_denied("cheaperinference/glm-4.5-air", self.reg))
+        # and both spellings of an allowed leg stay allowed (allow wins, first
+        # match, before the trailing deny-cheaperinference)
+        self.assertFalse(registry.leg_denied("cheapinference/kimi-k3", self.reg))
+        self.assertFalse(registry.leg_denied("cheaperinference/kimi-k3", self.reg))
+        # the providers key spelling is what the canonical resolution yields
+        self.assertEqual(
+            registry._canonical_leg_spelling("cheapinference/glm-4.5-air", self.reg),
+            "cheaperinference/glm-4.5-air")
+
+    def test_providers_key_spelling_is_flagged_when_serving(self):
+        """A denied leg is only tolerated while the route gates it by the same
+        exact string; a providers-key spelling with no gate is still a problem.
+        Use groq (available) since cheaperinference is now provider-off."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p
+                for p in problems), problems)
 
     def test_available_true_entry_does_not_gate_a_denied_leg(self):
         """Only available:false gates (the renders' _leg_is_unavailable)."""
@@ -1143,20 +1210,74 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
-class CheaperinferenceDisabledTests(unittest.TestCase):
-    """Operator 2026-09-27T10:12Z (via L0): no cheaperinference top-up - treat
-    it like SambaNova (R2): it has no free model, so the whole provider is
-    unavailable and no gateway declaration carries any of its legs."""
+class CheaperinferenceUnavailableTests(unittest.TestCase):
+    """Operator 2026-09-27T17:2xZ: wallet balance exhausted (402), operator
+    rule: credits out -> off until topped up. Provider marked available:false.
+    Its pinned combos cheaperinference/{glm-5.2,kimi-k3} then go to omitted
+    like deepseek - re-pin tests accordingly."""
 
     def test_provider_is_unavailable(self):
-        self.assertIs(load_registry()["providers"]["cheapinference"].get("available"), False)
+        entry = load_registry()["providers"]["cheapinference"]
+        self.assertIs(entry.get("available"), False)
 
-    def test_gateway_legs_drop_every_cheaperinference_leg(self):
+    def test_no_cheaperinference_legs_are_servable(self):
+        reg = load_registry()
+        served = set()
+        for rid, route in reg["routes"].items():
+            for leg in registry.gateway_legs(route, reg):
+                if leg.startswith("cheaperinference/"):
+                    served.add(leg)
+        self.assertEqual(served, set())
+
+    def test_glm_4_5_air_and_deepseek_flash_stay_out(self):
         reg = load_registry()
         for rid, route in reg["routes"].items():
             kept = registry.gateway_legs(route, reg)
-            self.assertFalse([leg for leg in kept if leg.startswith("cheaperinference/")],
-                             "route %s still serves a cheaperinference leg" % rid)
+            self.assertNotIn("cheaperinference/glm-4.5-air", kept, rid)
+            self.assertNotIn("cheaperinference/deepseek-v4-flash", kept, rid)
+
+    def test_glm_4_5_air_is_route_gated_where_listed(self):
+        reg = load_registry()
+        for rid in ("t2-worker", "t3-driver"):
+            entry = (reg["routes"][rid].get("unavailable_legs") or {}).get(
+                "cheaperinference/glm-4.5-air")
+            self.assertIsNotNone(entry, rid)
+            self.assertIs(entry.get("available"), False)
+
+    def test_leg_rules_allow_the_three_and_deny_the_rest(self):
+        reg = load_registry()
+        # The three legs are allowed by leg_rules (explicit allow rules), but
+        # unavailable due to provider-level available:false.
+        for leg in ("cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+                    "cheaperinference/minimax-m2.7"):
+            self.assertFalse(registry.leg_denied(leg, reg), leg)
+            self.assertTrue(registry._leg_is_unavailable(leg, reg["routes"]["t2-worker"], reg), leg)
+        # Other cheaperinference legs are denied by leg_rules (deny-cheaperinference)
+        # AND by provider-level available:false.
+        for leg in ("cheaperinference/glm-4.5-air",
+                    "cheaperinference/deepseek-v4-flash",
+                    "cheaperinference/claude-sonnet-5",
+                    "cheaperinference/anything-else"):
+            self.assertTrue(registry.leg_denied(leg, reg), leg)
+
+    def test_real_registry_passes_check_with_cheaperinference_back(self):
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+
+class CerebrasDisabledTests(unittest.TestCase):
+    """Operator 2026-09-27T12:55Z: cerebras has no free tier and no credits, so
+    OmniRoute disables the connection - provider available:false, and no
+    gateway declaration carries any of its legs."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cerebras"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cerebras_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cerebras/")],
+                             "route %s still serves a cerebras leg" % rid)
 
 
 class ClaudeCodeLegsUnavailableTests(unittest.TestCase):
@@ -1173,6 +1294,91 @@ class ClaudeCodeLegsUnavailableTests(unittest.TestCase):
             kept = registry.gateway_legs(route, reg)
             self.assertFalse([leg for leg in kept if leg.startswith("cc/")],
                              "route %s still serves a cc leg" % rid)
+
+
+class FreeAiProviderTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): Free.ai joins as the free provider `free_ai`
+    with model `qwen7b`, wired as the LAST free leg of both zero-spend routes
+    so `t3-driver-free-only` serves again. `free_ai` is a public pool whose
+    terms allow training on prompts, so it is never private-safe and never
+    enters a -clean route."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_entry_shape(self):
+        provider = self.reg["providers"]["free_ai"]
+        self.assertEqual(provider["api_base"], "https://api.free.ai/v1")
+        self.assertEqual(provider["omniroute_id"], "free-ai")
+        self.assertEqual(provider["model_prefix"], "free-ai")
+        self.assertEqual(provider["litellm_prefix"], "openai")
+        self.assertEqual(provider["litellm_env"], "FREE_AI_API_KEY")
+        self.assertEqual(provider["tier"], "free")
+        self.assertIs(provider["trains_on_prompts"], True)
+
+    def test_gateway_ref_translates_to_the_builtin_free_ai_id(self):
+        # free_ai is a built-in OmniRoute connection; the gateway catalog names
+        # its model free-ai/qwen7b, exactly as antigravity -> agy.
+        self.assertEqual(
+            registry.gateway_ref("free_ai/qwen7b", self.reg), "free-ai/qwen7b")
+
+    def test_provider_limits_are_rpm_and_tpd_only(self):
+        # free_ai's terms cap requests per minute and tokens per DAY; there is
+        # no published per-minute token cap, so only rpm/tpd are declared (the
+        # resolver reads only `tpm`, which is deliberately absent).
+        limits = self.reg["providers"]["free_ai"]["limits"]
+        self.assertEqual(sorted(limits), ["qwen7b"])
+        entry = limits["qwen7b"]
+        self.assertEqual(entry["rpm"], 10)
+        self.assertEqual(entry["tpd"], 30000)
+        self.assertNotIn("tpm", entry)
+        self.assertTrue(entry["source"].strip())
+
+    def test_model_qwen7b_mirrors_its_qwen_sibling(self):
+        model = self.reg["models"]["qwen7b"]
+        self.assertEqual(model["context_advertised"], 131072)
+        self.assertEqual(model["output_max"], 16384)
+        self.assertEqual(model["price_in"], 0.0)
+        self.assertEqual(model["price_out"], 0.0)
+
+    def test_free_ai_is_never_private_safe(self):
+        safe, reason = registry.private_safe("free_ai", "qwen7b", self.reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_free_ai_leg_is_last_on_both_free_only_routes(self):
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            legs = self.reg["routes"][route_id]["legs"]
+            self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
+
+    def test_no_clean_route_carries_free_ai(self):
+        # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
+        # and its rendered omniroute_id (free-ai/) - so a regression that emits
+        # either into a -clean route is caught.
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            self.assertFalse(
+                [leg for leg in route.get("legs") or []
+                 if leg.startswith(("free_ai/", "free-ai/"))],
+                "clean route %s carries free_ai" % route_id)
+
+    def test_gateway_legs_keep_free_ai_on_the_free_only_routes(self):
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            kept = registry.gateway_legs(self.reg["routes"][route_id], self.reg)
+            self.assertIn("free_ai/qwen7b", kept, route_id)
+
+    def test_t3_driver_free_only_serves_again(self):
+        ids = registry.servable_route_ids(self.reg)
+        self.assertIn("t3-driver-free-only", ids)
+        self.assertIn("t2-worker-free-only", ids)
+
+    def test_leg_rules_allow_the_free_ai_leg(self):
+        self.assertFalse(registry.leg_denied("free_ai/qwen7b", self.reg))
+
+    def test_real_registry_passes_check_with_free_ai(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
 
 
 if __name__ == "__main__":

@@ -14,11 +14,16 @@ Card v1 (unknown fields and values are an error):
     spend       free-ok | credit                     default free-ok
 
 Resolution is filters, then preference: privacy, ctx, spend, then
-role/complexity. sensitive + 1m has no route: t1-orchestrator-clean's only leg
-is a contributor model that trains on prompts, so it is reachable only through
-an explicit allow_training, which the caller logs. spend=credit stays a valid
-value but has no combo of its own: the -credit chains were dropped 2026-09-23,
-and t2-worker / t3-driver already overflow to their paid legs.
+role/complexity. ctx=1m routes to t1-orchestrator again since 2026-09-27
+(T1FREE): the route keeps a free gemini/gemini-3.8-flash fallback leg while
+OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps
+a free leg). Sensitive 1m still has no route: t1-orchestrator-clean's only
+leg is a contributor model that trains on prompts and stays off, so it is
+reachable only through an explicit allow_training, which the caller logs -
+but that leg is provider-off too, so allow_training is retained for
+compatibility and is inert. spend=credit stays a valid value but has no
+combo of its own: the -credit chains were dropped 2026-09-23, and t2-worker /
+t3-driver already overflow to their paid legs.
 """
 from __future__ import annotations
 
@@ -38,7 +43,7 @@ CARD_VALUES = {
 CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
 ALL_COMBOS = ("t1-orchestrator", "t2-worker", "t3-driver",
-              "t2-worker-clean", "t3-driver-clean", "t1-orchestrator-clean")
+              "t2-worker-clean", "t3-driver-clean")
 
 # Card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4). v1 stays valid:
 # role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy
@@ -259,28 +264,37 @@ def normalize_v2(card: dict) -> dict:
 
 
 def select_combo(card: dict, allow_training: bool = False) -> tuple:
-    """Return (combo, reason). Raises CardError or NoRoute."""
+    """Return (combo, reason). Raises CardError or NoRoute.
+
+    ``allow_training`` is accepted for backward compatibility and is inert:
+    sensitive ctx=1m's only candidate leg (t1-orchestrator-clean's
+    contributor leg) is off at the provider level since 2026-09-27, so there
+    is no trainable gateway leg for it to unlock. It never changes the
+    result.
+    """
     c = normalize(card)
     strong = c["role"] == "orchestrate" or c["complexity"] == "hard"
     light = not strong and (c["role"] == "review" or c["complexity"] == "trivial")
 
     # 1. privacy - a hard filter; only -clean combos serve sensitive work.
     if c["privacy"] == "sensitive":
-        # 2. ctx - there is no 1m leg that does not train on prompts.
+        # 2. ctx - the only 1M leg was switched off 2026-09-27 (OpenRouter
+        #    off; the Zen leg is client-bound), so 1M fails closed.
         if c["ctx"] == "1m":
-            if allow_training:
-                return "t1-orchestrator-clean", "sensitive-1m-allow-training"
             raise NoRoute(
-                "privacy=sensitive with ctx=1m has no route: t1-orchestrator-clean's only leg "
-                "trains on prompts. Split the work so each part fits 128k and run it on "
-                "t2-worker-clean "
-                "(card privacy=sensitive,ctx=128k), or pass --allow-training to accept a "
-                "training leg explicitly (logged).")
+                "privacy=sensitive with ctx=1m has no route: the only 1M leg "
+                "(muse-spark-1.3-contributor) was switched off 2026-09-27 "
+                "(OpenRouter off; the Zen leg is client-bound). Split the work so "
+                "each part fits 128k and run it on t2-worker-clean "
+                "(card privacy=sensitive,ctx=128k).")
         # 3. spend - -clean is paid only, so spend changes nothing here.
         # 4. role/complexity preference.
         return ("t3-driver-clean", "sensitive-light") if light else ("t2-worker-clean", "sensitive")
 
     # public
+    # ctx=1m routes to t1-orchestrator again (T1FREE, 2026-09-27): the route
+    # now carries a free gemini/gemini-3.8-flash fallback leg, so it stays
+    # servable while OpenRouter/DeepSeek credit is out.
     if c["ctx"] == "1m":
         return "t1-orchestrator", "public-1m"
     if strong:

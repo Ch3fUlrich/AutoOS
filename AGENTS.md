@@ -100,6 +100,7 @@ what makes `--dry-run` meaningful and what lets a headless run be fully non-inte
   expansion. `shellcheck` clean, no exceptions without an inline justification comment.
 - No `sudo` inside a function — check `AUTOOS_SUDO` (set once at startup, empty when already
   root) so the scripts work identically as root, under `sudo`, and in a container.
+  Exception (operator 2026-09-27): `antigravity_sandbox_setup` alone may call `sudo` for `chrome-sandbox`.
 
 ### Output
 
@@ -124,8 +125,8 @@ That is the acceptance bar, and it is the single most common source of defects h
 
 ```bash
 powershell -File tests/run-tests.ps1   # Windows lib + catalog + end-to-end dry runs
-bash tests/run-tests.sh                # Linux lib + catalog + end-to-end dry runs
-bash tests/run-tests.sh --wsl          # same, forced through WSL2 from Windows
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh   # Linux lib + catalog + end-to-end dry runs
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh --wsl   # same, forced through WSL2 from Windows
 bash tests/run-tests.sh --filter catalog
 ```
 
@@ -203,7 +204,7 @@ only skips when neither that nor the binary is available. Install them where you
 
 Before you claim a change is complete:
 
-- [ ] `bash tests/run-tests.sh` and `pwsh tests/run-tests.ps1` both pass
+- [ ] `AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh` and `pwsh tests/run-tests.ps1` both pass
 - [ ] `shellcheck` clean on touched `.sh`; `Invoke-ScriptAnalyzer` clean on touched `.ps1`
 - [ ] Ran with `--dry-run` and read the plan output — it says what you expected
 - [ ] Ran twice; the second run reports `skipped`, not `installed`

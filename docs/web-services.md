@@ -21,7 +21,7 @@ The table below describes the native (workstation) layout.
 | Service | Port | Bind | Own auth | Proxied as | Start | Health |
 |---|---|---|---|---|---|---|
 | OmniRoute gateway + dashboard | 20128 | `0.0.0.0` | `/v1/*`: client key (`REQUIRE_API_KEY=true`); dashboard + `/api/*`: login session | `omniroute.<domain>` | unit `autoos-omniroute` / `omniroute --no-open --port 20128` | `GET /api/health` → 200 |
-| opencode serve (web UI + API) | 4096 | `0.0.0.0` | HTTP Basic on `/api/*`, user `opencode`, password in `~/.config/autoos/opencode-serve.password` | `opencode.<domain>` | unit `autoos-opencode` / `configuration/start-stack.sh opencode-serve` | `GET /` → 200; `GET /api/session` → 401 without the password |
+| opencode serve (web UI + API) | 4096 | `0.0.0.0` | HTTP Basic on `/api/*`, user `opencode`, password from `OPENCODE_PASSWORD` (source: `configuration/api-keys.yml` → `opencode_password`; derived copies `~/.config/autoos/ai-stack/opencode.env` for docker and `~/.config/autoos/opencode-serve.password` for native - [logins table](#logins-and-secrets)) | `opencode.<domain>` | unit `autoos-opencode` / `configuration/start-stack.sh opencode-serve` | `GET /` → 200; `GET /api/session` → 401 without the password |
 | OpenHands (docker app) | 3000 | `0.0.0.0` | **none** | `openhands.<domain>` | `configuration/start-stack.sh openhands` (container `--restart unless-stopped`) | `GET /` → 200 |
 | LiteLLM fallback proxy | 4000 | `127.0.0.1` | `LITELLM_MASTER_KEY` | not proxied - local fallback only; clients use the gateway | unit `autoos-litellm` / `configuration/litellm/start-litellm.sh` | `GET /` → 200 |
 | AutoOS browser UI | 8777 | `127.0.0.1` (default) | per-run token in the URL | not proxied - an installer with root-level effects; reach it over SSH or the tailnet (`--bind`) | `./setup.sh --serve` | `GET /api/ping?token=…` → 200 |
@@ -32,6 +32,28 @@ The table below describes the native (workstation) layout.
 | Serena MCP (streamable HTTP/SSE) | 9121 | `127.0.0.1` | none (loopback only) | not proxied - local agents only | `serena-mcp` container | `GET /sse` → 200 |
 | Serena dashboard | 24282 | `127.0.0.1` | none (loopback only) | not proxied | `serena-mcp` container | `GET /` → 302 `/dashboard/` |
 | Sablier front (Caddy) | 8199 | `0.0.0.0` | none - it only wakes scale-to-zero tools | it IS the upstream for the proxy's scale-to-zero names (docs, code-server) | docker compose (sablier stack, Server repo) | `GET /` → 200 |
+
+## Logins and secrets
+
+Where each password or key lives, what it guards, and how to rotate it.
+Nothing secret is in a tracked file; the real values are git-ignored.
+
+| Login / secret | Protects | File | Key | How to change | Restart / apply after |
+|---|---|---|---|---|---|
+| Authelia browser login (admins group + 2FA) for `omniroute`/`opencode`/`openhands` `<domain>`s | SSO gate at the reverse proxy | `secrets-generated/auth_users_database.yml` (server repo, not this one); rules in `server/manage/auth/authelia/configuration.yml` | argon2id hashes via `server/manage/auth/authelia/gen-user-hashes.sh` | edit the users file with a new hash (server repo) | Authelia Semaphore template |
+| opencode serve Basic auth (user `opencode`) | `/api/*` on :4096 | source: `configuration/api-keys.yml` → `opencode_password`; derived copies written by `ai-stack.sh init`: `~/.config/autoos/ai-stack/opencode.env` `OPENCODE_PASSWORD` (docker) and `~/.config/autoos/opencode-serve.password` (0600, native). `init` updates a copy older than `api-keys.yml` (backup first), leaves a newer copy and warns about it; a missing yml key is migrated once from the password file, else from `opencode.env`, else a new random value | `opencode_password` (yml) → `OPENCODE_PASSWORD` (env) | edit `configuration/api-keys.yml` → `opencode_password`, or the **Logins and keys** card in the browser UI (`./setup.sh --serve`) | docker: `ai-stack.sh init && ai-stack.sh up opencode`; native: `systemctl --user restart autoos-opencode`; Windows: `.\configuration\start-stack.ps1 -App opencode-serve` |
+| OmniRoute dashboard password | dashboard + `/api/*` on :20128 | dashboard DB in `~/.local/share/autoos/ai-stack/omniroute/` (docker) or `~/.omniroute/` (native); `INITIAL_PASSWORD` in the `.env` there seeds only the first start | dashboard session cookie | dashboard → Settings → change password | immediate |
+| OmniRoute client API key (`REQUIRE_API_KEY=true`) | `/v1/*` on :20128 (every model/chat call) | source: `configuration/api-keys.yml` → `omniroute` (dashboard → API keys → Create API Key); consumers: `~/.config/autoos/ai-stack/opencode.env` `AUTOOS_OMNIROUTE_KEY`, `~/.config/autoos/ai-stack/openhands.env` `LLM_API_KEY`, `~/.config/autoos/ai-stack/client.key` (standby router, 0600) | bearer `sk-…` | dashboard → API keys; re-read by `ai-stack.sh init` (opencode.env, openhands.env) and `ensure_client_key_file` (client.key, on every `failover on`) | `configuration/omniroute/apply.sh` (registers the new key) |
+| OmniRoute management token | management routes (`/api/providers`, `/api/combos`, `/api/resilience`) | `~/.config/autoos/ai-stack/manage.key` (0600, `ai-stack.sh ensure_manage_key`) - what **`apply.sh` reads**, after `$OMNIROUTE_API_KEY` (`apply.sh` :189-201). `configuration/api-keys.yml` → `omniroute_management` is *not* read by `apply.sh`; it is optional and remote-only, per its comment in `configuration/api-keys.example.yml` | `oma_live_…` with scope `manage` | dashboard → API keys → new key with scope `manage`; save it to `manage.key` (or export `OMNIROUTE_API_KEY`) | immediate - `apply.sh` re-reads `manage.key` / the env var on each run; a `omniroute_management` yml value has no effect on `apply.sh` |
+| Provider API keys (groq, google_ai_studio, mistral, …, free_ai, zen, qoder_pat) | upstream model APIs | `configuration/api-keys.yml` (template `api-keys.example.yml`); where to get each: [docs/api-keys.md](api-keys.md) | provider-specific | edit `api-keys.yml` | `configuration/omniroute/apply.sh` (registers them); LiteLLM copy: `python3 tools/mirror-litellm-env.py` → `configuration/litellm/.env`; restart litellm if it runs |
+| LiteLLM master key | LiteLLM proxy on :4000 | `configuration/litellm/.env` → `LITELLM_MASTER_KEY`; override: `AUTOOS_LITELLM_MASTER_KEY_FILE` points at a single-line file (the standby router uses this with `client.key` during failover) | any local secret | edit `.env` (or the override file) | `systemctl --user restart autoos-litellm` (or the standby picks it up on the next `failover on`) |
+| OpenHands | no own login (Authelia only) | `~/.config/autoos/ai-stack/openhands.env` → `LLM_API_KEY` (set to the OmniRoute client key by `ai-stack.sh init`) | same as OmniRoute client key | change the OmniRoute client key (row above); `init` re-copies it | `ai-stack.sh up openhands` or `start-stack.sh openhands` |
+| Omnigraph token | Omnigraph server on :8080 | `~/.autoos-omnigraph.env` → `OMNIGRAPH_TOKEN` (outside the repo); `ai-stack.sh` :54 copies it into `opencode.env` during `init` | bearer token | issue a new token at the graph server; update `~/.autoos-omnigraph.env` | restart the docker compose omnigraph stack; opencode picks it up on next start |
+| AutoOS browser UI (`setup.sh --serve`) | the installer's HTTP API on :8777 | printed in the URL; new every run | one-time random token | re-run `./setup.sh --serve` | immediate (each run is a new token) |
+
+Every value in `configuration/api-keys.yml` can also be set from the browser UI: the **Logins and keys** card ([docs/web-ui.md](web-ui.md)) is write-only, accepts secrets from loopback clients only unless `AUTOOS_SERVE_REMOTE_SECRETS=1`, and prints the apply command to run after a save.
+
+Other secrets not in the table: `STORAGE_ENCRYPTION_KEY` in OmniRoute's own data-dir `.env` (encrypts the gateway DB; without it the stored provider credentials are unreadable - [Server profile: Secrets](#secrets)); `client.key` doubles as the standby router's LiteLLM master key during failover (`ai-stack.sh failover on`).
 
 ## Per service
 
@@ -50,6 +72,14 @@ The table below describes the native (workstation) layout.
 - **Start**: `configuration/autostart/register-autostart.sh` installs the
   `autoos-omniroute` unit (Type=notify, watchdog). By hand:
   `omniroute --no-open --port 20128` from `$HOME`.
+- **Dashboard password reset from the host** (docker stack):
+  `printf '%s' "$NEW" | docker exec -i autoos-omniroute node bin/reset-password.mjs --password-stdin`,
+  then `bash configuration/docker/ai-stack/ai-stack.sh restart omniroute` (the
+  CLI writes the database; the running gateway reads it at start) and log in
+  with the new password. The CLI imports
+  `bcryptjs`, which the upstream image's standalone build prunes from
+  `/app/node_modules`, so the derived layer adds it: needs
+  `autoos/omniroute:…-autoos2` or later (rebuilt by `ai-stack.sh up`).
 
 #### OAuth logins and the public URL
 
@@ -93,9 +123,13 @@ The table below describes the native (workstation) layout.
 
 - V2 (`@opencode/cli` 2.x) serves its web UI to anyone and guards `/api/*`
   with HTTP Basic auth: user `opencode`, password from `OPENCODE_PASSWORD`.
-  Without that variable it invents a new password on every start, so
-  `configuration/autostart/run-opencode-serve.sh` pins one in
-  `~/.config/autoos/opencode-serve.password` (mode 600).
+  Without that variable it invents a new password on every start, so the value
+  is pinned: `configuration/api-keys.yml` → `opencode_password` is the source,
+  `configuration/autostart/run-opencode-serve.sh` reads that key first and uses
+  `~/.config/autoos/opencode-serve.password` (mode 600) only as a fallback, and
+  the docker stack reads the derived copy in
+  `~/.config/autoos/ai-stack/opencode.env`, which `ai-stack.sh init` writes from
+  the same yml key (see [Logins and secrets](#logins-and-secrets)).
 - **Streams**: `/api/event` (server-sent events - no response buffering)
   and websockets under `/api/pty/…` (terminal).
 - The providers it offers come from the global `~/.config/opencode/opencode.json`
@@ -235,7 +269,7 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | local `autoos/omniroute:3.8.50-autoos1` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos2` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
 | `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/opencode`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
@@ -309,12 +343,14 @@ under a `700` directory `~/.config/autoos/ai-stack/`:
 | File | Holds | Read by |
 |---|---|---|
 | `stack.env` | uid/gid, paths, bind, RAM - no secret | compose (`--env-file`) |
-| `opencode.env` | `OPENCODE_PASSWORD` (reused from `~/.config/autoos/opencode-serve.password`, so phone logins survive), the gateway client key, `OMNIGRAPH_TOKEN`, every other `{env:…}` key the rendered config references | opencode only |
+| `opencode.env` | `OPENCODE_PASSWORD` (a derived copy `init` writes from `configuration/api-keys.yml` → `opencode_password`, the source - [logins table](#logins-and-secrets)), the gateway client key, `OMNIGRAPH_TOKEN`, every other `{env:…}` key the rendered config references | opencode only |
 | `openhands.env` | `LLM_API_KEY`, and the remote-browser pair `OH_SANDBOX_CONTAINER_URL_PATTERN` + `WEB_HOST` (carried over from the running container) | OpenHands only |
 | `manage.key` | a manage-scoped gateway key | host CLI only (`apply.sh`) - never a container |
 
 `init` only **appends missing keys** (backup first); a value you edit stays
-yours. Each container gets only its own file: an agent's shell can read its
+yours — the exception is `OPENCODE_PASSWORD`, whose copies are refreshed when
+they are older than `api-keys.yml` and left alone, with a warning, when they
+are newer. Each container gets only its own file: an agent's shell can read its
 container's environment. OmniRoute keeps `STORAGE_ENCRYPTION_KEY` in its own
 data directory's `.env`, as it does natively.
 

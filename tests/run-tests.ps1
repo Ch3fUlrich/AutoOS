@@ -4128,14 +4128,18 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-deepseek-v4.1-flash,omniroute-t1-orchestrator-clean,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only'
+    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): the -clean, spark and
+    # deepseek tiers are omitted with their providers' credits off; the two
+    # t1-orchestrator-free-only tiers are the free gemini leg that serves t1 now.
+    Assert-Equal (@($spec.tiers | ForEach-Object { $_.id }) -join ',') 'omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only'
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        # Gateway tiers carry the openai/ transport prefix; a DIRECT provider
-        # profile (the effort-ladder surface for spark) names the provider
-        # itself, e.g. openrouter/<model>.
-        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-clean|-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|deepseek-v4\.1-flash|spark-1\.3-contributor|opus-4-6)|openrouter/meta/muse-spark-1\.3-contributor)$') "$($t.id) model is neither a gateway tier nor a known direct route"
+        # Gateway tiers carry the openai/ transport prefix. The DIRECT
+        # provider profiles (openrouter spark, deepseek-v4.1-flash) are gone:
+        # their routes fail closed (DSMAX 2026-09-27, deepseek 402
+        # 2026-09-27T16:4xZ), so every tier is a gateway tier now.
+        Assert-True ($t.model -match '^(openai/(t1-orchestrator(-free-only)?|t2-worker(-clean|-free-only)?|t2-orchestrator|t3-driver(-clean|-free-only)?|t4-rag|gemini-3\.8-flash|opus-4-6))$') "$($t.id) model is not a servable gateway tier"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
     Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
@@ -4158,7 +4162,10 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
         & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        foreach ($t in @('omniroute-t1-orchestrator', 'omniroute-t3-driver-clean', 'litellm-t2-worker', 'openrouter-muse-spark-1.3-contributor')) {
+        # Every spec tier has a key in the fixture, so exactly one profile per
+        # tier must come out - derived from the spec, never a pinned count.
+        Assert-Equal (@(Get-ChildItem (Join-Path $tmpA 'profiles') -Filter '*.json').Count) @($spec.tiers).Count 'generator wrote a different number of profiles than the spec lists'
+        foreach ($t in @('omniroute-t1-orchestrator', 'omniroute-t3-driver-clean', 'litellm-t2-worker')) {
             Assert-True (Test-Path (Join-Path $tmpA "profiles\$t.json")) "$t.json missing"
         }
         $t1 = Get-Content (Join-Path $tmpA 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
@@ -4168,11 +4175,28 @@ Test-Case 'tier profiles come from the spec, installer and tool agree' {
         Assert-Equal $lt.model 'openai/t1-orchestrator'
         Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
         Assert-Equal $lt.api_key 'test-lit-key'
-        # A direct-provider tier takes its OWN key and endpoint, not the gateway's.
-        $direct = Get-Content (Join-Path $tmpA 'profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
-        Assert-Equal $direct.api_key 'test-or-key'
-        Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
-        Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
+        # A direct-provider tier (gateway: openrouter) takes its OWN key and
+        # endpoint, not the gateway's - that is the effort-ladder surface. The
+        # committed spec has none today (PROV 2026-09-27: openrouter credit
+        # off), so the renderer's behaviour is exercised on a synthetic one-tier
+        # spec instead of a pinned profile name that goes stale with the
+        # provider state (PROVPIN re-pin).
+        $realOrKey = $env:OPENROUTER_API_KEY
+        try {
+            $syn = Join-Path $tmpB 'synthetic'
+            $null = New-Item -ItemType Directory -Force -Path $syn
+            [IO.File]::WriteAllText((Join-Path $syn 'spec.json'), '{"gateway_base_url": "http://gateway.invalid:20128/v1", "litellm_base_url": "http://litellm.invalid:4000/v1", "tiers": [{"id": "openrouter-muse-spark-1.3-contributor", "gateway": "openrouter", "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/meta/muse-spark-1.3-contributor", "max_input_tokens": 131072, "max_output_tokens": 32768, "reasoning": true}]}')
+            Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+            & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --spec (Join-Path $syn 'spec.json') --openhands-dir (Join-Path $syn 'oh') --keys-file $keys --litellm-env $litEnv *> $null
+            Assert-Equal $LASTEXITCODE 0 'synthetic generator failed'
+            $direct = Get-Content (Join-Path $syn 'oh\profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
+            Assert-Equal $direct.api_key 'test-or-key'
+            Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
+            Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
+        } finally {
+            if ($null -eq $realOrKey) { Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue }
+            else { $env:OPENROUTER_API_KEY = $realOrKey }
+        }
     } finally {
         if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
@@ -6498,7 +6522,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -6584,7 +6608,12 @@ Test-Case 'litellm fallback config is internally consistent' {
     $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     # Every group the registry can serve through LiteLLM (managed) plus the
     # hand-curated *-paid escalations, mirroring the Linux consistency test.
-    foreach ($g in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 't1-orchestrator-paid', 't2-orchestrator', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-paid', 't4-rag', 'deepseek-v4.1-flash', 'gemini-3.8-flash')) {
+    # t1/spark (DSMAX 2026-09-27) and deepseek-v4.1-flash (deepseek 402,
+    # 2026-09-27T16:4xZ) fail closed and render no block.
+    # cheaperinference legs omitted: wallet exhausted 2026-09-27T17:2xZ (402).
+    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
+    # a free gemini/gemini-3.8-flash fallback leg.
+    foreach ($g in @('gemini-3.8-flash', 't1-orchestrator', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't3-driver-paid', 't4-rag')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -6677,6 +6706,77 @@ Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one ta
     } finally {
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Pass
+}
+
+Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml opencode_password' {
+    # The opencode-serve branch must read opencode_password from the same
+    # api-keys.yml the OmniRoute key comes from, export it as OPENCODE_PASSWORD
+    # so the child inherits it, and never print the value. AST-extract
+    # Get-AutoOSKeyValue and exercise it in a scratch dir.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-AutoOSKeyValue' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function Get-AutoOSKeyValue in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ockey-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $keys = Join-Path $scratch 'api-keys.yml'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: hunter2" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'hunter2'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'x'" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "x"' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value "# opencode_password: y" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: REPLACE_WITH_A" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "pw-with-comment"   # rotated by L0' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'pw-with-comment'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'single-q'  # note" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'single-q'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
+
+        # Two uncommented lines: the last one wins (bash uses tail -n1).
+        Set-Content -LiteralPath $keys -Value "opencode_password: first`nopencode_password: second" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'second'
+
+        # Case-sensitive key match: Opencode_password is not opencode_password.
+        Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        # As in bash: a trailing placeholder line wins and reads empty; an indented key is not a top-level key.
+        Set-Content -LiteralPath $keys -Value "opencode_password: real`nopencode_password: REPLACE_WITH_X" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+        Set-Content -LiteralPath $keys -Value "  opencode_password: nested" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $text = Get-Content -LiteralPath $script -Raw
+    $ocBranch = $text -split "`n" | Where-Object { $_ -match 'opencode-serve' -or $_ -match 'opencode serve' -or $_ -match 'OPENCODE_PASSWORD' -or ($_ -match 'Get-AutoOSKeyValue' -and $_ -match 'opencode_password') }
+    $ocText = $ocBranch -join "`n"
+    if ($ocText -notmatch 'Get-AutoOSKeyValue') { throw 'opencode-serve branch must read opencode_password via Get-AutoOSKeyValue' }
+    if ($ocText -notmatch 'opencode_password') { throw 'opencode-serve branch must reference opencode_password' }
+    if ($text -notmatch '\$env:OPENCODE_PASSWORD') { throw 'opencode-serve branch must set $env:OPENCODE_PASSWORD' }
+    $whLines = @($text -split "`n" | Where-Object { $_ -match 'Write-Host' -and $_ -match '\$pw' })
+    if ($whLines.Count -gt 0) { throw "a Write-Host line references `$pw (would print the password): $($whLines -join ' | ')" }
     Pass
 }
 
@@ -7123,11 +7223,300 @@ Test-Case 'provider status reads keys but never exposes them' {
         ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
         $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
         $json = $status | ConvertTo-Json
-        Assert-True ($status.Count -eq 14) "expected 14 provider entries, got $($status.Count)"
+        Assert-True ($status.Count -eq 18) "expected 18 secret entries, got $($status.Count)"
         $groq = $status | Where-Object { $_.id -eq 'groq' }
         $ds = $status | Where-Object { $_.id -eq 'deepseek' }
         Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
         Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: set new key creates the file' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = Join-Path $scratch 'configuration\api-keys.yml'
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE123' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            Assert-True $result.Payload.ok 'payload not ok'
+            Assert-True $result.Payload.configured 'payload not configured'
+            Assert-True (Test-Path $env:AUTOOS_KEYS_FILE) 'keys file was not created'
+            $content = Get-Content $env:AUTOOS_KEYS_FILE -Raw -Encoding utf8
+            Assert-True ($content -match "groq: 'gsk_NEWVALUE123'") 'key not written correctly'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: replace keeps other lines + comment byte-identical and makes one backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "groq: 'gsk_OLDVALUE' # my comment`r`nmistral: 'old_mistral'`r`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllBytes($keysFile)
+            $afterText = [System.Text.Encoding]::UTF8.GetString($after)
+            if ($afterText.Length -gt 0 -and $afterText[0] -eq [char]0xFEFF) { $afterText = $afterText.Substring(1) }
+            Assert-True ($afterText -match "groq: 'gsk_NEWVALUE' # my comment`r`n") 'groq line not rebuilt correctly'
+            Assert-True ($afterText -match "mistral: 'old_mistral'`r`n") 'other lines changed'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 1 "expected 1 backup, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: same value twice -> unchanged no second backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SAMEVALUE'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_SAMEVALUE' }
+            $r1 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r1.Code 200
+            Assert-True $r1.Payload.unchanged 'first call should be unchanged'
+            $r2 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r2.Code 200
+            Assert-True $r2.Payload.unchanged 'second call should be unchanged'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 0 "expected 0 backups, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: 400 cases incl. quotes' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $bad = @(
+            @{ id = 'unknown_key'; value = 'x' },
+            @{ id = 'groq'; value = 123 },
+            @{ id = 'groq'; value = '' },
+            @{ id = 'groq'; value = ('x' * 4097) },
+            @{ id = 'groq'; value = "has`nnewline" },
+            @{ id = 'groq'; value = ' leading' },
+            @{ id = 'groq'; value = 'trailing ' },
+            @{ id = 'groq'; value = 'REPLACE_WITH_KEY' },
+            @{ id = 'groq'; value = 'replace_with_x' },
+            @{ id = 'groq'; value = "has'quote" },
+            @{ id = 'groq'; value = 'has"quote' }
+        )
+        foreach ($case in $bad) {
+            $body = [pscustomobject]$case
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-True ($result.Code -eq 400) "expected 400 for $($case.id)=$($case.value), got $($result.Code)"
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: non-loopback -> 403 and file untouched' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        $prevRemote = $env:AUTOOS_SERVE_REMOTE_SECRETS
+        Remove-Item Env:\AUTOOS_SERVE_REMOTE_SECRETS -ErrorAction SilentlyContinue
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_VALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $false
+            Assert-Equal $result.Code 403
+            Assert-True ($result.Payload.error -match 'loopback') 'wrong error message'
+            Assert-True (-not (Test-Path $keysFile)) 'file was created despite non-loopback'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+            if ($null -ne $prevRemote) { $env:AUTOOS_SERVE_REMOTE_SECRETS = $prevRemote }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: REPLACE_WITH_ reads not configured' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        @(
+            'groq: REPLACE_WITH_GROQ_KEY',
+            'mistral: real_value'
+        ) | Out-File $keysFile -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $mistral = $status | Where-Object { $_.id -eq 'mistral' }
+        Assert-True (-not $groq.configured) 'REPLACE_WITH_ should read as not configured'
+        Assert-True $mistral.configured 'real value should read as configured'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: no configured key -> every row reports false, nothing throws' {
+    # Get-AutoOSConfiguredIds returns a HashSet. Returned through the pipeline
+    # PowerShell unrolls it: an empty set arrived at the caller as $null and
+    # $have.Contains($id) threw "null-valued expression" on every row.
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: REPLACE_WITH_GROQ_KEY`nmistral: REPLACE_WITH_MISTRAL_KEY`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            Assert-True ($status.Count -gt 0) 'provider status returned no rows at all'
+            $on = @($status | Where-Object { $_.configured })
+            Assert-Equal $on.Count 0 'a row reported configured with no real key in the file'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: exactly one configured key -> exactly one configured row' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            [System.IO.File]::WriteAllText($keysFile, "meta: 'fake_meta_value'`n", [System.Text.Encoding]::UTF8)
+            $on = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on.Count 1 "expected one configured row, got: $(@($on | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on[0].id 'meta' 'the wrong key reported configured'
+            # The discriminating case: a one-element HashSet unrolled to a bare
+            # string makes .Contains a SUBSTRING test, so 'omniroute' answers
+            # true for a file that only holds omniroute_management.
+            [System.IO.File]::WriteAllText($keysFile, "omniroute_management: 'fake_management_token'`n", [System.Text.Encoding]::UTF8)
+            $on2 = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on2.Count 1 "expected one configured row, got: $(@($on2 | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on2[0].id 'omniroute_management' 'a substring of a configured key reported configured'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: only a column-0 key counts; a nested line is read and written as data' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "some_block:`n  groq: nested_value`nmistral: real_value`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            $groq = @($status | Where-Object { $_.id -eq 'groq' })
+            $mistral = @($status | Where-Object { $_.id -eq 'mistral' })
+            Assert-True ($groq.Count -eq 1 -and -not $groq[0].configured) 'an indented groq line read as a configured key'
+            Assert-True ($mistral.Count -eq 1 -and $mistral[0].configured) 'a column-0 mistral line did not read as configured'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_COL0TEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200 "POST groq got $($result.Code): $(@($result.Payload) | ConvertTo-Json -Compress)"
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-Equal $after ($original + "groq: 'gsk_COL0TEST'`n") 'the nested groq line was rewritten, or the new key did not land at column 0'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: payload JSON never contains the value' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SUPERSECRETXYZ'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $payload = Get-AutoOSSecretsPayload -RepoRoot $scratch -ClientIsLoopback $true
+            $json = $payload | ConvertTo-Json -Depth 10
+            Assert-True ($json -notmatch 'SUPERSECRET') 'a secret value leaked into the GET payload'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: key match is exact-case and leaves differently-cased lines alone' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "GROQ: 'x'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $groqBefore = @(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.id -eq 'groq' }
+            Assert-True (-not $groqBefore.configured) 'provider status reported groq configured for an uppercase GROQ line'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_CASETEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-True ($after -match "GROQ: 'x'") 'the uppercase GROQ line was altered'
+            Assert-True ($after -match "groq: 'gsk_CASETEST'") 'lowercase groq line was not appended'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: new file inside a git work tree with no .gitignore -> 409' {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "  [skip] git not on PATH"
+        return
+    }
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+        $prevDir = Get-Location
+        try {
+            Set-Location $scratch
+            $null = & git init -q 2>$null | Out-Null
+            $null = & git config user.email "t@t" 2>$null | Out-Null
+            $null = & git config user.name "t" 2>$null | Out-Null
+        } finally { Set-Location $prevDir }
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_GITTEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 409 "expected 409 for non-ignored new file, got $($result.Code)"
+            Assert-True (-not (Test-Path $keysFile)) 'keys file was written despite git refusal'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
@@ -7213,6 +7602,16 @@ Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {
     Assert-Equal $rc 0 "sync-ide-models unit tests failed: $out"
 }
 
+Test-Case "registry_loader's unit tests pass (shared by-path loader, REVFIX)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr (PS 5.1 + Stop would throw on it).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_registry_loader.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "registry_loader unit tests failed: $out"
+}
+
 Test-Case 'apply sets the resilience deadline and the fast-skip breaker' {
     # A 15s requestQueue.maxWaitMs kills every spark request mid-think and the
     # chain then reports a different leg's error (see docs/verification.md).
@@ -7249,7 +7648,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 't1-orchestrator,spark-1.3-contributor,t1-orchestrator-clean,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t4-rag,gemini-3.8-flash,deepseek-v4.1-flash,opus-4-6'
+    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7278,9 +7677,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
-        't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't2-worker' = '128k'
-        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't4-rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'deepseek-v4.1-flash' = '128k'; 'opus-4-6' = '200k'
+        't1-orchestrator' = '1M'
+        't1-orchestrator-free-only' = '1M'
+        't2-worker' = '128k'
+        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -7289,27 +7690,35 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
-    # t1-orchestrator is spark-only: gemini-3.1-pro reasons worse than 3.8-flash and
-    # must never occupy a 1M orchestrator slot again.
-    $t1 = @($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0]
-    Assert-True (($t1.models -join ',') -notmatch 'gemini') 'gemini back in t1-orchestrator'
+    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
+    # a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
+    # t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
+    # fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
+    # client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
+    # of 2026-09-27T16:4xZ. No 1M context promise survives them.
+    foreach ($gone in @('t1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+        Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
+        Assert-True ($omitted -contains $gone) "$gone missing from omitted"
+    }
+    # t1-orchestrator and t1-orchestrator-free-only MUST be in combos now.
+    foreach ($kept in @('t1-orchestrator', 't1-orchestrator-free-only')) {
+        Assert-True ($names -contains $kept) "$kept should be in combos, not omitted"
+        Assert-True ($omitted -notcontains $kept) "$kept missing from combos"
+    }
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
     # free tier, mistral-code + qwen free pools. -contributor (trains by
-    # contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it
-    # deliberately since the 2026-09-21 contributor-only block (paid-only,
-    # trains — see combos.json). Direct-key legs (mistral-small, deepseek,
-    # openrouter paid, zen paid) bill past the pool on the same key, so
-    # they stay.
+    # contract) is banned in t2-worker-clean/t3-driver-clean
+    # (t1-orchestrator-clean is omitted, see above). Direct-key legs
+    # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
+    # on the same key, so they stay.
     $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
         $free = @($c.models | Where-Object { $_ -match $freeRe })
         Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
-        if ($c.name -ne 't1-orchestrator-clean') {
-            $train = @($c.models | Where-Object { $_ -match $noTrainRe })
-            Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
-        }
+        $train = @($c.models | Where-Object { $_ -match $noTrainRe })
+        Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
     }
     # *-free-only = zero paid/keyed legs: only free pools may appear (the
     # zen contributor-free promo counts as free; other opencode-zen legs bill).
@@ -7318,16 +7727,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
     }
-    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): the only spark
-    # in any tier is the contributor.
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no spark leg may
+    # appear in any combo now that t1/spark fail closed.
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
-    # spark-1.3-contributor is the pinned single-model route: byte-identical
-    # legs to t1-orchestrator (zen free promo -> openrouter paid), so the spark family
-    # is addressable directly without the t1 id.
-    $t1legs = (@($combos | Where-Object { $_.name -eq 't1-orchestrator' })[0].models) -join ','
-    $splegs = (@($combos | Where-Object { $_.name -eq 'spark-1.3-contributor' })[0].models) -join ','
-    Assert-Equal $splegs $t1legs
+    Assert-True ($allLegs -notmatch 'spark') 'spark leg present in a combo'
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {
@@ -7523,13 +7927,13 @@ Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, nev
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('t3-driver-free-only', 't2-worker', 'my-own-combo')
+        Set-AutoOSPruneList $d @('t1-orchestrator-free-only', 't2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
-        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t3-driver-free-only --yes'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t1-orchestrator-free-only --yes'
         Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
-        Assert-True ($out -like '*  - t3-driver-free-only: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -like '*  - t1-orchestrator-free-only: omitted, deleted*') "no omitted-deletion line in: $out"
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
@@ -7542,12 +7946,12 @@ Test-Case 'apply prune: --dry-run names the omitted combo and never names a live
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('t3-driver-free-only', 'auto', 't2-worker-paid', 'my-own-combo')
+        Set-AutoOSPruneList $d @('t1-orchestrator-free-only', 'auto', 't2-worker-paid', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
-        Assert-True ($out -like '*  - t3-driver-free-only: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -like '*  - t1-orchestrator-free-only: omitted, would delete*') "no omitted would-delete line in: $out"
         Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
         Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
         Assert-True ($out -notlike '*- t2-worker-paid:*') 'a live "t2-worker-paid" combo was named'
@@ -7623,15 +8027,16 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # cc: provider available:false since 2026-09-27 (operator: never connected
     # to OmniRoute), so it now lands in Skipped with the dead providers below.
     # Regression lock for today's registry (2026-09-27, OR1e): cerebras (402/401
-    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27) and the zen
-    # free pool are all-unavailable across every route that lists them; openrouter
-    # and antigravity still each carry a live leg, so they are offered. A dead
+    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter
+    # (DSMAX 401, 2026-09-27T15:05:54Z), deepseek (402, 2026-09-27T16:4xZ) and
+    # the zen free pool are all-unavailable across every route that lists them;
+    # antigravity still carries a live leg, so it is offered. A dead
     # provider must land in Skipped and never in Map.
-    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc')) {
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc', 'openrouter', 'deepseek')) {
         Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
         Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
     }
-    Assert-True ($registry.Map.Contains('openrouter')) 'openrouter (has a live leg today) must be offered'
+    Assert-True ($registry.Map.Contains('antigravity')) 'antigravity (has a live leg today) must be offered'
     # The UA escaping branch is a pure function of the registry's provider_data;
     # both real carriers (groq, cerebras) are skipped today, so a fixture keeps
     # both PowerShell generations under test. It is the exact call apply.ps1 makes.
@@ -7741,22 +8146,24 @@ Test-Case 'opencode tiers declare matching context limits' {
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
     $models = $oc.providers.omniroute.models
-    Assert-Equal $models.'t1-orchestrator'.limit.context 1000000
-    Assert-Equal $models.'t1-orchestrator-clean'.limit.context 1000000
     Assert-Equal $models.'t2-worker'.limit.context 131072
     Assert-Equal $models.'t2-worker-clean'.limit.context 131072
     Assert-Equal $models.'t2-worker-free-only'.limit.context 131072
     Assert-Equal $models.'t2-orchestrator'.limit.context 200000
     Assert-Equal $models.'t3-driver'.limit.context 131072
     Assert-Equal $models.'t3-driver-clean'.limit.context 131072
+    Assert-Equal $models.'t3-driver-free-only'.limit.context 131072
     Assert-Equal $models.'gemini-3.8-flash'.limit.context 131072
-    Assert-Equal $models.'deepseek-v4.1-flash'.limit.context 131072
     Assert-Equal $models.'opus-4-6'.limit.context 200000
-    Assert-Equal $models.'spark-1.3-contributor'.limit.context 1000000
     Assert-Equal $models.'t4-rag'.limit.context 131072
-    foreach ($name in @('t1-orchestrator', 't1-orchestrator-clean', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-orchestrator', 't3-driver', 't3-driver-clean', 't4-rag', 'spark-1.3-contributor', 'opus-4-6', 'gemini-3.8-flash', 'deepseek-v4.1-flash', 'auto', 'auto/cheap', 'auto/smart')) {
+    foreach ($name in @('t2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-orchestrator', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't4-rag', 'opus-4-6', 'gemini-3.8-flash', 'auto', 'auto/cheap', 'auto/smart')) {
         Assert-True ($null -ne $models.$name) "missing model $name"
         Assert-Equal $models.$name.modelID $name
+    }
+    # t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
+    # deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
+    foreach ($gone in @('t1-orchestrator', 't1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+        Assert-True ($null -eq $models.$gone) "$gone should be omitted, not a client model"
     }
     Pass
 }

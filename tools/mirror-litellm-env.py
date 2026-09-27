@@ -27,26 +27,21 @@ touches a tracked file. Exit 0 = in sync / written, 1 = drifted (--check),
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import secrets
 import sys
 from pathlib import Path
 
+# The shared by-path loader for tools/registry.py; tools/ is added to sys.path
+# only when it is missing, so importing this module from another tool (or the
+# test suite loading THIS file by path) still resolves it.
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+from registry_loader import load_registry_tool  # noqa: E402 - tools/ added above
+
 # catalog/ai-registry.json - the single registry shared with apply.ps1/
 # apply.sh and tools/sync-router-tiers.py (spec 3.2 phase 2, task A5c).
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
-REGISTRY_TOOL_PATH = Path(__file__).resolve().parent / "registry.py"
-
-
-def _load_registry_tool():
-    """Import tools/registry.py by path - the same importlib-by-path
-    technique tools/sync-ide-models.py's _load_registry_tool() and
-    tools/registry.py's own _load_sync_router_tiers() already use, so this
-    tool carries no second copy of the loader."""
-    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def load_key_map(path=None) -> dict:
@@ -59,7 +54,7 @@ def load_key_map(path=None) -> dict:
     provider with no litellm_env (an OAuth/subscription bridge - `cc`,
     `antigravity`) is skipped: it never had an api-keys.yml entry either.
     """
-    registry = _load_registry_tool()
+    registry = load_registry_tool()
     doc = registry.load(path or DEFAULT_REGISTRY_PATH)
     return registry.provider_field_map(doc["providers"], "litellm_env")
 

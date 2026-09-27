@@ -24,16 +24,13 @@ fi
 
 if it "registry model reads project a fixture with no legacy catalog present"; then
     if python3 - <<'PY'
-import importlib.util, json, os, tempfile
+import json, os, sys, tempfile
 
-def load_registry_tool():
-    # The real read path: the installers import tools/registry.py by path
-    # (as tools/audit-router.py does) and call legacy_models(); this test
-    # loads the same module the same way, never a copy of its logic.
-    spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+# The real read path: the installers import tools/registry.py by path (as
+# tools/audit-router.py does) and call legacy_models(); this test uses the
+# one shared loader, never a copy of its logic (REVFIX review 8).
+sys.path.insert(0, "tools")
+from registry_loader import load_registry_tool
 registry = load_registry_tool()
 fixture = {"models": {
     "muse-spark": {
@@ -243,7 +240,12 @@ PY
 )"
     # Pinned on purpose: the order is the OpenHands push priority (the app
     # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-deepseek-v4.1-flash,omniroute-t1-orchestrator-clean,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/deepseek-v4.1-flash,openai/t1-orchestrator-clean,openai/spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only"
+    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): omniroute-t1-orchestrator-clean,
+    # omniroute-spark-1.3-contributor, openrouter-muse-spark-1.3-contributor and
+    # omniroute-deepseek-v4.1-flash are omitted (their providers' credits are off,
+    # so no leg is servable); t1-orchestrator is servable again through the free
+    # gemini leg, which is what the two t1-orchestrator-free-only tiers carry.
+    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator-free-only,openai/t1-orchestrator-free-only"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -252,9 +254,37 @@ PY
     printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$tmp/.env"
     out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY OPENROUTER_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
     written="$(printf '%s' "$out" | grep -c written)"
+    rm -rf "$tmp"
+    # Every spec tier has a key in the fixture, so the tool must write exactly
+    # as many profiles as the spec lists - derived from the spec, never pinned
+    # to a count that goes stale when a route is omitted or added.
+    spec_tiers="$(python3 - 2>&1 <<'PY'
+import json
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+print(len(spec["tiers"]))
+PY
+)"
+    assert_eq "$written" "$spec_tiers"
+
     # A direct-provider tier (gateway: openrouter) must take its OWN key and
-    # endpoint, not the gateway's - that is the effort-ladder surface.
-    direct="$(python3 - "$tmp/profiles/openrouter-muse-spark-1.3-contributor.json" <<'PY'
+    # endpoint, not the gateway's - that is the effort-ladder surface. The
+    # committed spec has none today (PROV 2026-09-27: openrouter credit off),
+    # so the behaviour is exercised on a synthetic one-tier spec rather than a
+    # pinned profile name that goes stale with the provider state.
+    synth="$(mktemp -d)"
+    cat >"$synth/spec.json" <<JSON
+{"gateway_base_url": "http://gateway.invalid:20128/v1",
+ "litellm_base_url": "http://litellm.invalid:4000/v1",
+ "tiers": [{"id": "openrouter-muse-spark-1.3-contributor", "gateway": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "openrouter/meta/muse-spark-1.3-contributor",
+            "max_input_tokens": 131072, "max_output_tokens": 32768, "reasoning": true}]}
+JSON
+    printf 'omniroute: test-omni-key\nopenrouter: test-or-key\n' >"$synth/api-keys.yml"
+    printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$synth/.env"
+    synth_run="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY OPENROUTER_API_KEY; python3 tools/sync-openhands-profiles.py --spec "$synth/spec.json" --openhands-dir "$synth/oh" --keys-file "$synth/api-keys.yml" --litellm-env "$synth/.env" ) 2>&1)"
+    assert_contains "$synth_run" "openrouter-muse-spark-1.3-contributor.json written"
+    direct="$(python3 - 2>&1 "$synth/oh/profiles/openrouter-muse-spark-1.3-contributor.json" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -264,8 +294,7 @@ else:
     print("%s|%s|%s" % (d.get("api_key"), d.get("base_url"), d.get("model")))
 PY
 )"
-    rm -rf "$tmp"
-    assert_eq "$written" "18"
+    rm -rf "$synth"
     assert_eq "$direct" "test-or-key|https://openrouter.ai/api/v1|openrouter/meta/muse-spark-1.3-contributor"
 fi
 

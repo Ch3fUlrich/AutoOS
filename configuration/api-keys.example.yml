@@ -20,6 +20,9 @@ mistral: REPLACE_WITH_MISTRAL_KEY
 cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
 cohere: REPLACE_WITH_COHERE_KEY
 hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
+# Free.ai self-hosted pool (Qwen3-30B-A3B): 10 rpm, 30k tokens/day, may train
+# on prompts — excluded from every *-clean route.
+free_ai: REPLACE_WITH_FREE_AI_KEY
 
 # ── Paid partner gateway (own key, own billing — sits between free/paid) ──
 cheapinference: REPLACE_WITH_CHEAPINFERENCE_KEY
@@ -42,6 +45,7 @@ zen: REPLACE_WITH_ZEN_KEY
 # Client key the apps send to http://127.0.0.1:20128/v1
 # (dashboard -> api-manager -> Create API Key).
 omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
+# opencode_password: REPLACE_WITH_A_LONG_RANDOM_STRING   # opencode serve Basic auth (user opencode); ai-stack.sh init copies it
 # Optional: oma_live_… management token, only needed for remote management
 # calls. Local CLI management works without it.
 # omniroute_management: REPLACE_WITH_OMNIROUTE_ACCESS_TOKEN

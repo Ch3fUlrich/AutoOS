@@ -40,7 +40,7 @@ jobs:
             fi
             echo "network isolated: loopback only"
             exec setpriv --reuid="$1" --regid="$2" --init-groups \
-              env HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
+              env AUTOOS_FULL_SUITE=1 HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
           ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH"
 
       - name: Progress regression tests
@@ -63,6 +63,8 @@ jobs:
 
   windows:
     name: Windows suite
+    # operator 2026-09-27: Windows CI paused until the Linux work is done.
+    if: false
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
