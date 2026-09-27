@@ -24,23 +24,44 @@ ENV
     printf '%s' "$d"
 }
 
+# A throwaway HTTP server on an ephemeral loopback port for the
+# start-litellm.sh probes below: it writes the chosen port to "$1/port" and
+# sets the variable named by "$2" to the server's PID, so the caller can stop
+# it. Any further args are appended to the server's argv (the handler ignores
+# them); the "merely mentions litellm" case uses that to give the process a
+# misleading directory argument.
+_svc_loopback_server() {
+    local d pid_var
+    d="$1"; pid_var="$2"; shift 2
+    python3 -c 'import http.server,socketserver,sys
+s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" "$@" >/dev/null 2>&1 &
+    printf -v "$pid_var" '%s' "$!"
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    # A stand-in that never bound its port would otherwise leave
+    # "$(cat "$d/port")" empty and report a wrong start-litellm.sh verdict
+    # instead of "the server did not start" (REVFIX review 7).
+    if [[ ! -s "$d/port" ]]; then
+        kill "${!pid_var}" 2>/dev/null
+        fail "the loopback stand-in server never wrote $d/port"
+        return 1
+    fi
+}
+
 # Review finding 2026-09-25: without /proc (macOS) the stale-key check can
 # never run, and the old message blamed "another user". Say what is true.
 if it "svc: start-litellm.sh says stale-key restart is Linux-only where /proc is missing"; then
     d="$(mktemp -d)"
     # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
-    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
-    python3 -c 'import http.server,socketserver,sys
-s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
-open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
-    srv=$!
-    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
-        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc=$?
-    kill "$srv" 2>/dev/null
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
+    if _svc_loopback_server "$d" srv; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
+            bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc=$?
+        kill "$srv" 2>/dev/null
+        if [[ $rc -eq 0 && "$out" == *"Linux-only"* && "$out" != *"another user"* ]]; then pass
+        else fail "rc=$rc: $out"; fi
+    fi
     rm -rf "$d"
-    if [[ $rc -eq 0 && "$out" == *"Linux-only"* && "$out" != *"another user"* ]]; then pass
-    else fail "rc=$rc: $out"; fi
 fi
 
 # Found in review 2026-09-25: the restart path killed whatever same-user
@@ -48,18 +69,15 @@ fi
 if it "svc: start-litellm.sh never kills a program on its port that is not litellm"; then
     d="$(mktemp -d)"
     # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
-    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
-    python3 -c 'import http.server,socketserver,sys
-s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
-open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" >/dev/null 2>&1 &
-    srv=$!
-    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
-    alive=0; kill -0 "$srv" 2>/dev/null && alive=1
-    kill "$srv" 2>/dev/null
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
+    if _svc_loopback_server "$d" srv; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+        alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+        kill "$srv" 2>/dev/null
+        if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+        else fail "rc=$rc alive=$alive: $out"; fi
+    fi
     rm -rf "$d"
-    if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
-    else fail "rc=$rc alive=$alive: $out"; fi
 fi
 
 # Re-review 2026-09-25: "litellm" anywhere in the command line is not proof;
@@ -67,19 +85,16 @@ fi
 if it "svc: start-litellm.sh leaves a program alone that merely mentions litellm in its arguments"; then
     d="$(mktemp -d)"
     # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
-    printf 'LITELLM_MASTER_KEY=sk-test-dummy\n' >"$d/.env"
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
     mkdir -p "$d/my-litellm-docs"
-    python3 -c 'import http.server,socketserver,sys
-s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
-open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" "$d/my-litellm-docs" >/dev/null 2>&1 &
-    srv=$!
-    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
-    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
-    alive=0; kill -0 "$srv" 2>/dev/null && alive=1
-    kill "$srv" 2>/dev/null
+    if _svc_loopback_server "$d" srv "$d/my-litellm-docs"; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+        alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+        kill "$srv" 2>/dev/null
+        if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+        else fail "rc=$rc alive=$alive: $out"; fi
+    fi
     rm -rf "$d"
-    if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
-    else fail "rc=$rc alive=$alive: $out"; fi
 fi
 
 if it "svc: start-litellm.sh loads .env literally, never evaluates it"; then

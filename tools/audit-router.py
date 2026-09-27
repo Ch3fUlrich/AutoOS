@@ -39,7 +39,6 @@ Never prints or reads a key value: only key *names* and model ids.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -49,18 +48,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# The shared by-path loader for tools/registry.py; tools/ is added to sys.path
+# only when it is missing, so importing this module from another tool (or the
+# test suite loading THIS file by path) still resolves it.
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+from registry_loader import load_registry_tool  # noqa: E402 - tools/ added above
+
 ROOT = Path(__file__).resolve().parent.parent
-REGISTRY_TOOL_PATH = ROOT / "tools" / "registry.py"
-
-
-def _load_registry_tool():
-    """Import tools/registry.py by path - the same importlib-by-path
-    technique tools/sync-ide-models.py's _load_registry_tool() and
-    tools/registry.py's own _load_sync_router_tiers() already use."""
-    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def litellm_key(env_path=None):
@@ -133,7 +129,7 @@ def repo_combos(registry_path=None, combos_path=None) -> list[dict]:
         except (OSError, ValueError, KeyError) as exc:
             raise SystemExit(f"ERROR: cannot read {path}: {exc}")
     path = Path(registry_path) if registry_path else ROOT / "catalog" / "ai-registry.json"
-    registry_tool = _load_registry_tool()
+    registry_tool = load_registry_tool()
     try:
         doc = registry_tool.load(path)
         if "routes" not in doc:
@@ -377,7 +373,7 @@ def main(argv=None) -> int:
     tp = tier_profile_ids()
     try:
         reg_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
-        reg_doc = _load_registry_tool().load(reg_path)
+        reg_doc = load_registry_tool().load(reg_path)
     except (OSError, ValueError):
         reg_doc = None
     if not isinstance(reg_doc, dict) or "routes" not in reg_doc:
