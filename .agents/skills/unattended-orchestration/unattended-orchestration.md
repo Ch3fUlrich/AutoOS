@@ -151,7 +151,7 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
   deleted for you. The clone starts from `HEAD`, so commit first.
 - **`--free`** maps every tier to opencode's own free model (default
-  `opencode/big-pickle`) through `OPENCODE_CONFIG_CONTENT`. Use it to
+  `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
   exercise the chain and the fences before any provider key exists. Free
   promo models may train on prompts, so `--free --clean` is refused.
 
