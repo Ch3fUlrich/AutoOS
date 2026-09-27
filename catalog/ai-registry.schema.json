@@ -457,6 +457,22 @@
           "type": "object",
           "description": "spec 5.3/8.2, per bucket.",
           "additionalProperties": { "$ref": "#/$defs/token_count" }
+        },
+        "leg_rules": {
+          "type": "array",
+          "description": "Ordered list of fnmatch policy gates (Claude budget rules from briefs/common.md). First match wins; no match = allowed. A denied serving leg (not gated via routes.<id>.unavailable_legs) is an error.",
+          "items": {
+            "type": "object",
+            "required": ["id", "match", "allow", "reason", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "match": { "type": "string" },
+              "allow": { "type": "boolean" },
+              "reason": { "type": "string" },
+              "source": { "$ref": "#/$defs/source_tag" }
+            }
+          }
         }
       }
     },

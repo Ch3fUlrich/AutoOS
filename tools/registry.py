@@ -1787,6 +1787,46 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 
 
 # ===========================================================================
+# leg_rules policy gates (briefs/common.md Claude budget)
+# ===========================================================================
+
+
+def _check_leg_rules(registry) -> list:
+    """Check every route leg against policy.leg_rules (briefs/common.md Claude
+    budget rules). First match wins; no match = allowed. A leg that is denied
+    but already gated via the route's unavailable_legs passes -- the operator
+    has already acknowledged it. A denied leg that is still serving is an error
+    naming the rule that denied it."""
+    import fnmatch
+
+    problems = []
+    rules = _section(registry, "policy").get("leg_rules")
+    if not isinstance(rules, list):
+        return problems
+
+    for route_id, route in _section(registry, "routes").items():
+        if not isinstance(route, dict):
+            continue
+        unavailable = set(route.get("unavailable_legs") or {})
+        for leg in dict.fromkeys(route.get("legs") or []):
+            if leg in unavailable:
+                continue  # operator already acknowledged it
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                match = rule.get("match")
+                if not isinstance(match, str):
+                    continue
+                if fnmatch.fnmatch(leg, match):
+                    if rule.get("allow") is not True:
+                        problems.append(
+                            "leg_rules: routes.%s leg %s denied by rule %s"
+                            % (route_id, leg, rule.get("id", "(unnamed)")))
+                    break  # first match wins
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -1801,6 +1841,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))
     problems.extend(_check_until_values(registry))
+    problems.extend(_check_leg_rules(registry))
     return problems
 
 

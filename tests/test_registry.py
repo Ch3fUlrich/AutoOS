@@ -831,5 +831,70 @@ class OpenRouterByokLegTests(unittest.TestCase):
         self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
 
 
+class LegRulesTests(unittest.TestCase):
+    """leg_rules policy gates (briefs/common.md Claude budget rules, encoded as
+    policy.leg_rules: ordered list of {"id", "match" (fnmatch), "allow" (bool),
+    "reason", "source"}; first match wins; no match = allowed.
+
+    A denied leg that routes.<id>.unavailable_legs already gates (available:false)
+    passes the check — the operator has already acknowledged it. A denied leg
+    that is still serving (not flagged in unavailable_legs) is an error naming
+    the rule that denied it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_denied_serving_leg_fails_check_naming_the_rule(self):
+        """A leg matching a deny rule with no unavailable_legs gate is flagged."""
+        reg = mutated()
+        # groq/qwen/qwen3.8-27b resolves (provider groq, model qwen/qwen3.8-27b)
+        # and would be denied by groq/* rule
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_denied_leg_gated_via_unavailable_legs_passes(self):
+        """A leg matching a deny rule that is already in unavailable_legs is not
+        flagged — the operator has already acknowledged it."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
+            "groq/qwen/qwen3.8-27b"] = {"available": False}
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_allowed_leg_passes_after_deny_rule(self):
+        """First-match-wins: an allow rule placed before a deny rule exempts."""
+        reg = mutated()
+        # deepseek/deepseek-flash resolves and should be allowed by an early
+        # allow rule before the *deepseek* deny
+        reg["routes"]["t2-worker"]["legs"].append("deepseek/deepseek-flash")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "deepseek/deepseek-flash" in p for p in problems),
+            problems)
+
+    def test_leg_with_no_matching_rule_is_allowed(self):
+        """No match in any leg_rule = allowed (not flagged)."""
+        reg = mutated()
+        # mistral/leg exists and is not matched by any leg_rule
+        reg["routes"]["t2-worker"]["legs"].append("mistral/mistral-small-latest")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "mistral/mistral-small-latest" in p for p in problems),
+            problems)
+
+    def test_real_registry_passes_leg_rules_check(self):
+        """The committed registry must itself pass check (any denied serving
+        leg must be gated via unavailable_legs)."""
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
 if __name__ == "__main__":
     unittest.main()
