@@ -342,6 +342,22 @@ _WRAPPER_OPTION_SPELLINGS: dict[str, list[list[str]]] = {
     ],
     "setsid": [[], ["--wait"], ["-w"], ["--fork"]],
     "nohup": [[], ["--"]],
+    # chrt takes one positional (the priority) before its command and three
+    # value-taking options; taskset takes one positional (the mask, or the
+    # cpu-list after the -c switch) and no values at all; watch is only
+    # transparent with -x/--exec, so every spelling here carries it.
+    "chrt": [
+        ["1"], ["-f", "1"], ["--fifo", "1"], ["-a", "1"], ["--all-tasks", "1"],
+        ["-T", "1000", "1"], ["-T1000", "1"], ["--sched-runtime", "1000", "1"],
+        ["--sched-runtime=1000", "1"],
+    ],
+    "taskset": [
+        ["0x1"], ["-c", "0"], ["--cpu-list", "0"], ["--cpu-l", "0"],
+    ],
+    "watch": [
+        ["-x"], ["--exec"], ["-e", "-x"], ["-n", "5", "-x"],
+        ["--interval=5", "-x"],
+    ],
 }
 
 # env -S/--split-string after a value-taking option: the value hides the
@@ -373,8 +389,37 @@ _HARMLESS_ALLOWED = (
     ["flock", "/tmp/l", "ls"],
     ["flock", "--", "/tmp/l", "ls"],
     ["flock", "--", "-", "ls"],
+    ["flock", "/tmp/l", "--", "ls"],
     ["setsid", "ls"],
     ["nohup", "ls"],
+    # chrt: policy switch, value-taking -T/-P/-D, then the priority positional.
+    ["chrt", "1", "ls"],
+    ["chrt", "-f", "1", "ls"],
+    ["chrt", "--fifo", "1", "ls"],
+    ["chrt", "-T", "1000", "5", "ls"],
+    ["chrt", "-T1000", "5", "ls"],
+    ["chrt", "--sched-runtime", "1000", "1", "ls"],
+    ["chrt", "-m"],
+    ["chrt", "--max"],
+    ["chrt", "9", "--", "ls"],
+    ["chrt", "--", "9", "ls"],
+    # taskset: the mask is positional; -c/--cpu-list is a switch, not a value.
+    ["taskset", "0x1", "ls"],
+    ["taskset", "-c", "0", "ls"],
+    ["taskset", "--cpu-list", "0", "ls"],
+    ["taskset", "--cpu-l", "0", "ls"],
+    ["taskset", "-a", "0x1", "ls"],
+    ["taskset", "9", "--", "ls"],
+    ["taskset", "--", "0x1", "ls"],
+    # watch: transparent only in -x/--exec form.
+    ["watch", "-x", "ls"],
+    ["watch", "--exec", "ls"],
+    ["watch", "--ex", "ls"],
+    ["watch", "-n", "5", "-x", "ls"],
+    ["watch", "--interval=5", "-x", "ls"],
+    ["watch", "-d", "-x", "ls"],
+    ["watch", "-q", "5", "-x", "ls"],
+    ["watch", "-x", "uptime"],
 )
 
 
@@ -453,6 +498,189 @@ class WrapperOptionBypassMatrixTests(unittest.TestCase):
         self.assertEqual(
             policy._direct_child_heads(["flock", "--", "-", "ls"]),
             [["ls"]])
+
+
+# ─── hx2 follow-up: chrt / taskset / watch on the shared option walker ─────
+#
+# These three launchers were the last hand-scanned ones. Each skipped any token
+# starting with '-', so an unknown or abbreviated long option was never
+# fail-closed and a value-taking short option left its value standing where the
+# command is looked for (`chrt -T 1000 5 cmd`, `watch -q 5 cmd`,
+# `taskset -pc 0,3 700`).
+#
+# The option tables are the real programs' own -- util-linux 2.39.3
+# `chrt --help` / `taskset --help` and procps-ng 4.0.4 `watch --help` -- and the
+# abbreviation behaviour was measured against those binaries rather than
+# assumed: `chrt --f`, `chrt --ba`, `taskset --cpu`, `taskset --c`,
+# `watch --ex` and `watch --int` each resolve to exactly one option there, while
+# the programs themselves report `chrt --r` (rr | reset-on-fork), `chrt --s`
+# (sched-runtime | sched-period | sched-deadline), `watch --e` (errexit |
+# equexit | exec) and `watch --no` (no-color | no-rerun | no-title | no-wrap) as
+# ambiguous, and `chrt --reset-fork` / `watch --compat` as unrecognized.
+
+# (argv, the wrapped-command heads the walker must yield). [] means "no head is
+# statically derivable", which is what pid mode and a stop are for.
+_THREE_LAUNCHER_HEADS = (
+    (["chrt", "-T", "1000", "5", "ls", "-n"], [["ls", "-n"]]),
+    (["chrt", "-f", "1", "ls"], [["ls"]]),
+    (["chrt", "--fifo", "1", "ls"], [["ls"]]),
+    (["chrt", "--sched-runtime", "1000", "1", "ls"], [["ls"]]),
+    (["chrt", "9", "--", "ls"], [["ls"]]),
+    (["chrt", "--", "9", "ls"], [["ls"]]),
+    (["chrt", "-m"], []),
+    (["chrt", "-p", "123"], []),
+    (["chrt", "--pid", "123"], []),
+    (["taskset", "0x1", "ls", "-l"], [["ls", "-l"]]),
+    (["taskset", "-c", "0", "ls"], [["ls"]]),
+    (["taskset", "--cpu-l", "0", "ls"], [["ls"]]),
+    (["taskset", "9", "--", "ls"], [["ls"]]),
+    (["taskset", "--", "0x1", "ls"], [["ls"]]),
+    (["taskset", "-pc", "0,3", "700"], []),
+    (["taskset", "-p", "03", "700"], []),
+    (["watch", "-x", "-n", "5", "ls", "-l"], [["ls", "-l"]]),
+    (["watch", "-x", "--", "ls"], [["ls"]]),
+    (["watch", "--exec", "uptime"], [["uptime"]]),
+    # flock keeps its lockfile positional, and `--` does not reset the
+    # positional count: `flock /tmp/l -- ls` runs ls (the hand-scan gave it no
+    # head at all, so a forbidden command after `--` went unchecked), while
+    # `flock -- -c …` still takes -c as the lockfile name.
+    (["flock", "/tmp/l", "--", "ls"], [["ls"]]),
+    (["flock", "--", "-c", "rm", "-rf", "/"], [["rm", "-rf", "/"]]),
+)
+
+# Denied for what the option region says about the command: pid mode has no
+# command to audit, an unknown/ambiguous long option makes it unknowable, and
+# watch without -x/--exec joins its arguments into a `sh -c` string -- the same
+# fail-closed posture as env -S and flock -c, which deny the same way.
+_THREE_LAUNCHER_DENIED = (
+    (["chrt", "-p", "123"], "no-inline-shell"),
+    (["chrt", "--pid", "123"], "no-inline-shell"),
+    (["chrt", "--pi", "123"], "no-inline-shell"),
+    (["chrt", "--p", "123"], "no-inline-shell"),
+    (["chrt", "-vp", "123"], "no-inline-shell"),
+    (["chrt", "-p", "123", "rm", "-rf", "/"], "no-inline-shell"),
+    (["taskset", "-p", "700"], "no-inline-shell"),
+    (["taskset", "--pi", "700"], "no-inline-shell"),
+    (["taskset", "-p", "03", "700"], "no-inline-shell"),
+    (["taskset", "-pc", "0,3", "700"], "no-inline-shell"),
+    (["chrt", "--zzz", "5", "ls"], "no-inline-shell"),
+    (["chrt", "--r", "1", "ls"], "no-inline-shell"),
+    (["chrt", "--s", "1000", "5", "ls"], "no-inline-shell"),
+    (["taskset", "--zz", "0x1", "ls"], "no-inline-shell"),
+    (["watch", "--zz", "ls"], "no-inline-shell"),
+    (["watch", "--e", "-x", "ls"], "no-inline-shell"),
+    (["watch", "--no", "-x", "ls"], "no-inline-shell"),
+    (["watch", "ls"], "no-inline-shell"),
+    (["watch", "-d", "ls"], "no-inline-shell"),
+    (["watch", "-z", "ls"], "no-inline-shell"),
+    (["watch", "-q", "5", "ls"], "no-inline-shell"),
+    (["watch", "rm", "-rf", "/"], "no-inline-shell"),
+    (["env", "watch", "ls"], "no-inline-shell"),
+)
+
+# The head, not a neighbouring rule, is what these denials prove: the value
+# option consumed its value and the priority/mask positional was skipped, so
+# the child is found and denied for its own reason.
+_THREE_LAUNCHER_DENIED_BY_CHILD_RULE = (
+    (["chrt", "-T", "1000", "5", "rm", "-rf", "/"], "destructive"),
+    (["chrt", "--sched-runtime", "1000", "1", "rm", "-rf", "/"], "destructive"),
+    (["chrt", "-T", "1000", "5", "sudo", "id"], "no-sudo"),
+    (["chrt", "1", "sudo", "id"], "no-sudo"),
+    (["chrt", "--fifo", "1", "sh", "-c", "x"], "no-inline-shell"),
+    (["taskset", "-c", "0", "rm", "-rf", "/"], "destructive"),
+    (["taskset", "--cpu-l", "0", "rm", "-rf", "/"], "destructive"),
+    (["taskset", "--c", "0", "sudo", "id"], "no-sudo"),
+    (["watch", "-x", "sudo", "id"], "no-sudo"),
+    (["watch", "-x", "rm", "-rf", "/"], "destructive"),
+    (["watch", "-q", "5", "-x", "rm", "-rf", "/"], "destructive"),
+    (["watch", "-n", "5", "-x", "sh", "-c", "x"], "no-inline-shell"),
+    # the gap the positional-count fix closes: flock runs `rm -rf /` here.
+    (["flock", "/tmp/l", "--", "rm", "-rf", "/"], "destructive"),
+)
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
+class ChrtTasksetWatchWalkerTests(unittest.TestCase):
+    """hx2 follow-up: chrt, taskset and watch parse through
+    _walk_wrapper_options like every other transparent launcher, so a
+    value-taking option swallows its value, an unknown or ambiguous long option
+    fails closed, pid mode yields no head and denies, and watch is refused
+    unless it was given -x/--exec."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.bindir = _make_fixed_path(cls._tmp.name)
+        cls.policy = _test_policy(cls.bindir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _decide(self, argv):
+        return policy.decide(self.policy, "claude", "coding-host", argv, cwd="/tmp")
+
+    def test_wrapped_head_after_each_launcher(self):
+        for argv, heads in _THREE_LAUNCHER_HEADS:
+            with self.subTest(argv=argv):
+                self.assertEqual(policy._direct_child_heads(argv), heads)
+
+    def test_pid_mode_and_unparsable_option_regions_deny(self):
+        for argv, rule in _THREE_LAUNCHER_DENIED:
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, rule, f"{argv!r}: {decision.problems}")
+
+    def test_hidden_child_is_denied_for_its_own_reason(self):
+        for argv, rule in _THREE_LAUNCHER_DENIED_BY_CHILD_RULE:
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, rule, f"{argv!r}: {decision.problems}")
+
+    def test_the_three_launchers_reach_the_option_problem_gate(self):
+        # decide() denies an unknown/ambiguous long option through
+        # _wrapper_option_problem, which reads _WRAPPER_SPECS: each of these
+        # names is a launcher the walker knows, and its problem is the denial.
+        for argv in (["chrt", "--zzz", "1", "ls"],
+                     ["taskset", "--zzz", "0x1", "ls"],
+                     ["watch", "--zzz", "ls"]):
+            with self.subTest(argv=argv):
+                self.assertIsNotNone(policy._wrapper_option_problem(argv), argv)
+
+    def test_the_three_launchers_have_full_option_tables(self):
+        # The walker fails closed on an unknown long option, so a real option
+        # missing from a table denies a harmless call. These are every long
+        # option the installed program lists, in full and as its shortest
+        # unambiguous prefix (measured against the binary's own errors).
+        tables = {"chrt": policy._CHRT_LONGS, "taskset": policy._TASKSET_LONGS,
+                  "watch": policy._WATCH_LONGS}
+        expected = {
+            "chrt": ("--all-tasks", "--batch", "--deadline", "--fifo", "--help",
+                     "--idle", "--max", "--other", "--pid", "--reset-on-fork",
+                     "--rr", "--sched-deadline", "--sched-period",
+                     "--sched-runtime", "--verbose", "--version"),
+            "taskset": ("--all-tasks", "--cpu-list", "--help", "--pid",
+                        "--version"),
+            "watch": ("--beep", "--chgexit", "--color", "--differences",
+                      "--equexit", "--errexit", "--exec", "--help", "--interval",
+                      "--no-color", "--no-rerun", "--no-title", "--no-wrap",
+                      "--precise", "--version"),
+        }
+        for wrapper, names in expected.items():
+            longs = tables[wrapper]
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(sorted(names), sorted("--" + k for k in longs))
+                for full in names:
+                    body = full[2:]
+                    for size in range(1, len(body) + 1):
+                        prefix = body[:size]
+                        if sum(o.startswith(prefix) for o in longs) != 1:
+                            continue  # the real program calls this ambiguous too
+                        argv = [wrapper, "--" + prefix, "ls"]
+                        self.assertIsNone(policy._wrapper_option_problem(argv),
+                                          f"{wrapper} {argv}")
 
 
 # ─── round 4 (hx4): generated long-option abbreviation matrix ────────────
