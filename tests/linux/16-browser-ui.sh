@@ -46,7 +46,7 @@ if it "every component has a homepage link"; then
     missing="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
-# OS catalogs only: llm-models.json is a model catalogue, not components.
+# OS catalogs only (the AI registry holds models, not components).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     for grp in json.load(open(p, encoding="utf-8")).get("categories", []):
         for c in grp.get("components", []):
@@ -137,7 +137,7 @@ if it "the dependency graph the UI draws has no orphan requirements"; then
     bad="$(python3 - 2>&1 <<'PY'
 import json, glob
 bad = []
-# OS catalogs only: llm-models.json is a model catalogue, not components.
+# OS catalogs only (the AI registry holds models, not components).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     d = json.load(open(p, encoding="utf-8"))
     ids = {c["id"] for g in d.get("categories", []) for c in g.get("components", [])}
@@ -273,7 +273,7 @@ if it "the core stack is available on all three platforms"; then
     missing="$(python3 - 2>&1 <<'PY'
 import json, glob, collections
 have = collections.defaultdict(set)
-# OS catalogs only: llm-models.json is keyed by model id, not component id.
+# OS catalogs only (the AI registry is keyed by model id, not component id).
 for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
     plat = p.replace("catalog", "").strip("/\\").replace(".json", "")
     for g in json.load(open(p, encoding="utf-8"))["categories"]:

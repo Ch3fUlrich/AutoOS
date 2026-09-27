@@ -323,8 +323,8 @@ fi
 if it "apply handles the Cloudflare UA and stays openrouter-first"; then
     ok=1
     # The UA quirk now lives once, in the registry; apply.sh only passes
-    # provider_data through. Task A5a moved the read from catalog/providers.json
-    # to catalog/ai-registry.json.
+    # provider_data through. Task A5a moved the read to
+    # catalog/ai-registry.json.
     grep -q 'ai-registry\.json' configuration/omniroute/apply.sh || ok=0
     grep -q 'muse-code' configuration/omniroute/apply.sh && ok=0
     grep -q 'provider-specific-data' configuration/omniroute/apply.sh || ok=0
@@ -334,7 +334,7 @@ if it "apply handles the Cloudflare UA and stays openrouter-first"; then
 fi
 
 if it "provider registry drives apply, mirror and the tier maps"; then
-    # catalog/providers.json is the one map; the helper asserts every
+    # catalog/ai-registry.json is the one map; the helper asserts every
     # consumer's in-memory map equals it, so a hand-edited copy or a half-done
     # registry edit fails here instead of routing a provider to a wrong name.
     out="$(python3 tests/helpers/check-provider-registry.py 2>&1)"; rc=$?
@@ -373,9 +373,8 @@ if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     else fail "the real mistral key was not planned"; fi
 fi
 
-# A5a (routing v2 spec 3.2, D11): apply.sh's provider rows now come from
-# catalog/ai-registry.json's `providers` section instead of the retired
-# catalog/providers.json - same row shape (name.lower, omniroute_id,
+# A5a (routing v2 spec 3.2, D11): apply.sh's provider rows come from
+# catalog/ai-registry.json's `providers` section - same row shape (name.lower, omniroute_id,
 # provider_data compact JSON), same "no omniroute_id -> skip" rule, plus a
 # new skip: a provider whose every leg in every route the registry marks
 # unavailable is never registered (routes.<id>.unavailable_legs,
@@ -440,7 +439,7 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     [[ "$out" == *"  - mixed-id: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "mixed (one live leg) was wrongly all-unavailable-skipped: $out" >&2; }
     # noomni has no omniroute_id at all - the pre-existing skip rule, never
-    # even printed (matches today's providers.json behaviour).
+    # even printed (the pre-existing skip rule for entries with no id).
     [[ "$out" == *"noomni"* ]] && { ok=0; echo "noomni (no omniroute_id) must never appear: $out" >&2; }
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
@@ -464,34 +463,6 @@ if it "apply --dry-run against the real registry skips a provider whose every le
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
-fi
-
-# Equivalence: switching apply.sh's provider source from catalog/providers.json
-# to catalog/ai-registry.json (task A5a) must keep the same row shape for
-# every provider the old file still knows about - same omniroute_id, same
-# provider_data. New registry-only providers (antigravity, cc - no
-# catalog/providers.json entry) and the all-unavailable skip are additive,
-# checked by the two tests above and by the "provider registry drives apply,
-# mirror and the tier maps" helper test.
-if it "ai-registry.json providers agree field-for-field with providers.json for every shared entry"; then
-    report="$(python3 - 2>&1 <<'PY'
-import json
-
-old = json.load(open("catalog/providers.json", encoding="utf-8"))["providers"]
-new = json.load(open("catalog/ai-registry.json", encoding="utf-8"))["providers"]
-problems = []
-for name, entry in old.items():
-    if name not in new:
-        problems.append(f"{name}: missing from ai-registry.json")
-        continue
-    if entry.get("omniroute_id") != new[name].get("omniroute_id"):
-        problems.append(f"{name}: omniroute_id differs ({entry.get('omniroute_id')!r} vs {new[name].get('omniroute_id')!r})")
-    if entry.get("provider_data") != new[name].get("provider_data"):
-        problems.append(f"{name}: provider_data differs")
-print(" ".join(problems))
-PY
-)"
-    assert_eq "$report" ""
 fi
 
 # start-stack.sh sits in configuration/, one level below the repo root. A
@@ -569,19 +540,17 @@ if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE ref
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# catalog/ai-registry.json (routing v2 spec section 3): converter, schema keys, idempotence.
-if it "ai-registry converter: schema keys, legs resolve, idempotent (unit tests)"; then
-    out="$(python3 tests/test_registry_convert.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
-fi
-
-if it "registry.py: check rules (unit tests) and the committed registry has no drift"; then
+# catalog/ai-registry.json (routing v2 spec section 3): check rules.
+if it "registry.py: check rules (unit tests) and the committed registry is valid"; then
     out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# registry.py render omniroute (routing v2 spec 3.2 phase 1, task A4a): combos.json
-# generated from catalog/ai-registry.json, gated on semantic equality.
-if it "registry.py render omniroute: matches combos.json semantically (unit tests)"; then
-    out="$(python3 tests/test_registry_render.py 2>&1 && python3 tools/registry.py render omniroute --check 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+# registry renders (routing v2 spec 3.2 D11, task A5f): every generated file is
+# gated on a fresh render; ide-models.json is byte-exact, the rest semantic.
+if it "registry: no generated file drifts"; then
+    tmp_ide="$(mktemp)"
+    out="$(python3 tests/test_registry_render.py 2>&1 && python3 tools/registry.py render omniroute --check 2>&1 && python3 tools/registry.py render litellm --check 2>&1 && python3 tools/registry.py render ide --check 2>&1 && python3 tools/registry.py render openhands --check 2>&1 && python3 tools/registry.py render models-doc --check 2>&1 && python3 tools/registry.py render ide --out "$tmp_ide" 2>&1 && { cmp -s "$tmp_ide" catalog/ide-models.json || { echo "ide-models.json differs byte-exact from render ide (run: python3 tools/registry.py render ide --out catalog/ide-models.json)"; exit 1; }; })" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    rm -f "$tmp_ide"
 fi
 
 # tools/probe-toolcalls.py: tool-calling probe writes the overlay (routing v2 spec 3.1, 5.3, 10).

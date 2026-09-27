@@ -1,6 +1,6 @@
 """Tests for tools/mirror-litellm-env.py sourcing its provider -> litellm .env
-name map from catalog/ai-registry.json instead of catalog/providers.json
-(routing v2 spec 3.2 phase 2, task A5c).
+name map from catalog/ai-registry.json instead of the deleted
+catalog/providers.json (routing v2 spec 3.2 phase 2, task A5c).
 
 Run from the repo root:
 
@@ -56,8 +56,9 @@ MINIMAL_REGISTRY = {
 
 class RegistrySourcedKeyMapTests(unittest.TestCase):
     """load_key_map() now reads catalog/ai-registry.json's `providers` section
-    (task A5c) - same field names as the old catalog/providers.json (mapping
-    doc section 2), so this is a source change only, never a shape change."""
+    (task A5c) - same field names as the deleted catalog/providers.json
+    (mapping doc section 2), so this is a source change only, never a shape
+    change."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -69,8 +70,8 @@ class RegistrySourcedKeyMapTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_reads_a_registry_fixture_with_no_old_catalog_anywhere(self):
-        # self.dir has no catalog/providers.json at all - proves the default
-        # read never falls back to it.
+        # self.dir has no catalog/providers.json at all (it was deleted in
+        # task A5e) - proves the default read never falls back to it.
         mirror = _load_mirror()
         got = mirror.load_key_map(self.registry_path)
         self.assertEqual(got, {
@@ -95,8 +96,8 @@ class RenderNeverEmitsANullDestinationTests(unittest.TestCase):
     carries no litellm_env (an OAuth/subscription bridge) - regression for
     the "None=REPLACE_WITH_CC" bug a naive, unfiltered registry read would
     produce (cc/antigravity are new registry-only entries with no
-    catalog/providers.json counterpart, so this bug has no old-catalog
-    equivalent to have already caught it)."""
+    catalog/providers.json counterpart - that file was deleted in task A5e,
+    so this bug has no old-catalog equivalent to have already caught it)."""
 
     def test_render_has_no_none_destination_line(self):
         mirror = _load_mirror()
@@ -107,9 +108,9 @@ class RenderNeverEmitsANullDestinationTests(unittest.TestCase):
 
 class CliRegistryFlagTests(unittest.TestCase):
     """--registry lets a caller point the tool at a fixture directly - proves
-    the default run needs no catalog/providers.json present anywhere (task
-    A5c: 'a test that runs the tool with a registry fixture and NO old
-    catalog present')."""
+    the default run needs no catalog/providers.json present anywhere (that
+    file was deleted in task A5e; task A5c: 'a test that runs the tool with
+    a registry fixture and NO old catalog present')."""
 
     def test_check_and_write_both_work_from_a_bare_registry_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,7 +135,7 @@ class ProviderFieldMapTests(unittest.TestCase):
     id-keyed, presence-filtered map for a single registry field - the
     reusable primitive load_key_map() above now builds on, replacing the
     hand-rolled comprehension tools/mirror-litellm-env.py used to carry
-    against catalog/providers.json directly."""
+    against the deleted catalog/providers.json directly."""
 
     def test_filters_falsy_and_keeps_registry_order(self):
         registry = _load_registry()

@@ -56,7 +56,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t1-orchestrator-free-only` | free | 1M | opencode-zen `muse-spark-1.3-contributor-free` |
 | `t1-orchestrator-paid` | cheap | 1,000,000 | (none) |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → cc `claude-opus-4-6` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → groq `openai/gpt-oss-120b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → sambanova `gpt-oss-120b` → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → cheaperinference `glm-4.5-air` → cheaperinference `kimi-k3` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → groq `openai/gpt-oss-120b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → sambanova `gpt-oss-120b` → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → cheaperinference `glm-4.5-air` → cheaperinference `kimi-k3` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → groq `openai/gpt-oss-120b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → sambanova `gpt-oss-120b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
@@ -689,8 +689,10 @@ the OmniRoute dashboard, static chains in `configuration/litellm/config.yaml`.
 Per-user overrides go in `~/.config/opencode/opencode.jsonc` (global merges
 under project).
 
-Add, rename or resize a client-facing model in `catalog/ide-models.json`
-only, then run `python3 tools/sync-ide-models.py`: it regenerates the
+Add, rename or resize a client-facing model by editing the hand-curated
+source `catalog/ai-registry.json`, then regenerate the generated catalog
+with `python3 tools/registry.py render ide --out catalog/ide-models.json`,
+then run `python3 tools/sync-ide-models.py`: it regenerates the
 `opencode.jsonc` model blocks and the token windows in
 `configuration/openhands/tier-profiles.json` and `config.toml`
 (`--check` shows drift, exit 1). The Zed writers and the OpenCode user-config

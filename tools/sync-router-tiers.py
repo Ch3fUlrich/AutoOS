@@ -70,7 +70,7 @@ SYNCED_TIERS = ("t2-worker", "t3-driver")
 # Their legs never enter a managed mirror block — see combos_refs().
 GATEWAY_ONLY = frozenset({"antigravity", "cc"})
 
-# Filled from catalog/providers.json by main(); Leg reads them at call time.
+# Filled from the registry providers by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and
 # does not carry a registry around.
 PROVIDER_PREFIX: dict = {}
@@ -92,13 +92,13 @@ class ConfigError(RuntimeError):
 def provider_maps_from_dict(providers: dict):
     """(prefix, api_base, env_key) keyed by OmniRoute provider id, from an
     already-loaded {name: {omniroute_id, litellm_prefix, api_base,
-    litellm_env, ...}} mapping - the shape both catalog/providers.json's own
+    litellm_env, ...}} mapping - the shape the legacy provider catalog's own
     "providers" section and catalog/ai-registry.json's "providers" section
     share field-for-field (docs/plans/2026-09-25-registry-mapping.md section
     2: litellm_env/litellm_prefix/api_base carry over unchanged). Factored out
     of provider_maps() below (task A4b) so tools/registry.py's
     render_litellm_blocks() can build the same three maps from the registry
-    instead of catalog/providers.json, without copying this logic or
+    instead of the legacy catalog, without copying this logic or
     diverging from it.
 
     The OmniRoute provider id is the key because it is the first segment of a
@@ -132,7 +132,7 @@ def provider_maps_from_dict(providers: dict):
 def provider_maps(path=None):
     """(prefix, api_base, env_key) keyed by OmniRoute provider id, read from
     catalog/ai-registry.json's `providers` section by default (task A5c -
-    this used to read catalog/providers.json; same field names, mapping doc
+    this used to read the legacy provider catalog; same field names, mapping doc
     section 2, so an explicit `path` accepts either file's shape unchanged).
     apply.ps1/apply.sh and tools/mirror-litellm-env.py have their own reads
     (mirror-litellm-env.py switched to the registry too, task A5c; apply.*
@@ -423,8 +423,8 @@ def main(argv=None):
     # tool's default run sources legs from the registry instead (task A5c).
     # Providers always come from --registry (or its default) - apply.ps1/
     # apply.sh have no combos.json-only provider source to fall back to
-    # either, and none ever existed as a CLI flag here (provider_maps() was
-    # always the hardcoded catalog/providers.json before this task).
+    # either, and none ever existed as a CLI flag here (provider_maps() read
+    # the legacy provider catalog before this task).
     combos_path = Path(args.combos) if args.combos else None
     registry_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
     source_path = combos_path if combos_path is not None else registry_path

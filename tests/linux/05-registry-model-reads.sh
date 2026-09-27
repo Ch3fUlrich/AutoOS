@@ -7,10 +7,12 @@ describe "registry model reads"
 
 if it "registry model reads come from ai-registry.json models"; then
     # Every model read in the installers targets catalog/ai-registry.json
-    # `models`; no read may still point at catalog/llm-models.json.
+    # `models`; no read may still point at the deleted legacy models file.
+    # (The grep pattern below names that file on purpose: it is the guard
+    # proving no installer read points there.)
     bad="$(grep -n 'llm-models\.json' lib/linux/install.sh lib/windows/AutoOS.Install.psm1 || true)"
     if [[ -n "$bad" ]]; then
-        fail "model reads still on llm-models.json: $bad"
+        fail "model reads still on the legacy models file: $bad"
     elif ! grep -q 'ai-registry\.json' lib/linux/install.sh; then
         fail "lib/linux/install.sh has no ai-registry.json read"
     elif ! grep -q 'ai-registry\.json' lib/windows/AutoOS.Install.psm1; then
@@ -20,7 +22,7 @@ if it "registry model reads come from ai-registry.json models"; then
     fi
 fi
 
-if it "registry model reads project a fixture with no llm-models.json present"; then
+if it "registry model reads project a fixture with no legacy catalog present"; then
     if python3 - <<'PY'
 import importlib.util, json, os, tempfile
 
@@ -67,8 +69,9 @@ tmp = tempfile.mkdtemp(prefix="a5d-")
 os.makedirs(os.path.join(tmp, "catalog"), exist_ok=True)
 with open(os.path.join(tmp, "catalog", "ai-registry.json"), "w", encoding="utf-8") as fh:
     json.dump(fixture, fh)
-assert not os.path.exists(os.path.join(tmp, "catalog", "llm-models.json")), \
-    "fixture must run with no llm-models.json present"
+# The fixture holds only the registry file: the projection must need no
+# legacy catalog anywhere.
+assert sorted(os.listdir(os.path.join(tmp, "catalog"))) == ["ai-registry.json"]
 # The real read path: ai-registry.json from disk, projected by the one
 # helper the installers call -- never a copy of its logic, and a model
 # without a direct block is skipped, never listed.
@@ -97,9 +100,10 @@ assert local["direct"]["model"] == "ollama/qwen2.5-coder:7b", local
 assert (local["context"], local["output"]) == (32768, 8192), local
 assert local.get("default_for") == "fallback", local
 assert "reasoning" not in local, local
-# The projection keeps the output identical on the real catalogs too.
+# The projection keeps the output identical on the real catalog too:
+# the committed golden fixture pins the legacy shape field-for-field.
 llm = {m["id"]: m for m in
-       json.load(open("catalog/llm-models.json", encoding="utf-8"))["models"]}
+       json.load(open("tests/fixtures/legacy-models.golden.json", encoding="utf-8"))["models"]}
 with open("catalog/ai-registry.json", encoding="utf-8") as _rf:
     new = {m["id"]: m for m in registry.legacy_models(json.load(_rf))}
 assert set(new) == set(llm), (set(new) ^ set(llm))

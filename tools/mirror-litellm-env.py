@@ -7,11 +7,11 @@ LiteLLM's conventional names (GROQ_API_KEY, ...) plus a random
 LITELLM_MASTER_KEY. This tool regenerates the .env from the yml so the two
 never drift apart by hand-editing. The name mapping itself comes from
 catalog/ai-registry.json's `providers` section (task A5c, spec 3.2 phase 2 -
-this used to read catalog/providers.json directly; same field names,
+this used to read the legacy provider catalog directly; same field names,
 mapping doc section 2, only the source file changed). --registry overrides
-the registry path (a test fixture, mainly); catalog/providers.json itself is
-untouched and unread by this tool now, but stays in the repo (spec 3.2: no
-old catalog is deleted before every consumer has moved off it).
+the registry path (a test fixture, mainly); the legacy provider catalog it
+replaced was deleted in task A5e (spec 3.2: no old catalog is deleted before
+every consumer has moved off it).
 
     python3 tools/mirror-litellm-env.py [--check] [--registry PATH]
 

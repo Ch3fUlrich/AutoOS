@@ -21,11 +21,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
 REGISTRY_TOOL = ROOT / "tools" / "registry.py"
+GOLDEN_LEGACY_MODELS_PATH = ROOT / "tests" / "fixtures" / "legacy-models.golden.json"
 
 
 def _load_tool():
@@ -66,7 +68,7 @@ class RealRegistryTests(unittest.TestCase):
             proc.stdout,
             r"^(info: .*\n)*ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
 
-    def test_cli_validate_succeeds_and_confirm_no_drift(self):
+    def test_cli_validate_succeeds(self):
         proc = subprocess.run(
             [sys.executable, str(REGISTRY_TOOL), "validate"],
             cwd=str(ROOT), capture_output=True, text=True, timeout=180,
@@ -386,20 +388,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("private host: providers.zen.api_base", proc.stdout)
 
-    def test_validate_reports_drift_for_a_valid_but_stale_file(self):
-        reg = mutated()
-        reg["version"] = "2026-01-01"  # 'version' may hold a date; check still passes
-        self.assertEqual(registry.check_registry(reg), [])
-        path = self._write(reg)
-        try:
-            proc = self._run("validate", "--registry", path)
-        finally:
-            Path(path).unlink()
-        self.assertEqual(proc.returncode, 1)
-        self.assertIn("drift:", proc.stdout)
-
-
-
 class ModelLevelTierOverrideTests(unittest.TestCase):
     """PRIV2 brief 2026-09-26: an optional models.<id>.tier overrides its
     provider's tier in private_safe() -- needed for the zen provider (tier
@@ -620,12 +608,15 @@ class ReviewA3Tests(unittest.TestCase):
 
 class LegacyModelsTests(unittest.TestCase):
     """tools/registry.py legacy_models(): the one projection of registry
-    models into the old catalog/llm-models.json entry shape (A5dfix) --
+    models into the legacy llm-models entry shape (A5dfix) --
     every installer read (lib/linux/install.sh x2, AutoOS.Install.psm1
-    embedded python) calls this instead of carrying its own copy."""
+    embedded python) calls this instead of carrying its own copy. The
+    committed golden fixture tests/fixtures/legacy-models.golden.json pins
+    that shape: it is the deleted legacy models catalog's own "models"
+    list, copied verbatim in task A5e."""
 
-    def test_legacy_models_match_llm_models_json_field_for_field(self):
-        with (ROOT / "catalog" / "llm-models.json").open(encoding="utf-8") as fh:
+    def test_legacy_models_match_the_committed_golden_fixture_field_for_field(self):
+        with GOLDEN_LEGACY_MODELS_PATH.open(encoding="utf-8") as fh:
             old = {m["id"]: m for m in json.load(fh)["models"]}
         new = {m["id"]: m for m in registry.legacy_models(load_registry())}
         self.assertEqual(set(new), set(old))
@@ -660,22 +651,185 @@ class LegacyModelsTests(unittest.TestCase):
                          "fallback")
 
 
-class ValidateIgnoresCommentTests(unittest.TestCase):
-    """`validate`'s fresh-render comparison ignores "$comment" keys at any
-    depth (hand-edited prose); structure, routes, legs, models and providers
-    still match exactly."""
+class UnavailableUntilTests(unittest.TestCase):
+    """Time-bounded unavailability (brief UNTIL, 2026-09-26; skill rule
+    R-gateway-12: a 429 with retryable:true but a multi-day reset is not
+    soon-retryable -- mark the entry unavailable till the reset, then let it
+    come back on its own instead of relying on someone hand-undoing an
+    ``available: false``).
 
-    def test_docs_differing_only_in_a_nested_comment_compare_equal(self):
-        left = {"routes": {"r": {"legs": ["p/m"], "$comment": "one"}},
-                "models": {"m": {"id": "m", "$comment": "old prose"}}}
-        right = {"routes": {"r": {"legs": ["p/m"], "$comment": "two"}},
-                 "models": {"m": {"id": "m", "$comment": "new prose"}}}
-        self.assertEqual(registry.strip_comments(left), registry.strip_comments(right))
+    One helper, registry.unavailable_now(entry, now), answers "is this
+    clients/providers/unavailable_legs entry unavailable at `now`":
 
-    def test_docs_differing_in_a_leg_do_not_compare_equal(self):
-        left = {"routes": {"r": {"legs": ["p/m"], "$comment": "one"}}}
-        right = {"routes": {"r": {"legs": ["p/other"], "$comment": "one"}}}
-        self.assertNotEqual(registry.strip_comments(left), registry.strip_comments(right))
+    - ``available: false`` with no ``unavailable_until`` is unavailable
+      forever (today's behaviour, unchanged);
+    - a future ``unavailable_until`` is unavailable until that instant;
+    - a past ``unavailable_until`` counts as available again -- the entry
+      self-heals, no hand edit to undo.
+    """
+
+    def dt(self, *args):
+        return datetime(*args, tzinfo=timezone.utc)
+
+    def test_available_false_without_an_until_stays_unavailable_forever(self):
+        entry = {"available": False}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26)))
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2030, 1, 1)))
+
+    def test_a_future_until_is_unavailable(self):
+        entry = {"unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26, 19, 17)))
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+
+    def test_a_past_until_counts_as_available_again(self):
+        entry = {"available": False, "unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 5, 0)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 12, 31)))
+
+    def test_no_flags_at_all_is_available(self):
+        self.assertFalse(registry.unavailable_now({}, self.dt(2026, 9, 26)))
+        self.assertFalse(registry.unavailable_now(None, self.dt(2026, 9, 26)))
+
+    def test_an_unparsable_until_fails_check_not_the_helper(self):
+        # The helper itself never raises (a resolver runs it against live
+        # state); the shape is a check-time problem, reported by rule 7.
+        entry = {"unavailable_until": "next tuesday"}
+        self.assertIs(registry.unavailable_now(entry, self.dt(2026, 9, 26)),
+                      False)
+
+
+class RuleSevenUnavailableUntilTests(unittest.TestCase):
+    """Rule 7: every ``unavailable_until`` value anywhere in the registry is
+    an ISO-8601 UTC timestamp. The key itself holds a date by design, so
+    rule 5 (no dated values) must exempt it; a value that does not parse is
+    a check failure, never a silent pass (an unparsable until would quietly
+    read as available forever -- the exact hand-edit-forgot-to-undo failure
+    this field exists to remove)."""
+
+    def test_an_unparsable_until_on_a_client_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "next tuesday"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: clients.agy 'next tuesday'",
+                      problems)
+
+    def test_an_unparsable_until_on_a_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["unavailable_until"] = "soon"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: providers.openrouter 'soon'",
+                      problems)
+
+    def test_an_unparsable_until_on_an_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+            "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = "2026-13-01"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith(
+            "bad unavailable_until: routes.t2-worker-clean.unavailable_legs."
+            "opencode-zen/deepseek-v4.1-flash") for p in problems), problems)
+
+    def test_a_non_string_until_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = 1759258200
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
+    def test_a_parsable_until_is_not_a_dated_value(self):
+        # Rule 5 exempts the key by name: "2026-10-01T09:05:00Z" matches
+        # DATE_RE, so only an explicit exemption keeps this quiet.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertFalse(any("dated" in p and "agy" in p for p in problems),
+                         problems)
+        self.assertFalse(any(p.startswith("bad unavailable_until")
+                             for p in problems), problems)
+
+    def test_an_explicit_zero_offset_is_rejected_too(self):
+        # UNTILfix: the schema's until_tag pattern is Z-only, so an explicit
+        # +00:00 must fail check even though it names the same instant. This
+        # was the one offset rule 7 used to let through.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = (
+            "2026-10-01T09:05:00+00:00")
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
+    def test_offsets_and_naive_timestamps_are_rejected(self):
+        # UTC only ("...Z"): an offset or a naive timestamp is ambiguous
+        # about which clock it means on a machine in another zone.
+        for value in ("2026-10-01T11:05:00+02:00", "2026-10-01T09:05:00"):
+            reg = mutated()
+            reg["clients"]["agy"]["unavailable_until"] = value
+            problems = registry.check_registry(reg)
+            self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                                for p in problems), (value, problems))
+
+    def test_the_committed_schema_permits_the_field_on_all_three_surfaces(self):
+        # The schema carries additionalProperties: false on client, provider
+        # and unavailable_legs entries; it must name unavailable_until on all
+        # three, and the committed registry itself passes check with one set.
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        defs = schema["$defs"]
+        for surface in (defs["client"]["properties"],
+                        defs["provider"]["properties"],
+                        defs["route"]["properties"]["unavailable_legs"]
+                        ["additionalProperties"]["properties"]):
+            self.assertIn("unavailable_until", surface)
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+
+class OpenRouterByokLegTests(unittest.TestCase):
+    """L0 2026-09-27: openrouter/openai/gpt-oss-120b BYOK leg on t2-worker."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.t2_worker_legs = cls.reg["routes"]["t2-worker"]["legs"]
+        cls.unavailable_legs = cls.reg["routes"]["t2-worker"].get("unavailable_legs", {})
+
+    def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
+        idx = self.t2_worker_legs.index("openrouter/openai/gpt-oss-120b")
+        # Must be right after sambanova/gpt-oss-120b
+        self.assertGreaterEqual(idx, 1)
+        self.assertEqual(self.t2_worker_legs[idx - 1], "sambanova/gpt-oss-120b")
+
+    def test_leg_resolves_to_a_model(self):
+        # resolve_leg ignores route membership, so this pins the spelling only;
+        # the membership/order pin is the test above.
+        provider, model = registry.resolve_leg("openrouter/openai/gpt-oss-120b", self.reg)
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(model, "openai/gpt-oss-120b")
+
+    def test_a_sibling_spelling_with_no_model_entry_is_refused(self):
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
+
+    def test_leg_is_unavailable_via_unavailable_legs_entry(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry)
+        self.assertIs(entry.get("available"), False)
+
+    def test_leg_is_unavailable_now(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIsNotNone(entry)
+        self.assertTrue(registry.unavailable_now(
+            entry, datetime.now(timezone.utc)))
+
+    def test_unavailable_entry_has_the_l0_comment(self):
+        entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
+        self.assertIn("$comment", entry)
+        self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
+
 
 if __name__ == "__main__":
     unittest.main()
