@@ -426,15 +426,18 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
 
 def usable_legs(route, card, features, client_state, registry, overlay,
                client="opencode", now=None):
-    """``(legs, skipped)`` -- FT (fall-through, spec 2026-09-26 operator
-    decision): the serving legs of `route` that also pass every *per-leg*
-    filter, and why each rejected leg did not.
+    """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
+    operator decision): the serving legs of `route` that also pass every
+    *per-leg* filter, and why each rejected leg did not.
 
     ``legs`` is ``(provider_id, model_id)`` tuples, same shape as
     ``serving_legs``, in route order. ``skipped`` maps the leg string exactly
     as written in the route (an omniroute_id alias included) to every reason
     that leg did not qualify -- collecting all of them for that leg, never
-    stopping at the first, in route order.
+    stopping at the first, in route order. ``re_probe_notes`` is a parallel
+    dict for legs that ARE usable but carry informational re-probe notes
+    (a past ``unavailable_until`` that self-healed -- such notes must not
+    count as a "skipped leg" in plan()).
 
     Per-leg filters (replacing the old route-level context/tool_calls/
     client_bound checks, which blocked the whole route on one bad leg):
@@ -479,6 +482,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
     legs = []
     skipped = {}
+    re_probe_notes = {}
     for leg in route.get("legs") or []:
         # One leg-resolution rule for the validator and the resolver. Every
         # leg is resolved, unavailable or not, so a broken registry fails
@@ -517,9 +521,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         else:
             legs.append((provider_id, model_id))
             if notes:
-                skipped[leg] = notes
+                re_probe_notes[leg] = notes
 
-    return legs, skipped
+    return legs, skipped, re_probe_notes
 
 
 def filter_routes(card, features, client_state, registry, overlay,
@@ -585,8 +589,8 @@ def filter_routes(card, features, client_state, registry, overlay,
         if client_reason:
             reasons.append(client_reason)
 
-        usable, skipped = usable_legs(route, card, features, client_state,
-                                      registry, overlay, client, now)
+        usable, skipped, _ = usable_legs(route, card, features, client_state,
+                                        registry, overlay, client, now)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -1097,8 +1101,8 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     out = []
     for route_id in route_ids:
         route = registry["routes"][route_id]
-        legs, _ = usable_legs(route, card, features, client_state, registry,
-                              overlay, client, now)
+        legs, _, _ = usable_legs(route, card, features, client_state, registry,
+                                overlay, client, now)
         if not legs:
             raise ValueError("route %r has no usable leg to score" % route_id)
         leg = legs[0]
@@ -1256,12 +1260,19 @@ def plan(card, features, client_state, registry, overlay, track_record,
 
     # FT (spec 2026-09-26 operator decision): the chosen route's own skipped
     # legs, so a caller can see which legs it fell through past.
-    _, skipped_legs = usable_legs(registry["routes"][chosen["route"]], card,
-                                  features, client_state, registry, overlay,
-                                  client, now)
+    # FUP (2026-09-27): re-probe notes tracked separately so they do not
+    # inflate the "falls through" count.
+    _, skipped_legs, re_probe_notes = usable_legs(
+        registry["routes"][chosen["route"]], card,
+        features, client_state, registry, overlay,
+        client, now)
     if skipped_legs:
         reason_parts.append(
             "falls through %d skipped leg(s)" % len(skipped_legs))
+    if re_probe_notes:
+        for leg, notes in re_probe_notes.items():
+            for note in notes:
+                reason_parts.append(note)
 
     defer_time, defer_reason = defer_until(card, chosen, registry, now)
     reason_parts.append(defer_reason)
@@ -1296,4 +1307,5 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "reason": "; ".join(reason_parts),
         "explain": [s["reason"] for s in scores],
         "skipped_legs": skipped_legs,
+        "re_probe_notes": re_probe_notes,
     }

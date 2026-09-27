@@ -788,6 +788,62 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(load_registry()), [])
 
 
+class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
+    """Rule 8: an entry with ``unavailable_until`` must also carry ``available:
+    false``. Without the flag the resolver's re-probe note cannot fire after
+    the until expires (FUP 2026-09-27, measured on ``clients.agy``)."""
+
+    def test_committed_registry_passes_rule_8(self):
+        # agy now has both available: false and unavailable_until.
+        self.assertFalse(
+            any("entry with unavailable_until but no available: false"
+                in p for p in registry.check_registry(load_registry())),
+            "committed registry must not violate rule 8")
+
+    def test_missing_available_on_client_is_flagged(self):
+        reg = mutated()
+        del reg["clients"]["agy"]["available"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_a_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: providers.openrouter"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        leg = reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+            "opencode-zen/deepseek-v4.1-flash"]
+        del leg["available"]
+        leg["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: "
+                "routes.t2-worker-clean.unavailable_legs.opencode-zen/deepseek-v4.1-flash"
+                in p for p in problems),
+            problems)
+
+    def test_available_true_with_unavailable_until_is_flagged_too(self):
+        # Explicit available: true is still not available: false, and the
+        # resolver needs the flag to emit the re-probe note.
+        reg = mutated()
+        del reg["clients"]["agy"]["available"]
+        reg["clients"]["agy"]["available"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+
 class OpenRouterByokLegTests(unittest.TestCase):
     """L0 2026-09-27: openrouter/openai/gpt-oss-120b BYOK leg on t2-worker."""
 

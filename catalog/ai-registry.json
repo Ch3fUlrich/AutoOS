@@ -8,6 +8,7 @@
       "signin_check": "agy models",
       "skills_dir": null,
       "supports_effort": false,
+      "available": false,
       "unavailable_until": "2026-10-01T09:05:00Z"
     },
     "claude": {
