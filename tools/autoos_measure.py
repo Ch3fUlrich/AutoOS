@@ -104,20 +104,22 @@ def _module_of(path):
 def _covered(repo, touched, tracked):
     """The first tracked test file that covers a touched file, else None.
 
-    A test file covers a touched path when the touched file's stem equals a
-    whole token of the test file's name (split on "_", "." and "-"), or its
-    text contains the touched file's repo path (a suite reference). The
-    whole-token rule keeps lib/i.py from reading as covered by
-    tests/test_maintenance.py. Text is read with errors="replace" so one odd
-    byte cannot hide a reference.
+    A test file covers a touched path when the touched file's stem shares a
+    whole token with the test file's name (both split on "_", "." and "-"), or
+    its text contains the touched file's repo path (a suite reference). Both
+    sides are tokenised, so a multi-token stem - decision_engine.py matched by
+    test_decision_engine.py - is covered by name alone; comparing the stem
+    whole missed it (REVFIX). The whole-token rule still keeps lib/i.py from
+    reading as covered by tests/test_maintenance.py. Text is read with
+    errors="replace" so one odd byte cannot hide a reference.
     """
-    stems = {Path(p).stem for p in touched}
+    stem_tokens = {tok for path in touched
+                   for tok in re.split(r"[_.\-]", Path(path).stem) if tok}
     for candidate in tracked:
         if not _is_test_file(candidate):
             continue
         name = candidate.rsplit("/", 1)[-1]
-        tokens = set(re.split(r"[_.\-]", name))
-        if any(stem and stem in tokens for stem in stems):
+        if set(re.split(r"[_.\-]", name)) & stem_tokens:
             return candidate
         try:
             text = (Path(repo) / candidate).read_text(encoding="utf-8",
