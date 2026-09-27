@@ -1,0 +1,11 @@
+{
+    admin off
+    auto_https off
+}
+
+:4097 {
+    reverse_proxy opencode:4096 {
+        header_up Authorization "Basic {env.OPENCODE_BASIC_B64}"
+        flush_interval -1
+    }
+}

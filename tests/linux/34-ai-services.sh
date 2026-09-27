@@ -1568,7 +1568,7 @@ _aistack_migrated() {
     mkdir -p "$d/cfg" "$d/data/omniroute"
     printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
     printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
-    for c in autoos-omniroute autoos-opencode openhands-app; do : >"$d/run-$c"; : >"$d/compose-$c"; done
+    for c in autoos-omniroute autoos-opencode openhands-app autoos-opencode-auth; do : >"$d/run-$c"; : >"$d/compose-$c"; done
     : >"$d/unit-coding-agents-fw"; : >"$d/active-coding-agents-fw"
     printf 'container-db\n' >"$d/data/omniroute/storage.sqlite"
 }
@@ -1905,6 +1905,134 @@ if it "aistack: a newer derived opencode password is left as is with a warning";
     [[ "$out" == *"old-pass"* || "$out" == *"new-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a newer derived password was not preserved"; fi
+fi
+
+if it "aistack: forwarder init writes opencode-auth.env with the Basic credential and skips a second run"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'phone-pass'\n" >"$keys"
+    first="$(_aistack "$d" init)"
+    auth_env="$d/cfg/opencode-auth.env"
+    want="$(printf '%s' 'opencode:phone-pass' | base64 -w0)"
+    sha_first="$(sha256sum "$auth_env" 2>/dev/null | cut -d' ' -f1)"
+    second="$(_aistack "$d" init)"
+    sha_second="$(sha256sum "$auth_env" 2>/dev/null | cut -d' ' -f1)"
+    ok=1
+    [[ -e "$auth_env" ]] || { ok=0; echo "opencode-auth.env was not written" >&2; }
+    grep -q "^OPENCODE_BASIC_B64='$want'$" "$auth_env" 2>/dev/null \
+        || { ok=0; echo "opencode-auth.env does not carry base64(opencode:<password>)" >&2; }
+    [[ "$(stat -c %a "$auth_env" 2>/dev/null)" == 600 ]] || { ok=0; echo "opencode-auth.env is not 0600" >&2; }
+    [[ "$sha_first" == "$sha_second" ]] || { ok=0; echo "a second init rewrote opencode-auth.env" >&2; }
+    [[ "$second" == *"$auth_env opencode password up to date (skipped)"* ]] \
+        || { ok=0; echo "second run did not skip the forwarder copy: $second" >&2; }
+    [[ "$first$second" == *"phone-pass"* ]] && { ok=0; echo "the password was printed" >&2; }
+    [[ "$first$second" == *"$want"* ]] && { ok=0; echo "the Blob was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "opencode-auth.env is not derived from opencode_password"; fi
+fi
+
+if it "aistack: forwarder opencode-auth.env is rewritten when opencode_password changes, without printing a value"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    mkdir -p "$d/cfg"
+    old_blob="$(printf '%s' 'opencode:old-pass' | base64 -w0)"
+    printf '# keep me\nOPENCODE_BASIC_B64=%s\nEXTRA=keep\n' "$old_blob" >"$d/cfg/opencode-auth.env"
+    touch -d '2 hours ago' "$d/cfg/opencode-auth.env"
+    out="$(_aistack "$d" init)"
+    want="$(printf '%s' 'opencode:new-pass' | base64 -w0)"
+    ok=1
+    grep -q "^OPENCODE_BASIC_B64='$want'$" "$d/cfg/opencode-auth.env" \
+        || { ok=0; echo "opencode-auth.env not updated from api-keys.yml" >&2; }
+    grep -q '^EXTRA=keep$' "$d/cfg/opencode-auth.env" || { ok=0; echo "an unrelated line was lost" >&2; }
+    grep -q '^# keep me$' "$d/cfg/opencode-auth.env" || { ok=0; echo "a comment was lost" >&2; }
+    compgen -G "$d/cfg/opencode-auth.env.autoos-backup-*" >/dev/null || { ok=0; echo "no opencode-auth.env backup" >&2; }
+    [[ "$out" == *"$old_blob"* || "$out" == *"$want"* || "$out" == *"new-pass"* || "$out" == *"old-pass"* ]] \
+        && { ok=0; echo "a value was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "changed opencode_password not propagated to the forwarder copy"; fi
+fi
+
+if it "aistack: forwarder a newer derived opencode-auth.env is left as is with a warning"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    touch -d '2 hours ago' "$keys"
+    mkdir -p "$d/cfg"
+    old_blob="$(printf '%s' 'opencode:old-pass' | base64 -w0)"
+    printf "OPENCODE_BASIC_B64=%s\n" "$old_blob" >"$d/cfg/opencode-auth.env"
+    before="$(sha256sum "$d/cfg/opencode-auth.env" | cut -d' ' -f1)"
+    out="$(_aistack "$d" init)"; rc=$?
+    after="$(sha256sum "$d/cfg/opencode-auth.env" | cut -d' ' -f1)"
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "init failed: rc=$rc" >&2; }
+    [[ "$before" == "$after" ]] || { ok=0; echo "a newer opencode-auth.env was rewritten" >&2; }
+    [[ "$out" == *"newer opencode password than"* ]] || { ok=0; echo "no warning: $out" >&2; }
+    [[ "$out" == *"$old_blob"* || "$out" == *"new-pass"* ]] && { ok=0; echo "a value was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a newer forwarder copy was not preserved"; fi
+fi
+
+if it "aistack: forwarder compose service is digest-pinned, publishes :4097 and is hardened"; then
+    f="$AISTACK/compose.yml"
+    # The opencode-auth block: from its service header to the next service.
+    block="$(sed -n '/^  opencode-auth:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q '^    container_name: autoos-opencode-auth$' <<<"$block" || { ok=0; echo "container_name wrong" >&2; }
+    grep -q '^    image: .*@sha256:' <<<"$block" || { ok=0; echo "image not digest-pinned" >&2; }
+    grep -q '^      - "${AUTOOS_STACK_BIND:-0.0.0.0}:4097:4097"$' <<<"$block" || { ok=0; echo "publish is wrong" >&2; }
+    grep -q 'opencode-auth.Caddyfile:/etc/caddy/Caddyfile:ro' <<<"$block" || { ok=0; echo "Caddyfile not mounted read-only" >&2; }
+    grep -q 'opencode-auth.env' <<<"$block" || { ok=0; echo "env_file missing" >&2; }
+    grep -q '^    read_only: true$' <<<"$block" || { ok=0; echo "not read-only" >&2; }
+    grep -q 'no-new-privileges:true' <<<"$block" || { ok=0; echo "no-new-privileges missing" >&2; }
+    grep -q '^      - ALL$' <<<"$block" || { ok=0; echo "cap_drop ALL missing" >&2; }
+    grep -q '^    depends_on:$' <<<"$block" && grep -q '^      - opencode$' <<<"$block" \
+        || { ok=0; echo "depends_on opencode missing" >&2; }
+    out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$f" 2>&1)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "check_compose: $out" >&2; }
+    if (( ok )); then pass; else fail "opencode-auth compose service is not hardened as specified"; fi
+fi
+
+if it "aistack: forwarder Caddyfile replaces Authorization and streams responses"; then
+    f="$AISTACK/opencode-auth.Caddyfile"
+    ok=1
+    [[ -f "$f" ]] || { ok=0; echo "no $f" >&2; }
+    grep -q '^    admin off$' "$f" 2>/dev/null || { ok=0; echo "admin not off" >&2; }
+    grep -q '^    auto_https off$' "$f" 2>/dev/null || { ok=0; echo "auto_https not off" >&2; }
+    grep -q '^:4097 {$' "$f" 2>/dev/null || { ok=0; echo ":4097 site block missing" >&2; }
+    grep -q 'reverse_proxy opencode:4096' "$f" 2>/dev/null || { ok=0; echo "no reverse_proxy to opencode:4096" >&2; }
+    grep -q 'header_up Authorization "Basic {env.OPENCODE_BASIC_B64}"' "$f" 2>/dev/null \
+        || { ok=0; echo "Authorization is not replaced from the env" >&2; }
+    grep -q 'flush_interval -1' "$f" 2>/dev/null || { ok=0; echo "no flush_interval -1 for SSE/websockets" >&2; }
+    if (( ok )); then pass; else fail "the forwarder Caddyfile is wrong"; fi
+fi
+
+if it "aistack: forwarder the bind guard refusal names :4097"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "the open LAN bind was accepted" >&2; }
+    [[ "$out" == *":4097"* ]] || { ok=0; echo "the refusal does not name :4097: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the bind-guard message does not cover :4097"; fi
+fi
+
+if it "aistack: forwarder restart opencode-auth restarts just that service"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart opencode-auth)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$(grep -c 'compose.*restart' "$d/docker.log" 2>/dev/null || true)" == 1 ]] \
+        || { ok=0; echo "not exactly one compose restart: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'restart opencode-auth' "$d/docker.log" || { ok=0; echo "no restart of opencode-auth: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -qE '(^| )up( |$)' "$d/docker.log" && { ok=0; echo "restart ran up" >&2; }
+    [[ "$out" == *"opencode-auth"* ]] || { ok=0; echo "no one-line report: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart opencode-auth is not one compose restart"; fi
 fi
 
 if it "aistack: a REPLACE_WITH_ placeholder counts as an unset opencode_password"; then
@@ -2863,7 +2991,8 @@ STUB
         'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-free-only 200' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-clean 200' \
-        'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
+        'http://127.0.0.1:4096/api/session none - 401' \
+        'http://127.0.0.1:4097/api/session none - 200' >"$d/curl-table"
 }
 # _aistack_verify_route <sandbox> <url> <auth> <body> <code>: one more route,
 # ahead of the table (the first match wins).
@@ -2891,10 +3020,12 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 12 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 14 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
+                'container autoos-opencode-auth' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
+                'forwarder /api/session injected on :4097' \
                 'combo t2-worker-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }

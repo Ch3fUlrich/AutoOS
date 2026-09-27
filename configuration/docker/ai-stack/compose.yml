@@ -165,6 +165,55 @@ services:
     networks:
       - autoos-ai
 
+  opencode-auth:
+    # Edge forwarder for the reverse proxy: opencode.<domain> reaches :4097,
+    # and Caddy replaces the incoming Authorization with opencode's own Basic
+    # credential before forwarding to opencode:4096. The proxy host therefore
+    # holds no opencode password: only this container's env_file
+    # (opencode-auth.env, mode 600) carries it, derived by `ai-stack.sh init`
+    # from opencode_password. Caddy streams: flush_interval -1 turns off
+    # response buffering, so SSE and websockets pass through.
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    container_name: autoos-opencode-auth
+    restart: unless-stopped
+    # The host user's ids: Caddy writes only into the tmpfs below.
+    user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /config
+      - /data
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Only OPENCODE_BASIC_B64 (base64 of "opencode:<password>") - the single
+    # key this forwarder needs. Never printed, never tracked.
+    env_file:
+      - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/opencode-auth.env
+    volumes:
+      - ./opencode-auth.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${AUTOOS_STACK_BIND:-0.0.0.0}:4097:4097"
+    mem_limit: 128m
+    pids_limit: 128
+    healthcheck:
+      # GET / is unauthenticated on opencode, so a 200 proves the upstream.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4097/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    depends_on:
+      - opencode
+    networks:
+      - autoos-ai
+
   openhands:
     # The image start-stack.sh ran as :latest, pinned to the digest measured
     # working with its settings repair (agent-server 1.36.0). Bump

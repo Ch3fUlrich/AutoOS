@@ -81,6 +81,7 @@ container_of() {
     case "$1" in
         omniroute) echo autoos-omniroute ;;
         opencode)  echo autoos-opencode ;;
+        opencode-auth) echo autoos-opencode-auth ;;
         openhands) echo openhands-app ;;
     esac
 }
@@ -89,6 +90,7 @@ service_of() {
     case "$1" in
         autoos-omniroute) echo omniroute ;;
         autoos-opencode)  echo opencode ;;
+        autoos-opencode-auth) echo opencode-auth ;;
         openhands-app)    echo openhands ;;
     esac
 }
@@ -194,7 +196,7 @@ fake_docker() {
                     if [[ -d "$S/data/qoder-home" ]]; then echo present; else echo absent; fi >>"$S/qoder-home-at-up.log"
                     local svcs=()
                     for a in "$@"; do [[ "$a" == -* ]] || svcs+=("$a"); done
-                    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
+                    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands opencode-auth)
                     for svc in "${svcs[@]}"; do
                         [[ -e "$S/fail-up-$svc" ]] && return 1
                         c="$(container_of "$svc")"
@@ -202,7 +204,7 @@ fake_docker() {
                     done ;;
                 stop)
                     local svcs=("$@")
-                    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
+                    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands opencode-auth)
                     for svc in "${svcs[@]}"; do rm -f "$S/run-$(container_of "$svc")"; done ;;
                 start)
                     local a c
@@ -224,7 +226,7 @@ fake_docker() {
                         rm -f "$S/run-$c" "$S/compose-$c"
                     done ;;
                 down)
-                    for c in autoos-omniroute autoos-opencode openhands-app; do
+                    for c in autoos-omniroute autoos-opencode autoos-opencode-auth openhands-app; do
                         [[ -e "$S/compose-$c" ]] && rm -f "$S/run-$c" "$S/compose-$c"
                     done ;;
             esac
@@ -253,6 +255,7 @@ fake_ss() {
     case "$port" in
         20128) unit=autoos-omniroute; c=autoos-omniroute ;;
         4096)  unit=autoos-opencode;  c=autoos-opencode ;;
+        4097)  unit=none;             c=autoos-opencode-auth ;;
         3000)  unit=none;             c=openhands-app ;;
         *) return 0 ;;
     esac
@@ -280,6 +283,7 @@ fake_curl() {
         *:20128/v1/*)        up autoos-omniroute autoos-omniroute omniroute && code=401 ;;
         *:4096/api/*)        up autoos-opencode autoos-opencode opencode && code=401 ;;
         *:4096/*)            up autoos-opencode autoos-opencode opencode && code=200 ;;
+        *:4097/*)            up none autoos-opencode-auth opencode-auth && code=200 ;;
         *:3000/*)            up none openhands-app openhands && code=200 ;;
     esac
     (( want_code )) && printf '%s' "$code"

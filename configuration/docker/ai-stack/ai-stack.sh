@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Manage the AutoOS AI stack in Docker (compose.yml next to this script):
-# OmniRoute gateway :20128, opencode serve :4096, OpenHands :3000.
+# OmniRoute gateway :20128, opencode serve :4096, opencode-auth forwarder :4097,
+# OpenHands :3000.
 #
 #   ai-stack.sh init              env files + opencode config (idempotent)
 #   ai-stack.sh up [service...]   build/pull what is missing, start, wait healthy
@@ -18,6 +19,8 @@
 # Files (never tracked, all mode 600 under a 700 directory):
 #   ~/.config/autoos/ai-stack/stack.env      compose settings (uid, paths, RAM)
 #   ~/.config/autoos/ai-stack/opencode.env   OPENCODE_PASSWORD + {env:...} keys
+#   ~/.config/autoos/ai-stack/opencode-auth.env  Basic credential for the
+#                                            opencode-auth forwarder (:4097)
 #   ~/.config/autoos/ai-stack/openhands.env  LLM_API_KEY (+ remote-browser pair)
 #   ~/.config/autoos/ai-stack/manage.key     manage-scoped gateway key, host only
 #   ~/.config/autoos/ai-stack/client.key     gateway client key (0600): the standby
@@ -86,7 +89,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -301,12 +304,13 @@ env_replace_value() {
 # the yml (quotes and CR stripped; a REPLACE_WITH_* placeholder counts as
 # empty). When empty it migrates the value once - from the native serve file,
 # then the docker opencode.env OPENCODE_PASSWORD, then a fresh 32-char value -
-# appending it to the yml. It then makes the two derived copies agree, never
+# appending it to the yml. It then makes the three derived copies agree, never
 # overwriting a copy newer than the yml. Sets OC_PW. Only file names, never a
 # value, are printed.
 opencode_password_sync() {
     local keys_env="$CONFIG_DIR/opencode.env"
-    local y="" src="" val backup cur
+    local auth_env="$CONFIG_DIR/opencode-auth.env"
+    local y="" src="" val backup cur basic
     y="$(keys_value opencode_password)"
     if [[ "$y" == *$'\n'* || "$y" == *$'\r'* ]]; then
         echo "  ! opencode_password: the value holds a line break (\\n or \\r) - an env file cannot carry it; not used"
@@ -383,6 +387,26 @@ opencode_password_sync() {
             echo "  + $PW_FILE opencode password updated from $KEYS_FILE"
         fi
     fi
+
+    # Derived copy 3: the opencode-auth forwarder's Basic credential, base64 of
+    # "opencode:<password>", read by Caddy as OPENCODE_BASIC_B64. Same rules as
+    # the other copies - a copy newer than the yml is the operator's.
+    basic="$(printf '%s' "opencode:$y" | base64 -w0)"
+    if ! file_has_key "$auth_env" OPENCODE_BASIC_B64; then
+        ensure_env_file "$auth_env" OPENCODE_BASIC_B64 "$basic" || return 1
+    else
+        cur="$(env_value "$auth_env" OPENCODE_BASIC_B64)"
+        if [[ "$cur" == "$basic" ]]; then
+            echo "  = $auth_env opencode password up to date (skipped)"
+        elif [[ -f "$KEYS_FILE" && "$auth_env" -nt "$KEYS_FILE" ]]; then
+            echo "  ! $auth_env holds a newer opencode password than $KEYS_FILE - left as is; put it into opencode_password there and re-run init"
+        elif [[ $DRY -eq 1 ]]; then
+            echo "  - would update the opencode password in $auth_env from $KEYS_FILE"
+        else
+            env_replace_value "$auth_env" OPENCODE_BASIC_B64 "$basic" || return 1
+            echo "  + $auth_env opencode password updated from $KEYS_FILE"
+        fi
+    fi
 }
 
 # The value a name should get: this environment, then the litellm .env (the
@@ -436,6 +460,9 @@ gateway_ok()   { [[ "$(http_code http://127.0.0.1:20128/api/health)" == 200 ]]; 
 gateway_keyed() { [[ "$(http_code http://127.0.0.1:20128/v1/models)" == 401 ]]; }
 opencode_ok()  { local c; c="$(http_code http://127.0.0.1:4096/)"; [[ "$c" == 200 || "$c" == 401 ]]; }
 openhands_ok() { [[ "$(http_code http://127.0.0.1:3000/)" == 200 ]]; }
+# The forwarder adds opencode's Basic auth, so a keyless request to :4097 is
+# answered 200 (where :4096 alone answers 401).
+forwarder_ok() { [[ "$(http_code http://127.0.0.1:4097/api/session)" == 200 ]]; }
 
 wait_for() {
     local _
@@ -448,16 +475,18 @@ unit_known()  { "$SYSTEMCTL" --user cat "$1.service" >/dev/null 2>&1; }
 
 service_container() {
     case "$1" in
-        omniroute) echo autoos-omniroute ;;
-        opencode)  echo autoos-opencode ;;
-        openhands) echo openhands-app ;;
+        omniroute)     echo autoos-omniroute ;;
+        opencode)      echo autoos-opencode ;;
+        opencode-auth) echo autoos-opencode-auth ;;
+        openhands)     echo openhands-app ;;
     esac
 }
 service_port() {
     case "$1" in
-        omniroute) echo 20128 ;;
-        opencode)  echo 4096 ;;
-        openhands) echo 3000 ;;
+        omniroute)     echo 20128 ;;
+        opencode)      echo 4096 ;;
+        opencode-auth) echo 4097 ;;
+        openhands)     echo 3000 ;;
     esac
 }
 # The native unit a service replaces (OpenHands never had one).
@@ -469,14 +498,15 @@ service_unit() {
 }
 
 # ─── ownership ──────────────────────────────────────────────────────────────
-# The marker, not a container, says who owns :20128/:4096/:3000. A container
-# proves nothing: a failed migrate can leave one behind (stopped or not).
+# The marker, not a container, says who owns :20128/:4096/:3000 and the
+# derived :4097 forwarder. A container proves nothing: a failed migrate can
+# leave one behind (stopped or not).
 stack_owned() { [[ -f "$MARKER" ]]; }
 
 write_marker() {
     mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || return 1
     ( umask 077; printf 'owner=docker by=%s since=%s\n' "$1" "$(date +%Y-%m-%dT%H:%M:%S%z)" >"$MARKER" ) || return 1
-    echo "  + wrote $MARKER: the docker stack owns the gateway, opencode serve and OpenHands"
+    echo "  + wrote $MARKER: the docker stack owns the gateway, opencode serve, the opencode-auth forwarder and OpenHands"
 }
 
 # ─── publish address ────────────────────────────────────────────────────────
@@ -512,7 +542,7 @@ bind_guard() {
         BIND_OK=1
         return 0
     fi
-    echo "  ! refusing to publish :20128, :4096 and :3000 on $bind: coding-agents-fw.service is not"
+    echo "  ! refusing to publish :20128, :4096, :3000 and :4097 on $bind: coding-agents-fw.service is not"
     echo "    active, so nothing limits LAN clients to the reverse proxy (OpenHands has no login and"
     echo "    holds the docker socket). Start that firewall unit, or set AUTOOS_STACK_BIND=127.0.0.1"
     echo "    (host only), or accept the exposure with AUTOOS_STACK_ALLOW_LAN=1 - both in $STACK_ENV"
@@ -787,13 +817,13 @@ claim_fresh_host() {
 
 cmd_up() {
     local svcs=("${SERVICES[@]}") start=() svc c port unit
-    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands)
+    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands opencode-auth)
     if [[ ! -f "$STACK_ENV" ]]; then
         if [[ $DRY -eq 1 ]]; then echo "  - would run init first"; else cmd_init || return 1; fi
     fi
     for svc in "${svcs[@]}"; do
         c="$(service_container "$svc")"; port="$(service_port "$svc")"
-        [[ -n "$c" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands)"; return 2; }
+        [[ -n "$c" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands, opencode-auth)"; return 2; }
         if container_running "$c"; then
             if [[ "$svc" == openhands ]] && ! is_compose_container "$c"; then
                 echo "  ! $svc: $c runs outside the stack - replace it with: ai-stack.sh migrate --yes"; continue
@@ -837,6 +867,7 @@ cmd_up() {
             omniroute) wait_for gateway_ok && echo "  + omniroute answers on :20128" || echo "  ! omniroute did not answer - docker logs autoos-omniroute" ;;
             opencode)  wait_for opencode_ok && echo "  + opencode answers on :4096" || echo "  ! opencode did not answer - docker logs autoos-opencode" ;;
             openhands) wait_for openhands_ok && echo "  + openhands answers on :3000 (tier profiles: configuration/start-stack.sh openhands)" || echo "  ! openhands did not answer - docker logs openhands-app" ;;
+            opencode-auth) wait_for forwarder_ok && echo "  + opencode-auth answers on :4097 (injects opencode's Basic auth)" || echo "  ! opencode-auth did not answer - docker logs autoos-opencode-auth" ;;
         esac
     done
     claim_fresh_host
@@ -857,11 +888,11 @@ cmd_down() {
 cmd_restart() {
     local svc c
     if (( ${#SERVICES[@]} == 0 )); then
-        echo "  ! restart needs a service (omniroute, opencode, openhands)"; return 2
+        echo "  ! restart needs a service (omniroute, opencode, openhands, opencode-auth)"; return 2
     fi
     # Validate every name first: an unknown one must not follow a restart.
     for svc in "${SERVICES[@]}"; do
-        [[ -n "$(service_container "$svc")" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands)"; return 2; }
+        [[ -n "$(service_container "$svc")" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands, opencode-auth)"; return 2; }
     done
     for svc in "${SERVICES[@]}"; do
         c="$(service_container "$svc")"
@@ -875,13 +906,14 @@ cmd_status() {
     local svc c
     if stack_owned; then echo "  owner: the docker stack ($MARKER)"
     else echo "  owner: native units (no $MARKER)"; fi
-    for svc in omniroute opencode openhands; do
+    for svc in omniroute opencode openhands opencode-auth; do
         c="$(service_container "$svc")"
-        printf '  %-10s %-18s %s\n' "$svc" "$c" "$(container_state "$c")"
+        printf '  %-14s %-22s %s\n' "$svc" "$c" "$(container_state "$c")"
     done
     echo "  gateway :20128 /api/health -> $(http_code http://127.0.0.1:20128/api/health); keyless /v1/models -> $(http_code http://127.0.0.1:20128/v1/models) (401 expected)"
     echo "  opencode :4096 / -> $(http_code http://127.0.0.1:4096/); /api/session without password -> $(http_code http://127.0.0.1:4096/api/session) (401 expected)"
     echo "  openhands :3000 / -> $(http_code http://127.0.0.1:3000/)"
+    echo "  opencode-auth :4097 /api/session -> $(http_code http://127.0.0.1:4097/api/session) (200 expected: opencode's Basic auth added)"
 }
 
 # Ownership, not container state. The marker is written only after every
@@ -996,12 +1028,13 @@ Migration plan (native units -> docker AI stack):
      $DATA_DIR/omniroute - the original stays as it is
   6. start the omniroute container and wait until it answers /api/health and
      refuses a keyless /v1 call with 401
-  7. stop the autoos-opencode unit, start the opencode container, wait until
-     it answers
+  7. stop the autoos-opencode unit, start the opencode container and its
+     opencode-auth forwarder, wait until opencode answers and the forwarder
+     injects its Basic auth on :4097
   8. replace the openhands container from start-stack.sh with the compose one
      (state stays in $OH_DIR; running sandboxes keep running), wait until it
      answers
-  9. only when all three answered: write $MARKER (from then on is-active is
+  9. only when all of them answered: write $MARKER (from then on is-active is
      true), then unregister autoos-omniroute and autoos-opencode
      (register-autostart.sh --unregister --only)
   Any failure from step 3 on hands EVERY service moved so far back: the
@@ -1076,7 +1109,11 @@ migrate_abort() {
     if moved omniroute && restore_native autoos-omniroute omniroute; then
         wait_for gateway_ok || echo "  ! the native gateway does not answer yet - journalctl --user -u autoos-omniroute"
     fi
-    if moved opencode; then restore_native autoos-opencode opencode || true; fi
+    if moved opencode; then
+        # The forwarder has no native owner: it goes when the move fails too.
+        dc rm -s -f opencode-auth >/dev/null 2>&1 || true
+        restore_native autoos-opencode opencode || true
+    fi
     if [[ $OH_REPLACED -eq 1 ]]; then
         echo "  - recreating the start-stack.sh openhands-app container"
         bash "$START_STACK" openhands || echo "  ! openhands did not come back - run: configuration/start-stack.sh openhands"
@@ -1106,7 +1143,7 @@ cmd_migrate() {
     cmd_init || return 1
     preflight || return 1
     ensure_manage_key || return 1
-    ensure_images omniroute opencode openhands || return 1
+    ensure_images omniroute opencode opencode-auth openhands || return 1
 
     MOVED=(); UNITS_BEFORE=(); OH_REPLACED=0
     local u
@@ -1140,13 +1177,13 @@ cmd_migrate() {
             migrate_abort
             return 1
         fi
-        if ! dc_up --no-deps opencode || ! wait_for opencode_ok; then
-            echo "  ! the opencode container did not answer on :4096 - docker logs autoos-opencode"
+        if ! dc_up --no-deps opencode opencode-auth || ! wait_for opencode_ok || ! wait_for forwarder_ok; then
+            echo "  ! the opencode container or its forwarder did not answer (:4096 / :4097) - docker logs autoos-opencode autoos-opencode-auth"
             migrate_abort
             return 1
         fi
         attach_shared_mcp
-        echo "  + opencode container answers on :4096"
+        echo "  + opencode container answers on :4096; the forwarder injects its Basic auth on :4097"
     fi
 
     # 3. OpenHands: the start-stack.sh container becomes the compose one.
@@ -1587,6 +1624,20 @@ verify_keyless_one() {
     if [[ "$code" == 401 ]]; then v_ok "$name"; else v_fail "$name" "$(verify_expected "$code" 401)"; fi
 }
 
+# 2b. The opencode-auth forwarder adds opencode's Basic auth: a keyless request
+# to :4097 is answered 200 (the header is injected before the request leaves the
+# container), where opencode's own :4096 refused the same request above. No
+# credential is sent or printed - it lives only in the container's env_file
+# (derived by init, mode 600), never on the firewall.
+verify_forwarder() {
+    local port name code
+    port="$(service_port opencode-auth)"
+    name="forwarder /api/session injected on :$port"
+    if [[ -z "$(verify_container opencode-auth)" ]]; then v_skip "$name" "the opencode-auth service is not enabled"; return 0; fi
+    code="$(verify_code --noproxy '*' "http://127.0.0.1:$port/api/session")"
+    if [[ "$code" == 200 ]]; then v_ok "$name"; else v_fail "$name" "$(verify_expected "$code" 200)"; fi
+}
+
 # 3. A one-word request per combo, with the gateway key. The key goes to curl
 # on stdin (`-H @-` from a here-string): never on a command line, where `ps`
 # shows it, and never in this script's output.
@@ -1790,6 +1841,7 @@ cmd_verify() {
     verify_containers
     verify_keyless_one omniroute /v1/models
     verify_keyless_one opencode /api/session
+    verify_forwarder
     verify_combos
     verify_code_dir_visible
     verify_omniroute_qodercli
