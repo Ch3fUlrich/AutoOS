@@ -45,10 +45,10 @@ asks before loading that level's rules.
 
 | Level | Job | Relaunches | Asks the operator |
 |---|---|---|---|
-| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1 | decides obvious questions itself after research and says so; forwards everything else, and the answer, verbatim |
-| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap, from its handoff | never directly — appends `question: … \| options: …` to L0's inbox (R-orch-03) |
-| **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop | never directly — same channel, via L1 |
-| **L3** worker / reviewer | one closed task, an explicit return contract | nothing — the leaf rule (R-worker-06) | never |
+| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1 | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
+| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap, from its handoff (R-coord-06) | never directly — R-router-01 |
+| **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop (R-orch-06) | never directly — same channel, via L1 |
+| **L3** worker / reviewer | one closed task, an explicit return contract (`docs/agent-protocol.md`) | nothing — R-worker-06 | never |
 
 This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3` picks for a task
 — the two axes are independent. `references/main-orchestrator.md` names a single top session
@@ -77,7 +77,7 @@ merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or re
 
 ### router (L0)
 
-- R-router-01: Only L0 asks the operator; every other session appends `question:` to the L0/L1 inbox. (why: a dialog blocks a background session; source: common.md Questions for the operator)
+- R-router-01: Only L0 asks the operator, and only after research; every other session writes `question:` to the inbox. (why: a dialog blocks a background session; source: common.md Questions)
 - R-router-02: Diagnose against host and route state before declaring failure. (why: first verdict is usually wrong; source: review-b3c1.out 2026-09-26T07:33Z)
 
 ### coord (L1)

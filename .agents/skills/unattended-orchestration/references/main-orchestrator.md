@@ -15,6 +15,15 @@ have to repeat any of it in a brief.
 You may also spawn an L3 yourself, for example a cheap reviewer or a test run, when that is
 cheaper than asking an L2.
 
+## 1a. The heartbeat (every level, from the first minute)
+
+One recurring `CronCreate` job every 10 minutes, from launch until you stop, recreated after every
+relaunch or context clear: each beat pushes your branches, rewrites your status file (timestamp on
+the first line), reads your inbox, and checks your children. The rules that bind it are R-coord-07
+and R-coord-08; `autoos-agent.py heartbeat` is the read-only report of the same state. A background
+shell loop does not replace the cron — the runner kills loops under memory pressure and retires an
+idle session after 8 h.
+
 ## 2. Start of session
 
 1. **Navigate with tools, not by reading.**
@@ -29,6 +38,8 @@ cheaper than asking an L2.
 2. Read the plan. Read the DONE notes of earlier sessions (`layers.md`, "successor brief").
    Read `<stateDir>/state.json` if a run exists.
 3. Check the machine (§5) before launching anything.
+4. Create the heartbeat cron (§1a) before your first spawn — a session that cannot be watched
+   cannot be recovered.
 
 ## 3. Spawning and briefing L2
 
@@ -58,7 +69,8 @@ cheaper than asking an L2.
 
 ## 4. L3 executors, and cross-family review
 
-Cross-family review is rule R-review-03 in [`../SKILL.md`](../SKILL.md); put it in every L2 brief.
+Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md) (R-orch-14 keeps Haiku an
+extra cheap pass, never the final); put it in every L2 brief.
 
 | Executor | Family | How to reach it (measured status, 2026-09-18) |
 |---|---|---|
@@ -75,12 +87,11 @@ Cross-family review is rule R-review-03 in [`../SKILL.md`](../SKILL.md); put it 
 **The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
 carries them:
 
-1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): route by
-   [`../SKILL.md`](../SKILL.md) R-gateway-01 (free pools, then qoder/agy, paid DeepSeek and Claude
-   only as fallback) and review by R-review-03; Claude closes only high-risk changes (spec §5.7).
-4. **Opus stays at L1/L2 and does judgement:** decomposing, accepting or rejecting evidence.
-   Every DONE note records, for each change, which model wrote it, which reviewed it, and which
-   closed it.
+1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): the resolver owns the
+   leg order — read it with `python3 tools/autoos-agent.py route --explain`, never from prose
+   (R-coord-03) — and review by R-orch-13; Claude closes only high-risk changes (spec §5.7).
+4. **Opus stays at L1/L2 and does judgement:** decomposing, accepting or rejecting evidence
+   (R-coord-02). Who wrote, reviewed and closed each change is the lane record's job — R-orch-14.
 5. **Free first, private never** (operator, 2026-09-18: "allowed training on user data now so the
    free and contributor models are available … ensure that no private data is used on those
    models").
@@ -155,7 +166,7 @@ L2 alike.
 - **Fewer lanes beat a thrashing host.** Only add a parallel heavy lane when CPU, RAM and disk
   all have headroom. Run one local GPU model at a time, and unload it (`keep_alive: 0`) when
   done.
-- Never run the full suite in the main checkout while lanes merge (SKILL.md R-tests-02). Never reboot the
+- Never run the full suite in the main checkout while lanes merge (R-worker-03). Never reboot the
   host.
 - Check free disk before anything that downloads or builds. Clean up worktrees you merged
   (`-Cleanup`).
@@ -172,14 +183,13 @@ L2 alike.
   you already summarised.
 - Subagents return a short structured result: verdict, evidence paths, numbers. Tell them that
   in the brief, and tell them the same token rules.
-- Use the cheapest model that can verify its own output (lanes.md); save Opus for
-  judgement.
+- The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
 
 ## 7. Research grade: evidence over assertion
 
-- **A DONE note is a claim, not evidence.**
-  - Check each outcome yourself: the diff, the guard log's summary line, and a re-run of the
-    one test that proves it.
+- **A DONE note is a claim, not evidence** — verifying it yourself is R-coord-02.
+  - Check each outcome yourself: the guard log's summary line, and a re-run of the one test that
+    proves it.
   - Ask the lower level for its reasoning, not just its result.
 - **Question results that look too good, and results that contradict each other.** When two
   reviewers disagree, settle it with a test, not a vote.
@@ -190,7 +200,7 @@ L2 alike.
 - **Label every statement:** measured (command and date), sourced (link), or inferred. Never
   present an inference as a measurement.
 - **Refusals:** record them verbatim and route them to the operator; never work around them
-  (SKILL.md R-safety-02).
+  (R-orch-08).
 
 ## 8. End of session
 
