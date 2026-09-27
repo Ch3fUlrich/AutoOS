@@ -35,7 +35,8 @@
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
 # runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1. The opt-in opencode-auth
 # forwarder is additionally refused on a LAN bind until that firewall actually
-# restricts :4097 (AUTOOS_FW_SCRIPT). An AUTOOS_OMNIROUTE_PUBLIC_URL
+# restricts :4097 (AUTOOS_FW_SCRIPT in the environment or stack.env), unless
+# stack.env says AUTOOS_STACK_FORWARDER_LAN=1. An AUTOOS_OMNIROUTE_PUBLIC_URL
 # the gateway would exit on (not an http(s) URL) is refused too.
 # Design, RAM budget, rollback: docs/web-services.md (Server profile section).
 set -euo pipefail
@@ -94,7 +95,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -315,7 +316,7 @@ env_replace_value() {
 opencode_password_sync() {
     local keys_env="$CONFIG_DIR/opencode.env"
     local auth_env="$CONFIG_DIR/opencode-auth.env"
-    local y="" src="" val backup cur basic
+    local y="" src="" val backup cur basic op_pw
     y="$(keys_value opencode_password)"
     if [[ "$y" == *$'\n'* || "$y" == *$'\r'* ]]; then
         echo "  ! opencode_password: the value holds a line break (\\n or \\r) - an env file cannot carry it; not used"
@@ -395,8 +396,17 @@ opencode_password_sync() {
 
     # Derived copy 3: the opencode-auth forwarder's Basic credential, base64 of
     # "opencode:<password>", read by Caddy as OPENCODE_BASIC_B64. Same rules as
-    # the other copies - a copy newer than the yml is the operator's.
-    basic="$(printf '%s' "opencode:$y" | base64 -w0)"
+    # the other copies - a copy newer than the yml is the operator's. Only
+    # written when the edge-forwarder profile is requested: a host without it
+    # gets no third copy. The blob comes from the password opencode actually
+    # uses (copy 1 above), so an operator-newer opencode.env value is honoured.
+    if ! forwarder_requested; then
+        echo "  = $auth_env skipped (edge-forwarder profile not requested)"
+        return 0
+    fi
+    op_pw="$(env_value "$keys_env" OPENCODE_PASSWORD)"
+    [[ -n "$op_pw" ]] || op_pw="$y"
+    basic="$(printf '%s' "opencode:$op_pw" | base64 -w0)"
     if ! file_has_key "$auth_env" OPENCODE_BASIC_B64; then
         ensure_env_file "$auth_env" OPENCODE_BASIC_B64 "$basic" || return 1
     else
@@ -588,25 +598,35 @@ service_enabled() {
     esac
 }
 
+# fw_script: the host firewall script the forwarder guard reads to learn
+# which ports coding-agents-fw.service limits. Read only - never executed.
+# The environment wins, then stack.env, then the default path.
+fw_script() {
+    local f="${AUTOOS_FW_SCRIPT:-}"
+    [[ -n "$f" ]] || f="$(env_value "$STACK_ENV" AUTOOS_FW_SCRIPT)"
+    printf '%s' "${f:-/usr/local/sbin/coding-agents-fw.sh}"
+}
+
 # fw_ports_cover <script> <port>: whether the firewall script's PORTS=
 # assignment names <port> (a bare number or a range a:b that contains it). The
 # script is only read, never executed: a guard must not run root's firewall
-# just to ask it a question.
+# just to ask it a question. Only an unindented top-level PORTS= line counts:
+# anything inside an if, loop or function is not the firewall's own list.
 fw_ports_cover() {
     local script="$1" port="$2" raw spec p a b parts
     [[ -r "$script" ]] || return 1
-    raw="$(grep -E '^[[:space:]]*(export[[:space:]]+)?PORTS=' "$script" 2>/dev/null | tail -n1)" || true
+    raw="$(grep -E '^PORTS=' "$script" 2>/dev/null | tail -n1)" || true
     [[ -n "$raw" ]] || return 1
     spec="${raw#*=}"
     spec="${spec%%#*}"
-    spec="$(printf '%s' "$spec" | tr -d "\"'[:space:]")"
+    spec="$(printf '%s' "$spec" | tr -d "\"'" | tr '[:space:]' ',')"
     local IFS=',;'
     read -ra parts <<<"$spec"
     for p in "${parts[@]}"; do
         [[ -z "$p" ]] && continue
         if [[ "$p" == *:* ]]; then
             a="${p%%:*}"; b="${p##*:}"
-            if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && (( a <= port && port <= b )); then return 0; fi
+            if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && (( 10#$a <= 10#$port && 10#$port <= 10#$b )); then return 0; fi
         elif [[ "$p" == "$port" ]]; then
             return 0
         fi
@@ -618,24 +638,42 @@ fw_ports_cover() {
 # proves the firewall unit runs; it says nothing about :4097, which the
 # forwarder publishes with NO auth of its own. So when the forwarder is opted
 # in on a LAN bind, this refuses until the firewall itself restricts :4097
-# (or the operator accepts the exposure with AUTOOS_STACK_ALLOW_LAN=1).
+# (or the operator accepts the exposure with AUTOOS_STACK_FORWARDER_LAN=1 in
+# stack.env - AUTOOS_STACK_ALLOW_LAN=1 alone does not cover the forwarder).
 FORWARDER_OK=0
 forwarder_guard() {
-    local bind allow
+    local bind allow fw
     (( FORWARDER_OK )) && return 0
     if ! forwarder_requested; then FORWARDER_OK=1; return 0; fi
     bind="$(effective_bind)"
     if is_loopback "$bind"; then FORWARDER_OK=1; return 0; fi
-    allow="$(env_value "$STACK_ENV" AUTOOS_STACK_ALLOW_LAN)"
+    allow="$(env_value "$STACK_ENV" AUTOOS_STACK_FORWARDER_LAN)"
     if [[ "$allow" == 1 ]]; then FORWARDER_OK=1; return 0; fi
-    if fw_ports_cover "$FW_SCRIPT" 4097; then
-        echo "  = publishing the opencode-auth forwarder on $bind:4097: $FW_SCRIPT restricts :4097"
+    fw="$(fw_script)"
+    if fw_ports_cover "$fw" 4097; then
+        echo "  = publishing the opencode-auth forwarder on $bind:4097: $fw restricts :4097"
         FORWARDER_OK=1
         return 0
     fi
-    echo "  ! refusing to start the opencode-auth forwarder on $bind:4097: the host firewall ($FW_SCRIPT) does not restrict :4097 - it would expose opencode without a password to the LAN. Ask for :4097 in coding-agents-fw (only the proxy host), or set AUTOOS_STACK_ALLOW_LAN=1."
+    echo "  ! refusing to start the opencode-auth forwarder on $bind:4097: the host firewall ($fw) does not restrict :4097 - it would expose opencode without a password to the LAN. Ask for :4097 in coding-agents-fw (only the proxy host), or set AUTOOS_STACK_FORWARDER_LAN=1 in $STACK_ENV."
     if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
     return 1
+}
+
+# remove_leftover_forwarder: the forwarder runs with restart: unless-stopped,
+# so turning the edge-forwarder profile off leaves autoos-opencode-auth
+# running with :4097 published and nothing to stop it. up and down therefore
+# remove that leftover whenever the profile is not requested.
+remove_leftover_forwarder() {
+    if forwarder_requested; then return 0; fi
+    if ! "$DOCKER" inspect autoos-opencode-auth >/dev/null 2>&1; then return 0; fi
+    if [[ $DRY -eq 1 ]]; then echo "  - would remove leftover autoos-opencode-auth (edge-forwarder profile not requested)"; return 0; fi
+    if "$DOCKER" rm -f autoos-opencode-auth >/dev/null 2>&1; then
+        echo "  - removed leftover autoos-opencode-auth (edge-forwarder profile not requested)"
+    else
+        echo "  ! could not remove leftover autoos-opencode-auth"
+    fi
+    return 0
 }
 
 # dc_up [args...]: `docker compose up -d`, never past a refusing bind guard.
@@ -943,7 +981,7 @@ cmd_up() {
         fi
         start+=("$svc")
     done
-    (( ${#start[@]} )) || return 0
+    (( ${#start[@]} )) || { remove_leftover_forwarder; return 0; }
     # Before the images: compose up below may create these containers or
     # recreate running ones (a changed bind, a rebuilt image).
     preflight || return 1
@@ -953,10 +991,12 @@ cmd_up() {
     ensure_images "${start[@]}" || return 1
     if [[ $DRY -eq 1 ]]; then
         echo "  - would run: docker compose -p autoos-ai up -d --no-deps ${start[*]}"
+        remove_leftover_forwarder
         attach_shared_mcp
         return 0
     fi
     dc_up --no-deps "${start[@]}" || { echo "  ! docker compose up failed - see: $0 status"; return 1; }
+    remove_leftover_forwarder
     attach_shared_mcp
     for svc in "${start[@]}"; do
         case "$svc" in
@@ -974,8 +1014,9 @@ is_compose_container() {
 }
 
 cmd_down() {
-    if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai stop ${SERVICES[*]}"; return 0; fi
+    if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai stop ${SERVICES[*]}"; remove_leftover_forwarder; return 0; fi
     dc stop "${SERVICES[@]}"
+    remove_leftover_forwarder
 }
 
 # restart one service through the same compose wrapper as up/down (same

@@ -36,7 +36,7 @@ def main(path):
     text = open(path, encoding="utf-8").read()
     svc = services(text)
     bad = []
-    for want in ("omniroute", "opencode", "openhands"):
+    for want in ("omniroute", "opencode", "openhands", "opencode-auth"):
         if want not in svc:
             bad.append("missing service " + want)
     for name, body in svc.items():
@@ -50,7 +50,7 @@ def main(path):
         need(r"^    pids_limit: ", "pids_limit missing")
         need(r"^    healthcheck:", "healthcheck missing")
         need(r"^    container_name: ", "container_name missing")
-        need(r"^      - autoos-ai$|^      autoos-ai:", "not on the autoos-ai network")
+        # Networks are checked per service below (the forwarder is isolated).
         if re.search(r"^    privileged:", body, re.M):
             bad.append(name + ": privileged is forbidden")
         if re.search(r"network_mode:\s*host", body):
@@ -70,12 +70,56 @@ def main(path):
         if re.search(r"(sk-[A-Za-z0-9]{8,}|PASSWORD=\S|_KEY: ['\"]?[A-Za-z0-9]{12,})", body):
             bad.append(name + ": inline secret")
     om, oc, oh = svc.get("omniroute", ""), svc.get("opencode", ""), svc.get("openhands", "")
-    for name, body in (("omniroute", om), ("opencode", oc)):
+    oa = svc.get("opencode-auth", "")
+    # Networks: the forwarder sits on its own wire with opencode only, never
+    # on autoos-ai (OpenHands, its sandboxes and serena must not reach :4097).
+    def nets(body):
+        return set(re.findall(r"^      - ([A-Za-z0-9_.-]+)$", body, re.M))
+    for name, body, want, forbid in (
+        ("omniroute", om, {"autoos-ai"}, {"opencode-auth"}),
+        ("openhands", oh, {"autoos-ai"}, {"opencode-auth"}),
+        ("opencode", oc, {"autoos-ai", "opencode-auth"}, set()),
+        ("opencode-auth", oa, {"opencode-auth"}, {"autoos-ai"}),
+    ):
+        got = nets(body)
+        if not want <= got:
+            bad.append("%s: must join %s (joins %s)" % (name, sorted(want), sorted(got)))
+        if got & forbid:
+            bad.append("%s: must not join %s" % (name, sorted(got & forbid)))
+    for name, body in svc.items():
+        if name not in ("omniroute", "opencode", "openhands", "opencode-auth"):
+            continue
+        if name in ("omniroute", "opencode", "openhands") and "autoos-ai" not in nets(body):
+            # Backstop for a service that lists its network as a mapping.
+            if not re.search(r"^      - autoos-ai$|^      autoos-ai:", body, re.M):
+                bad.append("%s: not on the autoos-ai network" % name)
+    if not re.search(r"^networks:\n(?:^  .*\n)*?^  opencode-auth:\s*$", text, re.M):
+        bad.append("missing top-level network opencode-auth")
+    # Hardening for every service: run as the host user on a read-only root
+    # with no capability back - except where noted below.
+    for name, body in svc.items():
+        if name == "openhands":
+            # The entrypoint must start as root (useradd/usermod + su to the
+            # sandbox user), so no user: / read_only: rule applies to it; its
+            # capabilities are checked separately below.
+            continue
         if not re.search(r'^    user: "\$\{AUTOOS_UID:-1000\}:\$\{AUTOOS_GID:-1000\}"$', body, re.M):
             bad.append(name + ": must run as the host user (AUTOOS_UID:AUTOOS_GID)")
         if not re.search(r"^    read_only: true$", body, re.M):
             bad.append(name + ": root filesystem must be read-only")
-        if re.search(r"^    cap_add:", body, re.M):
+    for name, body in svc.items():
+        if name == "opencode-auth":
+            # The official caddy binary carries the file capability
+            # cap_net_bind_service; with it outside the bounding set exec
+            # fails ("exec /usr/bin/caddy: operation not permitted", measured).
+            # Only this one cap comes back.
+            m = re.search(r"^    cap_add:\n((?:      - \S+\n?)+)", body, re.M)
+            got = set(re.findall(r"- (\S+)", m.group(1))) if m else set()
+            if got != {"NET_BIND_SERVICE"}:
+                bad.append("opencode-auth: cap_add must be exactly NET_BIND_SERVICE")
+        elif name == "openhands":
+            pass  # checked against its own allow-list below
+        elif re.search(r"^    cap_add:", body, re.M):
             bad.append(name + ": needs no capability back")
     if not re.search(r'REQUIRE_API_KEY: "true"', om):
         bad.append("omniroute: REQUIRE_API_KEY must be pinned to true")

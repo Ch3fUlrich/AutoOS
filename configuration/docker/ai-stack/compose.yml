@@ -20,6 +20,11 @@ networks:
   # http://omniroute:20128, http://opencode:4096, http://openhands:3000.
   autoos-ai:
     name: autoos-ai
+  # Forwarder-only wire: opencode and opencode-auth reach each other as
+  # http://opencode:4096. Nothing else joins it, and opencode-auth is NOT on
+  # autoos-ai, so OpenHands, its sandboxes and serena cannot reach :4097.
+  opencode-auth:
+    name: autoos-opencode-auth
 
 services:
   omniroute:
@@ -164,6 +169,7 @@ services:
       - omniroute
     networks:
       - autoos-ai
+      - opencode-auth
 
   opencode-auth:
     # Edge forwarder for the reverse proxy: opencode.<domain> reaches :4097,
@@ -208,8 +214,10 @@ services:
     mem_limit: 128m
     pids_limit: 128
     healthcheck:
-      # GET / is unauthenticated on opencode, so a 200 proves the upstream.
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4097/"]
+      # /api/session without a password is 401 on opencode itself; through
+      # the forwarder (Basic injected) it must be 200. wget -q exits non-zero
+      # on 401, so the verdict is real.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4097/api/session"]
       interval: 30s
       timeout: 5s
       start_period: 15s
@@ -222,7 +230,7 @@ services:
     depends_on:
       - opencode
     networks:
-      - autoos-ai
+      - opencode-auth
 
   openhands:
     # The image start-stack.sh ran as :latest, pinned to the digest measured
