@@ -35,7 +35,7 @@ function Get-AutoOSKeyValue {
     $found = $false
     foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
         $line = $raw -replace '\r$',''
-        if ($line -cmatch "^\s*$escaped\s*:\s*(.+)$") {
+        if ($line -cmatch "^$escaped\s*:\s*(.+)$") {
             $v = $Matches[1]
             if ($v -match '^\s*#') { continue }
             if ($v.Length -gt 0 -and $v[0] -eq '"') {
@@ -53,7 +53,7 @@ function Get-AutoOSKeyValue {
                 if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
                 $v = $v.TrimEnd()
             }
-            if ($v -clike 'REPLACE_WITH_*') { continue }
+            if ($v -clike 'REPLACE_WITH_*') { $v = '' }
             $last = $v
             $found = $true
         }
