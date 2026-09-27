@@ -1755,8 +1755,9 @@ def cmd_ps(args) -> int:
     directory = workers_dir()
     rows = list_workers(directory, include_ended=args.all)
     if args.all:  # --all: exited from the last 24 h (running/died always shown)
+        day_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
         rows = [r for r in rows if not r["state"].startswith("exited")
-                or (r["elapsed_seconds"] or 0) <= 24 * 3600]
+                or (_parse_iso(r["ended"]) or day_ago) > day_ago]
     if args.json:
         print(json.dumps({"workers": rows, "dir": directory}, indent=1))
         return 0

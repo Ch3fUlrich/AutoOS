@@ -3934,6 +3934,19 @@ class PsTests(_WorkerRecordBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("no workers running", r.stdout)
 
+    def test_ps_all_window_is_by_end_time_not_run_length(self):
+        # --all adds workers that EXITED in the last 24 h: a 1-minute run that
+        # ended 3 days ago is out, a 30-hour run that ended an hour ago is in.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.write("old", started=iso(now - datetime.timedelta(days=3, minutes=1)),
+                   ended=iso(now - datetime.timedelta(days=3)), rc=0)
+        self.write("long", started=iso(now - datetime.timedelta(hours=31)),
+                   ended=iso(now - datetime.timedelta(hours=1)), rc=0)
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["long"])
+
     def test_mcp_ps_returns_the_same_rows(self):
         self.write()
         rows = self.agent.list_workers(self.workers)
