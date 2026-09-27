@@ -1120,37 +1120,89 @@ ensure_client_key_file() {
     echo "  + wrote the gateway client key to $CLIENT_KEY_FILE (0600)"
 }
 
-# Prints the pid listening on the gateway port (same-user processes only;
-# ss hides the owner of anyone else's socket, which then counts as "no
-# listener"), exactly like configuration/litellm/start-litellm.sh does.
-# start-litellm.sh writes no pid file, so the standby is discoverable only
-# this way, plus the cmdline check below.
-failover_listener_pid() {
-    local port
-    port="$(failover_port)"
-    ss -ltnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2
+# failover_cmdline <pid>: that process's argv, one argument per line (empty
+# when the pid is gone or unreadable).
+failover_cmdline() {
+    tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null || true
 }
 
-# failover_is_litellm <pid>: that pid still runs the standby (argv[0], or the
-# script in argv[1] when a venv python runs it - never "litellm" anywhere in
-# the arguments, so a reused pid belongs to someone else). Same rule as
-# start-litellm.sh's foreign-port check.
-failover_is_litellm() {
+# failover_litellm_name <pid>: the PROGRAM is litellm - argv[0], or the script
+# in argv[1] when a venv python runs it - never "litellm" anywhere in the
+# arguments, so a reused pid belongs to someone else. Same rule as
+# start-litellm.sh's foreign-port check, and on its own not enough: the
+# always-on :4000 proxy is the same program.
+failover_litellm_name() {
     local arg
     local found=0
-    [[ "${1:-}" =~ ^[0-9]+$ ]] || return 1
-    [[ -d "/proc/$1" ]] || return 1
     while IFS= read -r arg; do
         [[ "${arg##*/}" == litellm ]] && found=1
-    done < <(tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null | head -n 2)
+    done < <(failover_cmdline "$1" | head -n 2)
     (( found ))
 }
 
-# Every pid the standby may have left: the state file's, any pid file in
-# its own state dir, plus the live listener when it looks like litellm (a
-# reused pid belongs to someone else - the pid-reuse guard). Only numbers -
-# anything else is ignored - each once (a duplicate would SIGPIPE a
-# `| head -n1` reader under pipefail + errexit).
+# failover_argv_ports <pid> <port>: that process was STARTED on <port> -
+# `--port <port>` or `--port=<port>` in its own argv. The one piece of evidence
+# that survives the instant the standby lets the socket go.
+failover_argv_ports() {
+    local prev="" arg
+    while IFS= read -r arg; do
+        if [[ "$arg" == "--port=$2" ]] || { [[ "$prev" == "--port" ]] && [[ "$arg" == "$2" ]]; }; then
+            return 0
+        fi
+        prev="$arg"
+    done < <(failover_cmdline "$1")
+    return 1
+}
+
+# failover_listens_on <pid> <port>: ss names that pid as a holder of a
+# listening socket on <port> (same-user processes only - ss hides the owner of
+# anyone else's socket).
+failover_listens_on() {
+    local p
+    while IFS= read -r p; do
+        [[ "$p" == "$1" ]] && return 0
+    done < <(ss -ltnpH "sport = :$2" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2)
+    return 1
+}
+
+# failover_is_standby <pid>: the failover standby and nothing else, so a
+# signal here can never reach the always-on :4000 proxy - which the SAME
+# starter script runs, with the SAME argv shape, and which the name test alone
+# would accept. Both halves must hold (review lstby2c): the program is litellm,
+# AND it belongs to the failover port - listening on it now, or started with
+# --port <failover port>. A stale state-file pid that today belongs to the
+# :4000 proxy fails the second half and is left alone.
+failover_is_standby() {
+    local pid="${1:-}" port
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [[ -d "/proc/$pid" ]] || return 1
+    failover_litellm_name "$pid" || return 1
+    port="$(failover_port)"
+    failover_argv_ports "$pid" "$port" && return 0
+    failover_listens_on "$pid" "$port"
+}
+
+# Every pid listening on the gateway port that passes the standby check. `ss`
+# can name several processes for one port - separate IPv4 and IPv6 lines, or
+# programs sharing the socket - so EVERY pid=N is tested, not the first line of
+# the whole output (review lstby2c). Prints one per line, possibly none.
+failover_listener_pid() {
+    local port p
+    port="$(failover_port)"
+    while IFS= read -r p; do
+        [[ "$p" =~ ^[0-9]+$ ]] || continue
+        if failover_is_standby "$p"; then printf '%s\n' "$p"; fi
+    done < <(ss -ltnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2)
+    return 0
+}
+
+# Every pid a stop may be asked of it: the state file's, any pid file in
+# the standby's own state dir, plus the live listener when it passes the
+# standby check. Only numbers - anything else is ignored - each once (a
+# duplicate would SIGPIPE a `| head -n1` reader under pipefail + errexit).
+# These are CANDIDATES, not verdicts: failover_stop_litellm re-checks every
+# one, because a state file outliving its standby leaves a pid that now belongs
+# to someone else - possibly the :4000 proxy.
 failover_pids() {
     local p f
     local -A seen=()
@@ -1166,48 +1218,54 @@ failover_pids() {
         p="${p%%$'\n'*}"
         if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]]; then seen[$p]=1; printf '%s\n' "$p"; fi
     done
-    p="$(failover_listener_pid || true)"
-    if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]] && failover_is_litellm "$p"; then
-        printf '%s\n' "$p"
-    fi
+    while IFS= read -r p; do
+        if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]]; then seen[$p]=1; printf '%s\n' "$p"; fi
+    done < <(failover_listener_pid)
     return 0
 }
 
-# Stop the standby and nothing else: only a pid from above is ever signalled,
-# and only while it still looks like litellm (a reused pid belongs to someone
-# else) - the :4000 unit's processes can never match. Missing pids are already
-# gone. TERM first, KILL after 10 s for a standby that ignores TERM;
-# afterwards only the standby's own pid files are removed.
+# Stop the standby and nothing else. A pid from failover_pids is signalled only
+# while it passes failover_is_standby (the program is litellm AND it belongs to
+# the gateway port), so a stale pid, a reused pid, a foreign listener and the
+# always-on :4000 proxy are named in the output and left alone. TERM first,
+# KILL after 10 s for a standby that ignores TERM; only the pids that passed the
+# check are waited on, so a stale one never costs 15 s. Afterwards only the
+# standby's own pid files are removed.
 failover_stop_litellm() {
     local p i alive
+    local -a targets=()
+    local -A taken=()
     for p in $(failover_pids); do
-        if failover_is_litellm "$p"; then
+        if failover_is_standby "$p"; then
+            [[ -n "${taken[$p]:-}" ]] && continue
+            taken[$p]=1
+            targets+=("$p")
             kill "$p" 2>/dev/null || true
         else
             echo "  ! pid $p is not litellm any more - leaving it alone"
         fi
     done
-    for i in $(seq 1 10); do
-        alive=0
-        for p in $(failover_pids); do
-            [[ -d "/proc/$p" ]] && alive=1
+    if (( ${#targets[@]} )); then
+        for i in $(seq 1 10); do
+            alive=0
+            for p in "${targets[@]}"; do
+                failover_is_standby "$p" && alive=1
+            done
+            (( alive )) || break
+            sleep 1
         done
-        (( alive )) || break
-        sleep 1
-    done
-    for p in $(failover_pids); do
-        if [[ -d "/proc/$p" ]] && failover_is_litellm "$p"; then
-            kill -KILL "$p" 2>/dev/null || true
-        fi
-    done
-    for i in $(seq 1 5); do
-        alive=0
-        for p in $(failover_pids); do
-            [[ -d "/proc/$p" ]] && alive=1
+        for p in "${targets[@]}"; do
+            if failover_is_standby "$p"; then kill -KILL "$p" 2>/dev/null || true; fi
         done
-        (( alive )) || break
-        sleep 1
-    done
+        for i in $(seq 1 5); do
+            alive=0
+            for p in "${targets[@]}"; do
+                failover_is_standby "$p" && alive=1
+            done
+            (( alive )) || break
+            sleep 1
+        done
+    fi
     rm -f "$FAILOVER_DIR"/litellm.pid "$FAILOVER_DIR"/*.pid 2>/dev/null || true
 }
 
@@ -1237,23 +1295,32 @@ failover_require_port_free() {
 
 # Bring OmniRoute back with a RECREATE, never a bare `start`: a stopped
 # container left without published ports stays port-less (live 2026-09-27 -
-# only `ai-stack.sh up omniroute` fixed it). Then gateway health plus a
-# published-port check; on failure the manual fix, rc 1.
+# only `ai-stack.sh up omniroute` fixed it). Through dc_up, so the same
+# preflight that guards every other `compose up` (bind guard, public URL)
+# judges this one too - handing the port back must not be a way around them.
+# Then gateway health plus a published-port check; on failure the manual fix,
+# rc 1. Optional <health_tries> bounds the wait: the interrupt trap passes a
+# short one, so a handed-back Ctrl-C never sits on the full 180 s.
 failover_bring_back_omniroute() {
+    local tries="${1:-36}"
     local port
     local ports
     port="$(failover_port)"
-    dc up -d --no-deps omniroute || {
+    dc_up --no-deps omniroute || {
         echo "  ! docker compose up omniroute failed - fix by hand: $0 up omniroute"
         return 1
     }
-    if ! wait_for gateway_ok; then
+    if ! wait_for gateway_ok "$tries"; then
         echo "  ! omniroute did not answer - docker logs autoos-omniroute"
         echo "  ! fix by hand: $0 up omniroute"
         return 1
     fi
+    # A published port means a NON-NULL host binding. `{"20128/tcp":null}` is
+    # compose's "key exists, nothing bound" answer and is as broken as `{}` -
+    # the gateway answers inside its own network while the host port stays
+    # closed (review lstby2c).
     ports="$("$DOCKER" inspect -f '{{json .NetworkSettings.Ports}}' autoos-omniroute 2>/dev/null || true)"
-    if [[ -z "$ports" || "$ports" == '{}' ]]; then
+    if ! grep -qE "\"$port/tcp\"[[:space:]]*:[[:space:]]*\[[^]]*\"HostPort\"" <<<"$ports"; then
         echo "  ! omniroute answers but publishes no port (:$port missing) - fix by hand: $0 up omniroute"
         return 1
     fi
@@ -1284,8 +1351,9 @@ cmd_failover_on() {
     dc stop omniroute || { echo "  ! could not stop the omniroute container"; return 1; }
     # From here the gateway is down: an interrupt (ctrl-C, TERM) must hand the
     # port back instead of leaving a stateless standby on it. Cleared on every
-    # return below.
-    trap 'echo "  ! interrupted - handing the port back to the gateway"; failover_stop_litellm; if failover_require_port_free; then failover_bring_back_omniroute || true; fi; trap - INT TERM; exit 130' INT TERM
+    # return below. The trap's recreate waits 30 s, not the full 180 s: an
+    # interrupted command should report, not hold the terminal (review lstby2c).
+    trap 'echo "  ! interrupted - handing the port back to the gateway"; failover_stop_litellm; if failover_require_port_free; then failover_bring_back_omniroute 6 || true; fi; trap - INT TERM; exit 130' INT TERM
     if ! AUTOOS_LITELLM_HOST="$host" AUTOOS_LITELLM_PORT="$port" \
         AUTOOS_LITELLM_MASTER_KEY_FILE="$CLIENT_KEY_FILE" AUTOOS_LITELLM_STATE_DIR="$FAILOVER_DIR" \
         "$START_LITELLM"; then
@@ -1299,13 +1367,19 @@ cmd_failover_on() {
     fi
     if wait_for failover_litellm_ok 12; then
         since="$(date +%Y-%m-%dT%H:%M:%S%z)"
+        # The listener probe answers with one line per standby pid; the state
+        # file records one. Read the first without a `| head` (SIGPIPE under
+        # pipefail) and fall back to "unknown" when nothing passed the check.
         pid="$(failover_listener_pid || true)"
-        if [[ -z "$pid" ]] || ! failover_is_litellm "$pid"; then
-            pid="unknown"
-        fi
+        pid="${pid%%$'\n'*}"
+        [[ "$pid" =~ ^[0-9]+$ ]] || pid="unknown"
         # No state file = a later `off` could not find the standby: roll back.
         if ! { mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" && printf 'since=%s\npid=%s\n' "$since" "$pid" >"$FAILOVER_STATE"; }; then
             echo "  ! could not record the failover state - handing the port back to the gateway"
+            # A failed printf can leave a truncated file behind, and a later
+            # `off` reads that as a live failover with a pid of its own: remove
+            # the path whatever survived of the write (review lstby2c).
+            rm -f "$FAILOVER_STATE" 2>/dev/null || true
             failover_stop_litellm
             if failover_require_port_free; then
                 failover_bring_back_omniroute || true
@@ -1326,10 +1400,21 @@ cmd_failover_on() {
     return 1
 }
 
+# Did a failover standby ever run here, and does one still hold the gateway
+# port? The state file is the usual answer; when it is gone (a shell killed
+# between the standby's start and the write, an operator who cleared the
+# config dir by hand) the standby's own state dir is the local trace that the
+# starter ran - it creates that directory and writes no pid file - and a
+# litellm listener on the gateway port is the proof it is still up (review
+# lstby2c). Only "never ran, nothing listens" is a real no-op.
+failover_standby_may_be_live() {
+    [[ -d "$FAILOVER_DIR" ]] && [[ -n "$(failover_listener_pid)" ]]
+}
+
 cmd_failover_off() {
     local port
     port="$(failover_port)"
-    if [[ ! -f "$FAILOVER_STATE" ]]; then
+    if [[ ! -f "$FAILOVER_STATE" ]] && ! failover_standby_may_be_live; then
         echo "  = failover is off (skipped)"
         return 0
     fi
@@ -1342,7 +1427,9 @@ cmd_failover_off() {
     fi
     failover_stop_litellm
     if ! failover_require_port_free; then
-        echo "  - kept $FAILOVER_STATE: failover is still on, the gateway needs attention"
+        if [[ -f "$FAILOVER_STATE" ]]; then
+            echo "  - kept $FAILOVER_STATE: failover is still on, the gateway needs attention"
+        fi
         return 1
     fi
     if ! failover_bring_back_omniroute; then

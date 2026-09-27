@@ -163,17 +163,26 @@ combo id).
   (`~/.config/autoos/ai-stack/client.key`, mode 600, never printed), wait for
   `/health/liveliness`, then record `failover.state` with the standby pid -
   the process listening on `:20128`, found with `ss` exactly like
-  `start-litellm.sh` does (it writes no pid file) and accepted only when its
-  `/proc/<pid>/cmdline` is litellm. Already on refuses (rc 2); a standby
-  that never turns live hands the port back to the gateway and exits 1 -
-  the port is never left empty.
-- `ai-stack.sh failover off` - stop only the standby (TERM, KILL after 10 s;
-  a foreign listener on the port is never signalled - the `:4000` unit below
-  is never touched), then refuse when the port stays busy (names the holder
-  from `ss`, starts nothing, rc 1), otherwise recreate the gateway
-  (`compose up -d --no-deps omniroute` - a bare `start` of a port-less
-  container never republishes the port), wait for `/api/health`, check the
-  port is published, remove the state file. Already off is a no-op (rc 0).
+  `start-litellm.sh` does (it writes no pid file) and accepted only when the
+  program IS litellm (`/proc/<pid>/cmdline`) *and* it belongs to that port:
+  every `pid=` ss names is tested, not just the first. Already on refuses
+  (rc 2); a standby that never turns live - or a state file that cannot be
+  written - hands the port back to the gateway and exits 1: the port is never
+  left empty and no half-written state path survives.
+- `ai-stack.sh failover off` - stop only the standby (TERM, KILL after 10 s).
+  "The standby" is the litellm process on `:20128`, never merely a process
+  named litellm: the always-on `:4000` unit below is the same program started
+  by the same script, so a state-file pid that now belongs to it is named in
+  the output and left alone, as is any foreign listener. Then refuse when the
+  port stays busy (names the holder from `ss`, starts nothing, rc 1),
+  otherwise recreate the gateway through the same preflight every other
+  `compose up` passes (bind guard, public URL) - `compose up -d --no-deps
+  omniroute`, because a bare `start` of a port-less container never
+  republishes the port - wait for `/api/health`, check the port really has a
+  host binding (`{"20128/tcp":null}` is not published), remove the state file.
+  With no state file at all it still looks for a standby on the port: a
+  `failover on` that died before the write left one, and only "no standby
+  listening" is the no-op (rc 0).
 - `ai-stack.sh failover status` - `failover on since <time> (litellm pid N)`
   or `failover off`. `--dry-run` prints every step and changes nothing;
   `verify` names the standby (`failover ON: LiteLLM serves the gateway port`)
