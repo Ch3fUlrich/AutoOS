@@ -989,6 +989,127 @@ class ProviderLimitsFilterTests(unittest.TestCase):
         self.assertEqual(r.no_route(removed)["state"], "input_required")
 
 
+class LegRulesFilterTests(unittest.TestCase):
+    """The per-leg policy.leg_rules filter (brief OR1f, 2026-09-27).
+
+    The gateway renders only ``registry.gateway_legs``, which drops every leg
+    ``policy.leg_rules`` denies; the resolver's ``usable_legs`` must drop the
+    same legs, or it plans a combo (e.g. ``groq/openai/gpt-oss-120b``) the
+    gateway never serves. A denied leg is skipped with a reason naming the
+    rule, and a route whose only leg is denied comes back as the resolver's
+    existing no-usable-leg outcome. No clock, no availability here: the inline
+    registry isolates the deny rule from the other per-leg filters.
+    """
+
+    def registry(self):
+        return {
+            "providers": {
+                "groq": {"id": "groq", "tier": "free",
+                         "trains_on_prompts": False},
+                "clean": {"id": "clean", "tier": "paid",
+                          "trains_on_prompts": False},
+            },
+            "models": {
+                "openai/gpt-oss-120b": {
+                    "id": "openai/gpt-oss-120b", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "big": {"id": "big", "tool_calls": "proven",
+                        "context_usable": {"tokens": 100000,
+                                           "source": "default"}},
+                "small": {"id": "small", "tool_calls": "proven",
+                          "context_usable": {"tokens": 100000,
+                                             "source": "default"}},
+            },
+            "routes": {
+                "r-rules": {"id": "r-rules",
+                            "legs": ["groq/openai/gpt-oss-120b", "clean/big"]},
+                "r-only-denied": {"id": "r-only-denied",
+                                  "legs": ["groq/openai/gpt-oss-120b"]},
+                "r-order": {"id": "r-order",
+                            "legs": ["clean/big", "groq/openai/gpt-oss-120b",
+                                     "clean/small"]},
+            },
+            "policy": {
+                "leg_rules": [
+                    {"id": "deny-groq", "match": "groq/*", "allow": False,
+                     "reason": "test: groq denied"},
+                    {"id": "allow-clean", "match": "clean/*", "allow": True,
+                     "reason": "test: clean allowed"},
+                ],
+            },
+        }
+
+    def card(self):
+        return {"kind": "review", "privacy": "public"}
+
+    def features(self):
+        return {"need_tokens": 1000}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def test_denied_leg_skipped_with_reason_naming_the_rule(self):
+        registry = self.registry()
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-rules"],
+                                       self.card(), self.features(),
+                                       self.state(), registry, {})
+        self.assertEqual(legs, [("clean", "big")])
+        self.assertEqual(
+            skipped["groq/openai/gpt-oss-120b"],
+            ["leg_rules: groq/openai/gpt-oss-120b denied by deny-groq"])
+
+    def test_route_whose_only_leg_is_denied_is_input_required(self):
+        registry = self.registry()
+        survivors, removed = r.filter_routes(self.card(), self.features(),
+                                             self.state(), registry, {})
+        self.assertNotIn("r-only-denied", survivors)
+        joined = " ".join(removed["r-only-denied"])
+        self.assertIn("no usable leg", joined)
+        self.assertIn("leg_rules: groq/openai/gpt-oss-120b denied by deny-groq",
+                      joined)
+        self.assertEqual(r.no_route(removed)["state"], "input_required")
+
+    def test_an_allowed_leg_next_to_a_denied_one_is_kept_in_order(self):
+        registry = self.registry()
+        legs, skipped, _ = r.usable_legs(registry["routes"]["r-order"],
+                                       self.card(), self.features(),
+                                       self.state(), registry, {})
+        # Allowed legs keep route order; the denied leg in the middle is the
+        # only one skipped.
+        self.assertEqual(legs, [("clean", "big"), ("clean", "small")])
+        self.assertEqual(sorted(skipped), ["groq/openai/gpt-oss-120b"])
+
+    def test_real_registry_usable_legs_are_gateway_servable(self):
+        """Every leg ``usable_legs`` keeps is also served by
+        ``registry.gateway_legs`` for the same route: the resolver must plan
+        only legs a gateway combo serves. Client-bound legs are dropped by both
+        (the gateway 403s them; the resolver's client_bound filter skips them).
+        Legs are compared in resolved ``(provider_id, model_id)`` form because
+        gateway_legs returns the raw leg strings, whose provider half can be an
+        alias (``cheapinference/...`` resolves to provider
+        ``cheaperinference``)."""
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        card = {"kind": "review", "privacy": "public"}
+        features = {"need_tokens": 1000}
+        client_state = {"opencode": {"installed": True, "signed_in": True,
+                                     "reason": ""}}
+        for route_id, route in registry["routes"].items():
+            if not (route.get("legs") or []):
+                continue  # a legless route renders no combo at all
+            gateway = set()
+            for leg in registry_tool.gateway_legs(route, registry):
+                if isinstance(leg, str):
+                    gateway.add(registry_tool.resolve_leg(leg, registry))
+            kept, _, _ = r.usable_legs(route, card, features, client_state,
+                                       registry, {})
+            for leg in kept:
+                self.assertIn(leg, gateway,
+                              "%s: usable leg %s is not in gateway_legs"
+                              % (route_id, leg))
+
+
 class ScoreTests(unittest.TestCase):
     """Expected-cost scoring and theta picking (spec 5.3 steps 4-5, 5.4).
 
