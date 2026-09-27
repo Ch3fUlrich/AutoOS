@@ -4578,9 +4578,6 @@ class ClientModeHelpTests(unittest.TestCase):
             return len(io.open(exe + ".help-calls", encoding="utf-8").read())
         except OSError:
             return 0
-            return len(io.open(exe + ".help-calls", encoding="utf-8").read())
-        except OSError:
-            return 0
 
     def test_an_absent_binary_is_not_a_refusal(self):
         ok, reason = self.clients.check_client_modes(
