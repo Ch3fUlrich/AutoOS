@@ -46,7 +46,7 @@ asks before loading that level's rules.
 | Level | Job | Relaunches | Asks the operator |
 |---|---|---|---|
 | **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1, when L1's status timestamp stays quiet >25 min from its handoff (R-coord-08; source: common.md "Heartbeats never stop") | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
-| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap (R-coord-06); or a busy L2 whose status timestamp it watches stays quiet >25 min from its handoff (R-coord-08) | never directly — R-router-01 |
+| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap (R-coord-06); or a busy L2 whose status timestamp it watches stays quiet >25 min from its handoff (R-coord-08) | never directly — appends `question: … \| options: …` to L0's inbox (`RUN/inbox/L0.md`), per R-router-01 |
 | **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop (R-orch-06) | never directly — same channel, via L1 |
 | **L3** worker / reviewer | one closed task, an explicit return contract (`docs/agent-protocol.md`) | nothing — R-worker-06 | never |
 
