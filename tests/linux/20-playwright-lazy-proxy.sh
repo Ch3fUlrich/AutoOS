@@ -150,6 +150,7 @@ pw_without_claude() {
 pw_backup_fails() {
     backup_file() { return 1; }
     install_mcp_playwright
+    printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
 }
 
 # pw_writes <tmp>: how many claude calls changed something (add or remove).
@@ -320,7 +321,8 @@ if it "playwright lazy proxy installer: a failed backup stops the replace with a
     same=0; cmp -s "$cfg" "$tmp/seed.json" && same=1
     writes="$(pw_writes "$tmp")"
     rm -rf "$tmp"
-    if [[ "$writes" == "0" && "$same" == "1" && "$out" == *"could not back up"* ]]; then pass
+    if [[ "$writes" == "0" && "$same" == "1" && "$out" == *"could not back up"* \
+        && "$out" == *"recorded: mcp-playwright"* ]]; then pass
     else fail "writes=$writes unchanged=$same out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 

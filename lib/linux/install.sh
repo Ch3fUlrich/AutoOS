@@ -297,6 +297,21 @@ INSTALL_STATE=""
 # current) sets this to "skipped": install_component then reports skipped, not
 # installed. Reset on every call.
 INSTALL_SCRIPT_STATE=""
+# A post-install step can refuse to touch a user's file (a backup that could not
+# be made means no write) without the package install failing. Such a step calls
+# `autoos_record_failure <id>`; setup.sh folds the ids into its own failed count
+# and exit code, so the summary cannot read "done" over a change that never
+# happened. Ids are space-free and recorded once, so the report's word-split list
+# stays clean and two call paths in one run cannot double-count.
+AUTOOS_EXTRA_FAILURES=()
+autoos_record_failure() {
+    local id="$1" seen
+    for seen in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
+        [[ "$seen" == "$id" ]] && return 0
+    done
+    AUTOOS_EXTRA_FAILURES+=("$id")
+    return 0
+}
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
@@ -3446,7 +3461,7 @@ register_playwright_lazy_proxy() {
         else
             ui_warn "could not back up ${cfg} - the ${kind/-/ } 'playwright' entry was left unchanged"
         fi
-        return 0
+        return 1
     fi
 
     if [[ "$kind" != none ]]; then
@@ -3486,7 +3501,8 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        register_playwright_lazy_proxy "$playwright_pkg"
+        register_playwright_lazy_proxy "$playwright_pkg" \
+            || autoos_record_failure mcp-playwright
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
@@ -3653,7 +3669,7 @@ enable_project_mcp_server() {
     mkdir -p "$repo/.claude"
     if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
         ui_warn "could not back up ${path} - left unchanged"
-        return 0
+        return 1
     fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
@@ -3919,13 +3935,13 @@ install_agent_skills() {
     fi
     if [[ -f "$dest/.mcp.json" ]]; then
         ui_muted "omnigraph is declared per-repo in ${dest}/.mcp.json"
-        enable_project_mcp_server "$dest" omnigraph
+        enable_project_mcp_server "$dest" omnigraph || autoos_record_failure agent-skills
     else
         ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
     fi
     # The agent spawner is declared in this repo's own .mcp.json.
     if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
-        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent || autoos_record_failure agent-skills
     fi
 
     local omni_pkg omni_spec

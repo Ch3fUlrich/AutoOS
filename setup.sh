@@ -688,6 +688,14 @@ for id in $PLAN_IDS; do
     if [[ "$install_rc" == 124 ]]; then ui_err "Run stopped after timeout; remaining applications were not started."; break; fi
 done
 
+# Post-install steps can record a failure of their own - a user file they could
+# not back up, so a change they refused to make - without the package install
+# failing. Fold those in, so neither the summary nor the exit code claims
+# success over something that never happened.
+for extra in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
+    failed=$((failed + 1)); failed_names+="$extra "
+done
+
 # ─── 8. Report ──────────────────────────────────────────────────────────────
 ui_section "Summary"
 ui_kv "Installed"       "$installed" ok

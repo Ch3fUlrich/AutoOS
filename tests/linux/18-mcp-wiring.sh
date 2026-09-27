@@ -503,6 +503,38 @@ if it "repo skills link into project .claude/skills and win as skills source"; t
     if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
 fi
 
+if it "install_agent_skills records a refused project-server approval for the summary"; then
+    # A post-install step that refuses to touch a user's file (no backup, no
+    # write) must still be counted: setup.sh folds autoos_record_failure ids
+    # into its failed count and exit code, so the summary cannot read "done"
+    # over a change that never happened. Both project servers approved here map
+    # to one id, and the recorder is idempotent.
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/Documents/code/agent-skills/.claude" "$tmp/root/.claude"
+    printf '{}\n' >"$tmp/Documents/code/agent-skills/.mcp.json"
+    printf '{}\n' >"$tmp/root/.mcp.json"
+    printf '{"theme":"mine"}\n' >"$tmp/Documents/code/agent-skills/.claude/settings.local.json"
+    printf '{"theme":"mine"}\n' >"$tmp/root/.claude/settings.local.json"
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
+        clone_or_update() { :; }
+        install_mcp_graphify() { :; }; install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }; install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        write_omnigraph_env() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        answer() { echo ""; }
+        backup_file() { return 1; }
+        install_agent_skills >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ "$out" == *"recorded: agent-skills"* ]] || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
+    [[ "$out" != *"agent-skills agent-skills"* ]] || { ok=0; echo "the id was recorded twice" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "install_agent_skills did not record a refused project-server approval"; fi
+fi
+
 # ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
 # oh_setup_run <home> <repo>: setup_openhands_config in a hermetic subshell -
 # scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network - with
