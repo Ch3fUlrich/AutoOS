@@ -145,7 +145,7 @@ def fake_windows_ctypes(k32):
     fake.k32 = k32
     fake.windll = types.SimpleNamespace(kernel32=k32)
     fake.WinDLL = lambda *args, **kwargs: k32
-    fake.wintypes = types.SimpleNamespace(HANDLE=object(), DWORD=object(),
+    fake.wintypes = types.SimpleNamespace(HANDLE=object(), DWORD=_FakeCtypesValue,
                                           BOOL=object(), FILETIME=object())
     fake.POINTER = lambda typ: typ
     fake.get_last_error = lambda: k32.last_error
@@ -4158,6 +4158,23 @@ class WindowsLivenessTests(_WorkerRecordBase):
     def test_windows_start_time_is_none_when_get_process_times_fails(self):
         k32 = _FakeKernel32(times_ok=False)
         self.assertIsNone(self.call(k32, self.agent._proc_starttime, 1))
+
+
+class WindowsPrototypeTests(unittest.TestCase):
+    """Real ctypes type-checking (no fake module): every by-reference argument
+    _win_liveness passes must be accepted by the prototype _win_kernel32 declares.
+    A POINTER(FILETIME) prototype rejected byref(c_ulonglong) with ArgumentError."""
+
+    def test_declared_pointer_types_accept_the_values_passed(self):
+        import ctypes
+        agent = load_agent()
+        exit_code_t, stamp_t = agent._win_value_types()
+        ctypes.POINTER(exit_code_t).from_param(ctypes.byref(exit_code_t()))
+        ctypes.POINTER(stamp_t).from_param(ctypes.byref(stamp_t()))
+        self.assertEqual(ctypes.sizeof(stamp_t), 8)  # one FILETIME
+        src = AGENT.read_text(encoding="utf-8")
+        self.assertNotIn("POINTER(wintypes.FILETIME)", src)
+        self.assertNotIn("ctypes.c_ulonglong() for", src)
 
 
 class PsTests(_WorkerRecordBase):

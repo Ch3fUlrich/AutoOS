@@ -1575,6 +1575,14 @@ STILL_ACTIVE = 259
 _WIN_KERNEL32 = None
 
 
+def _win_value_types():
+    """The ctypes value types _win_liveness passes by reference - the ONE source
+    for both the declared prototypes and the call arguments."""
+    import ctypes
+    from ctypes import wintypes
+    return wintypes.DWORD, ctypes.c_ulonglong
+
+
 def _win_kernel32():
     """kernel32 with explicit Win32 signatures, configured once per process.
 
@@ -1590,10 +1598,13 @@ def _win_kernel32():
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.OpenProcess.restype = wintypes.HANDLE
     k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    exit_code_t, stamp_t = _win_value_types()
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(exit_code_t)]
     k32.GetExitCodeProcess.restype = wintypes.BOOL
-    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
-        ctypes.POINTER(wintypes.FILETIME) for _ in range(4)]
+    # A FILETIME is two little-endian DWORDs = one 64-bit integer: declared as
+    # c_ulonglong so the prototype matches the byref() the caller passes (a
+    # POINTER(FILETIME) prototype rejects byref(c_ulonglong) with ArgumentError).
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(stamp_t) for _ in range(4)]
     k32.GetProcessTimes.restype = wintypes.BOOL
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
     k32.CloseHandle.restype = wintypes.BOOL
@@ -1621,10 +1632,11 @@ def _win_liveness(pid):
     if not handle:
         return (ctypes.get_last_error() == ERROR_ACCESS_DENIED), None
     try:
-        code = ctypes.c_ulong()
+        exit_code_t, stamp_t = _win_value_types()
+        code = exit_code_t()
         if not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
             return False, None
-        stamps = [ctypes.c_ulonglong() for _ in range(4)]
+        stamps = [stamp_t() for _ in range(4)]
         if k32.GetProcessTimes(handle, *(ctypes.byref(s) for s in stamps)):
             return True, stamps[0].value
         return True, None
@@ -1789,7 +1801,10 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
             continue
         if not isinstance(record, dict):
             continue
-        state = _worker_state(record)
+        try:
+            state = _worker_state(record)
+        except Exception:  # noqa: BLE001 - one unjudgeable record never breaks ps
+            state = "unknown"
         started = _parse_iso(record.get("started"))
         ended = _parse_iso(record.get("ended"))
         age_ref = ended if ended is not None else (started if state == "died" else None)
@@ -1994,7 +2009,7 @@ def cmd_run(args, cfg: dict) -> int:
         workers = workers_dir()
         env["AUTOOS_WORKERS_DIR"] = workers
         worker_id, worker_rec = _worker_record_start(plan, args, workers)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - a registry problem never blocks a run
         print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
     run_rc = None
     try:
