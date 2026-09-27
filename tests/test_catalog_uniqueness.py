@@ -87,6 +87,33 @@ def synthetic(components):
     return {"categories": [{"id": "fake", "components": components}]}
 
 
+def duplicate_report(catalogs):
+    """One problem line per duplicated key across `catalogs` ([(path, data), ...]).
+
+    Every field the detector keys on is named, because two entries differing
+    only in `arch`/`cask`/`source` are *not* a conflict — a reader told only
+    "apt/foo shared by a, b" cannot see why they were flagged.
+
+    Sorting the rendered lines rather than the key tuples: a key holds `None`
+    and `True` side by side (`cask`), which Python 3 cannot order.
+    """
+    problems = []
+    for path, data in catalogs:
+        for (provider, package, arch, cask, source), ids in duplicate_packages(data).items():
+            problems.append(
+                "{}: {}/{} shared by {} (arch={} cask={} source={})".format(
+                    path.name,
+                    provider,
+                    package,
+                    ", ".join(str(i) for i in ids),
+                    ",".join(arch) or "-",
+                    cask if cask is not None else "-",
+                    source or "-",
+                )
+            )
+    return sorted(problems)
+
+
 class DetectorSelfTests(unittest.TestCase):
     """Prove the detector can fail; otherwise the aggregate test is assert(true)."""
 
@@ -147,12 +174,56 @@ class DetectorSelfTests(unittest.TestCase):
             self.assertGreater(count, 0, f"{name} yielded no components")
 
 
+class ReportSelfTests(unittest.TestCase):
+    """The failure path must be exercised — a clean catalog never runs it.
+
+    It used to unpack the detector's 5-tuple key into two names, so the first
+    real duplicate made the lint die with `ValueError: too many values to
+    unpack` instead of naming the collision.
+    """
+
+    def test_names_every_key_field_for_a_bare_duplicate(self):
+        catalogs = [(Path("linux.json"), synthetic([
+            {"id": "a", "provider": "apt", "package": "ripgrep"},
+            {"id": "b", "provider": "apt", "package": "ripgrep"},
+        ]))]
+        out = duplicate_report(catalogs)
+        self.assertEqual(len(out), 1, out)
+        for want in ("linux.json", "apt/ripgrep", "a", "b", "arch=-", "cask=-", "source=-"):
+            self.assertIn(want, out[0], out[0])
+
+    def test_names_the_fields_that_differ_when_several_keys_collide(self):
+        # Two colliding pairs whose keys differ only in `cask` (None vs True):
+        # ordering the raw key tuples raises TypeError on Python 3 ("'<' not
+        # supported between instances of 'NoneType' and 'bool'"), so the report
+        # has to be sorted by its rendered lines.
+        catalogs = [(Path("macos.json"), synthetic([
+            {"id": "a", "provider": "apt", "package": "foo", "cask": True},
+            {"id": "b", "provider": "apt", "package": "foo", "cask": True},
+            {"id": "c", "provider": "apt", "package": "foo"},
+            {"id": "d", "provider": "apt", "package": "foo"},
+            {"id": "e", "provider": "winget", "package": "bar", "source": "msstore"},
+            {"id": "f", "provider": "winget", "package": "bar", "source": "msstore"},
+        ]))]
+        out = duplicate_report(catalogs)
+        self.assertEqual(len(out), 3, out)
+        self.assertEqual(out, sorted(out), "the report is not deterministically ordered")
+        self.assertTrue(any("apt/foo shared by c, d" in line and "cask=-" in line
+                            for line in out), out)
+        self.assertTrue(any("apt/foo shared by a, b" in line and "cask=True" in line
+                            for line in out), out)
+        self.assertTrue(any("source=msstore" in line for line in out), out)
+
+    def test_a_clean_catalog_reports_nothing(self):
+        catalogs = [(Path("linux.json"), synthetic([
+            {"id": "a", "provider": "apt", "package": "ripgrep"},
+        ]))]
+        self.assertEqual(duplicate_report(catalogs), [])
+
+
 class RealCatalogTests(unittest.TestCase):
     def test_no_catalog_file_duplicates_a_provider_package(self):
-        problems = []
-        for path, data in component_catalogs():
-            for (provider, package), ids in sorted(duplicate_packages(data).items()):
-                problems.append(f"{path.name}: {provider}/{package} shared by {ids}")
+        problems = duplicate_report(component_catalogs())
         self.assertEqual(problems, [], "duplicate provider+package in catalog:\n" + "\n".join(problems))
 
 
