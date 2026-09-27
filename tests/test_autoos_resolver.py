@@ -2492,5 +2492,53 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIn("r-quota", after)
 
 
+class FreeAiResolverTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): free_ai declares only rpm/tpd (no tpm), so
+    the resolver's request-size filter never skips its qwen7b leg - a
+    need_tokens*1.3 that exceeds the daily 30k cap must NOT be mistaken for a
+    tpm skip. And because free_ai is a free, may-train public pool, a
+    privacy=sensitive card disqualifies every route carrying it."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        cls.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True,
+                             "reason": ""}}
+
+    def test_free_ai_declares_only_rpm_and_tpd(self):
+        entry = self.registry["providers"]["free_ai"]["limits"]["qwen7b"]
+        self.assertEqual(entry["rpm"], 10)
+        self.assertEqual(entry["tpd"], 30000)
+        self.assertNotIn("tpm", entry)
+
+    def test_provider_tpm_is_none_for_free_ai(self):
+        self.assertIsNone(
+            r.provider_tpm("free_ai", "qwen7b", self.registry))
+
+    def test_a_need_above_the_daily_cap_is_not_skipped_by_a_tpm_filter(self):
+        # 30000 * 1.3 = 39000 > tpd 30000, but tpd is data-only today: the leg
+        # stays because provider_tpm() reads only tpm and free_ai has none.
+        route = self.registry["routes"]["t3-driver-free-only"]
+        card = {"kind": "review", "privacy": "public"}
+        legs, skipped, _ = r.usable_legs(
+            route, card, {"need_tokens": 30000}, self.state(),
+            self.registry, {})
+        self.assertIn(("free_ai", "qwen7b"), legs)
+        self.assertNotIn("free_ai/qwen7b", skipped)
+
+    def test_a_sensitive_card_removes_routes_carrying_free_ai(self):
+        card = {"kind": "review", "privacy": "sensitive"}
+        survivors, removed = r.filter_routes(
+            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        self.assertNotIn("t3-driver-free-only", survivors)
+        self.assertIn("t3-driver-free-only", removed)
+        joined = " ".join(removed["t3-driver-free-only"])
+        self.assertIn("privacy: free_ai/qwen7b", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

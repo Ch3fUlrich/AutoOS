@@ -155,6 +155,13 @@
       "reasoning": false
     },
     {
+      "id": "omniroute-t3-driver-free-only",
+      "model": "openai/t3-driver-free-only",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 16384,
+      "reasoning": false
+    },
+    {
       "id": "omniroute-t1-orchestrator-clean",
       "model": "openai/t1-orchestrator-clean",
       "max_input_tokens": 1000000,
@@ -207,6 +214,14 @@
       "model": "openai/t2-worker-free-only",
       "max_input_tokens": 131072,
       "max_output_tokens": 32768,
+      "reasoning": false
+    },
+    {
+      "id": "litellm-t3-driver-free-only",
+      "gateway": "litellm",
+      "model": "openai/t3-driver-free-only",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 16384,
       "reasoning": false
     }
   ]

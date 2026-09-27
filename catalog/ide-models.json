@@ -194,6 +194,24 @@
       }
     },
     {
+      "id": "t3-driver-free-only",
+      "name": "t3 cheap-driver-128k — zero spend (free legs only)",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
       "id": "spark-1.3-contributor",
       "name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
       "context": 1000000,

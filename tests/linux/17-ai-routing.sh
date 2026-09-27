@@ -2027,7 +2027,8 @@ groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
 need = {"t1-orchestrator", "t1-orchestrator-clean", "spark-1.3-contributor",
         "t1-orchestrator-paid", "t2-orchestrator", "t2-worker", "t2-worker-clean",
         "t2-worker-free-only", "t2-worker-paid", "t3-driver", "t3-driver-clean",
-        "t3-driver-paid", "t4-rag", "deepseek-v4.1-flash", "gemini-3.8-flash"}
+        "t3-driver-free-only", "t3-driver-paid", "t4-rag", "deepseek-v4.1-flash",
+        "gemini-3.8-flash"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2070,12 +2071,13 @@ combos = {c["name"]: c["models"]
           for c in json.load(open("configuration/omniroute/combos.json",
                                    encoding="utf-8"))["combos"]}
 # LiteLLM model strings: OmniRoute provider/model passes through except the
-# OpenAI-compatible gateways (zen, cheaperinference -> openai/ + api_base).
-# Only pre-existing, proven mappings appear here - no new inference.
+# OpenAI-compatible gateways (zen, cheaperinference, free_ai -> openai/ +
+# api_base). Only pre-existing, proven mappings appear here - no new inference.
 # known_drops is deliberately hardcoded, NOT derived from GATEWAY_ONLY in
 # tools/sync-router-tiers.py: the test must stay an independent second
 # opinion - deriving it would make tool and test agree by construction.
-transport = {"opencode-zen": "openai", "cheaperinference": "openai"}
+transport = {"opencode-zen": "openai", "cheaperinference": "openai",
+             "free_ai": "openai"}
 def litellm_model(ref):
     prov, model = ref.split("/", 1)
     return "%s/%s" % (transport.get(prov, prov), model)
@@ -2137,7 +2139,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
