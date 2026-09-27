@@ -6,7 +6,7 @@ repository's `AGENTS.md` and the `coding-principles` skill and does not replace 
 
 1. **One closed task.** Do exactly the task you were given. Do not widen it, and do not start
    a second one.
-2. **No spawning.** Never start another agent, sub-agent or task tool.
+2. **No spawning.** Never start another agent, sub-agent or task tool (skill rule R-worker-06).
 3. **No git history or ref changes.** Never commit, push, merge, rebase, reset, tag, stash,
    update a ref, switch or check out a branch, restore files, clean, or delete a branch or
    worktree. Leave your edits in the working tree: your orchestrator judges them and commits.

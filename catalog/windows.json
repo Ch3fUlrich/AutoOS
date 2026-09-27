@@ -580,7 +580,7 @@
             "ai-coding"
           ],
           "prompt": "omnigraph_url",
-          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {
           "id": "uv",
@@ -729,7 +729,7 @@
             "ai-coding"
           ],
           "notes": "Codebase dependency knowledge graph queries for coding agents.",
-          "homepage": "https://github.com/Ch3fUlrich/agent-skills"
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {
           "id": "mcp-playwright",

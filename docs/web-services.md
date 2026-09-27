@@ -41,7 +41,9 @@ Nothing secret is in a tracked file; the real values are git-ignored.
 | Login / secret | Protects | File | Key | How to change | Restart / apply after |
 |---|---|---|---|---|---|
 | Authelia browser login (admins group + 2FA) for `omniroute`/`opencode`/`openhands` `<domain>`s | SSO gate at the reverse proxy | `secrets-generated/auth_users_database.yml` (server repo, not this one); rules in `server/manage/auth/authelia/configuration.yml` | argon2id hashes via `server/manage/auth/authelia/gen-user-hashes.sh` | edit the users file with a new hash (server repo) | Authelia Semaphore template |
-| opencode serve Basic auth (user `opencode`) | `/api/*` on :4096 | source: `configuration/api-keys.yml` → `opencode_password`; derived copies written by `ai-stack.sh init`: `~/.config/autoos/ai-stack/opencode.env` `OPENCODE_PASSWORD` (docker) and `~/.config/autoos/opencode-serve.password` (0600, native). `init` updates a copy older than `api-keys.yml` (backup first), leaves a newer copy and warns about it; a missing yml key is migrated once from the password file, else from `opencode.env`, else a new random value | `opencode_password` (yml) → `OPENCODE_PASSWORD` (env) | edit `configuration/api-keys.yml` → `opencode_password`, or the **Logins and keys** card in the browser UI (`./setup.sh --serve`) | docker: `ai-stack.sh init && ai-stack.sh up opencode`; native: `systemctl --user restart autoos-opencode`; Windows: `.\configuration\start-stack.ps1 -App opencode-serve` |
+| opencode serve Basic auth (user `opencode`) | `/api/*` on :4096 | source: `configuration/api-keys.yml` → `opencode_password`; derived copies written by `ai-stack.sh init`: `~/.config/autoos/ai-stack/opencode.env` `OPENCODE_PASSWORD` (docker) and `~/.config/autoos/opencode-serve.password` (0600, native). `init` updates a copy older than `api-keys.yml` (backup first), leaves a newer copy and warns about it; a missing yml key is migrated once from the password file, else from `opencode.env`, else a new random value | `opencode_password` (yml) → `OPENCODE_PASSWORD` (env) | edit `configuration/api-keys.yml` → `opencode_password`, or the **Logins and keys** card in the browser UI (`./setup.sh --serve`) | docker: `ai-stack.sh opencode-rotate` (init, recreate opencode, POST the edge webhook so the edge pulls the new password); native: `systemctl --user restart autoos-opencode`; Windows: `.\configuration\start-stack.ps1 -App opencode-serve` |
+| Edge copy of the opencode credential (`OPENCODE_BASIC_B64`) | `opencode.<domain>` at the edge proxy (injected as Basic after the SSO gate) | held only on the edge (the proxy's own secrets file, managed by the edge admin; never in this repo) | base64 of `opencode:<opencode_password>` | never by hand: `ai-stack.sh opencode-rotate` POSTs the edge webhook; the edge's Semaphore template pulls `OPENCODE_PASSWORD` from `opencode.env`, rebuilds the value and reloads the proxy only if it changed | the template run (its task result is the check - a wrong webhook token also gets 2xx) |
+| Edge webhook token | the webhook that starts that template | `configuration/api-keys.yml` → `semaphore_edge_webhook_url`, `semaphore_edge_webhook_header` (name), `semaphore_edge_webhook_token` (value) | from the edge admin | edit `api-keys.yml` | none (read on each `opencode-rotate`) |
 | OmniRoute dashboard password | dashboard + `/api/*` on :20128 | dashboard DB in `~/.local/share/autoos/ai-stack/omniroute/` (docker) or `~/.omniroute/` (native); `INITIAL_PASSWORD` in the `.env` there seeds only the first start | dashboard session cookie | dashboard → Settings → change password | immediate |
 | OmniRoute client API key (`REQUIRE_API_KEY=true`) | `/v1/*` on :20128 (every model/chat call) | source: `configuration/api-keys.yml` → `omniroute` (dashboard → API keys → Create API Key); consumers: `~/.config/autoos/ai-stack/opencode.env` `AUTOOS_OMNIROUTE_KEY`, `~/.config/autoos/ai-stack/openhands.env` `LLM_API_KEY`, `~/.config/autoos/ai-stack/client.key` (standby router, 0600) | bearer `sk-…` | dashboard → API keys; re-read by `ai-stack.sh init` (opencode.env, openhands.env) and `ensure_client_key_file` (client.key, on every `failover on`) | `configuration/omniroute/apply.sh` (registers the new key) |
 | OmniRoute management token | management routes (`/api/providers`, `/api/combos`, `/api/resilience`) | `~/.config/autoos/ai-stack/manage.key` (0600, `ai-stack.sh ensure_manage_key`) - what **`apply.sh` reads**, after `$OMNIROUTE_API_KEY` (`apply.sh` :189-201). `configuration/api-keys.yml` → `omniroute_management` is *not* read by `apply.sh`; it is optional and remote-only, per its comment in `configuration/api-keys.example.yml` | `oma_live_…` with scope `manage` | dashboard → API keys → new key with scope `manage`; save it to `manage.key` (or export `OMNIROUTE_API_KEY`) | immediate - `apply.sh` re-reads `manage.key` / the env var on each run; a `omniroute_management` yml value has no effect on `apply.sh` |
@@ -195,13 +197,28 @@ combo id).
 - `ai-stack.sh failover on` - stop the gateway container, start LiteLLM on
   the gateway's bind and port with the gateway client key
   (`~/.config/autoos/ai-stack/client.key`, mode 600, never printed), wait for
-  `/health/liveliness`, then record `failover.state`. Already on refuses
-  (rc 2); a standby that never turns live hands the port back to the gateway
-  and exits 1 - the port is never left empty.
-- `ai-stack.sh failover off` - stop only the standby (its own state dir, only
-  its pid - the `:4000` unit below is never touched), start the gateway
-  again, wait for `/api/health`, remove the state file. Already off is a
-  no-op (rc 0).
+  `/health/liveliness`, then record `failover.state` with the standby pid -
+  the process listening on `:20128`, found with `ss` exactly like
+  `start-litellm.sh` does (it writes no pid file) and accepted only when the
+  program IS litellm (`/proc/<pid>/cmdline`) *and* it belongs to that port:
+  every `pid=` ss names is tested, not just the first. Already on refuses
+  (rc 2); a standby that never turns live - or a state file that cannot be
+  written - hands the port back to the gateway and exits 1: the port is never
+  left empty and no half-written state path survives.
+- `ai-stack.sh failover off` - stop only the standby (TERM, KILL after 10 s).
+  "The standby" is the litellm process on `:20128`, never merely a process
+  named litellm: the always-on `:4000` unit below is the same program started
+  by the same script, so a state-file pid that now belongs to it is named in
+  the output and left alone, as is any foreign listener. Then refuse when the
+  port stays busy (names the holder from `ss`, starts nothing, rc 1),
+  otherwise recreate the gateway through the same preflight every other
+  `compose up` passes (bind guard, public URL) - `compose up -d --no-deps
+  omniroute`, because a bare `start` of a port-less container never
+  republishes the port - wait for `/api/health`, check the port really has a
+  host binding (`{"20128/tcp":null}` is not published), remove the state file.
+  With no state file at all it still looks for a standby on the port: a
+  `failover on` that died before the write left one, and only "no standby
+  listening" is the no-op (rc 0).
 - `ai-stack.sh failover status` - `failover on since <time> (litellm pid N)`
   or `failover off`. `--dry-run` prints every step and changes nothing;
   `verify` names the standby (`failover ON: LiteLLM serves the gateway port`)
@@ -218,7 +235,7 @@ separate and untouched: the standby runs from its own state dir
 | Name | Upstream | Websocket / streaming paths | May bypass SSO | Headers |
 |---|---|---|---|---|
 | `omniroute.<domain>` | `<coding-host>:20128` | `/live-ws`, `/v1/*` (SSE + Responses websocket) | `/v1/*` only - API clients cannot do an SSO login; the client key guards it | `Host`, `X-Forwarded-For`, `X-Forwarded-Proto` |
-| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | replace `Authorization` with the app's Basic credentials after the SSO gate, so the browser shows one login (`header_up Authorization "Basic <base64 opencode:password>"`; the value exists only in the proxy's live config, never in git) |
+| `opencode.<domain>` | `<coding-host>:4096` | `/api/event` (SSE, no buffering), `/api/pty/*` (websocket) | nothing | strip the client's `Authorization` **before** the SSO gate (`request_header -Authorization`, then `import authelia` / `forward_auth`), then set the app's Basic credentials **after** it (`header_up Authorization "Basic <base64 opencode:password>"`; the value exists only in the proxy's live config, never in git). The strip is required: Authelia's forward-auth evaluates a request's `Authorization: Basic` before its session cookie, and the opencode web app sends Basic from its stored server password - without the strip that becomes a 401 and the browser's login dialog after some minutes. |
 | `openhands.<domain>` | `<coding-host>:3000` | `/socket.io/*`; plus `/sbx/<port>/*` → `<coding-host>:<port>` (sandbox API + `/sockets/*` websockets) when `AUTOOS_OPENHANDS_SANDBOX_URL` uses that pattern | nothing - the app has no login | `Host`, `X-Forwarded-Proto`; keep `X-Session-API-Key` |
 
 Every service above is listed in the web UI's router card (live up/down,
@@ -355,6 +372,48 @@ is one `KEY=value` per line and docker's format has no escape for it, so the
 rest of the value would become a key of its own. Such a key is skipped with a
 warning that names the key, never the value. The data directory, its
 `omniroute/`, `opencode-home/` and `qoder-home/` are mode `700`.
+
+#### Rotating the opencode password
+
+When the opencode serve password needs to be rotated (e.g. a scheduled
+rotation, or a suspected leak), run:
+
+```bash
+bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate
+```
+
+This single command runs three steps in order; a failing step stops the ones
+after it (no rollback: rerun after fixing):
+
+1. **Regenerate `opencode.env`** — runs `ai-stack.sh init` logic to refresh the
+   derived `OPENCODE_PASSWORD` in `~/.config/autoos/ai-stack/opencode.env` from
+   the single source of truth in `configuration/api-keys.yml` → `opencode_password`.
+
+2. **Recreate the opencode container** — runs `ai-stack.sh up opencode` to
+   restart the opencode service with the new password, using all the same
+   guards (bind address, public URL, native unit conflicts) as a normal `up`.
+
+3. **POST the edge webhook** — if `semaphore_edge_webhook_url`,
+   `semaphore_edge_webhook_header` and `semaphore_edge_webhook_token` are
+   configured in `api-keys.yml`, POSTs a webhook to the edge's Semaphore
+   template. The template then PULLS the new password from the coding VM's
+   `opencode.env`. AutoOS holds **no Semaphore API token** and **never sends
+   the opencode password** — it only triggers the template refresh (the webhook
+   token is itself a secret and does travel, as a header). The header sent is
+   `<name>: <token>` where `name` is `semaphore_edge_webhook_header` and
+   `token` is `semaphore_edge_webhook_token`.
+
+The command is idempotent: a second run with the same password skips the webhook
+(unless `--force` is given). The webhook is sent with the header via a 0600 temp
+file (`-H @file`), never on the command line, and the password never appears in
+output or logs. The temp file is removed immediately after the request (also on
+error paths). Use `--dry-run` to preview without making changes.
+
+AutoOS holds no Semaphore API token and never SSHs to the firewall or the edge:
+every edge and firewall change goes through the edge admin, who runs it from
+Semaphore or the API. The opencode secret therefore stays on the edge — the
+proxy's own secrets file — consistent with the other proxy secrets, and this
+repository only ever names the webhook that refreshes it.
 
 ### opencode in the container
 

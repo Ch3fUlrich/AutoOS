@@ -1,0 +1,79 @@
+# Serena Project Configuration (Optional Per-Repo Template)
+#
+# Copy this file into any repository as .serena/project.yml
+# to customize Serena's behavior for that repo.
+#
+# For multi-repo work with cross-references, set up a parent project
+# and add subprojects via additional_workspace_folders.
+#
+# Without this file, Serena auto-detects the project from .git and
+# works with sensible defaults -- no configuration needed.
+#
+# If you add an `excluded_tools:` list to this file, never include
+# activate_project or get_current_config. Serena fixes a session's active
+# toolset at the moment a project is activated, so excluding those two here
+# strands any multi-project session on this repo for the rest of the
+# session -- there is no tool-based way back to another project, only a
+# client restart. See docs/TROUBLESHOOTING.md.
+
+# Core project settings
+project_name: ""              # Auto-detected from directory name if empty
+
+# Languages for which to start LSP servers. List ONLY the languages actually
+# present in this repo. Extra languages make Serena try to start (and fail)
+# language servers whose toolchains are not installed -- e.g. a Go or C# LSP
+# crashing on startup inside a pure-Python repo.
+#
+# RECOMMENDED: don't hand-maintain this list. Let it be autodetected:
+#   pwsh scripts/windows/init-serena-projects.ps1            # from mcp-servers/, current repo
+#   pwsh scripts/windows/init-serena-projects.ps1 -DryRun    # preview only
+# or let Serena infer it directly (no --language flags):
+#   serena project create . --index
+#
+# The line below is just an example for a Python project with docs/config:
+languages: ["python", "yaml", "toml", "json"] # only what's present — and never `markdown`
+# `markdown` used to be in that list and must not come back: marksman is not in the serena
+# image, and a language whose server is missing does not merely lose its own symbols — its
+# initialize failure takes the language server MANAGER down, so every symbol tool for the
+# project then errors (same opaque "manager not initialized" as the jedi trap below).
+#
+# Python backend choice: use "python" (Pyright), not "python_jedi". Serena
+# bootstraps Pyright itself via uvx on first use -- nothing to install. The
+# jedi backend does a bare PATH lookup for `jedi-language-server` with no
+# auto-install; if it's missing, LSP init fails hard for the WHOLE project
+# (not just Python), with an opaque "language server manager not initialized"
+# error. Only reach for python_jedi if Pyright itself is somehow unusable.
+
+# Additional workspaces for cross-repo code references.
+# When you need to read code from another repo while working,
+# add it here. Paths are relative to this file or absolute.
+#
+# Example:
+# additional_workspace_folders:
+#   - ../../DeepLabCut
+#   - ../../classifier-repo
+additional_workspace_folders: []
+
+# Language server configuration (auto-detected, optional overrides)
+language_servers:
+  # python:
+  #   command: "pyright-langserver"
+  #   args: ["--stdio"]
+  # typescript:
+  #   command: "typescript-language-server"
+  #   args: ["--stdio"]
+
+# Files and directories to ignore (adds to .gitignore-based filtering)
+exclude_patterns:
+  - "**/node_modules/**"
+  - "**/__pycache__/**"
+  - "**/.venv/**"
+  - "**/target/**"           # Rust build output
+  - "**/*.egg-info/**"       # Python package metadata
+  - "**/build/**"
+  - "**/dist/**"
+
+# Indexing settings
+indexing:
+  max_file_size_mb: 5        # Skip files larger than this
+  follow_symlinks: false

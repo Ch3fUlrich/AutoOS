@@ -192,7 +192,15 @@ custom_is_installed() {
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
         agent-skills)
-            [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
+            # New location: this checkout's .agents/skills + .mcp.json wiring
+            local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+            if [[ -d "$repo_root/.agents/skills" && -f "$repo_root/.mcp.json" ]]; then
+                return 0
+            fi
+            # Fallback: old external clone (for machines mid-migration)
+            local code_root="$SYS_HOME/Documents/Code"
+            [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+            [[ -d "$code_root/agent-skills/skills" ]]
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
@@ -2515,25 +2523,17 @@ route_detected_clis_to_gateway() {
     # install, so without this step they would never point at the gateway).
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
-    # (same file-first pattern as the openhands writer below; never printed).
-    # Without keys the claude step warns and the qwen step is skipped.
+    # (same resolution as the openhands and opencode writers — one chain, one
+    # parser, tools/keys_file.py; never printed). Without keys the claude
+    # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-        _keys_yml="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/api-keys.yml}"
-        _file_key="$(python3 - "$_keys_yml" 2>/dev/null <<'PY'
-import sys
-try:
-    found = ""
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        for line in fh:
-            t = line.strip()
-            if t.startswith("omniroute:") and "REPLACE" not in t:
-                found = t.split(":", 1)[1].strip().strip("\"'")
-                break
-    print(found)
-except Exception:
-    print("")
-PY
-)"
+        _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
+        _file_key=""
+        if [[ -n "$_keys_file" ]]; then
+            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/keys_file.py" \
+                "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
+        fi
+        unset _keys_file
         if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
             export OMNIROUTE_API_KEY="$_file_key"
         fi
@@ -3889,13 +3889,7 @@ PY
 }
 
 install_agent_skills() {
-    local code_root="$SYS_HOME/Documents/Code"
-    if [[ -d "$SYS_HOME/Documents/code" ]]; then
-        code_root="$SYS_HOME/Documents/code"
-    fi
-    local dest="$code_root/agent-skills"
-    (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
-    clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
     local base
     base="$(omnigraph_base_url)"
@@ -3917,15 +3911,12 @@ install_agent_skills() {
         ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
         ui_muted "    claude mcp remove omnigraph --scope user"
     fi
-    if [[ -f "$dest/.mcp.json" ]]; then
-        ui_muted "omnigraph is declared per-repo in ${dest}/.mcp.json"
-        enable_project_mcp_server "$dest" omnigraph
+    # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
+    if [[ -f "$repo_root/.mcp.json" ]]; then
+        enable_project_mcp_server "$repo_root" omnigraph
+        enable_project_mcp_server "$repo_root" autoos-agent
     else
-        ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
-    fi
-    # The agent spawner is declared in this repo's own .mcp.json.
-    if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
-        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+        ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
 
     local omni_pkg omni_spec
@@ -3948,16 +3939,28 @@ print(json.dumps({
 ")"
     register_antigravity_mcp_server omnigraph "$omni_spec"
 
+    # Skills source: this checkout's .agents/skills, or — on a machine mid-way
+    # through the migration, where the vendored copy is not there yet — the
+    # retired clone's skills dir. autoos_skills_source is the one home for that
+    # order, so no client directory can be linked from one and skipped by
+    # another.
+    local skills_source
+    skills_source="$(autoos_skills_source)"
+    if [[ -z "$skills_source" ]]; then
+        ui_warn "no skills to link: neither $repo_root/.agents/skills nor the retired clone's skills dir exists."
+    fi
+
     # Wire skills into Antigravity and Claude Code global skills directories
     local agy_skills="$SYS_HOME/.gemini/config/skills"
     local claude_skills="$SYS_HOME/.claude/skills"
-    if [[ -d "$dest/skills" ]]; then
+    local repo_skills="$skills_source"
+    if [[ -n "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
-            ui_muted "would link skills from $dest/skills to $agy_skills and $claude_skills"
+            ui_muted "would link skills from $repo_skills to $agy_skills and $claude_skills"
         else
             mkdir -p "$agy_skills" "$claude_skills"
             local s_dir s_name
-            for s_dir in "$dest/skills"/*; do
+            for s_dir in "$repo_skills"/*; do
                 [[ -d "$s_dir" ]] || continue
                 s_name="$(basename "$s_dir")"
                 if [[ ! -e "$agy_skills/$s_name" ]]; then
@@ -3974,9 +3977,7 @@ print(json.dumps({
     # Repo skills into project .claude/skills (Claude Code reads only that
     # dir). Symlinks, created at install time (never committed - see
     # .gitignore). Guarded: existing entries win.
-    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    repo_skills="$repo_root/.agents/skills"
-    repo_claude="$repo_root/.claude/skills"
+    local repo_claude="$repo_root/.claude/skills"
     if [[ -d "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
             ui_muted "would link repo skills into $repo_claude"
@@ -3995,8 +3996,6 @@ print(json.dumps({
     # Link repo skills into user-scope directories for clients that read from
     # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
     # link_skill_dirs handles dry-run, idempotency and never-overwrite rules.
-    local skills_source
-    skills_source="$(autoos_skills_source)"
     if [[ -n "$skills_source" ]]; then
         link_skill_dirs "$skills_source" "$SYS_HOME/.agents/skills" || true
         if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
@@ -4004,11 +4003,23 @@ print(json.dumps({
         fi
     fi
 
+    # Check for retired external agent-skills clone and hint it's no longer used
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    local old_clone="$code_root/agent-skills"
+    if [[ -d "$old_clone" && ! -L "$old_clone" ]]; then
+        ui_muted "Note: external agent-skills clone at $old_clone is retired; AutoOS now uses the vendored .agents/skills in this checkout."
+    fi
+
+    # Ensure graphify-mcp symlink points to this repo's infra
+    graphify_mcp_symlink
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
     fi
-    if omnigraph_readiness "$dest"; then
+    # Check omnigraph readiness using this repo's infra path
+    if omnigraph_readiness "$repo_root"; then
         ui_ok "omnigraph prerequisites are all present."
     fi
     ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
@@ -4058,6 +4069,111 @@ autoos_skills_source() {
     if [[ -d "$skills_source" ]]; then
         printf '%s\n' "$skills_source"
     fi
+    return 0
+}
+
+# autoos_api_keys_conf: the ONE answer to "which file holds this machine's API
+# keys", printed as a path, in priority order:
+# 1. ~/.config/autoos/api_keys.conf (user config, create nothing - just check)
+# 2. the repo's git-ignored keys file, configuration/api-keys.yml
+#    (AUTOOS_KEYS_FILE overrides this entry)
+# 3. Legacy ~/Documents/Code/agent-skills/secrets/api_keys.conf (fallback)
+# Returns 0 and prints the path if one exists, 1 if none does — and nothing is
+# ever invented, so a caller that wants "no keys" gets an empty string rather
+# than a path to a file that does not exist. Whichever file wins, its content is
+# parsed by tools/keys_file.py, which reads both the `name=value` and the
+# `name: value` shape.
+autoos_api_keys_conf() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    # 1. User config (~/.config/autoos/api_keys.conf) - create nothing
+    if [[ -f "$SYS_HOME/.config/autoos/api_keys.conf" ]]; then
+        printf '%s\n' "$SYS_HOME/.config/autoos/api_keys.conf"
+        return 0
+    fi
+    # 2. The repo's git-ignored keys file — configuration/api-keys.yml, what
+    # the browser page writes and tools/mirror-litellm-env.py reads.
+    # AUTOOS_KEYS_FILE replaces that entry (the suite points it at a stub for a
+    # hermetic keyless run), exactly as the gateway writers always did.
+    local keys_yml="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
+    if [[ -f "$keys_yml" ]]; then
+        printf '%s\n' "$keys_yml"
+        return 0
+    fi
+    # 3. Legacy agent-skills clone
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    if [[ -f "$code_root/agent-skills/secrets/api_keys.conf" ]]; then
+        printf '%s\n' "$code_root/agent-skills/secrets/api_keys.conf"
+        return 0
+    fi
+    return 1
+}
+
+# graphify_mcp_symlink: point ~/.local/bin/graphify-mcp at this checkout's
+# infra/mcp-servers/bin/graphify-mcp.
+#
+# Three shapes mean "AutoOS or the retired agent-skills clone put this here" and
+# are acted on: no link (create one), a link that already lands on the target
+# (skip), and a link into an agent-skills path (repoint it — including one left
+# dangling when the user deleted the clone, which is the common migration
+# case). Anything else is the user's own file or link: reported as left alone and
+# never replaced. The dry run decides from the same verdict, so it can never
+# announce something the real run will not do.
+graphify_mcp_symlink() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local target="$repo_root/infra/mcp-servers/bin/graphify-mcp"
+    local link="$SYS_HOME/.local/bin/graphify-mcp"
+
+    if [[ ! -x "$target" ]]; then
+        ui_muted "graphify-mcp is not in this checkout ($target) - nothing to link"
+        return 0
+    fi
+
+    local current="" verdict="create"
+    if [[ -L "$link" ]]; then
+        current="$(readlink "$link")" || current=""
+        # A relative link resolves against its own directory. The clone test
+        # below is a substring match, so making the path absolute is enough —
+        # resolving it through `cd` would fail on a dangling link and hand the
+        # clone's link to the "the user manages this" branch.
+        [[ -z "$current" || "$current" == /* ]] || current="$(dirname "$link")/$current"
+        if [[ "$current" == "$target" ]]; then
+            verdict="already"
+        elif [[ "$current" == */agent-skills/* ]]; then
+            verdict="repoint"
+        else
+            verdict="alone"
+        fi
+    elif [[ -e "$link" ]]; then
+        verdict="alone"
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        case "$verdict" in
+            create)  ui_muted "would link graphify-mcp: $link -> $target" ;;
+            repoint) ui_muted "would repoint graphify-mcp from the clone ($current) to $target" ;;
+            already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+            alone)   ui_muted "would leave graphify-mcp alone (yours: $link)" ;;
+        esac
+        return 0
+    fi
+
+    case "$verdict" in
+        create|repoint)
+            mkdir -p "$(dirname "$link")"
+            if ln -sfn "$target" "$link"; then
+                if [[ "$verdict" == "create" ]]; then
+                    ui_ok "linked graphify-mcp: $link -> $target"
+                else
+                    ui_ok "repointed graphify-mcp from the clone: $link -> $target"
+                fi
+            else
+                ui_warn "could not link graphify-mcp - $link left as it is"
+            fi
+            ;;
+        already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+        alone)   ui_muted "left graphify-mcp alone (yours: $link)" ;;
+    esac
     return 0
 }
 
@@ -4127,7 +4243,10 @@ setup_opencode_config() {
         if has_cmd python3; then
             local harness_out harness_rc skills_source
             skills_source="$(autoos_skills_source)"
-            [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+            # An empty source is passed through and the harness reports
+            # "skills: source missing". Naming the retired agent-skills clone
+            # here would invent a path that does not exist and read as a
+            # machine whose skills are simply absent.
             harness_rc=0
             harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
@@ -4165,8 +4284,8 @@ opencode_is_v2() {
 _opencode_merge_config() {
     local config_file="$1"
 
-    local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
-    [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     # catalog/ai-registry.json models is the single source of truth for model data.
     # The repo root is anchored off this script, never off the caller's cwd.
@@ -4200,6 +4319,13 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location('autoos_registry', _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# The keys-file parse is one module too: api_keys.conf writes `name=value`,
+# configuration/api-keys.yml writes `name: value`, and a reader that knows only
+# one of them reports a configured machine as an unconfigured one.
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'keys_file.py')
+_key_spec = _ilu.spec_from_file_location('keys_file', _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
@@ -4267,22 +4393,17 @@ if os.path.isfile(config_path):
 _before = json.dumps(data) if os.path.isfile(config_path) else None
 
 def _read_secrets_into(path, secrets):
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip('\"\''))
-    except Exception:
-        pass
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _keys_file.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 secrets = {}
-# Only the real conf. api_keys.conf.example is never read: its placeholder
-# keys are truthy and would be written into the config as if real (401s).
-if os.path.isfile(secrets_path):
-    _read_secrets_into(secrets_path, secrets)
+# Only a real file: the .example templates' placeholder keys are truthy and
+# read_keys drops them, so a machine that never configured anything stays
+# keyless rather than writing a 401 into the config.
+_read_secrets_into(secrets_path, secrets)
 
 providers = data.get('provider', {})
 _ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
@@ -4597,7 +4718,8 @@ setup_openhands_config() {
         link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
     fi
 
-    local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     catalog_require_python || return 0
 
@@ -4669,6 +4791,12 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# And the keys parse is tools/keys_file.py's: the resolved file may be
+# api_keys.conf (`name=value`) or configuration/api-keys.yml (`name: value`).
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "keys_file.py")
+_key_spec = _ilu.spec_from_file_location("keys_file", _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
@@ -4685,16 +4813,11 @@ if _ol["base_url"].endswith("/v1"):
     _ol["base_url"] = _ol["base_url"][:-3]
 
 def _read_secrets_file(path, secrets):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip("\"'"))
-    except Exception:
-        pass
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _keys_file.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 
 def _profile_for(mid, key, name=None):
@@ -4802,21 +4925,12 @@ llm = agent_settings.setdefault("llm", {})
 # with thinking params Ollama rejects outright.
 _default_reasoning = False
 # OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
-# writer below reads). AUTOOS_KEYS_FILE overrides the fallback keys file
-# (the suite points it at a stub for a hermetic keyless run).
-_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-if not _gw_key:
-    # Fall back to the repo's single source of truth for keys.
-    _keys_yml = os.environ.get("AUTOOS_KEYS_FILE") or os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
-    try:
-        with open(_keys_yml, "r", encoding="utf-8") as _kf:
-            for _line in _kf:
-                _t = _line.strip()
-                if _t.startswith("omniroute:") and "REPLACE" not in _t:
-                    _gw_key = _t.split(":", 1)[1].strip().strip("\"'")
-                    break
-    except Exception:
-        pass
+# writer below reads), else the keys file autoos_api_keys_conf resolved —
+# AUTOOS_KEYS_FILE overrides it and the suite points that at a stub for a
+# hermetic keyless run. No second reader of that file lives here: an inline
+# parse is how a `.conf`-only reader once ended up handed a `.yml` and
+# reported a configured machine as an unconfigured one.
+_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
 if _gw_key:
     # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
