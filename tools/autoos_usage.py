@@ -166,6 +166,8 @@ def fetch_window(fetch, gateway, key, cutoff):
         except (urllib.error.URLError, OSError) as e:
             raise UsageError("gateway unreachable at %s (%s)"
                              % (gateway, getattr(e, "reason", e)))
+        except Exception as e:  # http.client errors etc.: type only, the text may hold a body
+            raise UsageError("gateway read failed at %s (%s)" % (gateway, type(e).__name__))
         if status in (401, 403):
             raise UsageError("gateway refused the manage key (HTTP %d): the key is "
                              "missing, revoked or lacks the 'manage' scope" % status)

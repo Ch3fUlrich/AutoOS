@@ -986,6 +986,13 @@ class LegRulesTests(unittest.TestCase):
         self.assertIn(rule["id"], hits[0])
         self.assertIn(rule["reason"], hits[0])
 
+    def test_non_string_leg_is_left_to_rule_one(self):
+        # review-or2: a null leg must not crash the whole check in rule 9.
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append(None)
+        problems = registry.check_registry(reg)
+        self.assertFalse(any(p.startswith("leg_rules") and "None" in p for p in problems))
+
     def test_real_registry_passes_leg_rules_check(self):
         """The committed registry must itself pass check (any denied serving
         leg must be gated via unavailable_legs)."""

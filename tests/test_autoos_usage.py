@@ -276,6 +276,20 @@ class CliTests(UsageCliTests):
         self.assertIn("403", err)
         self.assertNotIn(FIXTURE_KEY, out + err)
 
+    def test_any_fetch_exception_exit3_without_its_text(self):
+        # review-or2: an exception outside URLError/OSError (http.client's
+        # IncompleteRead, RemoteDisconnected...) must not escape as a traceback;
+        # its text may carry a key or body, so only the type name is shown.
+        import http.client
+
+        def broken(url, headers, timeout):
+            raise http.client.IncompleteRead(FIXTURE_KEY.encode())
+
+        rc, out, err = self.run_cli(["--since", "1h"], broken)
+        self.assertEqual(rc, 3)
+        self.assertIn("IncompleteRead", err)
+        self.assertNotIn(FIXTURE_KEY, out + err)
+
     def test_gateway_unreachable_exit3(self):
         def down(url, headers, timeout):
             raise urllib.error.URLError("connection refused")

@@ -1871,6 +1871,8 @@ def _check_leg_rules(registry) -> list:
         if not isinstance(route, dict):
             continue
         for leg in dict.fromkeys(route.get("legs") or []):
+            if not isinstance(leg, str):
+                continue  # rule 1 reports it as unresolved
             rule = leg_rule_for(leg, registry)
             if rule is None or rule.get("allow") is True:
                 continue
