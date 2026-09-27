@@ -892,3 +892,22 @@ if it "secret key-file backups are git-ignored (api-keys.yml.autoos-backup-*, .b
     git -C "$ROOT" check-ignore -q --no-index configuration/api-keys.example.yml && { ok=0; echo "the example file is ignored" >&2; }
     if (( ok )); then pass; else fail "a key-file backup could be committed"; fi
 fi
+
+if it "no user-facing page points anyone at the retired agent-skills repo"; then
+    # asm-b1: the installer wires skills, MCP servers and keys from this
+    # checkout, so a page that sends the user to clone Ch3fUlrich/agent-skills
+    # describes a step that no longer exists (and a repo that is retired).
+    # Dated records keep their wording — docs/plans, docs/decisions,
+    # docs/research and docs/archive say what was true when they were written,
+    # and CHANGELOG.md is the history. The Windows catalog entry is listed as
+    # a twin to change: its installer still clones (Windows CI is off).
+    bad=""
+    for f in README.md AGENTS.md CLAUDE.md docs/*.md catalog/linux.json catalog/macos.json \
+             lib/linux/install.sh lib/linux/serve.py; do
+        [[ -f "$f" ]] || continue
+        hit="$(grep -n 'Ch3fUlrich/agent-skills' "$f" || true)"
+        [[ -n "$hit" ]] && bad+="$f"$'\n'"$hit"$'\n'
+    done
+    if [[ -z "$bad" ]]; then pass
+    else fail "points at the retired repo:"$'\n'"$bad"; fi
+fi

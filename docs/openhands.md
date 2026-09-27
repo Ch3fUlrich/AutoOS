@@ -14,12 +14,13 @@ installs it and writes its configuration; you use it in the browser.
 
 ## 1. Give it keys (optional)
 
-The configure step reads, in this order, the environment (`MUSE_API_KEY`,
-`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `CONTEXT7_API_KEY`) and then
-`~/Documents/Code/agent-skills/secrets/api_keys.conf` (`muse=…`, `deepseek=…`,
-`openrouter=…`, `context7=…`). Keys are written only to your `~/.openhands`,
-never to this repository. With no keys at all you still get a working setup on
-the local Ollama model.
+The configure step reads API keys in this order:
+1. Environment variables (`MUSE_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `CONTEXT7_API_KEY`)
+2. `~/.config/autoos/api_keys.conf` (user config, if present)
+3. This repo's `configuration/api-keys.yml` (git-ignored, if present)
+4. Legacy `~/Documents/Code/agent-skills/secrets/api_keys.conf` (fallback, if present)
+
+Keys are written only to your `~/.openhands`, never to this repository. With no keys at all you still get a working setup on the local Ollama model.
 
 ## 2. What the configure step writes
 
@@ -31,7 +32,7 @@ replaced.
 | `settings.json` | The default LLM — the first of Muse Spark → DeepSeek → OpenRouter free → local Ollama you have a key for — plus the Serena, Graphify and Omnigraph MCP servers |
 | `profiles/*.json` | One LLM profile per model in [`catalog/ai-registry.json`](../catalog/ai-registry.json) `models` (DeepSeek, Muse Spark, OpenRouter models, Ollama) with context windows and prices, plus one per gateway tier (`omniroute-tier*`, `litellm-tier*`) from [`configuration/openhands/tier-profiles.json`](../configuration/openhands/tier-profiles.json) |
 | `agent-profiles/*.json` | The agent hierarchy, copied from [`openhands/agent-profiles/`](../openhands/agent-profiles) |
-| `skills` | A link to `agent-skills/skills`, when that checkout exists |
+| `skills` | A link to this repo's `.agents/skills` (vendored), or the legacy `agent-skills/skills` checkout if present |
 
 ## 3. Start it and open the page
 
@@ -74,8 +75,8 @@ profile can switch model at run time (`enable_switch_llm_tool`).
   the configure step.
 - **`agent-canvas` has no headless mode.** It has no `--prompt`, `--model` or
   session flags, so it can't be driven as a CLI worker from a script. For
-  unattended runs, use the orchestration skills in `agent-skills`, and use the
-  canvas when a person is watching.
+  unattended runs, use the orchestration skills in this repo's `.agents/skills`,
+  and use the canvas when a person is watching.
 - Muse Spark and DeepSeek are paid per token. The `-free` profiles and Ollama
   cost nothing.
 

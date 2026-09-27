@@ -1,0 +1,30 @@
+query list_projects() {
+  match { $p: Project }
+  return { $p.slug, $p.name, $p.path, $p.summary }
+}
+query list_decisions() {
+  match { $d: Decision }
+  return { $d.slug, $d.title, $d.status, $d.date, $d.rationale }
+}
+query list_rules() {
+  match { $r: Rule }
+  return { $r.slug, $r.severity, $r.statement }
+}
+query list_preferences() {
+  match { $p: Preference }
+  return { $p.slug, $p.scope, $p.statement }
+}
+query list_conventions() {
+  match { $c: Convention }
+  return { $c.slug, $c.name, $c.example }
+}
+query list_components() {
+  match { $c: Component }
+  return { $c.slug, $c.name, $c.kind, $c.location }
+}
+query search_decisions($q: String) {
+  match { $d: Decision }
+  return { $d.slug, $d.title, $d.status }
+  order { nearest($d.embedding, $q) }
+  limit 5
+}
