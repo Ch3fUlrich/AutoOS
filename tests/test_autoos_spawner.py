@@ -1278,7 +1278,8 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "respond", "route", "list_agents", "context", "heartbeat"})
+                                     "respond", "route", "list_agents", "context", "heartbeat",
+                                     "ps"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -3763,6 +3764,183 @@ class OutsideFenceTaskDirTests(unittest.TestCase):
         rules, err = self.fence(link)
         self.assertEqual(rules, self.todays_rules())
         self.assertIn("AUTOOS_TASK_DIR", err)
+
+
+class _WorkerRecordBase(unittest.TestCase):
+    """Shared fixtures for the host-wide worker registry (`ps`)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        self.old = os.environ.get("AUTOOS_WORKERS_DIR")
+        os.environ["AUTOOS_WORKERS_DIR"] = self.workers
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_WORKERS_DIR", None)
+        else:
+            os.environ["AUTOOS_WORKERS_DIR"] = self.old
+
+    def write(self, wid="w1", **over):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        rec = {"id": wid, "pid": os.getpid(), "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "lane-a", "client": "opencode",
+               "model": "m", "route": "t2-worker", "title": "", "cwd": "/x", "sandbox": "",
+               "task_head": "do a thing", "depth": 1}
+        rec.update(over)
+        path = os.path.join(self.workers, wid + ".json")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return path
+
+
+class WorkerRecordTests(_WorkerRecordBase):
+    """list_workers / workers_dir: state, the pid-reuse guard and pruning."""
+
+    def test_workers_dir_honours_the_env_override_and_is_0700(self):
+        self.assertEqual(self.agent.workers_dir(), self.workers)
+        self.assertTrue(os.path.isdir(self.workers))
+        self.assertEqual(os.stat(self.workers).st_mode & 0o777, 0o700)
+
+    def test_a_dry_run_writes_no_record(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=True,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title=None, model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        with mock.patch.object(self.agent, "build_plan", return_value=plan):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 0)
+        self.assertEqual([f for f in (os.listdir(self.workers)
+                                      if os.path.isdir(self.workers) else [])], [])
+
+    def test_current_pid_and_start_time_is_running(self):
+        if self.agent._proc_starttime(os.getpid()) is None:
+            self.skipTest("no /proc start time on this host")
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
+    def test_worker_record_file_is_0600_and_leaves_no_tmp(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        path = os.path.join(self.workers, "w9.json")
+        self.agent._write_worker_record(path, {"id": "w9", "pid": os.getpid()})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(self.workers), ["w9.json"])
+
+    def test_a_pid_that_does_not_exist_is_died(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self.write(pid=proc.pid, pid_start=None)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_start_time_mismatch_is_died(self):
+        start = self.agent._proc_starttime(os.getpid())
+        if start is None:
+            self.skipTest("no /proc start time on this host")
+        self.write(pid_start=start + 1)
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_ended_is_exited_rc_and_hidden_without_include_ended(self):
+        self.write(ended=self.agent.utc_now_iso(), rc=7)
+        self.assertEqual(self.agent.list_workers(self.workers), [])
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual([r["state"] for r in rows], ["exited rc=7"])
+
+    def test_an_eight_day_old_ended_record_is_deleted(self):
+        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=8)
+        path = self.write(ended=old.isoformat(timespec="seconds").replace("+00:00", "Z"), rc=0)
+        rows = self.agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(rows, [])
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_corrupt_record_is_skipped_never_raises(self):
+        self.write()
+        bad = os.path.join(self.workers, "bad.json")
+        with io.open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["id"] for r in rows], ["w1"])
+
+    def test_cmd_run_records_during_the_run_and_ended_with_rc_after(self):
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+        ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
+                                card=None, clean=False, tier=2, joinable=False, lean=False,
+                                isolate=False, auto=True, title="t", model=None,
+                                free_model=self.agent.DEFAULT_FREE_MODEL, max_depth=None,
+                                allow_training=False, no_defer=False)
+        seen = {}
+
+        def fake_run(*a, **k):
+            files = [f for f in os.listdir(self.workers) if f.endswith(".json")]
+            self.assertEqual(len(files), 1)
+            with io.open(os.path.join(self.workers, files[0]), encoding="utf-8") as fh:
+                seen["rec"] = json.load(fh)
+            self.assertIsNone(seen["rec"].get("ended"))
+            self.assertEqual(seen["rec"]["pid"], os.getpid())
+            self.assertEqual(a[2]["AUTOOS_WORKERS_DIR"], self.workers)
+            return self.agent.ClientExit(4)
+
+        with mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 4)
+        self.assertEqual(seen["rec"]["client"], "opencode")
+        self.assertEqual(seen["rec"]["route"], "t2-worker")
+        self.assertEqual(seen["rec"]["task_head"], "do it")
+        with io.open(os.path.join(self.workers, seen["rec"]["id"] + ".json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        self.assertTrue(after["ended"])
+        self.assertEqual(after["rc"], 4)
+
+
+class PsTests(_WorkerRecordBase):
+    """The `ps` subcommand and the MCP `ps` tool read the same rows."""
+
+    def test_ps_json_parses_and_has_the_columns(self):
+        self.write()
+        r = run_agent("ps", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["dir"], self.workers)
+        row = data["workers"][0]
+        for key in ("id", "state", "elapsed", "client", "model", "lane", "pid", "title", "task"):
+            self.assertIn(key, row)
+        self.assertEqual(row["state"], "running")
+
+    def test_ps_says_no_workers_running_when_empty(self):
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        r = run_agent("ps", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no workers running", r.stdout)
+
+    def test_mcp_ps_returns_the_same_rows(self):
+        self.write()
+        rows = self.agent.list_workers(self.workers)
+        out = mcp_server.ps()
+        self.assertEqual(out["dir"], self.workers)
+        self.assertEqual([(w["id"], w["state"], w["client"]) for w in out["workers"]],
+                         [(w["id"], w["state"], w["client"]) for w in rows])
 
 
 if __name__ == "__main__":

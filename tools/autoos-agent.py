@@ -1544,6 +1544,229 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     return ClientExit(rc, tail.decode("utf-8", "replace"), found[0] if found else None)
 
 
+# --- the host-wide worker registry (`ps`) ---------------------------------
+# One directory per host, shared by every worktree and clone: a spawned
+# worker's own track record lives where the operator can find it, not in the
+# clone it runs in. AUTOOS_WORKERS_DIR wins (the tests use it); otherwise the
+# main checkout - the parent of git's common dir - so an --isolate clone (its
+# own .git) inherits the parent's dir through the child env cmd_run exports.
+
+def utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_iso(text):
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _proc_starttime(pid):
+    """Field 22 (starttime, in clock ticks) of /proc/<pid>/stat, or None.
+
+    The reuse guard: a recycled pid is a different process, so its start time
+    no longer matches the one a record stored when it was alive.
+    """
+    try:
+        with io.open("/proc/%d/stat" % int(pid), encoding="utf-8") as fh:
+            data = fh.read()
+    except (OSError, ValueError, TypeError):
+        return None
+    rparen = data.rfind(")")
+    if rparen < 0:
+        return None
+    fields = data[rparen + 1:].split()
+    idx = 22 - 3  # /proc field 3 is the first token after the command name
+    if len(fields) <= idx:
+        return None
+    try:
+        return int(fields[idx])
+    except ValueError:
+        return None
+
+
+def workers_dir() -> str:
+    override = os.environ.get("AUTOOS_WORKERS_DIR")
+    if override:
+        path = override
+    else:
+        base = None
+        try:
+            out = subprocess.run(["git", "rev-parse", "--path-format=absolute",
+                                  "--git-common-dir"],
+                                 cwd=ROOT, capture_output=True, text=True)
+            common = out.stdout.strip()
+            if out.returncode == 0 and common:
+                base = os.path.dirname(common)
+        except (OSError, subprocess.SubprocessError):
+            base = None
+        path = os.path.join(base or ROOT, "logs", "workers")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def _write_worker_record(path: str, record: dict) -> None:
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+    os.replace(tmp, path)
+
+
+def _worker_record_start(plan: dict, args, directory: str):
+    """Write the live record; return (id, record) for the ended rewrite."""
+    wid = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
+    pid = os.getpid()
+    task = (args.task or "").splitlines()
+    record = {"id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
+              "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
+              "client": plan.get("client"), "model": plan.get("model"),
+              "route": (plan.get("route") or {}).get("combo") or "",
+              "title": args.title or "", "cwd": plan.get("cwd"),
+              "sandbox": (plan.get("sandbox") or {}).get("path", ""),
+              "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]}
+    _write_worker_record(os.path.join(directory, wid + ".json"), record)
+    return wid, record
+
+
+def _worker_record_end(directory: str, wid: str, record: dict, rc) -> None:
+    record = dict(record, ended=utc_now_iso(), rc=(int(rc) if rc is not None else None))
+    _write_worker_record(os.path.join(directory, wid + ".json"), record)
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:  # alive, owned by someone else
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _worker_state(record: dict) -> str:
+    if record.get("ended"):
+        return "exited rc=%s" % record.get("rc")
+    pid = record.get("pid")
+    if pid is None or not _pid_alive(pid):
+        return "died"
+    pid_start = record.get("pid_start")
+    if pid_start is not None:
+        current = _proc_starttime(pid)
+        if current is None or current != pid_start:
+            return "died"
+    return "running"
+
+
+def _fmt_elapsed(seconds) -> str:
+    if seconds is None:
+        return "?"
+    secs = max(0, int(seconds))
+    if secs < 60:
+        return "%ds" % secs
+    mins, secs = divmod(secs, 60)
+    if mins < 60:
+        return "%dm%02ds" % (mins, secs)
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return "%dh%02dm" % (hours, mins)
+    days, hours = divmod(hours, 24)
+    return "%dd%02dh" % (days, hours)
+
+
+def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
+    """Every spawned worker in ``directory`` as rows, newest last.
+
+    state is "running" (alive, start time matches - the pid-reuse guard),
+    "died" (gone or a recycled pid) or "exited rc=N". Records with no ``ended``
+    whose process cannot be checked are not judged here. A record whose ended
+    time (or, for a died worker, whose started time) is older than 7 days is
+    deleted. A corrupt record is skipped, never raised on.
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif not isinstance(now, datetime.datetime):
+        now = _parse_iso(now) or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    cutoff = now - datetime.timedelta(days=7)
+    rows = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        state = _worker_state(record)
+        started = _parse_iso(record.get("started"))
+        ended = _parse_iso(record.get("ended"))
+        age_ref = ended if ended is not None else (started if state == "died" else None)
+        if age_ref is not None and age_ref < cutoff:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        if state.startswith("exited") and not include_ended:
+            continue
+        ref_end = ended if ended is not None else now
+        secs = (ref_end - started).total_seconds() if started is not None else None
+        rows.append({"id": record.get("id"), "state": state,
+                     "elapsed": _fmt_elapsed(secs), "elapsed_seconds": secs,
+                     "client": record.get("client") or "", "model": record.get("model") or "",
+                     "lane": record.get("session_tag") or "", "pid": record.get("pid"),
+                     "title": record.get("title") or "", "task": record.get("task_head") or "",
+                     "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
+                     "started": record.get("started"), "ended": record.get("ended"),
+                     "rc": record.get("rc"), "depth": record.get("depth")})
+    rows.sort(key=lambda r: (r.get("started") or "", r.get("id") or ""))
+    return rows
+
+
+def _print_worker_table(rows: list) -> None:
+    head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "LANE", "PID", "TITLE/TASK"]
+    cells = [[r["id"], r["state"], r["elapsed"] or "-", r["client"], r["model"],
+              r["lane"], str(r["pid"] or ""), r["title"] or r["task"] or ""] for r in rows]
+    widths = [max(len(head[i]), max(len(c[i]) for c in cells)) for i in range(len(head))]
+    width = shutil.get_terminal_size((120, 24)).columns
+    avail = max(15, width - sum(widths[:-1]) - 2 * (len(head) - 1))
+    widths[-1] = min(widths[-1], avail)
+    fmt = "  ".join("%-" + str(w) + "s" for w in widths)
+    print(fmt % tuple(head))
+    for cell in cells:
+        cell = list(cell)
+        cell[-1] = cell[-1][:widths[-1]]
+        print(fmt % tuple(cell))
+
+
+def cmd_ps(args) -> int:
+    directory = workers_dir()
+    rows = list_workers(directory, include_ended=args.all)
+    if args.all:  # --all: exited from the last 24 h (running/died always shown)
+        rows = [r for r in rows if not r["state"].startswith("exited")
+                or (r["elapsed_seconds"] or 0) <= 24 * 3600]
+    if args.json:
+        print(json.dumps({"workers": rows, "dir": directory}, indent=1))
+        return 0
+    if not rows:
+        print("no workers running")
+        return 0
+    _print_worker_table(rows)
+    return 0
+
+
 def cmd_run(args, cfg: dict) -> int:
     # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
     # when the caller names an inbox - a run with no AUTOOS_AGENT_INBOX set is
@@ -1656,8 +1879,19 @@ def cmd_run(args, cfg: dict) -> int:
     # mid-flight score, so it is never captured and never stop-checked or
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
-    run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                        capture=capture)
+    # Worker registry (ps): the record is live for the whole run, so `ps` shows
+    # this spawn even from another checkout. Hand the dir to the child so a
+    # nested spawn (inside an --isolate clone, which has its own .git) records
+    # in the same host-wide place.
+    workers = workers_dir()
+    env["AUTOOS_WORKERS_DIR"] = workers
+    worker_id, worker_rec = _worker_record_start(plan, args, workers)
+    run_rc = None
+    try:
+        run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                            capture=capture)
+    finally:
+        _worker_record_end(workers, worker_id, worker_rec, run_rc)
     client_tail = getattr(run_rc, "tail", "") or ""
     rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override
@@ -1742,6 +1976,11 @@ def main(argv=None) -> int:
                                  "gateway (OR4); its own flags follow `usage`, e.g. "
                                  "`usage --since 1h --by provider,lane`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
+    ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
+                                   "worktrees and clones)")
+    ps.add_argument("--all", action="store_true",
+                    help="also show exited workers from the last 24 h")
+    ps.add_argument("--json", action="store_true", help="print the rows as JSON")
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
@@ -1798,6 +2037,8 @@ def main(argv=None) -> int:
         return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
+    if args.cmd == "ps":
+        return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
     return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
 

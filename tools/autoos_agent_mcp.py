@@ -231,6 +231,18 @@ def list_agents() -> dict:
     return {"clients": client_rows, "routes": route_rows}
 
 
+def ps(include_ended: bool = False) -> dict:
+    """Every spawned worker on this host, as the CLI's `ps --json` rows.
+
+    The same host-wide registry the CLI writes (AUTOOS_WORKERS_DIR, else the
+    main checkout's logs/workers): running and died workers by default,
+    exited ones too with include_ended. Returns {"workers": rows, "dir": dir}.
+    """
+    directory = agent.workers_dir()
+    return {"workers": agent.list_workers(directory, include_ended=include_ended),
+            "dir": directory}
+
+
 def heartbeat_info(inbox: str | None = None, transcript: str | None = None,
                    repos: list | None = None, cap: int | None = None) -> dict:
     """The same json object `autoos-agent.py heartbeat --json` prints
@@ -712,6 +724,14 @@ def serve() -> None:
         """The registry's clients (installed/signed-in/reason) and routes
         (class, legs with availability, retired), spec 6.2."""
         return list_agents()
+
+    @app.tool(name="ps")
+    def _ps(include_ended: bool = False) -> dict:
+        """Every spawned worker on this host (all worktrees and clones): id,
+        state (running / died / exited rc=N), elapsed, client, model, lane,
+        pid and title/task - the same rows `autoos-agent.py ps --json` prints.
+        include_ended adds workers that exited (last 7 days)."""
+        return ps(include_ended)
 
     @app.tool(name="context")
     def _context(transcript: str | None = None) -> dict:
