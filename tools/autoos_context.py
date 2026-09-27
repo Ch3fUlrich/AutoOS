@@ -16,8 +16,8 @@ and the CLI reports `unknown` rather than inventing a number.
 on the lowercased model id, first row wins, `"*"` is the 200k-class default. A
 model id ending in `[1m]` asks for the 1M window, so it matches on its base id
 and takes the family's 1M row; a family with no 1M row keeps the default. The
-`source` the CLI reports is `default` until the recall probe of spec 10 lands
-and a measured cap replaces this table.
+`source` the CLI reports is `policy` when the cap comes from the registry's
+policy.handoff_caps, `default` when the fallback table is used.
 """
 from __future__ import annotations
 
@@ -39,6 +39,73 @@ DEFAULT_CAPS = [
 # The three usage fields that together fill the context window.
 _USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens",
                  "cache_creation_input_tokens")
+
+# The registry file that carries policy.handoff_caps (the single source).
+_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+
+
+def caps_from_registry(registry_dict: dict) -> list[tuple[str, int, int]]:
+    """Convert policy.handoff_caps to the (substring, window, cap) row format.
+
+    Non-"*" rows come first in file order, "*" last (the default). Each row's
+    `match` list may carry multiple substrings (e.g. opus+ fable); each becomes
+    its own row so cap_for's first-match-wins logic stays unchanged.
+    """
+    handoff_caps = registry_dict.get("policy", {}).get("handoff_caps", {})
+    if not isinstance(handoff_caps, dict):
+        return list(DEFAULT_CAPS)
+    rows = []
+    default_row = None
+    for _key, entry in handoff_caps.items():
+        if not isinstance(entry, dict):
+            continue
+        match = entry.get("match")
+        window = entry.get("window")
+        cap = entry.get("cap_tokens")
+        if not isinstance(match, list) or not isinstance(window, int) or not isinstance(cap, int):
+            continue
+        for substring in match:
+            if not isinstance(substring, str):
+                continue
+            if substring == "*":
+                default_row = (substring, window, cap)
+            else:
+                rows.append((substring, window, cap))
+    if default_row is not None:
+        rows.append(default_row)
+    return rows if rows else list(DEFAULT_CAPS)
+
+
+def _has_usable_rows(registry_dict) -> bool:
+    handoff_caps = (registry_dict.get("policy") or {}).get("handoff_caps")
+    if not isinstance(handoff_caps, dict):
+        return False
+    return any(isinstance(e, dict) and isinstance(e.get("match"), list)
+               and isinstance(e.get("window"), int) and isinstance(e.get("cap_tokens"), int)
+               for e in handoff_caps.values())
+
+
+def load_caps(path: str | Path | None = None) -> tuple[list[tuple[str, int, int]], str]:
+    """Load caps from the registry file, or fall back to DEFAULT_CAPS.
+
+    Returns (caps, source) where source is "policy" when read from the registry,
+    "default" when the file is missing/unreadable/malformed. Pure aside from the
+    file read itself.
+    """
+    path = _REGISTRY_PATH if path is None else Path(path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+        if not isinstance(registry, dict):
+            return list(DEFAULT_CAPS), "default"
+        caps = caps_from_registry(registry)
+        # caps_from_registry falls back to DEFAULT_CAPS when no row is usable:
+        # then the numbers are not the policy's, and the source must say so.
+        if caps == DEFAULT_CAPS and not _has_usable_rows(registry):
+            return list(DEFAULT_CAPS), "default"
+        return caps, "policy"
+    except (OSError, ValueError, KeyError):
+        return list(DEFAULT_CAPS), "default"
 
 
 def fill_from_transcript(lines) -> dict | None:
@@ -75,14 +142,18 @@ def fill_from_transcript(lines) -> dict | None:
     return fill
 
 
-def cap_for(model, caps=DEFAULT_CAPS) -> int:
+def cap_for(model, caps=None) -> int:
     """The handoff cap for `model` from the 8.3 table, or the default row.
 
     Substring match on the lowercased id, first row wins. A trailing `[1m]`
     marks an explicitly 1M window: it is stripped before matching so the id
     takes its family's 1M row, and an unmatched family still falls back to the
-    200k-class `"*"` row.
+    200k-class `"*"` row. When `caps` is None, loads from the registry's
+    policy.handoff_caps (single source); when the registry is missing or
+    malformed, falls back to DEFAULT_CAPS.
     """
+    if caps is None:
+        caps, _ = load_caps()
     name = str(model or "").lower()
     if name.endswith("[1m]"):
         name = name[:-4]
