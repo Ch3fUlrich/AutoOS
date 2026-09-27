@@ -455,17 +455,19 @@ when M is 0**, 1 otherwise.
 |---|---|---|---|
 | 1 | containers | every service compose starts (those without `profiles`, plus the ones `COMPOSE_PROFILES` names) is `running`, and `healthy` where docker reports a health status | - |
 | 2 | keyless refusal | `GET /v1/models` on `:20128` and `GET /api/session` on `:4096`, without an `Authorization` header, answer 401 | that service is not enabled |
-| 3 | keyed combos | `POST /v1/chat/completions` with a one-word prompt and `max_tokens` 16 answers 200 for each combo | `AUTOOS_OMNIROUTE_KEY` is unset |
+| 3 | keyed combos | `POST /v1/chat/completions` with a one-word prompt and `max_tokens` 256 (a reasoning leg needs room to think) answers 200 for each combo; a 502/503 is retried twice, 10 s then 20 s, while a just-started gateway warms up | `AUTOOS_OMNIROUTE_KEY` is unset |
 | 4 | code dir | `AUTOOS_CODE_DIR` (environment, then `stack.env`) is a directory inside the opencode container, and the OpenHands container's `SANDBOX_VOLUMES` has a `<dir>:<dir>` entry | that service is not enabled |
 | 5 | gateway CLI | `docker exec autoos-omniroute qodercli --version` prints a version, run as the gateway runs it (same user and `HOME`): the image has the qodercli layer and its `HOME` is writable | the omniroute service is not enabled, or its container is not running (check 1 already FAILs that) |
 | 6 | public URLs | each URL answers 302 (the auth proxy's redirect) without credentials | `AUTOOS_VERIFY_PUBLIC_URLS` is unset |
 | 7 | gateway public URL | `AUTOOS_OMNIROUTE_PUBLIC_URL` (environment, then `stack.env`) is an `http(s)` URL without credentials or blanks; printed as the app normalizes it, **not requested** (it may be a plain LAN address; reachability is check 6's job) | it is unset or empty |
 | 8 | healthcheck | - | always: `configuration/healthcheck.sh` appends to `logs/healthcheck-<date>.log` on every run and exits 0 whatever it finds, so it is neither read-only nor a verdict; its docker probes are checks 1 and 2 |
 
-The two variables `verify` reads besides the ones above:
+The variables `verify` reads besides the ones above:
 
 - `AUTOOS_VERIFY_COMBOS` - space separated combo names for check 3
   (default `t2-worker-free-only t3-driver-free-only t2-worker-clean`).
+- `AUTOOS_VERIFY_RETRY_SLEEP` - seconds before check 3's first retry (default
+  10, doubled for the second; decimal, anything else means 10).
 - `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 6. Keep
   them in your shell environment, not in a file that is committed. A URL with
   credentials in it is refused, and a query string is never echoed.

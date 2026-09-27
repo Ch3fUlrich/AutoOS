@@ -1040,13 +1040,16 @@ cmd_rollback() {
 # is only asked `inspect`, `exec <opencode> test -d` and `exec <omniroute>
 # qodercli --version` (which leaves qodercli's usual log files in its HOME, the
 # qoder-home mount - nothing else), curl only makes GETs and the combo probes
-# (POST /v1/chat/completions, max_tokens 16); nothing is started, stopped,
+# (POST /v1/chat/completions, max_tokens 256; a 502/503 is retried twice,
+# 10 s then 20 s, while a freshly started gateway warms up); nothing is started, stopped,
 # written or printed that could be a key. One line per
 # check - "  ok    <name>", "  FAIL  <name> - <why>", "  skip  <name> - <why>" -
 # then the totals; exit 0 only when nothing FAILed.
 #   AUTOOS_OMNIROUTE_KEY         gateway key for the combo probes (never read from
 #                                a file; unset -> that check is skipped)
 #   AUTOOS_VERIFY_COMBOS         space separated combo names (default below)
+#   AUTOOS_VERIFY_RETRY_SLEEP    seconds before the first combo retry (default
+#                                10; doubled for the second)
 #   AUTOOS_VERIFY_PUBLIC_URLS    space separated public URLs that must redirect
 #                                (302, the auth proxy) without credentials
 #   AUTOOS_OMNIROUTE_PUBLIC_URL  the gateway's public origin (stack.env): printed as
@@ -1181,7 +1184,7 @@ verify_keyless_one() {
 # on stdin (`-H @-` from a here-string): never on a command line, where `ps`
 # shows it, and never in this script's output.
 verify_combos() {
-    local key="${AUTOOS_OMNIROUTE_KEY:-}" combos c url body code why
+    local key="${AUTOOS_OMNIROUTE_KEY:-}" combos c url body code why wait_s attempt
     if [[ -z "$(verify_container omniroute)" ]]; then v_skip "keyed combos" "the omniroute service is not enabled"; return 0; fi
     if [[ -z "$key" ]]; then v_skip "keyed combos" "AUTOOS_OMNIROUTE_KEY is not set"; return 0; fi
     if [[ "$key" == *$'\n'* || "$key" == *$'\r'* ]]; then
@@ -1193,9 +1196,20 @@ verify_combos() {
     for c in "${combos[@]}"; do
         # The name goes into a JSON body: only what a combo name can be.
         if [[ ! "$c" =~ ^[A-Za-z0-9._:/-]+$ ]]; then v_fail "combo (invalid name)" "AUTOOS_VERIFY_COMBOS entries are [A-Za-z0-9._:/-]"; continue; fi
-        body="{\"model\":\"$c\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":16}"
-        code="$(verify_code -m 60 --noproxy '*' -X POST -H 'Content-Type: application/json' -H @- -d "$body" "$url" \
-            <<<"Authorization: Bearer $key")"
+        # max_tokens 256: a reasoning leg spends ~18 tokens thinking, and at 16-20
+        # the gateway's quality check answers 502 (L0, live 2026-09-27).
+        body="{\"model\":\"$c\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":256}"
+        # 502/503 right after `up` is the gateway warming up (both combos answered
+        # on re-probe, 2026-09-27): two retries, 10 s then 20 s. Nothing else is retried.
+        wait_s="${AUTOOS_VERIFY_RETRY_SLEEP:-10}"
+        # Decimal even with a leading zero: bash reads "008" as bad octal and aborts.
+        if [[ "$wait_s" =~ ^[0-9]{1,3}$ ]]; then wait_s=$(( 10#$wait_s )); else wait_s=10; fi
+        for attempt in 1 2 3; do
+            code="$(verify_code -m 60 --noproxy '*' -X POST -H 'Content-Type: application/json' -H @- -d "$body" "$url" \
+                <<<"Authorization: Bearer $key")"
+            [[ "$code" == 502 || "$code" == 503 ]] && (( attempt < 3 )) || break
+            sleep "$wait_s"; wait_s=$(( wait_s * 2 ))
+        done
         if [[ "$code" == 200 ]]; then v_ok "combo $c"; continue; fi
         why="$(verify_expected "$code" 200)"
         [[ "$code" == 401 ]] && why="HTTP 401, the gateway did not accept AUTOOS_OMNIROUTE_KEY"
