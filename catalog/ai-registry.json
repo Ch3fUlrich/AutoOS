@@ -563,6 +563,26 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "openai/gpt-oss-20b": {
+      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-20B (free tier). Added for its free-tier rate limits (brief R4, 2026-09-27) -- the limits key must resolve via resolve_leg, so the model entry exists even though no route leg uses it yet. Non-limit fields mirror the 120b sibling (same openai-oss family, reasoning, low/medium/high ladder): unsourced defaults, not a measured context/output guarantee (D20) -- price_in/price_out 0.0 follows the existing 'vendor price not sourced' convention (see openrouter sibling entries); do not use for cost math until priced.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "openai-oss",
+      "id": "openai/gpt-oss-20b",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "openrouter-dots3-note": {
       "$comment": "Same conservative default as openrouter-nemotron-ultra.",
       "context_advertised": 512000,
@@ -1794,7 +1814,30 @@
         "customUserAgent": "curl/8.7.1"
       },
       "tier": "free",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "limits": {
+        "openai/gpt-oss-120b": {
+          "rpm": 30,
+          "rpd": 1000,
+          "tpm": 8000,
+          "tpd": 200000,
+          "source": "operator Groq console screenshot 2026-09-27"
+        },
+        "openai/gpt-oss-20b": {
+          "rpm": 30,
+          "rpd": 1000,
+          "tpm": 8000,
+          "tpd": 200000,
+          "source": "operator Groq console screenshot 2026-09-27"
+        },
+        "qwen/qwen3.8-27b": {
+          "rpm": 30,
+          "rpd": 1000,
+          "tpm": 8000,
+          "tpd": 200000,
+          "source": "operator Groq console screenshot 2026-09-27"
+        }
+      }
     },
     "hugging_face": {
       "$comment": "Unverified default: no combo references this provider.",
@@ -2750,5 +2793,5 @@
       }
     }
   },
-  "version": "2026-09-26"
+  "version": "2026-09-27"
 }

@@ -82,6 +82,19 @@
         "verified": { "type": ["string", "null"] }
       }
     },
+    "provider_limits": {
+      "type": "object",
+      "description": "providers.<id>.limits entry (brief R4, 2026-09-27): one per model spelling. rpm/rpd/tpm/tpd are each optional non-negative ints (the resolver reads only tpm today); source is required (D20).",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "rpm": { "type": "integer", "minimum": 0 },
+        "rpd": { "type": "integer", "minimum": 0 },
+        "tpm": { "type": "integer", "minimum": 0 },
+        "tpd": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string" }
+      }
+    },
     "provider": {
       "type": "object",
       "required": ["id", "omniroute_id", "litellm_env", "litellm_prefix", "trains_on_prompts", "tier"],
@@ -110,6 +123,11 @@
         },
         "tier": { "enum": ["free", "paid", "subscription"] },
         "windows": { "type": "array", "items": { "$ref": "#/$defs/window" } },
+        "limits": {
+          "type": "object",
+          "description": "Additive field, not in spec 3.1 (brief R4, 2026-09-27): per-model free-tier rate caps as data, keyed by the provider's own model spelling (the part of a leg after its '<provider>/' prefix). The resolver reads only `tpm` today (a request-size filter: need_tokens * 1.3 > tpm skips the leg); rpm/rpd/tpd are data only for now (no clock, no counters). Each value carries a source tag (D20). registry.py check rule 10 validates every key resolves via resolve_leg and every value is a non-negative int.",
+          "additionalProperties": { "$ref": "#/$defs/provider_limits" }
+        },
         "$comment": { "$ref": "#/$defs/comment" }
       }
     },

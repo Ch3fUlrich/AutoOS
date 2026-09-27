@@ -1002,5 +1002,63 @@ class LegRulesTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class ProviderLimitsTests(unittest.TestCase):
+    """providers.<id>.limits: per-model free-tier rate caps as data (brief R4,
+    2026-09-27). Keyed by the provider's own model spelling (the part of the
+    leg after '<provider>/'); validated against resolve_leg so an unknown model
+    spelling is caught here, not at route time. Values are non-negative ints;
+    rpm/rpd/tpm/tpd are each optional, source is required (D20).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_groq_limits_carry_the_three_console_models(self):
+        limits = self.reg["providers"]["groq"]["limits"]
+        self.assertEqual(
+            sorted(limits),
+            ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+        for entry in limits.values():
+            self.assertEqual(entry["source"],
+                             "operator Groq console screenshot 2026-09-27")
+            for key in ("rpm", "rpd", "tpm", "tpd"):
+                self.assertIsInstance(entry[key], int, key)
+                self.assertGreaterEqual(entry[key], 0, key)
+        # the operator's measured console numbers (brief R4):
+        for entry in limits.values():
+            self.assertEqual(entry["rpm"], 30)
+            self.assertEqual(entry["rpd"], 1000)
+            self.assertEqual(entry["tpm"], 8000)
+            self.assertEqual(entry["tpd"], 200000)
+
+    def test_every_limits_key_resolves_as_a_groq_leg(self):
+        for key in self.reg["providers"]["groq"]["limits"]:
+            provider_id, model_id = registry.resolve_leg("groq/" + key, self.reg)
+            self.assertEqual(provider_id, "groq")
+            self.assertEqual(model_id, key)
+
+    def test_unknown_limits_key_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["ghost-model"] = {
+            "tpm": 8000, "source": "test"}
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "ghost-model" in p for p in problems),
+            problems)
+
+    def test_a_negative_limit_value_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tpm"] = -1
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "tpm" in p
+                and "openai/gpt-oss-120b" in p for p in problems),
+            problems)
+
+    def test_real_registry_passes_limits_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
 if __name__ == "__main__":
     unittest.main()

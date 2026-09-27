@@ -884,6 +884,78 @@ class FallThroughTests(unittest.TestCase):
         self.assertNotIn("t2-worker-clean", removed)
 
 
+class ProviderLimitsFilterTests(unittest.TestCase):
+    """The per-leg tpm filter (brief R4, 2026-09-27): a leg whose provider
+    limits for that model carry `tpm` is skipped when need_tokens * 1.3 > tpm,
+    counted as a skipped leg exactly like the context filter. No clock, no
+    counters: rpm/rpd/tpd are data only for now.
+
+    A small inline registry with a groq leg carrying tpm 8000 (the operator's
+    measured Groq free-tier cap); no policy.leg_rules here, so the deny-groq
+    rule never gates it -- the test isolates the tpm filter.
+    """
+
+    def setUp(self):
+        self.registry = {
+            "providers": {
+                "groq": {"id": "groq", "tier": "free", "trains_on_prompts": False,
+                         "limits": {
+                             "openai/gpt-oss-120b": {
+                                 "rpm": 30, "rpd": 1000, "tpm": 8000,
+                                 "tpd": 200000,
+                                 "source": "operator Groq console screenshot 2026-09-27"}}},
+                "clean": {"id": "clean", "tier": "paid", "trains_on_prompts": False},
+            },
+            "models": {
+                "openai/gpt-oss-120b": {
+                    "id": "openai/gpt-oss-120b", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "big": {"id": "big", "tool_calls": "proven",
+                        "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                "r-groq": {"id": "r-groq",
+                           "legs": ["groq/openai/gpt-oss-120b", "clean/big"]},
+            },
+        }
+
+    def card(self, kind="review", privacy="public"):
+        return {"kind": kind, "privacy": privacy}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def test_a_2k_token_need_keeps_a_groq_leg(self):
+        # 2000 * 1.3 = 2600 <= tpm 8000: the groq leg survives.
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 2000}, self.state(), self.registry, {})
+        self.assertIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", skipped)
+
+    def test_a_9k_need_skips_the_groq_leg_with_the_reason(self):
+        # 9000 * 1.3 = 11700 > tpm 8000: the groq leg is skipped, named as a
+        # limit reason, and the clean/big fallback leg still serves.
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 9000}, self.state(), self.registry, {})
+        self.assertNotIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertIn("groq/openai/gpt-oss-120b", skipped)
+        self.assertTrue(
+            any("limit: groq/openai/gpt-oss-120b tpm 8000 < need 9000" in rsn
+                for rsn in skipped["groq/openai/gpt-oss-120b"]),
+            skipped["groq/openai/gpt-oss-120b"])
+
+    def test_a_leg_without_limits_is_unaffected(self):
+        # clean/big has no limits entry: a 9k need skips the groq leg but keeps
+        # clean/big (context 100000 * 1.3 covers it).
+        legs, skipped, _ = r.usable_legs(
+            self.registry["routes"]["r-groq"], self.card(),
+            {"need_tokens": 9000}, self.state(), self.registry, {})
+        self.assertIn(("clean", "big"), legs)
+        self.assertNotIn("clean/big", skipped)
+
+
 class ScoreTests(unittest.TestCase):
     """Expected-cost scoring and theta picking (spec 5.3 steps 4-5, 5.4).
 

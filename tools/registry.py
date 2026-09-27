@@ -1885,6 +1885,48 @@ def _check_leg_rules(registry) -> list:
     return problems
 
 
+def _check_provider_limits(registry) -> list:
+    """rule 10 - every provider limits key resolves and values are non-negative
+    ints (brief R4, 2026-09-27).
+
+    providers.<id>.limits is keyed by the provider's own model spelling (the
+    part of a leg after its '<provider>/' prefix). Reusing resolve_leg -- the
+    same one-leg rule the validator and the resolver share -- means an unknown
+    model spelling fails closed here exactly as it would at route time. The
+    tpm/rpm/rpd/tpd values are each optional, but when present must be
+    non-negative ints; the resolver reads only tpm today (a request-size
+    filter), the rest are data only.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        limits = provider.get("limits")
+        if not isinstance(limits, dict):
+            continue
+        for key, entry in sorted(limits.items()):
+            label = "providers.%s.limits.%s" % (provider_id, key)
+            try:
+                resolve_leg(provider_id + "/" + key, registry)
+            except ValueError:
+                problems.append(
+                    "limits: %s key %r does not resolve to a %s model"
+                    % (label, key, provider_id))
+            if not isinstance(entry, dict):
+                problems.append("limits: %s is not an object" % label)
+                continue
+            for field in ("rpm", "rpd", "tpm", "tpd"):
+                if field not in entry:
+                    continue
+                value = entry[field]
+                if not isinstance(value, int) or isinstance(value, bool) \
+                        or value < 0:
+                    problems.append(
+                        "limits: %s.%s must be a non-negative int (got %r)"
+                        % (label, field, value))
+    return problems
+
+
 # ===========================================================================
 # check / validate
 # ===========================================================================
@@ -1902,6 +1944,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_until_values(registry))
     problems.extend(_check_unavailable_until_pairs_available(registry))
     problems.extend(_check_leg_rules(registry))
+    problems.extend(_check_provider_limits(registry))
     return problems
 
 
