@@ -2886,6 +2886,31 @@ if it "aistack: restart omniroute issues exactly one compose restart and no back
     if (( ok )); then pass; else fail "restart omniroute is not one compose restart with no backup"; fi
 fi
 
+if it "aistack: restart with one unknown name restarts nothing (validate all first)"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart omniroute bogus)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "restarted before the usage error: $(cat "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart omniroute bogus mutated before failing"; fi
+fi
+
+if it "aistack: --dry-run restart calls no compose"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" --dry-run restart omniroute)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "dry run restarted: $(cat "$d/docker.log")" >&2; }
+    [[ "$out" == *"would run"*"restart omniroute"* ]] || { ok=0; echo "no would-run line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--dry-run restart is not side-effect free"; fi
+fi
+
 if it "aistack: restart with an unknown service exits 2 without calling compose"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"

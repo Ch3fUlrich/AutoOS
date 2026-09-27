@@ -670,9 +670,12 @@ cmd_restart() {
     if (( ${#SERVICES[@]} == 0 )); then
         echo "  ! restart needs a service (omniroute, opencode, openhands)"; return 2
     fi
+    # Validate every name first: an unknown one must not follow a restart.
+    for svc in "${SERVICES[@]}"; do
+        [[ -n "$(service_container "$svc")" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands)"; return 2; }
+    done
     for svc in "${SERVICES[@]}"; do
         c="$(service_container "$svc")"
-        [[ -n "$c" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands)"; return 2; }
         if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai restart $svc"; continue; fi
         dc restart "$svc" || { echo "  ! docker compose restart $svc failed - see: $0 status"; return 1; }
         echo "  + $svc restarted ($c)"
