@@ -3479,6 +3479,70 @@ _aistack_failover_on() {
     _aistack "$1" failover on >/dev/null
 }
 
+# _aistack_standby_pid <sandbox>: the live standby's pid, as fake_ss reports it.
+_aistack_standby_pid() {
+    tr -d '\r[:space:]' <"$1/standby-pid"
+}
+
+# _aistack_standby_pids <sandbox>: every pid the fake starter spawned, newest
+# last. A standby is recorded as "<pid> <port>" in <sandbox>/standbys because
+# more than one can run at once (the gateway-port one plus the always-on :4000
+# unit, or two sharing the gateway port).
+_aistack_standby_pids() {
+    [[ -s "$1/standbys" ]] || return 0
+    cut -d' ' -f1 "$1/standbys"
+}
+
+# _aistack_standby <sandbox> <port>: run the fake starter DIRECTLY, the way
+# ai-stack.sh runs it (same AUTOOS_START_LITELLM, same argv shape), so a
+# standby exists on <port> without a failover having happened. 4000 is the
+# always-on fallback unit, 20128 the gateway port.
+_aistack_standby() {
+    env -u AUTOOS_LITELLM_MASTER_KEY_FILE \
+        HOME="$1/home" PATH="$1/bin:$PATH" \
+        AUTOOS_LITELLM_HOST=127.0.0.1 AUTOOS_LITELLM_PORT="$2" \
+        AUTOOS_LITELLM_STATE_DIR="$1/cfg/failover" \
+        "$1/bin/start-litellm" >/dev/null
+}
+
+# _aistack_process_alive <pid>: is it a live process (not a leftover zombie)?
+_aistack_process_alive() {
+    local p="$1" st
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$p" 2>/dev/null || return 1
+    [[ -r "/proc/$p/stat" ]] || return 0
+    st="$(sed -n 's/^.*) \([A-Za-z]\).*/\1/p' "/proc/$p/stat" 2>/dev/null)" || return 0
+    [[ "$st" != Z ]]
+}
+
+# _aistack_wait_gone <pid>: a stop is asynchronous - the process can still be
+# there, or a zombie waiting to be reaped, the moment the command returns - so
+# give it up to 2 s instead of asserting on an immediate kill -0 (review
+# lstby2c). 0 = gone, 1 = still alive after 2 s.
+_aistack_wait_gone() {
+    local i
+    for i in $(seq 1 20); do
+        _aistack_process_alive "$1" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# _aistack_kill_standby <sandbox>: reap every real standby the fake starter
+# spawned (a standby that shrugs off TERM needs the KILL too). Every failover
+# test that turns the standby on calls this before removing the sandbox -
+# rm -rf alone would leave the process behind.
+_aistack_kill_standby() {
+    local p i
+    while read -r p; do
+        [[ "$p" =~ ^[0-9]+$ ]] || continue
+        kill "$p" 2>/dev/null || true
+        for i in $(seq 1 20); do _aistack_process_alive "$p" || break; sleep 0.1; done
+        _aistack_process_alive "$p" && kill -KILL "$p" 2>/dev/null || true
+    done < <(_aistack_standby_pids "$1")
+    rm -f "$1/standby-pid" "$1/standbys"
+}
+
 if it "aistack: failover is listed in the unknown-command message and in --help"; then
     d="$(_aistack_sandbox)"
     ok=1
@@ -3504,13 +3568,20 @@ if it "aistack: failover on stops omniroute then starts litellm with the four en
     grep -qx 'master-key-file=ok' "$d/start-litellm-env.log" 2>/dev/null || { ok=0; echo "the key file was not readable: $(cat "$d/start-litellm-env.log" 2>/dev/null)" >&2; }
     grep -q 'http://127.0.0.1:20128/health/liveliness' "$d/curl.log" 2>/dev/null || { ok=0; echo "liveliness not probed on :20128" >&2; }
     [[ -e "$d/run-autoos-omniroute" ]] && { ok=0; echo "the gateway container still runs" >&2; }
-    grep -qx 'pid=424242' "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no state file with the standby pid" >&2; }
+    # The standby pid is discovered live (ss + cmdline), never from a pid
+    # file: the real starter writes none, and neither may the fake.
+    pid="$(_aistack_standby_pid "$d")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || { ok=0; echo "no live standby pid" >&2; }
+    kill -0 "$pid" 2>/dev/null || { ok=0; echo "the standby pid $pid is not alive" >&2; }
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q litellm || { ok=0; echo "the standby pid $pid is not litellm" >&2; }
+    grep -qx "pid=$pid" "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no state file with the live standby pid" >&2; }
     grep -q '^since=' "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no start time in the state file" >&2; }
-    [[ "$(cat "$d/cfg/failover/litellm.pid" 2>/dev/null)" == 424242 ]] || { ok=0; echo "no pid file in the standby state dir" >&2; }
+    if [[ -e "$d/cfg/failover/litellm.pid" ]]; then ok=0; echo "a pid file was written (the real starter writes none)" >&2; fi
     if grep -rF -- 'sk-test-client-key' "$d/events.log" "$d/docker.log" "$d/curl.log" "$d/start-litellm.log" "$d/start-litellm-env.log" "$d/systemctl.log" 2>/dev/null; then
         ok=0; echo "the client key reached a log" >&2
     fi
     [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover on does not hand the port to litellm"; fi
 fi
@@ -3547,44 +3618,96 @@ if it "aistack: a second failover on refuses with rc 2 and changes nothing"; the
     [[ "$out" == *"already on"* ]] || { ok=0; echo "no refusal: $out" >&2; }
     [[ -e "$d/docker.log" || -e "$d/start-litellm.log" ]] && { ok=0; echo "the refused run drove something" >&2; }
     [[ "$(cat "$d/cfg/failover.state")" == "$before" ]] || { ok=0; echo "the state file changed" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "a second failover on is not a refusal"; fi
 fi
 
-if it "aistack: failover with failed liveliness starts omniroute again, rc 1, no state file"; then
+if it "aistack: failover with failed liveliness recreates omniroute, rc 1, no state file"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     : >"$d/failover-liveliness-fail"
     out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
     ok=1
     (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
-    _aistack_seq "$d/docker.log" "stop omniroute" "start omniroute" || ok=0
+    # The rollback recreates the gateway (up -d --no-deps), never a bare
+    # start: a stopped container without published ports stays port-less.
+    _aistack_seq "$d/docker.log" "stop omniroute" "up -d --no-deps omniroute" || ok=0
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
     [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
     [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written for a dead standby" >&2; }
     [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "a failed standby leaves the port empty"; fi
 fi
 
-if it "aistack: failover off restores omniroute and a second off is a no-op"; then
+if it "aistack: failover on with a failing starter recreates omniroute, rc 1, no state file"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/fail-start-litellm"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    _aistack_seq "$d/docker.log" "stop omniroute" "up -d --no-deps omniroute" || ok=0
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written for a standby that never started" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed starter leaves the port empty"; fi
+fi
+
+if it "aistack: failover off kills the litellm listener, recreates omniroute, and a second off is a no-op"; then
     d="$(_aistack_sandbox)"
     _aistack_failover_on "$d"
+    standby="$(_aistack_standby_pid "$d")"
     rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
     out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
-    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null || { ok=0; echo "the gateway was not started: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    # A recreate, never a start: only `up -d` republishes the gateway port.
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started instead of recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby listener (pid $standby) survived" >&2; }
     [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not running again" >&2; }
     [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
-    [[ -e "$d/cfg/failover/litellm.pid" ]] && { ok=0; echo "the standby pid file survived" >&2; }
     [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
     rm -f "$d/docker.log" "$d/events.log"
     out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
     (( rc == 0 )) || { ok=0; echo "second: exit $rc, not 0: $out" >&2; }
     [[ "$out" == *"failover is off"* ]] || { ok=0; echo "second: no off line: $out" >&2; }
     [[ -e "$d/docker.log" || -e "$d/events.log" ]] && { ok=0; echo "second: the no-op drove something" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover off does not restore the gateway"; fi
+fi
+
+if it "aistack: failover off when the port stays busy starts nothing, rc 1, and names the holder"; then
+    # Live 2026-09-27 13:28-13:33Z: the standby was never stopped, so the port
+    # stayed busy and the gateway never came back. After the standby kill a
+    # foreign program still holds :20128 here: off must kill the standby, then
+    # refuse to recreate the gateway and say who holds the port.
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    standby="$(_aistack_standby_pid "$d")"
+    sleep 300 >/dev/null 2>&1 &
+    other=$!
+    printf 'LISTEN 0 511 0.0.0.0:20128 0.0.0.0:* users:(("busy-holder",pid=%s,fd=3))\n' "$other" >"$d/ss-hold-20128"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby listener (pid $standby) survived" >&2; }
+    kill -0 "$other" 2>/dev/null || { ok=0; echo "the foreign holder (pid $other) was killed" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was recreated onto a busy port" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started onto a busy port" >&2; }
+    [[ "$out" == *"$other"* && "$out" == *'busy-holder'* ]] || { ok=0; echo "the holder is not named: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] || { ok=0; echo "the state file was removed while the gateway is not serving" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off hides a busy gateway port"; fi
 fi
 
 if it "aistack: failover status says off and on"; then
@@ -3597,7 +3720,8 @@ if it "aistack: failover status says off and on"; then
     _aistack "$d" failover on >/dev/null || { ok=0; echo "on failed" >&2; }
     out="$(_aistack "$d" failover status)" && rc=0 || rc=$?
     (( rc == 0 )) || { ok=0; echo "on: exit $rc: $out" >&2; }
-    [[ "$out" == *"failover on since "*"(litellm pid 424242)"* ]] || { ok=0; echo "on: [$out]" >&2; }
+    [[ "$out" == *"failover on since "*"(litellm pid $(_aistack_standby_pid "$d"))"* ]] || { ok=0; echo "on: [$out]" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover status is wrong"; fi
 fi
@@ -3613,24 +3737,33 @@ if it "aistack: verify prints the failover line when on and never FAILs it"; the
     grep -q 'failover ON: LiteLLM serves the gateway port' <<<"$out" || { ok=0; echo "on: no failover line" >&2; }
     grep -q '^  FAIL.*ailover' <<<"$out" && { ok=0; echo "on: failover FAILs: $(grep '^  FAIL.*ailover' <<<"$out")" >&2; }
     [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "verify does not report the standby"; fi
 fi
 
-if it "aistack: failover off never kills a reused pid that is not the standby"; then
-    # The recorded pid may since belong to another program: off must check
-    # /proc/<pid>/cmdline and leave anything that is not litellm alive.
+if it "aistack: failover off never kills a foreign listener on the gateway port"; then
+    # The port is held by a program that is not litellm (a stale state file
+    # points at it too): off must leave it alive, start nothing, and exit 1
+    # naming the holder.
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    sleep 300 &
+    rm -f "$d/run-autoos-omniroute"   # the gateway is down; something else holds its port
+    sleep 300 >/dev/null 2>&1 &
     other=$!
     mkdir -p "$d/cfg/failover"
     printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
-    printf '%s\n' "$other" >"$d/cfg/failover/litellm.pid"
+    printf '%s\n' "$other" >"$d/cfg/failover/litellm.pid"   # stale pid file: cleaned, never signalled
+    printf 'LISTEN 0 511 0.0.0.0:20128 0.0.0.0:* users:(("foreign-prog",pid=%s,fd=3))\n' "$other" >"$d/ss-hold-20128"
     out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
     ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
     kill -0 "$other" 2>/dev/null || { ok=0; echo "failover off killed an unrelated process (pid $other)" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was recreated onto a busy port" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started onto a busy port" >&2; }
+    [[ "$out" == *"$other"* && "$out" == *'foreign-prog'* ]] || { ok=0; echo "the holder is not named: $out" >&2; }
     kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover off killed a pid that is not the standby"; fi
 fi
@@ -3653,11 +3786,47 @@ if it "aistack: failover on interrupted after the gateway stop hands the port ba
         sleep 1; kill -TERM "$p" 2>/dev/null || true
     fi
     wait "$bg" 2>/dev/null || true
-    _aistack_seq "$d/events.log" "stop omniroute" "start omniroute" || { ok=0; echo "the gateway was not started again: $(cat "$d/docker.log")" >&2; }
+    _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log")" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
     [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was left behind" >&2; }
     [[ -s "$d/cfg/failover/litellm.pid" ]] && { ok=0; echo "the standby pid file was left behind" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "an interrupted failover on left the gateway down"; fi
+fi
+
+if it "aistack: an interrupted failover on waits a short health window, not the full timeout"; then
+    # Same hand-back, but the gateway never becomes healthy afterwards. The
+    # interrupted command must report, not sit on the terminal for the full
+    # 180 s a normal recreate allows: the trap path passes a bounded wait, so
+    # the health probe runs a handful of times instead of 37 (review lstby2c).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    touch "$d/failover-liveliness-fail" "$d/slow-sleep" "$d/unhealthy-omniroute"
+    ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
+    bg=$!
+    p=""
+    for _ in $(seq 1 50); do
+        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+        sleep 0.1
+    done
+    ok=1
+    if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
+        sleep 1; kill -TERM "$p" 2>/dev/null || true
+    fi
+    wait "$bg" 2>/dev/null || true
+    out="$(cat "$d/out.txt" 2>/dev/null)"
+    _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    n="$(grep -c '/api/health' "$d/curl.log" 2>/dev/null)" || n=0
+    # The recreate polls /api/health until it answers; the trap's bounded wait
+    # is 6 tries plus the one that ends it.
+    (( n > 0 )) || { ok=0; echo "the recreated gateway was never probed" >&2; }
+    (( n <= 8 )) || { ok=0; echo "the hand-back waited the full timeout: $n health probes" >&2; }
+    [[ "$out" == *'interrupted'* ]] || { ok=0; echo "no interrupt line: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was left behind" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted hand-back waits the full gateway timeout"; fi
 fi
 
 if it "aistack: failover on refreshes a stale client.key from the current gateway key"; then
@@ -3672,6 +3841,7 @@ if it "aistack: failover on refreshes a stale client.key from the current gatewa
     grep -q 'sk-stale-old-key' "$d/cfg/client.key" && { ok=0; echo "client.key still holds the stale key" >&2; }
     grep -q 'sk-test-client-key' "$d/cfg/client.key" || { ok=0; echo "client.key does not hold the current key" >&2; }
     [[ "$(stat -c %a "$d/cfg/client.key")" == 600 ]] || { ok=0; echo "client.key mode is not 600" >&2; }
+    _aistack_kill_standby "$d"
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover on kept a stale client key"; fi
 fi
@@ -3690,5 +3860,318 @@ if it "aistack: failover on without a client key refuses before stopping anythin
     [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written without a key" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "failover on stops the gateway with no key to serve"; fi
+fi
+
+# ─── What counts as the standby (review lstby2c) ───────────────────────────
+# The standby and the always-on :4000 fallback unit are the SAME program
+# started by the SAME script with the SAME argv shape, so "it is litellm"
+# cannot be the whole test. Every case below plants the confusion the review
+# found - a reused pid, a second listener, a state file that vanished - and
+# asserts who gets a signal.
+
+if it "aistack: failover off never signals the always-on :4000 proxy a stale state pid now belongs to"; then
+    # The state file's pid outlived its standby and the kernel handed it to the
+    # fallback unit on :4000. Off must name it, leave it alone, and still hand
+    # the free gateway port back (failover off killed the :4000 proxy).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"      # the gateway is down: a failover ran here
+    _aistack_standby "$d" 4000
+    other="$(_aistack_standby_pid "$d")"
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_process_alive "$other" \
+        || { ok=0; echo "the :4000 fallback proxy (pid $other) was signalled" >&2; }
+    [[ "$out" == *'leaving it alone'* ]] || { ok=0; echo "the refused pid is not named: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off signalled the :4000 fallback proxy"; fi
+fi
+
+if it "aistack: failover off without a state file stops every standby sharing the gateway port"; then
+    # Two things: the state file is gone (a shell killed between the standby's
+    # start and the write), and ss names TWO holders of :20128 - its own IPv4
+    # and IPv6 lines, or programs sharing the socket. Probing only the first
+    # pid, or trusting only the state file, leaves one running on the port.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"
+    mkdir -p "$d/cfg/failover"           # the trace the real starter leaves: its state dir
+    _aistack_standby "$d" 20128
+    first="$(_aistack_standby_pid "$d")"
+    _aistack_standby "$d" 20128
+    second="$(_aistack_standby_pid "$d")"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    [[ "$first" =~ ^[0-9]+$ && "$second" =~ ^[0-9]+$ && "$first" != "$second" ]] \
+        || { ok=0; echo "the fake did not spawn two standbys: [$first] [$second]" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$first"  || { ok=0; echo "the first standby (pid $first) survived" >&2; }
+    _aistack_wait_gone "$second" || { ok=0; echo "the second standby (pid $second) survived" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file appeared" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a stateless failover left a standby on the gateway port"; fi
+fi
+
+if it "aistack: failover off with no state file and nothing listening is still a no-op"; then
+    # The other half: a leftover state dir with NO listener is not a failover.
+    # Nothing may be stopped, started or recreated.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/cfg/failover"
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *'failover is off'* ]] || { ok=0; echo "no off line: $out" >&2; }
+    [[ -e "$d/docker.log" ]] && { ok=0; echo "the no-op drove docker: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway container is gone" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a stateless, listenerless off is not a no-op"; fi
+fi
+
+if it "aistack: failover off waits its TERM grace only on pids it accepted"; then
+    # A stale pid it refuses to signal is not something to wait for: waiting on
+    # it costs the full 10 s + 5 s grace for nothing. The fake `sleep` is a
+    # no-op, so the call count is what the grace costs (15 calls = both loops).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"
+    sleep 300 >/dev/null 2>&1 &
+    other=$!
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    _aistack_standby "$d" 20128          # the real standby, found through ss
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/sleep.log" "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
+    _aistack_process_alive "$other" || { ok=0; echo "the stale pid (pid $other) was killed" >&2; }
+    n=0
+    # Read only when the fake `sleep` actually ran: a bare `<` on a missing path
+    # fails the redirection before any `2>/dev/null` applies and writes to the
+    # suite's stderr (assertion still passes, but a red line per run - review
+    # lstby2d).
+    [[ -e "$d/sleep.log" ]] && n="$(wc -l <"$d/sleep.log")" || n=0
+    (( n <= 5 )) || { ok=0; echo "the grace waited on the refused pid: $n sleep calls" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off waited its grace on a pid it left alone"; fi
+fi
+
+if it "aistack: failover off KILLs a standby that ignores SIGTERM after the grace"; then
+    # The escalation branch, untested until the fake could be made stubborn:
+    # TERM is trapped and discarded, so only the KILL after the 10 s grace
+    # stops it. All 10 grace calls are spent (the fake sleep is a no-op), then
+    # the port is free again.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/standby-ignore-term"
+    ok=1
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "failover on failed" >&2; }
+    standby="$(_aistack_standby_pid "$d")"
+    _aistack_process_alive "$standby" || { ok=0; echo "the stubborn standby (pid $standby) never started" >&2; }
+    rm -f "$d/sleep.log" "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the stubborn standby (pid $standby) survived the KILL" >&2; }
+    n="$(wc -l <"$d/sleep.log" 2>/dev/null)" || n=0
+    (( n >= 10 )) || { ok=0; echo "the TERM grace was never waited out: $n sleep calls" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a standby that ignores TERM is never escalated to KILL"; fi
+fi
+
+if it "aistack: failover off refuses when the recreated gateway publishes nothing, {} or null"; then
+    # `{"20128/tcp":null}` is docker's own "key exists, nothing bound": as
+    # broken for a client as `{}` - the gateway answers inside its own network
+    # while the host port stays closed. Both shapes must land on the manual fix.
+    ok=1
+    for marker in noports nullports; do
+        d="$(_aistack_sandbox)"
+        _aistack_failover_on "$d"
+        : >"$d/$marker-autoos-omniroute"
+        out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$marker]: exit $rc, not 1: $out" >&2; }
+        [[ "$out" == *'publishes no port'* ]] || { ok=0; echo "[$marker]: no port complaint: $out" >&2; }
+        [[ "$out" == *'fix by hand:'*'up omniroute'* ]] || { ok=0; echo "[$marker]: no manual fix: $out" >&2; }
+        grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+            || { ok=0; echo "[$marker]: the gateway was never recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+        [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "[$marker]: the client key is in the output" >&2; }
+        _aistack_kill_standby "$d"
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a port-less gateway passes as restored"; fi
+fi
+
+if it "aistack: failover off recreates the gateway through the preflight guards"; then
+    # Handing the port back is a `compose up` like any other: a LAN bind with
+    # the firewall unit down must refuse BEFORE docker is asked for anything,
+    # and say the manual fix. A raw `docker compose up` here would publish the
+    # stack past the guard.
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    rm -f "$d/active-coding-agents-fw" "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    [[ "$out" == *'refusing to publish'* ]] || { ok=0; echo "the bind guard did not refuse: $out" >&2; }
+    [[ "$out" == *'fix by hand:'*'up omniroute'* ]] || { ok=0; echo "no manual fix: $out" >&2; }
+    [[ -e "$d/docker.log" ]] && { ok=0; echo "compose ran past the guard: $(cat "$d/docker.log")" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started, not recreated" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the failover hand-back bypasses the publish guards"; fi
+fi
+
+if it "aistack: failover on whose state write failed leaves no state path and the gateway back"; then
+    # The standby is live but the state file cannot be written. Whatever
+    # survived of the write must be removed - a truncated file reads as a live
+    # failover with a pid of its own - and the port handed back.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/cfg"
+    ln -s "$d/cfg/nowhere/failover.state" "$d/cfg/failover.state"   # unresolvable target
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    [[ "$out" == *'could not record the failover state'* ]] || { ok=0; echo "no complaint: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" || -L "$d/cfg/failover.state" ]] && { ok=0; echo "the state path survived" >&2; }
+    _aistack_process_alive "$(_aistack_standby_pid "$d")" \
+        && { ok=0; echo "the standby survived the rollback" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed state write leaves a phantom failover"; fi
+fi
+
+if it "aistack: failover on records the standby argv the real proxy carries"; then
+    # Item 10 is about the fake: a standby identified by its argv must look
+    # like the real thing, or every argv-based test proves nothing. The real
+    # starter runs `litellm --config config.yaml --host <bind> --port <port>`.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    pid="$(_aistack_standby_pid "$d")"
+    argv="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+    [[ "$argv" == *litellm* ]] || { ok=0; echo "argv is not litellm: [$argv]" >&2; }
+    [[ "$argv" == *'--config config.yaml'* ]] || { ok=0; echo "no --config in the argv: [$argv]" >&2; }
+    [[ "$argv" == *'--host 127.0.0.1 --port 20128'* ]] || { ok=0; echo "no --host/--port 20128: [$argv]" >&2; }
+    [[ "$argv" != *'sk-test-client-key'* ]] || { ok=0; echo "the client key is in the argv" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the fake standby does not look like a real proxy"; fi
+fi
+
+if it "aistack: failover off accepts a gateway already serving the port and clears the stale state"; then
+    # omniroute already owns :20128 (recreated by hand, or a standby exited and
+    # the gateway bound again) while the state file still says a failover is on.
+    # Proving the holder is the gateway - the container running, its port
+    # published, /api/health 200 - must let off clear the record instead of
+    # refusing for ever on a busy port (review lstby2d). A foreign holder still
+    # goes to the refusal (the next test).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    # A pid that is real (was a genuine process, so /proc once had it) but
+    # provably gone by the time `off` reads it: fork a subshell that exits on
+    # its own and `wait` for that exit (a signal is never in the loop) -
+    # `sleep 300 & ...; kill; wait` used to do this by racing a TERM against
+    # the sleep's own timeout. That race intermittently lost deep in this
+    # suite's long-lived shell (kill reported success, wait still blocked for
+    # the sleep's full 300 s - reproduced twice; a fresh, otherwise-idle shell
+    # never lost it in 260+ tries), which is exactly the 5+ minute stall this
+    # file used to add to `--filter=failover` (lstby2e). Waiting on a job that
+    # dies by itself needs no signal to land in time, so the race cannot recur.
+    ( : ) &
+    dead=$!
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the stale state file survived" >&2; }
+    [[ "$out" == *'failover is off'* ]] || { ok=0; echo "no off line: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        && { ok=0; echo "the serving gateway was recreated: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway container was stopped" >&2; }
+    out="$(_aistack "$d" failover status)"
+    [[ "$out" == *'failover off'* ]] || { ok=0; echo "status still on: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off refuses on a gateway that already serves the port"; fi
+fi
+
+if it "aistack: failover off stops a standby holding the gateway port with no state dir"; then
+    # The state dir the real starter creates can be gone (cleared by hand) while
+    # the standby still serves :20128. The listener is the proof, so off must
+    # stop it and hand the port back rather than treat it as a no-op (review
+    # lstby2d). The dir is only a hint, never a gate.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    _aistack_standby "$d" 20128              # the fake starter creates no state dir
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    [[ -d "$d/cfg/failover" ]] && { ok=0; echo "the test left a state dir behind" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off missed a standby with no state dir"; fi
+fi
+
+if it "aistack: failover off names a stale state pid as already gone, not as a foreign program"; then
+    # A pid the state file names that is simply gone is not "a foreign program
+    # now": the operator needs the distinction (review lstby2d). off still hands
+    # the free port back to the gateway.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    # See the sibling "already serving the port" case above for why this is a
+    # self-exiting subshell rather than a killed `sleep 300` (lstby2e).
+    ( : ) &
+    dead=$!
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *"pid $dead is already gone"* ]] || { ok=0; echo "the gone pid is not named: $out" >&2; }
+    [[ "$out" != *'not litellm any more'* ]] || { ok=0; echo "a gone pid was called foreign: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a gone state pid is not distinguished from a foreign one"; fi
 fi
 
