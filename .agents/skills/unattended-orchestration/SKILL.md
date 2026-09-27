@@ -30,9 +30,10 @@ every L1 session needs before touching a brief.
 | [`references/state-file.md`](references/state-file.md) | The status/state file template an orchestrator rewrites every wave and hands off from |
 | [`references/recovery.md`](references/recovery.md) | Classifying a stopped turn (auth/limit/transient/stalled/…) and recovering it |
 | [`references/layers.md`](references/layers.md) | Orchestrator → session → subagent layers, the controller's inbox channel, successor briefs |
-| [`references/runner-setup.md`](references/runner-setup.md) | Adopting the runner in a new repo, its config fields, its CLI flags |
+| [`references/runner-setup.md`](references/runner-setup.md) | Adopting the runner in a new repo, its config fields, its CLI flags (`-Validate`, `-DryRun`) |
 | [`references/changing-the-runner.md`](references/changing-the-runner.md) | The test suites, the PowerShell array trap, where the incident backlog lives |
 | [`references/cao-runbook.md`](references/cao-runbook.md) | CAO: layers, safety mechanisms, providers, setup traps |
+| [`references/rule-map.md`](references/rule-map.md) | Old rule ids → new ids or code pointers (tested by `tests/test_skill_rules.py`) |
 | [`unattended-orchestration.md`](unattended-orchestration.md) | The opencode 3-tier routing protocol (task card, clients, depth budget) this repo runs on |
 | `HandoffCore.psm1`, `run_handoff_sessions.ps1`, `trust_worktree.py`, `l1_handoff.py`, `provider_windows.py`, `cao/` | The tested code — behaviour lives there, not restated here |
 
@@ -40,14 +41,14 @@ every L1 session needs before touching a brief.
 
 A router-led run nests four levels of depth. A session's *name* (e.g. `autoos-L1-routing`) is a
 project label, not proof of its level — a launch prompt states the level; one that names none
-asks (R-level-01) before loading that level's rules.
+asks before loading that level's rules.
 
 | Level | Job | Relaunches | Asks the operator |
 |---|---|---|---|
-| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1 | decides obvious questions itself after research and says so; forwards everything else, and the answer, verbatim (R-handoff-06) |
-| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap, from its handoff (R-handoff-07) | never directly — appends `question: … \| options: …` to L0's inbox (R-handoff-06) |
-| **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop (R-spawn-13) | never directly — same channel, via L1 |
-| **L3** worker / reviewer | one closed task, an explicit return contract | nothing — the leaf rule (R-safety-03) | never |
+| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1 | decides obvious questions itself after research and says so; forwards everything else, and the answer, verbatim |
+| **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap, from its handoff | never directly — appends `question: … \| options: …` to L0's inbox (R-orch-03) |
+| **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop | never directly — same channel, via L1 |
+| **L3** worker / reviewer | one closed task, an explicit return contract | nothing — the leaf rule (R-worker-06) | never |
 
 This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3` picks for a task
 — the two axes are independent. `references/main-orchestrator.md` names a single top session
@@ -55,188 +56,65 @@ This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3`
 
 ## Rules
 
-One rule per line, grouped by topic: `R-<topic>-<nn>: <imperative>. (why: …; source: …)`. A
-source names the test or measurement behind the rule (D20) — an unmeasured lesson is not a rule
-yet. `python3 tools/skill-rules.py check` (CI) enforces the format, uniqueness and near-duplicates.
-Source paths: `tests/…` is the repo's `tests/`; a bare `test_*.py` is this skill's `tests/`
-(`test_autoos_spawner.py` is the repo's `tests/`); `inbox/…`, `work/…`, `done/…` and `status/…` are the
-run log `logs/handoff-sessions/<date>/` (default date 2026-09-25 unless the line names another).
+One rule per line, grouped by level topic: `R-<topic>-NN: <imperative>. (why: <=12 words;
+source: <test|sha|path|run>)`. Topics: `router` (L0), `coord` (L1), `orch` (L2), `worker`
+(L3). A source names the test or measurement behind the rule — an unmeasured lesson is not a
+rule yet. `python3 tools/skill-rules.py check` (CI) enforces format, uniqueness and
+near-duplicates. Old ids (R-spawn-*, R-review-*, etc.) resolve via
+[`references/rule-map.md`](references/rule-map.md).
 
-Rules migrate into code over time: once a check or a decision moves into `autoos-agent` MCP
+Rules migrate into code over time: once a check moves into `autoos-agent` MCP
 tools, `tools/autoos*.py` or the resolver, this file points to the tool instead of restating it
 (source: briefs/common.md "Skill rules bind every spawned agent", operator 2026-09-26T13:43:33Z).
 
-### spawn
+Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
+context cap), `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
+`python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
+full list of code-enforced rules.
 
-- R-spawn-01: After a lane merges, `claude stop <id>`, remove its clean worktree and delete its logs/sandboxes/ clone. (why: finished sessions idle for hours; source: test_l1_handoff.py, 2026-09-25)
-- R-spawn-02: Run the client in its own process group; reap leftovers after it exits. (why: Serena/language servers survive a cancelled worker; source: test_autoos_spawner.py ProcessGroupTests)
-- R-spawn-03: `--mcp-config`/`--allowedTools` are variadic: add another option before the prompt. (why: the prompt is silently eaten as an argument; source: daemon.log, test_autoos_spawner.py)
-- R-spawn-04: Give lane Claude sessions trust_worktree.py --lane-mcp's strict per-worktree MCP config. (why: each worktree gets a private Serena; source: test_trust_worktree.py, 20:50Z)
-- R-spawn-05: Pre-approve a fresh worktree with `trust_worktree.py` before its first session starts. (why: a background session can't answer a trust dialog; source: measured: three lanes blocked in 3s)
-- R-spawn-06: Launch non-shell lane subagents with Agent isolation:worktree, never a raw worktree path. (why: a bare path made a subagent call EnterWorktree, stall; source: inbox/L1-routing.md 21:1xZ)
-- R-spawn-07: An isolation:worktree subagent can't run pwsh/bash; use a non-isolated agent for shell work. (why: 3 of 3 isolated agents stopped before any edit; source: inbox/L1-backlog.md 19:30Z)
-- R-spawn-08: The spawner reads configuration/api-keys.yml from the main checkout if a worktree lacks it. (why: it's git-ignored, absent in a fresh worktree; source: test_autoos_spawner.py KeyFileTests)
-- R-spawn-09: Use qoder only as a writer (you test and commit), agy only for read-only reviews. (why: headless denies qoder shell, agy shell+writes; source: work/L1-routing/B2fix.out, B3c1.out)
-- R-spawn-10: Start a worktree subagent with `git merge origin/<branch>`, then check the diff to it is empty. (why: ff fails as main moves; checkout -B refused; source: inbox/L1-routing.md 2026-09-26)
-- R-spawn-11: Read your inbox right before every launch, not only while waiting. (why: 3 workers started against a 30-min-old stop order; source: inbox/L1-routing.md 21:44Z)
-- R-spawn-12: Omit `--lean` for `--client qoder|agy`; the spawner refuses it with exit 2. (why: those clients start their MCP servers anyway; source: work/L1-routing/review-a3.out, 2026-09-26)
-- R-spawn-13: Relaunch, never resume, a worktree subagent that stopped without changes. (why: its worktree is deleted; resumed, it works in yours; source: inbox/L1-routing.md, 2026-09-26 08:5xZ)
-- R-spawn-14: isolation:worktree branches from main, not your branch, under the main checkout's worktrees; ff first. (why: branch-only files are missing otherwise; source: A12 report 2026-09-25 21:45Z)
-- R-spawn-15: Verify the worktree a resumed subagent's report names; it may be the parent's, not its own. (why: a resumed subagent committed there; source: B3c-2a report 2026-09-26 07:4xZ)
-- R-spawn-16: A cancelled run's process can survive SIGTERM; verify its pid is gone, then SIGKILL. (why: a cancelled qodercli ran 115s more; source: run 20260926-074714-2b01d2)
-- R-spawn-17: If a worktree subagent's commit is refused by the classifier, commit its diff yourself. (why: shared .git triggers Modify Shared Resources; source: RUNV2 report 2026-09-26T11:5xZ)
-- R-spawn-18: Start a background worker via run_in_background, never `nohup … &`/setsid. (why: the nohup worker died silently with its shell; source: work/L1-routing/review-a4c-qd.out)
-- R-spawn-19: Merge main into your branch and push before dispatching lanes; a lane cut from newer main fails the empty-diff setup check. (why: A5c stopped at setup; source: 88cc475, aee6857)
-- R-spawn-20: Check a resumed WIP commit against the current brief before building on it. (why: a WIP drifted out of scope; source: 5a90ef4, A5a report)
-- R-spawn-21: Gate an --isolate worker on the parent branch too: it can commit there via absolute paths while the spawner says NO-OP. (why: isolation leaked; source: 8f72409, work/L1-routing/Q1doc.out)
-- R-spawn-22: Pass brief inputs to an --isolate worker inline or by absolute read-only path; its clone has no git-ignored logs/. (why: relative logs/ paths were empty; source: work/L1-routing/Q1doc.out)
-- R-spawn-23: Route a fix that must turn red tests green to opencode, never qoder. (why: headless qoder cannot run tests; came back worse; source: L1-backlog-c3 lane-c3-fix.out)
-- R-spawn-24: Use Muse (t1-orchestrator) for research and review only, never to implement. (why: 1h45m reading git history, zero edits; source: work/L1-routing/OR1-muse-noop.out)
-- R-spawn-25: A relaunched session never stops, deletes or moves its predecessor's leftovers; list or re-dispatch them. (why: classifier blocks stalled a session; source: inbox/L1-routing.md 09:23:33Z)
+A level's rules bind every session doing that job: `coord` rules bind whoever runs lanes and
+merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or reviews workers.
 
-### review
+### router (L0)
 
-- R-review-01: Gate a worker's sandbox diff, not its report; a NO-OP (nothing changed) exits 5. (why: workers reported completed with uncommitted files; source: work/L1-routing/C1.out, NoOpGuardTests)
-- R-review-02: Treat a cheap/free reviewer's "no findings" as unproven; self-review often finds real defects. (why: measured across five lanes' DONE notes; source: 20260924/done, 20260925/done)
-- R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
-- R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
-- R-review-05: Pin a review's model (`--model omniroute/t1-orchestrator`); its clean-sandbox exit 5 is expected. (why: --card role=review routes to t3-driver; source: work/L1-routing/review-r234c4.out)
-- R-review-06: A qoder reviewer reads only inside its cwd, no Bash: copy inputs into the worktree logs/. (why: it could not read RUN/; source: work/L1-routing/review-a8-qd.out)
-- R-review-07: A review must open with the files it read; a bare "none / ship" is unproven. (why: qoder returned 4 lines, no reads; source: work/L1-routing/review-a5a.out)
-- R-review-08: Never accept a t3-driver review: it restates the intent as findings and ships. (why: tautological ship, 4 times; source: work/L1-routing/review-a8.out, review-r234c4.out)
-- R-review-09: Gate a generated-config lane with its consumer: the real reader must accept it, and refuse a bogus value. (why: worker invented a shape, tested its own; source: f85f8a4 vs A6afix)
-- R-review-10: When a brief says 'reuse X', diff every other symbol the worker switched too. (why: a swapped make_post killed a verdict, tests green; source: TOOLFIX 943fa32 -> 0d93997)
+- R-router-01: Only L0 asks the operator; L0 decides obvious questions after research. (why: single channel stops conflicting asks; source: inbox/L1-routing.md 2026-09-26)
+- R-router-02: Diagnose against host and route state before declaring failure. (why: first verdict is usually wrong; source: review-b3c1.out 2026-09-26T07:33Z)
 
-### tests
+### coord (L1)
 
-- R-tests-01: Run `-Validate` then `-DryRun` before any unattended run. (why: a mis-named lane once failed hours into a night; source: tests/Runner.Smoke.Tests.ps1)
-- R-tests-02: Never run a full suite in the main checkout while lanes merge; use a guardsOnly lane. (why: a moving tree makes reds that are not real; source: measured 2026-09-04: 18 red, 9 artefacts)
-- R-tests-03: Gate on `set -o pipefail` and the 'N passed' line, never `pytest … | tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out, l1/routing 0ed626a)
-- R-tests-04: Filter tests to the touched area while working; run both full suites once per phase. (why: keeps iteration fast without skipping the gate; source: 2026-09-25 plan, lane working rules)
-- R-tests-05: Run the full pwsh suite in the background; a 600s foreground call times out on its ~11 min run. (why: measured across a relaunch's wave-2 runs; source: L1-backlog, 2026-09-26T07:06:25Z)
-- R-tests-06: Copy a Pester -Filter from `grep -n ^Describe/Test tests/run-tests.ps1`, not a guessed prefix. (why: a guessed filter matched no test; source: L1-backlog 2026-09-26T07:06:25Z)
-- R-tests-07: Never assert a random secret/token by its first character. (why: token_urlsafe collides on one character about 1 in 64; source: main CI 36227152085, fixed 11e3aa7)
-- R-tests-08: When shellcheck OOMs on a whole file, lint only the added lines as an extracted snippet. (why: a new warning passed every gate; source: CI job 108372206183, fixed 1345e9b)
-- R-tests-09: Guard python path/symlink/mode assertions with os.name == "nt"; those tests run on Windows CI too. (why: a Windows path prefix broke one; source: CI job 108376529166, fixed 5b3b14e)
-- R-tests-10: A test needing a real installed client CLI skips when no client binary is on PATH. (why: it passed locally, failed on CI without one; source: CI 36241451890, fixed a9ffea8)
-- R-tests-11: The skill's own pytest suite is not wired into either CI suite; run it by hand first. (why: two failures sat unnoticed on HEAD; source: ci.yml/run-tests.* grep 2026-09-26)
-- R-tests-12: Prove a real docker build with --no-cache; a build after an identical one is cached. (why: a cached build proves nothing; source: status/L1-backlog.lane-omni.report.md)
-- R-tests-13: Make each guard test fail on its bug: seed state the bug changes, assert the reason line, reset per loop. (why: three guard tests passed vacuously; source: c4dd31a, 1d64a1e, 68e519d)
-- R-tests-14: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
-- R-tests-15: A test that fakes a user via USER/HOME must also unset SUDO_USER. (why: detect.sh prefers it and CI's sudo unshare+setpriv leaks SUDO_USER=runner; source: CI 36250221249, fix 854be02)
-- R-tests-16: Run the filtered pwsh suite yourself before merging an Agent-tool lane that touched .ps1/.psm1; the lane cannot run pwsh. (why: $pid bug shipped untested; source: 2c6a3d2)
-- R-tests-17: A lane migrating a tool must list tests/helpers/*.py in its paths; helpers assert tool internals. (why: helper broke outside scope; source: ec0e12d, A5c report)
-- R-tests-18: In tests/run-tests.sh name test arrays *_argv; reusing a string name as an array fails CI shellcheck SC2178. (why: filters passed, CI failed; source: CI 36252318777)
-- R-tests-19: Wrap a JSON-array read for Windows PowerShell 5.1: @($x | ConvertFrom-Json | ForEach-Object { $_ }). (why: 5.1 emits one object; pwsh 7 hides it; source: CI 36260488947, f3e955a)
-- R-tests-20: Keep --filter words specific; a broad word (clean, free) also runs the shellcheck of run-tests.sh. (why: it was OOM-killed at MemoryMax; source: inbox/L1-routing.md 2026-09-26T18:31:19Z)
-- R-tests-21: A local red CI lacks may be host state, not a flake; test host-state guards with a fake SYS_HOME. (why: CI runners have no installed units; source: main 6220a04, l1/backlog 67ba6c1)
-- R-tests-22: Under bash >= 5.2 `${v/pat/repl}` expands & in repl; split-and-concatenate, or shopt -u patsub_replacement. (why: path &-injection survived a sed rewrite; source: 784a108)
-- R-tests-23: Run tests only after `git add` resolves every conflict; an unresolved merge skews ls-files counts. (why: 8 red that were not real; source: l1/routing merge OR2 2026-09-27T07:0xZ)
+- R-coord-01: Merge two-stage (lane→orch→main), no-ff, under mutex, one merger. (why: serial merges need no hand reconciling; source: HandoffCore.Tests.ps1)
+- R-coord-02: Verify every cheap worker's done yourself: tests, diff vs brief. (why: cheap done is unproven until you verify; source: work/L1-routing/review-a8.out)
+- R-coord-03: Claude orchestrates and final-checks only, never implements; spawn by bucket table. (why: Claude limit stop halts the whole run; source: briefs/common.md "Claude budget")
+- R-coord-04: Hold host headroom: run `autoos-agent.py heartbeat`; <=3 lanes + 3 readers, MemAvailable >= 3 GB. (why: headroom keeps tests and builds alive; source: briefs/common.md "Host limits")
+- R-coord-05: Filter tests to the touched area while working; full suites once per phase. (why: moving tree makes reds that are not real; source: measured 2026-09-04: 18 red)
+- R-coord-06: At cap, rewrite state, brief successor from the DONE note, append handoff line, stop. (why: successor resumes from state file alone; source: briefs/common.md Always)
 
-### gateway
+### orch (L2)
 
-- R-gateway-01: Leg order per bucket is R-cost-03; the resolver enforces it (Q1 lane). (why: one home per rule; source: briefs/common.md "Claude budget", operator 2026-09-26)
-- R-gateway-02: Give a reasoning-model reviewer a real output budget (`max_tokens` ~48000, low effort). (why: 16k tokens is eaten by reasoning first; source: L1-HANDOFF.md, Known traps)
-- R-gateway-03: Route opencode's free zen/spark legs through an opencode-launched agent, not a bare API call. (why: that leg 403s any non-opencode caller; source: done/R-merge.md, item 5)
-- R-gateway-04: After a combo/id rename, confirm the live gateway's combos match the code before routing. (why: a stale gateway 400s every card/--tier route; source: done/R-merge.md, item 1)
-- R-gateway-05: Match a tool-allowlist entry to its MCP wiring: `mcp__<name>__*`, plugin form otherwise. (why: the wrong prefix leaves the tool silently missing; source: mcp-servers-setup skill)
-- R-gateway-06: Keep a Qwen (t3-driver-free-only) request under 7000 input tokens; send one file. (why: larger requests fail 413 at its ITPM limit; source: work/L1-routing/review-b4b5.out)
-- R-gateway-07: Each heartbeat, give a subagent every probe-proposals.jsonl line newer than its leg's probe. (why: a run contradicted the record; source: test_autoos_spawner.py ProbeProposalTests)
-- R-gateway-08: Have a subagent re-run probe-toolcalls.py once measured.json results are 7+ days old. (why: operator 2026-09-26: keep setups current; source: tests/test_probe_toolcalls.py)
-- R-gateway-09: omnigraph whoami's repository can be a Windows path, not the git remote; mismatch alone isn't the scope trap. (why: flagged a clean session false; source: MCP measure 2026-09-25 20:5xZ)
-- R-gateway-10: codex ignores model_providers.omniroute.model; pass -m <model> to codex exec or it sends its own default. (why: it 401s the gateway otherwise; source: L1-backlog 2026-09-26T07:20:39Z)
-- R-gateway-11: Don't treat agy as signed out on its 15s sign-in probe timing out; check host memory pressure first. (why: agy was signed in minutes earlier; source: review-b3c1.out 2026-09-26T07:33Z)
-- R-gateway-12: A 429 with retryable:true but a multi-day reset is not soon-retryable; mark the leg unavailable till reset. (why: agy quota read retryable, reset in 5d; source: 2026-09-26T07:47:05Z)
-- R-gateway-13: Size a request to its leg's per-minute token cap, not only its window. (why: groq gpt-oss-120b 413'd a review on TPM; source: work/L1-routing/review-l1own.out)
-- R-gateway-14: qoder as a non-review worker denies every Bash call; use it to write or review, never to run tests. (why: 6 denials incl. tests; source: inbox/L1-routing.md 2026-09-26T16:49:00Z)
-- R-gateway-15: Never mix Groq and DeepSeek legs in a multi-turn combo. (why: Groq 400s reasoning_details, DeepSeek needs reasoning_text; source: L1-backlog-k1 logs/lane-k1.out)
-- R-gateway-16: Prove a provider's credit with a worker-sized request or its balance, not 'reply PONG'. (why: PONG passed, worker turns failed 2 min later; source: work/L1-routing/OR1a.r2.out)
-- R-gateway-17: Manage the docker OmniRoute via apply.sh's omni wrapper (manage key); a bare host CLI call 401s. (why: the wrapper read every live combo; source: apply.sh --drift 2026-09-27T08:4xZ)
+- R-orch-01: Write fixed BRIEF/REPORT fields with evidence by pointer; one writer per file. (why: fixed fields parse and stay short; source: spec 2026-09-25 8.2, D9)
+- R-orch-02: Brief cheap workers with one file, exact spec, file:line anchors. (why: several files invite fabricated completion; source: L1-HANDOFF.md Known traps)
+- R-orch-03: Never ask the operator directly; append `question:` to the L0/L1 inbox. (why: background sessions cannot answer a dialog; source: inbox/L1-routing.md 2026-09-26)
+- R-orch-04: Feed isolated workers inline or by absolute read-only path. (why: clone cannot read outside itself; source: work/L1-routing/Q1doc.out)
+- R-orch-05: Cut lanes from main (ff first, empty-diff start, push before dispatch). (why: one writer on main; lanes own worktrees; source: inbox/L1-routing.md 2026-09-26)
+- R-orch-06: Relaunch, never resume, a no-change stop; verify worktree and WIP scope first. (why: resumed session works in wrong tree; source: inbox/L1-routing.md 2026-09-26)
+- R-orch-07: Route writers and reviewers across client families; pin review model; demand files-read evidence. (why: same family repeats writer blind spots; source: cao/dispatch.py review_degraded)
+- R-orch-08: Commit lanes under lane identity; record classifier refusals verbatim and stop. (why: refusals are signals, never obstacles; source: refusals measured 2026-09-24/25)
+- R-orch-09: Re-read your inbox before every launch, not only while waiting. (why: stale orders launched three workers post-stop; source: inbox/L1-routing.md 21:44Z)
+- R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
+- R-orch-11: A data lane that changes a route/provider set greps ALL of tests/ for changed ids. (why: stale test ids break CI silently; source: CI 36320592493, ee35dd3)
+- R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 
-### cost
+### worker (L3)
 
-- R-cost-01: Claude sessions orchestrate and give the final check; they never implement. (why: a Claude rate-limit stop halts the run; source: briefs/common.md "Claude budget" 16:4xZ)
-- R-cost-02: No Claude subagent to implement, read or first-pass review unless all external legs failed; log why. (why: same Claude budget; source: briefs/common.md "Claude budget")
-- R-cost-03: Spawn by the common.md bucket table; never Claude/GPT via paid API, DeepSeek only V4.1 Flash. (why: cost; source: briefs/common.md "Claude budget" 16:4xZ)
-- R-cost-04: Lane order: cheap writer, cheap cross-family review, your gate, then one Sonnet subagent last. (why: Sonnet is the trusted final check; source: briefs/common.md "Claude budget" 16:4xZ)
-- R-cost-05: Verify every cheap worker's "done" yourself: tests, diff vs brief. (why: a cheap done is unproven; source: work/L1-routing/review-a8.out)
-- R-cost-06: Count a client worker as ~0.7 GB; run at most 3 per orchestrator while MemAvailable >= 3000. (why: measured per client worker; source: briefs/common.md "Claude budget")
-- R-cost-07: OpenRouter is BYOK, no credit: only its deepseek-v4.1-flash + muse-spark-1.3 legs; 402 = leg down. (why: Qwen there 402d; source: inbox/L1-routing.md 2026-09-26T15:57:34Z)
-
-### brief
-
-- R-brief-01: Brief a free/cheap worker with one file and an exact spec, not several files at once. (why: given several files they fabricate completion; source: L1-HANDOFF.md, Known traps)
-- R-brief-02: Write briefs/reports in the fixed BRIEF/REPORT fields, no prose; put bulky output in a file. (why: fixed fields parse and stay short; source: spec 2026-09-25 section 8.2, D9)
-- R-brief-03: Write agent-to-agent text as fixed fields: <what> <sha|path|number> <verdict>; evidence by pointer, no prose. (why: the reader has the brief; source: common.md, operator 2026-09-26)
-- R-brief-04: Name this skill in every brief; report a failure as a lesson line to the skill's owner. (why: keeps agents on the same rules; source: briefs/common.md, operator 2026-09-26T13:43:33Z)
-- R-brief-05: Brief a render as 'derive every cell from registry fields'; equality with today's file is the test only. (why: a subagent copied the file into code; source: 6a61052 rejected, d1763a8)
-- R-brief-06: Brief a data lane 'render --check only, edit the file minimally'; never --out, never flip a guard test. (why: --out erased 461 hand-kept lines; source: work/L1-routing/BYOK.out, 821617e)
-- R-brief-07: Brief implementers with file:line anchors and 'do not read git history; edit within 10 calls'. (why: unanchored workers read history, never edit; source: work/L1-routing/OR1-muse-noop.out)
-- R-brief-08: Run research on t1-orchestrator; forbid printing whole bundles; confidence=guess is no evidence. (why: no-shell run guessed, bundles ate context; source: work/L1-routing/C5spike-t2.out)
-
-### level
-
-- R-level-01: A session with no level in its prompt takes it from its name; background sessions never AskUserQuestion. (why: it blocked L1-main 50 min; source: inbox/L1-routing.md 2026-09-26)
-- R-level-02: The L2 owning a topic researches, summarizes and answers it; L0 only routes. (why: operator levels direction 2026-09-27; source: briefs/common.md 'Operator direction')
-
-### heartbeat
-
-- R-heartbeat-01: Create one recurring CronCreate heartbeat job (e.g. `7-59/10 * * * *`); recreate it on relaunch. (why: background loops die under load; source: common.md Waiting, 2026-09-25)
-- R-heartbeat-02: Every heartbeat, push every branch `autoos-agent.py heartbeat` reports unpushed; WIP-commit anything older. (why: nothing may exist only locally; source: test_autoos_heartbeat.py)
-- R-heartbeat-03: Every heartbeat, run `autoos-agent.py heartbeat`; its exit (3 pause, 4 over-cap) gates everything else. (why: a stale check missed two PAUSE lines; source: test_autoos_heartbeat.py)
-
-### pause
-
-- R-pause-01: Treat an operator PAUSE as a hard stop; `autoos-agent.py heartbeat`, `run` and MCP `spawn` all refuse on it. (why: two PAUSE lines were ignored; source: test_autoos_heartbeat.py)
-
-### git
-
-- R-git-01: Expect a commit's attribution trailer from the harness that ran it, not the brief's line. (why: the harness's own trailer always wins; source: done/R-merge.md, S-docker-stack.md)
-- R-git-02: Commit lane work under its own git identity (its own user.name/user.email). (why: keeps lane authorship distinct from the operator; source: 2026-09-25 plan, lane working rules)
-
-### merge
-
-- R-merge-01: Leave guards opt-in but let them gate the merge; declare one for shared state. (why: with none declared, a clean stop alone merges; source: HandoffCore.Tests.ps1)
-- R-merge-02: Mark a branch already an ancestor of the base merged-elsewhere; skip it, never re-run. (why: two runners must not redo landed work; source: HandoffCore.Tests.ps1)
-- R-merge-03: Merge with no fast-forward, under a global mutex, so lanes can't interleave a merge. (why: guard-gated serial merges need no hand reconciling; source: PROPOSALS-2026-09-05.md, what worked)
-- R-merge-04: Merge in two stages: a lane into its orchestrator's branch, then that branch into main. (why: keeps a half-finished orchestrator run off main; source: briefs/common.md, Merge path)
-- R-merge-05: After a branch's CI is green, append ready <branch> <sha> to the coordinator's inbox; it alone merges to main. (why: one merger avoids interleaved merges; source: common.md, Merge path)
-- R-merge-06: Only the coordinator commits in the main checkout; everyone else works in their own worktree. (why: one writer on main; source: briefs/common.md Worktrees)
-
-### handoff
-
-- R-handoff-01: Cap an orchestrator's context per spec section 8.3; rewrite its state file every wave. (why: makes a handoff possible at any moment; source: default, spec D16 -- unmeasured)
-- R-handoff-02: Delegate reading DONE notes, plans and drafts to a subagent; don't read them all yourself. (why: a 200k orchestrator hit its 150k cap in 7 min; source: inbox/L1-main.md 19:21Z)
-- R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
-- R-handoff-04: At the policy cap (`autoos-agent.py context`): rewrite state, run l1_handoff.py, append `handoff <name>`, stop. (why: lets the parent relaunch you; source: briefs/common.md, Always)
-- R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
-- R-handoff-06: Only L0 asks the operator: `question:` to inbox/L0.md, or inbox/L1-main.md if refused. (why: classifier refused L1-backlog's L0 appends; source: inbox/L1-routing.md 2026-09-26)
-- R-handoff-07: A parent measures a child via `autoos-agent.py heartbeat --transcript --cap`, relaunching past its exit 4. (why: two sessions ran past cap unhandled; source: test_autoos_heartbeat.py)
-- R-handoff-08: One writer per run file: briefs/<n> by the parent, status/<n> by n, inbox/<n> append-only (n replies `→ done: …`). (why: no write conflicts; source: briefs/common.md Communication)
-- R-handoff-09: Answer `ping <text>` in your inbox with `pong <text>` in your status at your next decision point. (why: parents probe liveness cheaply; source: briefs/common.md Communication)
-- R-handoff-10: Keep the state file in references/state-file.md's template; offload tool output at half cap. (why: a successor resumes from it alone; source: spec section 8.3, status/L1-backlog.md)
-- R-handoff-11: Relaunched: read the handoff, recreate the heartbeat cron, re-measure every live-state line. (why: snapshots go stale in minutes; source: status/L1-routing.handoff.md 2026-09-27)
-
-### host
-
-- R-host-01: Budget a private Serena at approximately 160-200 MB and about 2s to start. (why: sizes how many can run on one host; source: work/L1-routing/Z3.md)
-- R-host-02: Give every session its own Omnigraph stdio bridge rather than sharing one. (why: measured ~7 MB each, 22 MB for three; source: inbox/L1-main.md 20:34Z)
-- R-host-03: Read a "shellcheck is clean" failure at exit 137 as host OOM, not a lint finding. (why: reproduced on a loaded host across five lanes; source: 20260924-25 DONE notes, five lanes)
-- R-host-04: Keep the machine awake yourself before an overnight run. (why: the runner cannot change power settings; source: SKILL.md history, rule 6)
-- R-host-05: Per orchestrator: <= 3 worktree lanes + 3 readers, MemAvailable >= 3000 MB. (why: headroom for tests/builds on a 16 GB host; source: briefs/common.md "Host limits" 2026-09-26)
-- R-host-06: The Bash tool shell is zsh: run multi-step shell as `bash <<'EOF'`; never name a var `path`. (why: zsh clobbered PATH and broke globs; source: status/L1-backlog.lane-omni.report.md)
-- R-host-07: Tell a live Claude session by ~/.claude/sessions/<pid>.json procStart vs /proc. (why: a job's state field is not liveness; source: status/L1-backlog.herdr-home-proposal.md)
-- R-host-08: Never shellcheck tests/run-tests.sh locally; CI gates it. (why: its OOM stopped herdr, killing all sessions twice; source: herdr-server.log 2026-09-26T15:25Z)
-- R-host-09: Run anything that may exceed ~2 GB as `systemd-run --user --scope -p MemoryMax=2G <cmd>`. (why: the cap killed a runaway suite, not the host; source: inbox/L1-routing.md 16:22:31Z)
-- R-host-10: Never call Serena activate_project from a worktree; the one shared server has one active project. (why: it re-points every session; source: briefs/common.md MCP, 2026-09-26)
-
-### safety
-
-- R-safety-01: Never put a secret in a committed handoff config; read tokens at preflight only. (why: a committed config is read by every clone; source: HandoffCore.psm1, AGENTS.md rule 1)
-- R-safety-02: Treat a classifier refusal as a signal: record it verbatim and stop, never work around it. (why: a background session can't negotiate a denial; source: refusals measured 2026-09-24/25)
-- R-safety-03: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: a supervisor wanting to write code mis-decomposed; source: tests/test_agent_harness.py)
-- R-safety-04: Re-check privacy=sensitive on every served leg, not only the first route pick. (why: a live route sent sensitive work free; source: route smoke 2026-09-26T11:2xZ, fixed 36ac003)
-- R-safety-05: A trust-boundary reader catches Exception and keeps its own 0700 leaf dir under shared caches. (why: RecursionError escaped; shared parent had umask mode; source: 1d64a1e, 7588d5f)
+- R-worker-01: Derive every render cell from registry fields; `--check` only, minimal edits. (why: --out erased 461 hand-kept lines; source: 6a61052 rejected, d1763a8)
+- R-worker-02: Author portable failing-first tests: seed bug state, assert the reason, guard platform. (why: passes here, fails there without guards; source: main CI 36227152085)
+- R-worker-03: Keep runs cheap and truthful: specific filters, snippet-lint on OOM, real --no-cache builds. (why: broad runs OOM or measure nothing; source: CI 108372206183, 1345e9b)
+- R-worker-04: Test fakes reproduce the real tool's observable contract; read the real tool first, cite its lines. (why: fake drift hides real bugs; source: L1-backlog lstby 99742a1)
+- R-worker-05: Gate on `set -o pipefail` and the 'N passed' line, never `tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out)
+- R-worker-06: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: supervisor wanting to code mis-decomposed; source: tests/test_agent_harness.py)
+- R-worker-07: Never shellcheck tests/run-tests.sh locally; run jobs over ~2 GB under systemd-run MemoryMax=2G. (why: its OOM killed every session twice; source: herdr-server.log 2026-09-26T15:25Z)
+- R-worker-08: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
+- R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 
 ## CAO quickstart
 
