@@ -155,7 +155,7 @@
       "tool_calls": "unproven"
     },
     "deepseek-flash": {
-      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash keeps its #low/#high/#max aliases now that this is legs[0]. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -1748,8 +1748,9 @@
       "trains_on_prompts": true
     },
     "deepseek": {
-      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either.",
+      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. DeepSeek credit exhausted (402 Insufficient Balance, measured 2026-09-27T16:4xZ): providers.deepseek is off entirely (available: false, below) until topped up. Routes whose only served leg was deepseek/* (deepseek-v4.1-flash) fail closed like t1/spark; t2-worker-clean/t3-driver-clean still serve via mistral.",
       "api_base": null,
+      "available": false,
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",
       "litellm_prefix": null,

@@ -338,12 +338,14 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # The managed set is derived from the registry, not a hand-kept pair:
         # every route that declares legs and keeps at least one LiteLLM-servable
         # leg after gateway_legs()/GATEWAY_ONLY gets a block. t1-orchestrator
-        # used to be hand-kept; t4-rag and t2-worker-clean never had markers.
+        # used to be hand-kept, then fail-closed 2026-09-27 (Zen client-bound,
+        # OpenRouter off) and lost its block; t4-rag and t2-worker-clean never
+        # had markers.
         reg = real_registry()
         rendered = registry.render_litellm_blocks(reg, real_litellm_config())
         sync = registry._load_sync_router_tiers()
         self.assertEqual(set(rendered), set(sync.managed_tiers(reg)))
-        for managed in ("t1-orchestrator", "t2-worker-clean", "t4-rag"):
+        for managed in ("t2-worker", "t2-worker-clean", "t4-rag"):
             self.assertIn(managed, rendered)
 
     def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
@@ -514,8 +516,14 @@ class IdeRenderMatchesTodayTests(unittest.TestCase):
     def test_a_route_with_no_omniroute_or_litellm_surface_is_out_of_scope(self):
         # spark-1.3-contributor's surfaces.openhands.direct_profile (mapping doc
         # section 6) is not an omniroute/litellm surface - render_ide must not
-        # choke on it, and must still render the route from its omniroute surface.
-        rendered = registry.render_ide(real_registry())
+        # choke on it, and must still render the route from its omniroute
+        # surface. Spark fails closed on the real registry (Zen client-bound,
+        # OpenRouter off since DSMAX 2026-09-27), so exercise it on a copy
+        # with the provider re-funded: the extra surface key is still there
+        # and the route still renders from its omniroute surface.
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["openrouter"]["available"] = True
+        rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "zed", "openhands"]})
 
@@ -608,13 +616,15 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
     def test_effort_ladder_derived_from_head_leg(self):
         reg = copy.deepcopy(real_registry())
         # Pick a route whose first leg's model actually carries an effort_ladder
-        route = reg["routes"]["t1-orchestrator"]
+        # (t2-worker heads gemini-3.8-flash; t1-orchestrator was the example
+        # until it fail-closed 2026-09-27 and left the ide render).
+        route = reg["routes"]["t2-worker"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         model_entry = reg["models"][mid]
         self.assertIn("effort_ladder", model_entry)
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["t1-orchestrator"]["effort_ladder"],
+        self.assertEqual(by_id["t2-worker"]["effort_ladder"],
                          [e for e in model_entry["effort_ladder"] if e != "none"])
 
     def test_none_is_dropped_from_effort_ladder(self):
@@ -632,15 +642,16 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         # Ensure the model has no effort_ladder
         reg["models"][mid].pop("effort_ladder", None)
-        # t1-orchestrator still has a ladder via the first leg's model
-        t1_route = reg["routes"]["t1-orchestrator"]
-        _t1_pid, t1_mid = registry.resolve_leg(t1_route["legs"][0], reg)
-        t1_ladder = reg["models"][t1_mid].get("effort_ladder", [])
-        expected = [e for e in t1_ladder if isinstance(e, str) and e != "none"]
+        # t2-worker still has a ladder via the first leg's model
+        # (t1-orchestrator was the control until it fail-closed 2026-09-27).
+        t2_route = reg["routes"]["t2-worker"]
+        _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
+        t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
+        expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["t3-driver-clean"])
-        self.assertEqual(by_id["t1-orchestrator"]["effort_ladder"], expected)
+        self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
 
     def test_no_effort_ladder_when_route_has_no_legs(self):
         reg = copy.deepcopy(real_registry())
@@ -696,7 +707,11 @@ class OpenhandsRenderMatchesTodayTests(unittest.TestCase):
         # spark-1.3-contributor's standalone surfaces.openhands.direct_profile
         # (mapping doc section 6) becomes the one tier with "gateway":
         # "openrouter" - its own endpoint/key, not the gateway client's.
-        rendered = registry.render_openhands(real_registry())
+        # Spark fails closed on the real registry (OpenRouter off since DSMAX),
+        # so exercise it on a copy with the provider re-funded.
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["openrouter"]["available"] = True
+        rendered = registry.render_openhands(reg)
         by_id = {t["id"]: t for t in rendered["tiers"]}
         direct = by_id["openrouter-muse-spark-1.3-contributor"]
         self.assertEqual(direct["gateway"], "openrouter")
@@ -812,9 +827,12 @@ class SyncOpenhandsProfilesSourcesFromRegistryTests(unittest.TestCase):
                 cwd=str(ROOT), capture_output=True, text=True, timeout=30, env=env,
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            written = Path(d) / "profiles" / "omniroute-t1-orchestrator.json"
+            # t1-orchestrator was the canary until it fail-closed 2026-09-27
+            # (omitted: Zen client-bound, OpenRouter off); t2-worker is the
+            # servable equivalent.
+            written = Path(d) / "profiles" / "omniroute-t2-worker.json"
             self.assertTrue(written.exists())
-            self.assertEqual(json.loads(written.read_text())["model"], "openai/t1-orchestrator")
+            self.assertEqual(json.loads(written.read_text())["model"], "openai/t2-worker")
 
 
 class ModelsDocRenderMatchesTodayTests(unittest.TestCase):
@@ -908,14 +926,16 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
     def test_leg_flagged_unavailable_in_its_own_route_is_marked(self):
         # All legs of routes.deepseek-v4.1-flash flagged in a copy (the real
         # data flags its zen leg and both OpenRouter BYOK gpt-oss legs stay
-        # gated since the 2026-09-27 credits-exhausted measurement).
+        # gated since the 2026-09-27 credits-exhausted measurement). The route
+        # carries two legs since DSMAX dropped the OpenRouter leg, so both
+        # render struck through.
         reg = copy.deepcopy(real_registry())
         route = reg["routes"]["deepseek-v4.1-flash"]
         for leg in route["legs"]:
             route.setdefault("unavailable_legs", {})[leg] = {"available": False}
         rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "deepseek-v4.1-flash")
-        self.assertEqual(row.count("(unavailable)"), 3)
+        self.assertEqual(row.count("(unavailable)"), len(route["legs"]))
 
     def test_leg_whose_provider_is_globally_unavailable_is_marked(self):
         # A provider-wide providers.<id>.available: false (independent of any
@@ -1118,11 +1138,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
     def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
+        # t2-worker-clean serves mistral only: the deepseek direct leg is
+        # provider-gated (402, 2026-09-27T16:4xZ), the openrouter leg died
+        # with DSMAX, the zen leg is route-gated.
         self.assertEqual(
             combos["t2-worker-clean"]["models"],
-            ["deepseek/deepseek-flash",
-             "openrouter/deepseek/deepseek-v4.1-flash",
-             "mistral/mistral-small-latest"])
+            ["mistral/mistral-small-latest"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes and the zero-spend t1 route.
         # t3-driver-free-only is NOT gone: FREEAI gave it a servable leg.
@@ -1136,9 +1157,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertNotIn("gpt-oss-120b", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
         # the client-bound opencode-zen leg (litellm transport openai/…) is
-        # dropped; the live openrouter leg of the same model stays.
+        # dropped; the openrouter leg of the same model died with it (DSMAX
+        # provider-off 2026-09-27), and the deepseek direct leg is provider-
+        # gated (402, 2026-09-27T16:4xZ) - none of the three stays.
         self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
-        self.assertIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
+        self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
+        self.assertNotIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
         # t3-driver: groq denied; samba/sambanova/cerebras provider-dead;
         # opencode-zen client-bound.

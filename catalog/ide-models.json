@@ -227,24 +227,6 @@
       }
     },
     {
-      "id": "deepseek-v4.1-flash",
-      "name": "deepseek-v4.1-flash — paid cheapest-first",
-      "context": 131072,
-      "output": 32768,
-      "effort_ladder": [
-        "low",
-        "high",
-        "max"
-      ],
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed",
-          "openhands"
-        ]
-      }
-    },
-    {
       "id": "cheaperinference/kimi-k3",
       "name": "cheaperinference kimi-k3 (S1-S2 credit)",
       "context": 131072,

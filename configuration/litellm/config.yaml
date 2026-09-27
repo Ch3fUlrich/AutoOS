@@ -45,18 +45,10 @@ model_list:
       model: openai/kimi-k3
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
   # AUTOOS-MANAGED-START t2-worker-clean
-  - model_name: t2-worker-clean
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t2-worker-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -106,10 +98,6 @@ model_list:
       api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: openai/kimi-k3
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
@@ -127,10 +115,6 @@ model_list:
 
   # ── t3-driver-clean: gateway-only legs stripped ────────────────────────────
   # AUTOOS-MANAGED-START t3-driver-clean
-  - model_name: t3-driver-clean
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t3-driver-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -176,12 +160,8 @@ model_list:
   # AUTOOS-MANAGED-END t4-rag
 
   # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
-  # AUTOOS-MANAGED-START deepseek-v4.1-flash
-  - model_name: deepseek-v4.1-flash
-    litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
-  # AUTOOS-MANAGED-END deepseek-v4.1-flash
+  # deepseek-v4.1-flash omitted: providers.deepseek 402 (2026-09-27T16:4xZ),
+  # no servable leg left - re-add the managed block when topped up.
 
   # AUTOOS-MANAGED-START gemini-3.8-flash
   - model_name: gemini-3.8-flash

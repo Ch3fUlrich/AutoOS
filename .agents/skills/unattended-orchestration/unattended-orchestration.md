@@ -208,10 +208,10 @@ silence as stuck — with one exception for rate limits (below):
 |---|---|---|---|
 | `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, spark-only + `#high` (xhigh effort) | UNSERVABLE since 2026-09-27 (route omitted): zen spark-contributor-free is client-bound → openrouter spark-contributor is off (DSMAX). Muse remains free Zen through the opencode client only. No gemini-3.1-pro (reasons worse than 3.8-flash). |
 | `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only | UNSERVABLE since 2026-09-27 (route omitted): its only leg was openrouter spark, now off (DSMAX). |
-| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k | gemini-3.8-flash → antigravity 3.7-flash-high → kimi-k3 (cheap-inference allow-list) → deepseek/deepseek-flash direct `#low`/`#high`/`#max`. groq/cerebras/sambanova/openrouter/zen legs are gated unavailable. |
-| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct `#low`/`#high`/`#max` → mistral-small direct. openrouter/zen legs are gated unavailable. No free legs, no reseller legs. |
-| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k | mistral-code → cheap-inference glm-5.2/minimax-m2.7 (allow-list) → deepseek/deepseek-flash direct → mistral-small. groq/cerebras/openrouter/zen legs are gated unavailable; glm-4.5-air is DENIED by `deny-cheaperinference`. |
-| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct `#low`/`#high`/`#max` → mistral-small direct. zen paid flash is gated unavailable. No free legs. |
+| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k | gemini-3.8-flash → antigravity 3.7-flash-high → kimi-k3 (cheap-inference allow-list). deepseek/deepseek-flash direct is gated (402, 2026-09-27T16:4xZ) until topped up. groq/cerebras/sambanova/openrouter/zen legs are gated unavailable. |
+| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k | mistral-small direct (deepseek direct gated 402 until topped up). openrouter/zen legs are gated unavailable. No free legs, no reseller legs. |
+| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k | mistral-code → cheap-inference glm-5.2/minimax-m2.7 (allow-list) → mistral-small (deepseek/deepseek-flash direct gated 402 until topped up). groq/cerebras/openrouter/zen legs are gated unavailable; glm-4.5-air is DENIED by `deny-cheaperinference`. |
+| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k | mistral-small direct (deepseek direct gated 402 until topped up). zen paid flash is gated unavailable. No free legs. |
 
 Rule: anything under 1M context belongs in t2/t3, never t1
 (`opencode.jsonc` limits enforce this: 1M vs 128k). Small-context models

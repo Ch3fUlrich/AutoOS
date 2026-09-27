@@ -44,12 +44,14 @@
     "         3.7-flash free input quota is also tiny). The antigravity",
     "         3.7-flash-medium leg in t2-worker is a separate OAuth pool",
     "         (ack 1.6s) — allowed as t2 overflow.",
-    "deepseek-v4.1-flash = pinned single-model route: native",
-    "         deepseek/deepseek-flash, then zen paid as overflow. The direct",
-    "         leg was probe-falsified 2026-09-22 ('not available in the active",
-    "         live catalog for provider deepseek') and dropped; operator",
-    "         restored it at L0 2026-09-27T12:55:16Z and it was re-measured 200",
-    "         through the gateway 2026-09-27T14:5xZ, so it LEADS now (D20: an",
+    "deepseek-v4.1-flash = pinned single-model route: FAILS CLOSED since",
+    "         2026-09-27T16:4xZ (providers.deepseek 402 Insufficient Balance,",
+    "         available: false) - the combo is omitted until the balance is",
+    "         topped up, like t1/spark. History: the direct leg was",
+    "         probe-falsified 2026-09-22 ('not available in the active live",
+    "         catalog for provider deepseek') and dropped; operator restored",
+    "         it at L0 2026-09-27T12:55:16Z and it was re-measured 200 through",
+    "         the gateway 2026-09-27T14:5xZ, so it LED while it lasted (D20: an",
     "         unmeasured lesson is not a rule). Zen is real but 402s until the",
     "         Zen balance is topped up (chain hops by design). Exact model only:",
     "         no v4-flash (no suffix 1) leg; OpenRouter is unavailable (DSMAX",
@@ -155,10 +157,11 @@
     "    The plain paid spark (trains nothing) was removed with the",
     "    contributor-only block. Meta-direct paid spark stays out:",
     "    unregistered 2026-09-23 (openrouter-first; muse-code 502s upstream).",
-    "  t2-worker-clean: deepseek direct → openrouter paid deepseek → zen paid",
-    "    flash → mistral-small direct. No groq/cerebras/sambanova free legs.",
-    "  t3-driver-clean: deepseek direct → mistral-small direct → zen paid",
-    "    flash. No qwen free legs. Lightweight paid review duty only.",
+    "  t2-worker-clean: mistral-small direct (deepseek direct exhausted its",
+    "    credit 2026-09-27T16:4xZ, providers.deepseek off - back when topped",
+    "    up). No groq/cerebras/sambanova free legs.",
+    "  t3-driver-clean: mistral-small direct (same deepseek outage). No qwen",
+    "    free legs. Lightweight paid review duty only.",
     "  cheap-inference is NOT a free pool: it is the user's own paid partner",
     "  gateway (own key, own billing), so its legs sit between free and paid",
     "  in t2-worker/t3-driver — never in *-clean (privacy tiers stay",
@@ -210,6 +213,7 @@
     "tier3-credit"
   ],
   "omitted": [
+    "deepseek-v4.1-flash",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "spark-1.3-contributor",
@@ -241,8 +245,7 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
-        "cheaperinference/kimi-k3",
-        "deepseek/deepseek-flash"
+        "cheaperinference/kimi-k3"
       ]
     },
     {
@@ -250,7 +253,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "deepseek/deepseek-flash",
         "mistral/mistral-small-latest"
       ]
     },
@@ -279,7 +281,6 @@
       "models": [
         "mistral/mistral-code-latest",
         "cheaperinference/glm-5.2",
-        "deepseek/deepseek-flash",
         "cheaperinference/kimi-k3",
         "cheaperinference/minimax-m2.7",
         "mistral/mistral-small-latest"
@@ -290,7 +291,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "deepseek/deepseek-flash",
         "mistral/mistral-small-latest"
       ]
     },
@@ -317,14 +317,6 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "deepseek-v4.1-flash",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "deepseek/deepseek-flash"
       ]
     },
     {
