@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — probe-toolcalls uses the shared leg selection (ptc)
+
+- **`tools/probe-toolcalls.py`**: deleted its local `_skip_reason`/`legs_to_probe` copies and imports both from **`tools/probe_common.py`**, so a `policy.leg_rules`-denied leg is skipped with `policy: denied by <id>` and only free legs are probed (D18); its own `make_post`/400 body classification is unchanged. Tests: new `DenyRuleTests` in `tests/test_probe_toolcalls.py`; existing leg fixtures now declare `tier: free` (no skip-reason assertion needed rewording — the shared wording matches).
+
 ### Added — Free.ai in the key guide
 
 - **`docs/api-keys.md`**: where to get a Free.ai key (`free_ai`), its free terms (30k tokens/day on self-hosted models, 10 requests/min) and that only public work goes there.
