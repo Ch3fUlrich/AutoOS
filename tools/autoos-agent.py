@@ -217,7 +217,7 @@ def lean_overlay(cfg: dict) -> dict:
                                 for n in LEAN_DROP if n in servers}}}
 
 
-def outside_fence(data_dir: str) -> list:
+def outside_fence(data_dir: str, task_dir: str | None = None) -> list:
     # opencode's default for paths outside the project is "ask", and --auto
     # approves every ask - live 2026-09-24 an isolated worker wrote to the
     # main checkout by absolute path. Deny outside paths, then re-allow the
@@ -227,6 +227,26 @@ def outside_fence(data_dir: str) -> list:
              os.path.join(home, ".local", "share", "opencode", "shell", "*", "*"),
              "/tmp/opencode/*"]
     allow.append(os.path.join(data_dir, "opencode", "*"))
+    if task_dir is not None:
+        # FENCE (L1-backlog 2026-09-27): the MCP run_job sets AUTOOS_TASK_DIR
+        # to <ROOT>/logs/agents/<run id>, and a blocked worker's
+        # tools/autoos-ask.py writes question.json there. Under --isolate the
+        # run dir is outside the sandbox clone, so the deny above refused the
+        # write (autoos-ask exit 5). Re-allow exactly that dir - only when
+        # its realpath stays under logs/agents; anything else (an escape via
+        # .. or a symlink, a relative path, a missing dir) adds no rule and
+        # warns once, it never refuses the run. The allow entries above set
+        # the form: "<dir>/*" matches the files written inside the dir, so
+        # the bare dir itself needs no entry.
+        task_real = os.path.realpath(task_dir)
+        agents = os.path.realpath(os.path.join(ROOT, "logs", "agents"))
+        if (os.path.isabs(task_dir) and os.path.isdir(task_real)
+                and task_real.startswith(agents + os.sep)):
+            allow.append(os.path.join(task_real, "*"))
+        else:
+            print("AUTOOS_TASK_DIR %s is not an existing run dir under %s - "
+                  "the --isolate fence keeps it denied (autoos-ask exits 5)"
+                  % (task_dir, agents), file=sys.stderr)
     return ([{"action": "external_directory", "resource": "*", "effect": "deny"}] +
             [{"action": "external_directory", "resource": p, "effect": "allow"} for p in allow])
 
@@ -487,7 +507,8 @@ def build_plan(args, cfg: dict) -> dict:
             # saw first; a private data dir keeps the clone from inheriting the
             # main checkout's recorded root.
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
-            overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"])
+            overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
+                                                   os.environ.get("AUTOOS_TASK_DIR"))
     if sandbox is not None:
         # The fence denies opencode's file tools outside the clone, but a
         # worker told (or shown) an absolute parent path can still cd, git -C

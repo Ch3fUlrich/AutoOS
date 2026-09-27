@@ -3376,5 +3376,76 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
+class OutsideFenceTaskDirTests(unittest.TestCase):
+    """FENCE (L1-backlog 2026-09-27T04:49Z): the MCP run_job exports
+    AUTOOS_TASK_DIR=<root>/logs/agents/<run id>, and a blocked worker's
+    tools/autoos-ask.py writes question.json there. Under --isolate the
+    worker's project is its sandbox clone, so the run dir is an
+    external_directory the fence denied and ask-back exited 5. The fence
+    re-allows exactly that one dir (its realpath must stay under
+    <root>/logs/agents/); any other value only warns, never refuses."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # outside_fence measures the run dir against the spawner's own ROOT.
+        self.agent.ROOT = self.root
+        self.agents = os.path.join(self.root, "logs", "agents")
+
+    def fence(self, task_dir):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rules = self.agent.outside_fence("/x/data", task_dir)
+        return rules, err.getvalue()
+
+    def todays_rules(self):
+        home = os.path.expanduser("~")
+        allow = [os.path.join(home, ".local", "share", "opencode", "tool-output", "*"),
+                 os.path.join(home, ".local", "share", "opencode", "shell", "*", "*"),
+                 "/tmp/opencode/*",
+                 os.path.join("/x/data", "opencode", "*")]
+        return ([{"action": "external_directory", "resource": "*", "effect": "deny"}] +
+                [{"action": "external_directory", "resource": p, "effect": "allow"}
+                 for p in allow])
+
+    def test_an_unset_task_dir_keeps_todays_rules_exactly(self):
+        rules, err = self.fence(None)
+        self.assertEqual(rules, self.todays_rules())
+        self.assertEqual(err, "")
+
+    def test_a_run_dir_under_logs_agents_is_allowed(self):
+        run_dir = os.path.join(self.agents, "20260927-063221-abcdef")
+        os.makedirs(run_dir)
+        rules, err = self.fence(run_dir)
+        self.assertEqual(rules[0], {"action": "external_directory", "resource": "*",
+                                    "effect": "deny"})  # deny-all still first
+        self.assertEqual(rules, self.todays_rules() + [
+            {"action": "external_directory",
+             "resource": os.path.join(os.path.realpath(run_dir), "*"),
+             "effect": "allow"}])
+        self.assertEqual(err, "")
+
+    def test_a_task_dir_outside_logs_agents_adds_no_rule_and_warns(self):
+        os.makedirs(os.path.join(self.root, "etc"))  # the escape target exists
+        for task_dir in ("/tmp/x", os.path.join(self.agents, "..", "..", "etc")):
+            with self.subTest(task_dir=task_dir):
+                rules, err = self.fence(task_dir)
+                self.assertEqual(rules, self.todays_rules())
+                lines = err.strip().splitlines()
+                self.assertEqual(len(lines), 1, err)  # ONE warning line
+                self.assertIn("AUTOOS_TASK_DIR", lines[0])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs privilege on Windows")
+    def test_a_symlink_under_logs_agents_escaping_it_adds_no_rule_and_warns(self):
+        os.makedirs(os.path.join(self.root, "elsewhere"))
+        os.makedirs(self.agents)
+        link = os.path.join(self.agents, "20260927-063221-link")
+        os.symlink(os.path.join(self.root, "elsewhere"), link)
+        rules, err = self.fence(link)
+        self.assertEqual(rules, self.todays_rules())
+        self.assertIn("AUTOOS_TASK_DIR", err)
+
+
 if __name__ == "__main__":
     unittest.main()
