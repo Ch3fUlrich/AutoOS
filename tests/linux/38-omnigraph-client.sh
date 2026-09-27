@@ -83,7 +83,7 @@ oh_run_client() {
             # The last argument is the package spec, and the tree npm lands for
             # @scope/name@1.2.3 carries exactly that version - the pin guard is
             # only tested if the stub honours it too.
-            spec="${@: -1}"
+            spec="${!#}"
             name="${spec%@*}"; version="${spec##*@}"
             [[ "$name" != "$spec" ]] || { printf 'npm stub: unpinned spec %s\n' "$spec" >&2; return 9; }
             oh_fake_npm_install "$prefix" "$name" "$version" "omnigraph-mcp"

@@ -36,6 +36,9 @@ if [[ -r "$env_file" ]]; then
         [[ -n "$value" ]] || continue
         if [[ -z "${!key:-}" ]]; then
             printf -v "$key" '%s' "$value"
+            # Exporting the NAME, not the literal word "key": $key is one of the
+            # three whitelisted names above, never anything else.
+            # shellcheck disable=SC2163
             export "$key"
         fi
     done <"$env_file"
