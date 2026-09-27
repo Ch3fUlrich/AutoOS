@@ -434,6 +434,8 @@ cmd_init() {
         AUTOOS_STACK_CONFIG "$CONFIG_DIR" AUTOOS_OPENHANDS_DIR "$OH_DIR" \
         AUTOOS_STACK_BIND 0.0.0.0 \
         OMNIROUTE_MEMORY_MB 1536 OMNIROUTE_MEM_LIMIT 2560m \
+        OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT 6 \
+        OMNIROUTE_CHAT_ADMISSION_QUEUE_MS 60000 \
         OPENCODE_MEM_LIMIT 1536m AUTOOS_OPENHANDS_MEMORY 2g \
         || return 1
 
@@ -1290,6 +1292,28 @@ verify_healthcheck() {
     v_skip "healthcheck" "configuration/healthcheck.sh writes a log file and always exits 0 - not read-only, no verdict"
 }
 
+# 9. The effective admission gate and heap the running gateway process sees:
+# read PID 1's environment (the entrypoint appends OMNIROUTE_MEMORY_MB to
+# NODE_OPTIONS; docker exec shells only see the Dockerfile's default, so
+# /proc/1 is the truth). Informational - not a pass/fail check; the image
+# defaults (1 heavy in flight, 2000 ms queue) kill parallel agent workers.
+verify_omniroute_admission() {
+    local c name="omniroute admission" environ heavy queue heap
+    c="$(verify_container omniroute)"
+    if [[ -z "$c" ]]; then echo "  skip  $name - the omniroute service is not enabled"; return 0; fi
+    if ! container_running "$c"; then echo "  skip  $name - $c is not running"; return 0; fi
+    environ="$("$DOCKER" exec "$c" sh -c 'tr "\0" "\n" </proc/1/environ' 2>/dev/null || true)"
+    if [[ -z "$environ" ]]; then echo "  = $name: could not read /proc/1/environ"; return 0; fi
+    heavy="$(printf '%s\n' "$environ" | sed -n 's/^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=//p' | tail -n1 || true)"
+    queue="$(printf '%s\n' "$environ" | sed -n 's/^OMNIROUTE_CHAT_ADMISSION_QUEUE_MS=//p' | tail -n1 || true)"
+    heap="$(printf '%s\n' "$environ" | sed -n 's/^NODE_OPTIONS=//p' | tail -n1 \
+        | grep -oE -- '--max-old-space-size=[0-9]+' | tail -n1 | cut -d= -f2 || true)"
+    heavy="${heavy:-unset (image default 1 / 2000)}"
+    queue="${queue:-unset (image default 1 / 2000)}"
+    heap="${heap:-unset}"
+    echo "  = $name: max_heavy=$heavy, queue_ms=$queue, heap MB=$heap"
+}
+
 cmd_verify() {
     V_OK=0; V_FAIL=0; V_SKIP=0
     verify_load_services
@@ -1302,6 +1326,7 @@ cmd_verify() {
     verify_public_urls
     verify_omniroute_public_url
     verify_healthcheck
+    verify_omniroute_admission
     printf 'verify: %d ok, %d failed, %d skipped\n' "$V_OK" "$V_FAIL" "$V_SKIP"
     [[ $V_FAIL -eq 0 ]]
 }

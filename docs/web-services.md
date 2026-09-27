@@ -361,6 +361,15 @@ Hardened probe containers: OmniRoute 486 MB after warm-up, opencode 100 MB.
 
 Total ceilings 6 GB; typical use ~1.5 GB, about what the native processes used.
 
+**Chat admission gate** (omniroute only): `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6`
+(parallel heavy requests the gateway admits) and
+`OMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000` (how long a queued request waits
+before 503). The image defaults (1 / 2000 ms) reject parallel agent
+sub-requests with retryable 503, killing worker runs (4 of 5; measured
+2026-09-27). `OMNIROUTE_MEMORY_MB` is the heap knob: the image entrypoint
+appends `--max-old-space-size=$OMNIROUTE_MEMORY_MB` to `NODE_OPTIONS`; the
+last flag wins, so `NODE_OPTIONS` is not set in compose.
+
 ### Migration (an existing native host)
 
 Opt-in and announced; `ai-stack.sh migrate` without `--yes` only prints the
