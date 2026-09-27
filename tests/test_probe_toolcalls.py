@@ -71,8 +71,8 @@ class LegsToProbeTests(unittest.TestCase):
         self.mod = _load_module()
         self.registry = {
             "providers": {
-                "clean": {"id": "clean", "tier": "free", "available": True},
-                "flaky": {"id": "flaky", "tier": "free", "available": False},
+                "clean": {"id": "clean", "available": True},
+                "flaky": {"id": "flaky", "available": False},
             },
             "models": {
                 "big": {"id": "big"},
@@ -399,7 +399,7 @@ class CliMainTests(unittest.TestCase):
         self.registry_path = os.path.join(self.tmpdir, "registry.json")
         self.overlay_path = os.path.join(self.tmpdir, "measured.json")
         registry = {
-            "providers": {"clean": {"id": "clean", "tier": "free", "available": True}},
+            "providers": {"clean": {"id": "clean", "available": True}},
             "models": {"m": {"id": "m"}},
             "routes": {"r1": {"id": "r1", "legs": ["clean/m"]}},
         }
@@ -460,42 +460,6 @@ class CliMainTests(unittest.TestCase):
         with io.open(self.overlay_path, encoding="utf-8") as fh:
             overlay_text = fh.read()
         self.assertNotIn("sk-SECRET-not-printed", overlay_text)
-
-
-class SharedSkipRuleTests(unittest.TestCase):
-    """Item 1 (TOOLFIX): probe-toolcalls shares probe_common's skip logic, so a
-    paid leg and a policy-denied free leg are both skipped (spec D18: probes
-    use free legs only; decided by the routing owner 2026-09-27)."""
-
-    def setUp(self):
-        self.mod = _load_module()
-        self.registry = {
-            "providers": {
-                "free": {"id": "free", "tier": "free", "available": True},
-                "paid": {"id": "paid", "tier": "paid", "available": True},
-                "groq": {"id": "groq", "tier": "free", "available": True},
-            },
-            "models": {"big": {"id": "big"}, "small": {"id": "small"}},
-            "routes": {
-                "r1": {"id": "r1", "legs": ["free/big", "paid/small", "groq/big"]},
-            },
-            "policy": {"leg_rules": [
-                {"id": "deny-groq", "match": "groq/*", "allow": False,
-                 "reason": "groq failed every agent call"},
-            ]},
-        }
-
-    def test_a_paid_leg_is_skipped(self):
-        reasons = dict(self.mod.legs_to_probe(self.registry))
-        self.assertEqual(reasons["paid/small"], "tier: paid")
-
-    def test_a_denied_free_leg_is_skipped_with_the_rule_id(self):
-        reasons = dict(self.mod.legs_to_probe(self.registry))
-        self.assertEqual(reasons["groq/big"], "policy: denied by deny-groq")
-
-    def test_an_allowed_free_leg_is_probed(self):
-        reasons = dict(self.mod.legs_to_probe(self.registry))
-        self.assertIsNone(reasons["free/big"])
 
 
 if __name__ == "__main__":

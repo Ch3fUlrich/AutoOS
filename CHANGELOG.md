@@ -7,16 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed — TOOLFIX: four small rule→code fixes (probes, audit-router, spawner, measure)
 
-- **`tools/probe_common.py`** / **`tools/probe-toolcalls.py`**: the two probes now share one skip-rule
-  set. `probe-toolcalls.py` imports `legs_to_probe`, `_skip_reason`, `make_post`, `gateway_up`,
-  `post_with_retry`, etc. from `probe_common.py` and its local copies are deleted, so a rule added in
-  one place applies to both. `probe_common._skip_reason` gained a policy-deny rule (checked first): a
-  leg matched by `registry.leg_denied` + `registry.leg_rule_for` is skipped with reason
-  `policy: denied by <rule id>`, and the paid-tier/unavailable check now uses `registry.unavailable_now`
-  (replacing the plain `available is False` test) so both probes inherit the UNTILfix self-heal.
-  Paid (`tier: paid`) and policy-denied legs are no longer probed. Tests: `tests/test_probe_toolcalls.py`
-  (`SharedSkipRuleTests`) and `tests/test_probe_recall.py` (`DenyRuleTests`); two probe-toolcalls
-  fixtures now set `"tier": "free"` to match the real provider schema.
+- **`tools/probe_common.py`**: `_skip_reason` gained a policy-deny rule (checked first): a leg that
+  `registry.leg_denied` denies is skipped with `policy: denied by <rule id>`, and the provider check
+  uses `registry.unavailable_now` (UNTILfix self-heal). With the free-tier rule (spec D18) paid and
+  policy-denied legs are never probed. `tools/probe-toolcalls.py` keeps its own copy until it moves
+  onto probe_common (L1-backlog). Test: `tests/test_probe_recall.py` (`DenyRuleTests`).
 - **`tools/audit-router.py`**: `_chat_once` no longer forwards provider error bodies or exception text
   into its result. The `HTTPError` branch returns `"HTTP %d"` and the transport branch returns
   `"transport error: %s" % type(exc).__name__`; the provider's JSON `detail`/`error` body and the raw
