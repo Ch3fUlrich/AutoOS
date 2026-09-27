@@ -1263,6 +1263,25 @@
         }
       ]
     },
+    "free_client_models": {
+      "$comment": [
+        "SPAWNFREE (S2) item 1: the ordered free-model list a --free run walks when its client prints a provider stop (tools/autoos-agent.py free_model_chain / _free_fallthrough_plan), keyed by client. The --free-model a caller gave goes first, these follow, and MAX_FALLTHROUGH bounds the re-runs.",
+        "Why: a --free run's model is not a resolver route, so the SPAWNCAP route fallthrough never reached it and the first 'Rate limit exceeded' ended the run with exit 8 (inbox 2026-09-27T17:08:22Z and 17:19:45Z, work/L1-routing/T1FREE.r2.out).",
+        "The ids are opencode's own zen spellings (the client's built-in keyless provider), not registry leg ids - zen's leg ids are the 'opencode-zen/...' form used by routes."
+      ],
+      "opencode": [
+        "opencode/nemotron-3-ultra-free",
+        "opencode/muse-spark-1.3-contributor-free",
+        "opencode/mimo-v2.6-flash-free"
+      ]
+    },
+    "free_concurrency": {
+      "$comment": [
+        "SPAWNFREE (S2) item 2: how many workers a free provider leg may serve at once on this host, keyed by the provider prefix of the free model id (tools/autoos-agent.py free_concurrency_cap). A run at or above its cap waits instead of starting into a 429.",
+        "Why: 3 Muse free workers started together on one account and all died on 'Rate limit exceeded' (L1-backlog lanes lstby2e, hx4m, rv3, measured 2026-09-27). Zen publishes no rpm for its free tier, so 1 is the measured-safe default until the vendor says more."
+      ],
+      "opencode": 1
+    },
     "handoff_caps": {
       "claude-opus-1m": {
         "cap_fraction": 0.6,

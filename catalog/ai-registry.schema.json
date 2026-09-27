@@ -437,6 +437,25 @@
             }
           }
         },
+        "free_client_models": {
+          "type": "object",
+          "description": "SPAWNFREE (S2) item 1: the ordered free-model list a --free run falls through when its client prints a provider stop (tools/autoos-agent.py free_model_chain), keyed by client name. Values are the client's own model ids (opencode's zen free spellings), NOT registry leg ids - nothing here is checked against providers/models. Optional: a client with no entry runs the one --free-model it was given, as before.",
+          "properties": { "$comment": { "$ref": "#/$defs/comment" } },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        },
+        "free_concurrency": {
+          "type": "object",
+          "description": "SPAWNFREE (S2) item 2: how many workers a free provider leg may serve at once on this host, keyed by the provider prefix of a free model id ('opencode/...' -> 'opencode'). A --free run at or above its cap waits for a slot instead of starting into a 429; tools/autoos-agent.py free_concurrency_cap defaults to 1 for an unlisted provider. Every leg is one shared account, so a cap below 1 would deadlock the queue.",
+          "properties": { "$comment": { "$ref": "#/$defs/comment" } },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
         "handoff_caps": {
           "type": "object",
           "description": "spec 8.3, keyed by orchestrator-model class. Each row carries a `match` list of lowercased model-id substrings (one entry per alias the row covers, or `[\"*\"]` for the default) and a `window` (the family's context window in tokens).",
