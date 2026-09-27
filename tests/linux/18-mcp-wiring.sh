@@ -932,6 +932,36 @@ if it "backup collision: a failed CAO backup copy leaves no partial backup and d
     if (( ok )); then pass; else fail "failed CAO backup left a partial copy or aborted"; fi
 fi
 
+# Item 4 (rv2): the FIFO probe in setup_wsl_agent_home interpolated the CAO
+# path into Python SOURCE (python3 -c "import os; os.mkfifo('$cao_legacy/...')").
+# A CAO home whose path contained a single quote made that a SyntaxError, the
+# probe "failed", and a perfectly good native ext4 home was falsely relocated:
+# live state moved and a backup taken on a host where FIFOs work fine. The path
+# now goes in as argv, so the shell never parses it and Python never sees it as
+# source.
+if it "setup_wsl_agent_home does not falsely relocate a CAO home whose path contains a single quote"; then
+    tmp="$(mktemp -d)"
+    home="$tmp/it's-here"
+    legacy="$home/.aws/cli-agent-orchestrator"
+    mkdir -p "$legacy/db"
+    printf 'live\n' >"$legacy/db/state"
+    (
+        SYS_HOME="$home"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null 2>&1
+    )
+    rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state was moved or changed" >&2; }
+    n_bak="$(find "$home/.aws" -maxdepth 1 -name 'cli-agent-orchestrator.backup-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$n_bak" == 0 ]] || { ok=0; echo "a false relocation took $n_bak backup(s)" >&2; }
+    [[ ! -e "$legacy/.autoos-fifo-probe" ]] || { ok=0; echo "the FIFO probe was left behind" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "a single quote in the CAO path caused a false relocation"; fi
+fi
+
 # ─── User-scope skill targets: ~/.agents/skills and ~/.codex/skills ──
 
 # oh_skill_repo creates a scratch AUTOOS_ROOT with two skills.

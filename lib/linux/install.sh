@@ -5167,7 +5167,11 @@ setup_wsl_agent_home() {
     # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
     # so the legacy path never dangles.
     if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
-        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+        # The path goes in as argv, never spliced into the Python source: a CAO
+        # home containing a single quote would otherwise turn the probe itself
+        # into a SyntaxError, read as "no FIFO support", and falsely relocate a
+        # working ext4 home.
+        if ! python3 -c 'import os,sys; os.mkfifo(sys.argv[1])' "$cao_legacy/.autoos-fifo-probe" 2>/dev/null; then
             local ts backup backup_base n=0
             ts="$(date +%Y%m%d-%H%M%S)"
             backup_base="${cao_legacy}.backup-${ts}"
