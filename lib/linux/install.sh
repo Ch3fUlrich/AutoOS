@@ -323,10 +323,10 @@ autoos_record_failure() {
     return 0
 }
 
-# The three result buckets setup.sh fills while it executes, one component id
-# per line. Ids and not display names: a name with spaces shatters when the list
-# is joined for the state file, and "Installed but listed as failed" is only
-# detectable by id. The counts are their lengths (see autoos_fold_extra_failures).
+# The three result buckets setup.sh fills while it executes, one component id per
+# element. Ids and not display names: a name with spaces shatters when the list is
+# joined for the state file, and "counted as installed *and* failed" is only
+# detectable by id. The counts are their lengths (autoos_fold_extra_failures).
 AUTOOS_RESULT_INSTALLED=()
 AUTOOS_RESULT_SKIPPED=()
 AUTOOS_RESULT_FAILED=()
