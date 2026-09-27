@@ -67,13 +67,18 @@ Rules migrate into code over time: once a check moves into `autoos-agent` MCP
 tools, `tools/autoos*.py` or the resolver, this file points to the tool instead of restating it
 (source: briefs/common.md "Skill rules bind every spawned agent", operator 2026-09-26T13:43:33Z).
 
+Every brief names this skill: the spawned session loads it, and a worker that cannot read files
+gets the rules its task touches inlined (source: briefs/common.md "Skill rules bind every spawned
+agent", operator 2026-09-26T13:45Z).
+
 Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
 context cap), `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
 full list of code-enforced rules.
 
 A level's rules bind every session doing that job: `coord` rules bind whoever runs lanes and
-merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or reviews workers.
+merges (L1, and an L2 for its own lanes — so the heartbeat rules `R-coord-07`/`R-coord-08` bind
+L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 ### router (L0)
 
