@@ -79,28 +79,6 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker
     litellm_params:
-      model: groq/openai/gpt-oss-120b
-      api_key: os.environ/GROQ_API_KEY
-      rpm: 30 # free: per-model 200K tokens/day caps
-  - model_name: t2-worker
-    litellm_params:
-      model: cerebras/gpt-oss-120b
-      api_key: os.environ/CEREBRAS_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: sambanova/gpt-oss-120b
-      api_key: os.environ/SAMBANOVA_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: openrouter/openai/gpt-oss-120b
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: openai/deepseek-v4-flash
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: openai/glm-4.5-air
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
@@ -117,11 +95,6 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: openai/deepseek-v4.1-flash
-      api_base: https://opencode.ai/zen/v1
-      api_key: os.environ/OPENCODE_ZEN_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-paid / t3-driver-paid: the escalation must actually answer ────
@@ -176,14 +149,6 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: samba/gpt-oss-120b
-      api_key: os.environ/SAMBA_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: openai/glm-5.2
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
@@ -196,14 +161,6 @@ model_list:
       model: openai/kimi-k3
       api_base: https://api.cheaperinference.com/v1
       api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: samba/MiniMax-M3
-      api_key: os.environ/SAMBA_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: cerebras/qwen-3.8-27b
-      api_key: os.environ/CEREBRAS_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: openai/glm-4.5-air
@@ -219,11 +176,6 @@ model_list:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
       rpm: 2
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/deepseek-v4.1-flash
-      api_base: https://opencode.ai/zen/v1
-      api_key: os.environ/OPENCODE_ZEN_API_KEY
   # AUTOOS-MANAGED-END t3-driver
 
   # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────

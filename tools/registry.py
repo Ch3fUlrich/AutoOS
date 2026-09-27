@@ -852,11 +852,12 @@ def render_omniroute(registry: dict) -> dict:
     (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
     combos.json counterpart at all - mapping doc section 4.
 
-    Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
-    providers.openrouter.available: false) stay in `legs` unchanged - today's
-    committed combos.json already lists those same dead legs (the operator chose
-    to flag them in the registry rather than remove them, 2026-09-25/26), so no
-    special case is needed for the render to match.
+    Only gateway-servable legs are rendered - see gateway_legs(): a leg the
+    registry marks unavailable (routes.<id>.unavailable_legs or its provider's
+    available: false), a leg policy.leg_rules denies, and a client_bound leg the
+    gateway 403s are all dropped from the combo's `models`. A route whose every
+    leg is dropped therefore renders no combo at all, the same shape a
+    `legs: []` route already has.
     """
     routes = registry.get("routes")
     routes = routes if isinstance(routes, dict) else {}
@@ -866,7 +867,7 @@ def render_omniroute(registry: dict) -> dict:
         route = routes[route_id]
         if not isinstance(route, dict):
             continue
-        legs = route.get("legs") or []
+        legs = gateway_legs(route, registry)
         if not legs:
             continue
         surfaces = route.get("surfaces")
@@ -1042,7 +1043,17 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
 
     refs_by_tier = {}
     for tier in tiers:
-        legs = routes[tier].get("legs") or []
+        declared_legs = routes[tier].get("legs") or []
+        legs = gateway_legs(routes[tier], registry)
+        if declared_legs and not legs:
+            # An empty model list in a managed block is not a valid config: a
+            # synced tier with no gateway-servable leg (unavailable, denied or
+            # client-bound) is a hard error naming the tier/route, unlike
+            # render_omniroute's all-dead route, which simply gets no combo.
+            raise ValueError(
+                "routes.%s has legs but no gateway-servable leg "
+                "(unavailable, policy-denied, or client-bound): %s"
+                % (tier, ", ".join(str(leg) for leg in declared_legs)))
         refs_by_tier[tier] = [
             leg for leg in legs
             if isinstance(leg, str) and leg.split("/", 1)[0] not in sync.GATEWAY_ONLY
@@ -1648,6 +1659,50 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
         return False
     provider = _section(registry, "providers").get(provider_id)
     return isinstance(provider, dict) and provider.get("available") is False
+
+
+def gateway_legs(route: dict, registry: dict) -> list:
+    """routes.<id>.legs in order, minus every leg a gateway cannot serve:
+
+      - _leg_is_unavailable(leg, route, registry): the route-level
+        unavailable_legs[leg].available or the leg's provider available is
+        false (the immutable flags - a bare unavailable_until never gates,
+        see _leg_is_unavailable);
+      - leg_denied(leg, registry): policy.leg_rules' first matching rule has
+        allow false;
+      - the resolved model carries client_bound: the leg only answers inside
+        its own client (opencode-zen's muse-spark-1.3-contributor-free), so a
+        gateway request 403s.
+
+    Pure and time-independent: the same (route, registry) always returns the
+    same list, no clock. A leg that resolve_leg cannot resolve is kept, not
+    dropped - rule 1 already reports it loudly, and a render must not hide a
+    malformed leg behind a silent filter.
+
+    render_omniroute() renders only this list: a route with no gateway-servable
+    leg gets no combo at all (a combo that serves nothing is worse than an
+    absent one), the same shape a `legs: []` route already has.
+    render_litellm_blocks() renders only this list too, but a synced tier with
+    no servable leg is a hard ValueError - an empty model list in config.yaml
+    is not a valid block."""
+    legs = route.get("legs") or []
+    out = []
+    for leg in legs:
+        if not isinstance(leg, str):
+            out.append(leg)
+            continue
+        if _leg_is_unavailable(leg, route, registry) or leg_denied(leg, registry):
+            continue
+        try:
+            _, model_id = resolve_leg(leg, registry)
+        except ValueError:
+            out.append(leg)
+            continue
+        model = _section(registry, "models").get(model_id)
+        if isinstance(model, dict) and model.get("client_bound"):
+            continue
+        out.append(leg)
+    return out
 
 
 def _leg_cell_text(leg: str, route: dict, registry: dict) -> str:

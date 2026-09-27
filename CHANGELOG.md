@@ -35,6 +35,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `test_run_goes_ahead_when_agy_is_signed_in` updated for the new agy form and
   `test_sensitive_card_with_free_is_refused` for the new promo model.
 - **`configuration/omniroute/apply.sh --drift`** (OR1b): compares the live combos against `combos.json` (name + ordered legs, `retired` ids ignored) without writing; exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot be read.
+### Fixed — gateway renders serve only usable legs (OR1a)
+
+- **`tools/registry.py`**: both gateway renders now share a new `gateway_legs(route, registry)` that drops every leg the registry marks unavailable, `policy.leg_rules` denies, or that resolves to a `client_bound` model; `configuration/omniroute/combos.json` and `configuration/litellm/config.yaml` drop those legs too (tests: `tests/test_registry_render.py::GatewayLegsFilterTests`).
 
 ### Added — provider rate limits as registry data + resolver request-size filter (R4)
 

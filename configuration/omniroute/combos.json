@@ -211,7 +211,6 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "opencode-zen/muse-spark-1.3-contributor-free",
         "openrouter/meta/muse-spark-1.3-contributor"
       ]
     },
@@ -220,7 +219,6 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "opencode-zen/muse-spark-1.3-contributor-free",
         "openrouter/meta/muse-spark-1.3-contributor"
       ]
     },
@@ -233,30 +231,16 @@
       ]
     },
     {
-      "name": "t1-orchestrator-free-only",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "opencode-zen/muse-spark-1.3-contributor-free"
-      ]
-    },
-    {
       "name": "t2-worker",
       "strategy": "priority",
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
-        "groq/openai/gpt-oss-120b",
-        "cerebras/gpt-oss-120b",
-        "sambanova/gpt-oss-120b",
-        "openrouter/openai/gpt-oss-120b",
-        "cheaperinference/deepseek-v4-flash",
         "cheaperinference/glm-4.5-air",
         "cheaperinference/kimi-k3",
         "openrouter/deepseek/deepseek-v4.1-flash",
-        "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -276,29 +260,12 @@
       ]
     },
     {
-      "name": "samba/gpt-oss-120b",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "samba/gpt-oss-120b"
-      ]
-    },
-    {
-      "name": "samba/MiniMax-M3",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "samba/MiniMax-M3"
-      ]
-    },
-    {
       "name": "t2-worker-clean",
       "strategy": "priority",
       "context": "128k",
       "models": [
         "deepseek/deepseek-flash",
         "openrouter/deepseek/deepseek-v4.1-flash",
-        "opencode-zen/deepseek-v4.1-flash",
         "mistral/mistral-small-latest"
       ]
     },
@@ -308,10 +275,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-medium",
-        "groq/openai/gpt-oss-120b",
-        "cerebras/gpt-oss-120b",
-        "sambanova/gpt-oss-120b"
+        "antigravity/gemini-3.7-flash-medium"
       ]
     },
     {
@@ -330,17 +294,12 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
-        "groq/qwen/qwen3.8-27b",
-        "samba/gpt-oss-120b",
         "cheaperinference/glm-5.2",
         "deepseek/deepseek-flash",
         "cheaperinference/kimi-k3",
-        "samba/MiniMax-M3",
-        "cerebras/qwen-3.8-27b",
         "cheaperinference/glm-4.5-air",
         "cheaperinference/minimax-m2.7",
-        "mistral/mistral-small-latest",
-        "opencode-zen/deepseek-v4.1-flash"
+        "mistral/mistral-small-latest"
       ]
     },
     {
@@ -349,17 +308,7 @@
       "context": "128k",
       "models": [
         "deepseek/deepseek-flash",
-        "mistral/mistral-small-latest",
-        "opencode-zen/deepseek-v4.1-flash"
-      ]
-    },
-    {
-      "name": "t3-driver-free-only",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "groq/qwen/qwen3.8-27b",
-        "cerebras/qwen-3.8-27b"
+        "mistral/mistral-small-latest"
       ]
     },
     {
@@ -376,8 +325,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "gemini/gemini-3.8-flash",
-        "openrouter/google/gemini-3.8-flash"
+        "gemini/gemini-3.8-flash"
       ]
     },
     {
@@ -385,8 +333,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "openrouter/deepseek/deepseek-v4.1-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "openrouter/deepseek/deepseek-v4.1-flash"
       ]
     },
     {
