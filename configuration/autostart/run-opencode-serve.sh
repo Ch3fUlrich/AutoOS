@@ -51,7 +51,7 @@ keys_value() {
     local file="$1" name="$2" raw val
     [[ -f "$file" ]] || return 0
     raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$file" \
-        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r')"
+        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r' || true)"
     [[ -n "$raw" ]] || return 0
     case "$raw" in
         \"*) val="${raw#\"}"; val="${val%%\"*}" ;;

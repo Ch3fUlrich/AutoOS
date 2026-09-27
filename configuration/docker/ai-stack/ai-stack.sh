@@ -217,7 +217,7 @@ keys_value() {
     local name="$1" raw val
     [[ -f "$KEYS_FILE" ]] || return 0
     raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$KEYS_FILE" \
-        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r')"
+        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r' || true)"
     [[ -n "$raw" ]] || return 0
     case "$raw" in
         \"*) val="${raw#\"}"; val="${val%%\"*}" ;;
@@ -252,6 +252,7 @@ keys_add_opencode_password() {
             echo "  ! could not back up $KEYS_FILE - the key was not added" >&2
             return 1
         fi
+        chmod 600 "$backup"
     fi
     (
         umask 077
@@ -275,15 +276,24 @@ env_replace_value() {
     fi
     chmod 600 "$backup"
     tmp="$(mktemp "$(dirname "$file")/.autoos-env-XXXXXX")"
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    if ! while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
             printf '%s=%s\n' "$key" "$(quote_value "$val")"
         else
             printf '%s\n' "$line"
         fi
-    done <"$file" >"$tmp"
-    chmod 600 "$tmp"
-    mv -- "$tmp" "$file"
+    done <"$file" >"$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    if ! chmod 600 "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    if ! mv -- "$tmp" "$file"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
 }
 
 # opencode_password_sync: make configuration/api-keys.yml's `opencode_password`

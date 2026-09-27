@@ -6721,6 +6721,14 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
         Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
 
+        # Two uncommented lines: the last one wins (bash uses tail -n1).
+        Set-Content -LiteralPath $keys -Value "opencode_password: first`nopencode_password: second" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'second'
+
+        # Case-sensitive key match: Opencode_password is not opencode_password.
+        Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
         Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
     } finally {
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

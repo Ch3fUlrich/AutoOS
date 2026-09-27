@@ -31,9 +31,11 @@ function Get-AutoOSKeyValue {
     param([string]$Path, [string]$Name)
     if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
     $escaped = [regex]::Escape($Name)
+    $last = ''
+    $found = $false
     foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
         $line = $raw -replace '\r$',''
-        if ($line -match "^\s*$escaped\s*:\s*(.+)$") {
+        if ($line -cmatch "^\s*$escaped\s*:\s*(.+)$") {
             $v = $Matches[1]
             if ($v -match '^\s*#') { continue }
             if ($v.Length -gt 0 -and $v[0] -eq '"') {
@@ -51,11 +53,13 @@ function Get-AutoOSKeyValue {
                 if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
                 $v = $v.TrimEnd()
             }
-            if ($v -like 'REPLACE_WITH_*') { return '' }
-            return $v
+            if ($v -clike 'REPLACE_WITH_*') { continue }
+            $last = $v
+            $found = $true
         }
     }
-    ''
+    if (-not $found) { return '' }
+    $last
 }
 
 $Key = $env:AUTOOS_OMNIROUTE_KEY

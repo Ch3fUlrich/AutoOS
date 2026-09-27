@@ -2496,7 +2496,7 @@ if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at 
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
-    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
+    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && (rm -rf .* && )?mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
         || { ok=0; echo "bcryptjs is not pinned and added, moved into /app/node_modules and cleaned up in one layer" >&2; }
     layer="$(grep -nE '^RUN npm install --prefix /tmp/[a-z-]+ .*bcryptjs@' "$f" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
     last="$(grep -nE '^USER node' "$f" 2>/dev/null | tail -n1 | cut -d: -f1 || true)"
@@ -2506,6 +2506,23 @@ if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at 
     grep -qE 'cd /app' "$f" 2>/dev/null \
         && { ok=0; echo "npm runs with cwd /app: it would reconcile the whole package.json" >&2; }
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned bcryptjs outside /app's npm tree"; fi
+fi
+
+if it "aistack: keys_add_opencode_password backs up a 644 keys file at mode 600"; then
+    d="$(_aistack_sandbox)"
+    # A keys file the operator relaxed to 644 (a common mistake on shared
+    # checkouts): the migration backup must NOT inherit that mode.
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    chmod 644 "$d/repo/api-keys.yml"
+    _aistack "$d" init >/dev/null
+    backup="$(ls "$d/repo/api-keys.yml.autoos-backup-"* 2>/dev/null | head -n1)"
+    ok=1
+    [[ -n "$backup" ]] || { ok=0; echo "no migration backup was made" >&2; }
+    if [[ -n "$backup" ]]; then
+        got="$(stat -c '%a' "$backup" 2>&1)"
+        [[ "$got" == "600" ]] || { ok=0; echo "backup mode is $got, expected 600" >&2; }
+    fi
+    if (( ok )); then pass; else fail "keys_add_opencode_password backup inherits source mode instead of 600"; fi
 fi
 
 if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then

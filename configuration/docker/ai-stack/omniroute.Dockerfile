@@ -23,6 +23,6 @@ USER root
 RUN npm install -g @qoder-ai/qodercli@1.1.63 && npm cache clean --force
 # Into a throw-away prefix, then moved: npm in /app would reconcile the whole
 # package.json. bcryptjs has no dependencies, so the one package is the tree.
-RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-fund bcryptjs@3.0.3 && mv /tmp/autoos-cli-deps/node_modules/bcryptjs /app/node_modules/bcryptjs && rm -rf /tmp/autoos-cli-deps && npm cache clean --force
+RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-fund bcryptjs@3.0.3 && rm -rf /app/node_modules/bcryptjs && mv /tmp/autoos-cli-deps/node_modules/bcryptjs /app/node_modules/bcryptjs && rm -rf /tmp/autoos-cli-deps && npm cache clean --force
 # The base's own user; compose.yml overrides it with the host uid:gid anyway.
 USER node
