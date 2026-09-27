@@ -341,11 +341,12 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
 
     def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
         # An all-gateway-only route (opus-4-6) and a route whose every leg is
-        # unavailable/denied (the *-free-only and samba one-leg routes) render
-        # no block at all - the same shape render_omniroute() gives an all-dead
-        # route, not an empty model list.
+        # unavailable/denied (t1-orchestrator-free-only and the samba one-leg
+        # routes) render no block at all - the same shape render_omniroute()
+        # gives an all-dead route, not an empty model list. t3-driver-free-only
+        # left this set when FREEAI gave it a servable free_ai/qwen7b leg.
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        for gone in ("opus-4-6", "t1-orchestrator-free-only", "t3-driver-free-only",
+        for gone in ("opus-4-6", "t1-orchestrator-free-only",
                      "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, rendered)
 
@@ -1091,8 +1092,9 @@ class GatewayLegsFilterTests(unittest.TestCase):
              "mistral/mistral-small-latest"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes and the zero-spend t1 route.
+        # t3-driver-free-only is NOT gone: FREEAI gave it a servable leg.
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3",
-                     "t1-orchestrator-free-only", "t3-driver-free-only"):
+                     "t1-orchestrator-free-only"):
             self.assertNotIn(gone, combos)
 
     def test_real_litellm_drops_gated_legs(self):
@@ -1141,7 +1143,7 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
 
     def test_ide_drops_a_route_that_declares_legs_but_serves_none(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
-        for gone in ("t1-orchestrator-free-only", "t3-driver-free-only",
+        for gone in ("t1-orchestrator-free-only",
                      "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, ids)
 
@@ -1161,9 +1163,7 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
     def test_openhands_drops_a_tier_that_declares_legs_but_serves_none(self):
         ids = {t["id"] for t in registry.render_openhands(real_registry())["tiers"]}
         for gone in ("omniroute-t1-orchestrator-free-only",
-                     "litellm-t1-orchestrator-free-only",
-                     "omniroute-t3-driver-free-only",
-                     "litellm-t3-driver-free-only"):
+                     "litellm-t1-orchestrator-free-only"):
             self.assertNotIn(gone, ids)
 
     def test_openhands_keeps_a_tier_whose_route_now_declares_no_legs(self):
@@ -1176,9 +1176,21 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         self.assertIn("litellm-t1-orchestrator", ids)
 
     def test_openhands_tier_returns_when_its_leg_becomes_servable(self):
-        reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver-free-only"]["unavailable_legs"] = {}
-        ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
+        # Gate t3-driver-free-only's one servable leg and its declaration
+        # goes; let it serve again and the declaration comes back. Before
+        # FREEAI every leg of this route was unavailable, so it sat in the
+        # dropped set for exactly this reason.
+        gated = copy.deepcopy(real_registry())
+        gated["routes"]["t3-driver-free-only"]["unavailable_legs"][
+            "free_ai/qwen7b"] = {"available": False}
+        gone = {t["id"] for t in registry.render_openhands(gated)["tiers"]}
+        self.assertNotIn("omniroute-t3-driver-free-only", gone)
+        self.assertNotIn("litellm-t3-driver-free-only", gone)
+
+        served = copy.deepcopy(real_registry())
+        served["routes"]["t3-driver-free-only"]["unavailable_legs"].pop(
+            "free_ai/qwen7b", None)
+        ids = {t["id"] for t in registry.render_openhands(served)["tiers"]}
         self.assertIn("omniroute-t3-driver-free-only", ids)
         self.assertIn("litellm-t3-driver-free-only", ids)
 
@@ -1359,6 +1371,61 @@ class OmittedRoutesListTests(unittest.TestCase):
         current = json.loads(json.dumps(real_combos()))
         current["omitted"] = current["omitted"][:-1]
         self.assertIn("omitted", registry.omniroute_diff(rendered, current))
+
+
+class FreeAiRenderTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): adding free_ai/qwen7b to the two zero-spend
+    routes makes t3-driver-free-only servable again - it leaves combos.json's
+    `omitted` list, gains an OmniRoute combo, a LiteLLM block, an IDE model and
+    both OpenHands tiers - and free_ai never enters a -clean declaration."""
+
+    def test_t3_driver_free_only_leaves_omitted_and_gains_a_combo(self):
+        rendered = registry.render_omniroute(real_registry())
+        self.assertNotIn("t3-driver-free-only", rendered["omitted"])
+        combos = {c["name"]: c for c in rendered["combos"]}
+        self.assertIn("t3-driver-free-only", combos)
+        # groq and cerebras are unavailable, so free_ai is the only servable leg.
+        self.assertEqual(combos["t3-driver-free-only"]["models"],
+                         ["free_ai/qwen7b"])
+
+    def test_free_ai_is_last_in_the_free_only_combos(self):
+        combos = {c["name"]: c for c in
+                  registry.render_omniroute(real_registry())["combos"]}
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            self.assertEqual(combos[route_id]["models"][-1],
+                             "free_ai/qwen7b", route_id)
+
+    def test_free_ai_never_enters_a_clean_combo(self):
+        for combo in registry.render_omniroute(real_registry())["combos"]:
+            if not combo["name"].endswith("-clean"):
+                continue
+            self.assertFalse(
+                [m for m in combo["models"] if m.startswith("free_ai/")],
+                combo["name"])
+
+    def test_litellm_blocks_carry_free_ai_on_both_free_only_routes(self):
+        rendered = registry.render_litellm_blocks(
+            real_registry(), real_litellm_config())
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            self.assertIn("model: openai/qwen7b", rendered[route_id], route_id)
+            self.assertIn("api_base: https://api.free.ai/v1",
+                          rendered[route_id], route_id)
+            self.assertIn("api_key: os.environ/FREE_AI_API_KEY",
+                          rendered[route_id], route_id)
+
+    def test_ide_lists_t3_driver_free_only_again(self):
+        ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
+        self.assertIn("t3-driver-free-only", ids)
+
+    def test_openhands_lists_both_t3_driver_free_only_tiers_again(self):
+        ids = {t["id"] for t in
+               registry.render_openhands(real_registry())["tiers"]}
+        self.assertIn("omniroute-t3-driver-free-only", ids)
+        self.assertIn("litellm-t3-driver-free-only", ids)
+
+    def test_combos_file_matches_the_render(self):
+        rendered = registry.render_omniroute(real_registry())
+        self.assertEqual(registry.omniroute_diff(rendered, real_combos()), [])
 
 
 if __name__ == "__main__":

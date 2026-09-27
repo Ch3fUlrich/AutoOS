@@ -125,6 +125,11 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   # AUTOOS-MANAGED-END t2-worker-free-only
 
   # ── t2-worker-paid / t3-driver-paid: the escalation must actually answer ────
@@ -172,6 +177,18 @@ model_list:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
   # AUTOOS-MANAGED-END t3-driver-clean
+
+  # ── t3-driver-free-only: zero spend ────────────────────────────────────────
+  # Mirror of registry routes.t3-driver-free-only MINUS the gateway-only legs.
+  # The groq/cerebras qwen legs are dead through the gateway (OR1d, 2026-09-27);
+  # free_ai/qwen7b is the only servable leg left.
+  # AUTOOS-MANAGED-START t3-driver-free-only
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
+  # AUTOOS-MANAGED-END t3-driver-free-only
 
   # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
   - model_name: t3-driver-paid

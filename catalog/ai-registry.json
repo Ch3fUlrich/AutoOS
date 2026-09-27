@@ -1028,6 +1028,22 @@
       "price_out": 0.0,
       "reasoning": false,
       "tool_calls": "proven"
+    },
+    "qwen7b": {
+      "$comment": "Free.ai's model id (BRIEF FREEAI 2026-09-27), spelled exactly as served ('qwen7b'); it answers with Qwen/Qwen3-30B-A3B-Instruct (L0 measured 2026-09-27: POST https://api.free.ai/v1/chat/completions -> 200, OpenAI-compatible). context_advertised/output_max are a conservative SIBLING DEFAULT, not a live measurement - no context field was sourced from /v1/models, so 131072/16384 mirror the family's other entries (qwen-3.8-27b, qwen/qwen3.8-27b). price 0.0 is the free tier's real price, not an unsourced placeholder. tool_calls unproven (no probe run) and reasoning false match the Qwen family default; neither is evidence the model lacks reasoning.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen7b",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
     }
   },
   "policy": {
@@ -1808,6 +1824,24 @@
       "tier": "subscription",
       "trains_on_prompts": false
     },
+    "free_ai": {
+      "$comment": "BRIEF FREEAI 2026-09-27: Free.ai's free tier, an OpenAI-compatible endpoint at https://api.free.ai/v1 (measured L0 2026-09-27T11:23:04Z: POST /v1/chat/completions with model 'qwen7b' -> 200; that id answers with Qwen/Qwen3-30B-A3B-Instruct). Terms: free self-hosted only, 30k tokens/day, 10 requests/min, prompts are public and may be used for training - so trains_on_prompts true and tier free, which makes private_safe() reject it (a free effective tier is never private-safe) and keeps it out of every -clean route. Referral: https://free.ai/?ref=46pK6GCwBJs. litellm_prefix 'openai' plus its own api_base, so LiteLLM never falls back to api.openai.com; omniroute_id 'free_ai' equals the registry id and the leg prefix, so apply.sh registers one connection and the 'free_ai/qwen7b' leg resolves through provider_maps_from_dict() (cf. zen -> opencode-zen).",
+      "api_base": "https://api.free.ai/v1",
+      "id": "free_ai",
+      "litellm_env": "FREE_AI_API_KEY",
+      "litellm_prefix": "openai",
+      "limits": {
+        "qwen7b": {
+          "rpm": 10,
+          "source": "Free.ai terms, measured 2026-09-27 (L0 evidence): 30k tokens/day, 10 rpm, public/may-train",
+          "tpd": 30000
+        }
+      },
+      "omniroute_id": "free_ai",
+      "provider_data": null,
+      "tier": "free",
+      "trains_on_prompts": true
+    },
     "google_ai_studio": {
       "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one.",
       "api_base": null,
@@ -2530,7 +2564,8 @@
         "antigravity/gemini-3.7-flash-medium",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
-        "sambanova/gpt-oss-120b"
+        "sambanova/gpt-oss-120b",
+        "free_ai/qwen7b"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2704,7 +2739,8 @@
       "id": "t3-driver-free-only",
       "legs": [
         "groq/qwen/qwen3.8-27b",
-        "cerebras/qwen-3.8-27b"
+        "cerebras/qwen-3.8-27b",
+        "free_ai/qwen7b"
       ],
       "strategy": "priority",
       "surfaces": {

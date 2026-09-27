@@ -53,6 +53,7 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
+| `free_ai` | `free_ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
 | `omniroute` | — | the **client** key apps use; not a provider |
 
 ## Where to get them
@@ -65,6 +66,7 @@ this public repo, never for private code.
 | Cheaper Inference (partner) | [cheaperinference.com](https://cheaperinference.com) | **Paid partner gateway, not a free tier**: 42-model resale (30% under list), own `ci_live_…` key, own billing. Sits between free and paid in tier2/tier3 | Per upstream model |
 | Mistral | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | **Biggest documented pool: ~1B/mo per org**, 2 RPM, rate-limited free mode, no card | Check terms |
 | Gemini (AI Studio) | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | Flash-family pooled, uncapped figure, dynamic limits; Pro left free tier Apr 2026; 2.0 Flash dead Jun 2026 | **Yes** |
+| Free.ai | signup via [free.ai](https://free.ai/?ref=46pK6GCwBJs) | 30k tokens/day, 10 rpm; serves Qwen3-30B-A3B (`qwen7b`) | **Yes** (public/may train) |
 | Groq | [console.groq.com/keys](https://console.groq.com/keys) | Per-model 200K tokens/day caps (~30M pool); llama-3.3-70b left free tier Aug 2026 — use GPT-OSS/Qwen/Llama current IDs | Check terms |
 | Free.ai (`free_ai`) | [free.ai](https://free.ai/?ref=46pK6GCwBJs) (referral link) → sign up, then generate an API key (`sk-free-…`) | 30,000 tokens/day on its self-hosted models only (e.g. `qwen7b`); 10 requests/min on a free account; external models (GPT, Claude, …) cost paid tokens and are not used here | Not stated: public work only |
 | Z.AI / GLM | [z.ai](https://z.ai) | GLM-4-Flash/4.5/4.7 **permanently free**, uncapped + 20M signup bonus | Check terms |
