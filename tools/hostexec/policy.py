@@ -273,6 +273,16 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         if env_problem:
             return Decision(False, "env-injection", (env_problem,))
 
+    # A transparent launcher with an unknown/ambiguous long option cannot be
+    # parsed, so the wrapped command is unknowable: fail closed before any
+    # later rule could mis-identify a head.
+    for head in heads:
+        if not head:
+            continue
+        wrapper_problem = _wrapper_option_problem(head)
+        if wrapper_problem:
+            return Decision(False, "no-inline-shell", (wrapper_problem,))
+
     for head in heads:
         if not head:
             continue
@@ -314,10 +324,9 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         split_problem = _env_split_string_problem(head)
         if split_problem:
             return Decision(False, "no-inline-shell", (split_problem,))
-        # flock -c/--command runs its argument via a shell (sh -c).
-        if base == "flock" and any(
-                t == "-c" or t == "--command" or t.startswith("--command=")
-                for t in head[1:]):
+        # flock -c/--command (or an abbreviation) runs its argument via a
+        # shell (sh -c).
+        if base == "flock" and _flock_runs_shell(head):
             return Decision(False, "no-inline-shell",
                              ("flock -c runs its command via a shell; put the script on disk",))
         shell_problem = _inline_shell_problem(head)
@@ -376,47 +385,248 @@ def _looks_like_assignment(token: str) -> bool:
 # _command_heads(argv) returns [argv, child, grandchild, ...] where each
 # child is the wrapped command's own argv slice. Every deny rule runs on
 # every head, so a wrapper cannot hide sudo/shell/destructive/git flags.
+#
+# GNU getopt_long accepts any unambiguous abbreviation of a long option and a
+# value-taking option swallows the following argv token. The old parsers
+# compared long options with == and so mis-parsed abbreviations: "env --ch
+# /tmp sudo id" treated /tmp as the wrapped command, leaving sudo as an
+# ordinary argument invisible to no-sudo. These tables drive one prefix-aware
+# scanner. Unknown or ambiguous long options fail closed (no-inline-shell)
+# instead of guessing which token is the command.
 
-def _idx_after_env(s: Sequence[str]) -> int | None:
-    i, n = 1, len(s)
-    longs_with_val = {"--unset", "--chdir", "--split-string", "--argv0",
-                      "--block-signal", "--default-signal", "--ignore-signal"}
+_LONG_NONE = "none"
+_LONG_REQUIRED = "required"
+_LONG_OPTIONAL = "optional"
+
+_ENV_LONGS = {
+    "ignore-environment": _LONG_NONE,
+    "null": _LONG_NONE,
+    "unset": _LONG_REQUIRED,
+    "chdir": _LONG_REQUIRED,
+    "split-string": _LONG_REQUIRED,
+    "argv0": _LONG_REQUIRED,
+    "debug": _LONG_NONE,
+    "block-signal": _LONG_OPTIONAL,
+    "default-signal": _LONG_OPTIONAL,
+    "ignore-signal": _LONG_OPTIONAL,
+    "list-signal-handling": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_NICE_LONGS = {
+    "adjustment": _LONG_REQUIRED,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_TIMEOUT_LONGS = {
+    "foreground": _LONG_NONE,
+    "kill-after": _LONG_REQUIRED,
+    "signal": _LONG_REQUIRED,
+    "verbose": _LONG_NONE,
+    "preserve-status": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_STDBUF_LONGS = {
+    "input": _LONG_REQUIRED,
+    "output": _LONG_REQUIRED,
+    "error": _LONG_REQUIRED,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_IONICE_LONGS = {
+    "class": _LONG_REQUIRED,
+    "classdata": _LONG_REQUIRED,
+    "ignore": _LONG_NONE,
+    "pid": _LONG_REQUIRED,
+    "pgid": _LONG_REQUIRED,
+    "uid": _LONG_REQUIRED,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_XARGS_LONGS = {
+    "null": _LONG_NONE,
+    "arg-file": _LONG_REQUIRED,
+    "delimiter": _LONG_REQUIRED,
+    "eof": _LONG_OPTIONAL,
+    "replace": _LONG_OPTIONAL,
+    "max-lines": _LONG_OPTIONAL,
+    "max-args": _LONG_REQUIRED,
+    "max-chars": _LONG_REQUIRED,
+    "max-procs": _LONG_REQUIRED,
+    "process-slot-var": _LONG_REQUIRED,
+    "interactive": _LONG_NONE,
+    "no-run-if-empty": _LONG_NONE,
+    "open-tty": _LONG_NONE,
+    "verbose": _LONG_NONE,
+    "exit": _LONG_NONE,
+    "show-limits": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_FLOCK_LONGS = {
+    "shared": _LONG_NONE,
+    "exclusive": _LONG_NONE,
+    "unlock": _LONG_NONE,
+    "nonblock": _LONG_NONE,
+    "timeout": _LONG_REQUIRED,
+    "conflict-exit-code": _LONG_REQUIRED,
+    "close": _LONG_NONE,
+    "command": _LONG_REQUIRED,
+    "no-fork": _LONG_NONE,
+    "verbose": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_SETSID_LONGS = {
+    "ctty": _LONG_NONE,
+    "fork": _LONG_NONE,
+    "wait": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+_NOHUP_LONGS = {
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class _WrapperSpec:
+    """How one transparent launcher's leading options parse. ``stops`` holds
+    short chars (e.g. env "S", flock "c") *and* canonical long names that
+    make the wrapped command statically unknowable; a stop yields no head."""
+
+    label: str
+    longs: Mapping[str, str]
+    short_value: frozenset[str] = frozenset()
+    short_optional: frozenset[str] = frozenset()
+    stops: frozenset[str] = frozenset()
+    trailing: str = "none"  # none | assignments | duration | file
+
+
+_ENV_SPEC = _WrapperSpec("env", _ENV_LONGS,
+                         short_value=frozenset("uCa"),
+                         stops=frozenset(("S", "split-string")),
+                         trailing="assignments")
+_NICE_SPEC = _WrapperSpec("nice", _NICE_LONGS, short_value=frozenset("n"))
+_TIMEOUT_SPEC = _WrapperSpec("timeout", _TIMEOUT_LONGS, short_value=frozenset("sk"),
+                             trailing="duration")
+_STDBUF_SPEC = _WrapperSpec("stdbuf", _STDBUF_LONGS, short_value=frozenset("ioe"))
+_IONICE_SPEC = _WrapperSpec("ionice", _IONICE_LONGS, short_value=frozenset("cn"),
+                            stops=frozenset(("p", "pid", "P", "pgid")))
+_XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
+                           short_value=frozenset("adEeILnsP"),
+                           short_optional=frozenset("il"))
+_FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
+                           stops=frozenset(("c", "command")), trailing="file")
+_SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
+_NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
+
+_WRAPPER_SPECS: dict[str, _WrapperSpec] = {
+    spec.label: spec for spec in (
+        _ENV_SPEC, _NICE_SPEC, _TIMEOUT_SPEC, _STDBUF_SPEC, _IONICE_SPEC,
+        _XARGS_SPEC, _FLOCK_SPEC, _SETSID_SPEC, _NOHUP_SPEC,
+    )
+}
+
+
+def _resolve_long_option(name: str, longs: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """Resolve a long option NAME (no leading --) the way getopt_long does:
+    an exact match wins, otherwise a unique prefix. Returns (canonical, None)
+    or (None, problem) when unknown or ambiguous -- callers fail closed."""
+    if not name:
+        return None, "an empty long option name"
+    if name in longs:
+        return name, None
+    matches = sorted(opt for opt in longs if opt.startswith(name))
+    if not matches:
+        return None, f"unknown option --{name}"
+    if len(matches) > 1:
+        return None, (f"ambiguous option --{name} (could be "
+                      f"{', '.join('--' + m for m in matches)})")
+    return matches[0], None
+
+
+def _scan_wrapper_options(cur: Sequence[str], spec: _WrapperSpec) -> tuple[int | None, str | None]:
+    """Walk one launcher's leading options. Returns (index_of_command,
+    problem): index is None when no wrapped command is statically derivable
+    (a stop like env -S or flock -c, or options ran off the end); problem is
+    set for an unknown/ambiguous long option so decide() denies instead of
+    guessing which token is the command."""
+    i, n = 1, len(cur)
+    problem: str | None = None
     while i < n:
-        tok = s[i]
+        tok = cur[i]
+        if not isinstance(tok, str):
+            i += 1
+            continue
         if tok == "--":
             i += 1
             break
         if tok.startswith("--"):
-            if "=" in tok:
+            name, eq, _val = tok[2:].partition("=")
+            canonical, prob = _resolve_long_option(name, spec.longs)
+            if prob is not None:
+                if problem is None:
+                    problem = (f"{spec.label}: {prob}; refusing to guess "
+                               "the wrapped command")
                 i += 1
                 continue
-            i += 2 if tok in longs_with_val else 1
+            if canonical in spec.stops:
+                return None, problem
+            mode = spec.longs[canonical]
+            i += 1 if (eq or mode != _LONG_REQUIRED) else 2
             continue
         if tok.startswith("-") and len(tok) > 1 and tok != "-":
-            # Parse the short-option cluster left to right. -S splits its
-            # string into argv, so the wrapped command cannot be derived
-            # statically -- give up (decide() denies env -S separately).
-            # u/C/a take a value: the rest of the token, else the next token.
-            value_at = None
-            for k, ch in enumerate(tok[1:]):
-                if ch == "S":
-                    return None
-                if ch in "uCa":
-                    value_at = k
+            rest = tok[1:]
+            consumed_next = False
+            for k, ch in enumerate(rest):
+                if ch in spec.stops:
+                    return None, problem
+                if ch in spec.short_value:
+                    consumed_next = k == len(rest) - 1
                     break
-                if ch in "i0":
-                    continue
-                break
-            if value_at is not None and value_at == len(tok) - 2:
-                i += 2  # value is the next token
-            else:
-                i += 1
-            continue
-        if _looks_like_assignment(tok):
-            i += 1
+                if ch in spec.short_optional:
+                    break
+                # An unrecognised short flag does not end the cluster; env
+                # -vS must keep scanning past -v to reach -S.
+            i += 2 if consumed_next else 1
             continue
         break
-    return i if i < n else None
+    if spec.trailing == "assignments":
+        while i < n and _looks_like_assignment(cur[i]):
+            i += 1
+    elif spec.trailing == "duration":
+        if i < n and not cur[i].startswith("-") and _looks_like_duration(cur[i]):
+            i += 1
+    elif spec.trailing == "file":
+        if i < n and not cur[i].startswith("-"):
+            i += 1
+    return (i if i < n else None), problem
+
+
+def _wrapper_option_problem(head: Sequence[str]) -> str | None:
+    """Unknown/ambiguous long option on a transparent launcher: deny rather
+    than assume where the wrapped command starts."""
+    if not head:
+        return None
+    spec = _WRAPPER_SPECS.get(_basename(head[0]))
+    if spec is None:
+        return None
+    return _scan_wrapper_options(head, spec)[1]
+
+
+def _idx_after_env(s: Sequence[str]) -> int | None:
+    return _scan_wrapper_options(s, _ENV_SPEC)[0]
 
 
 def _env_split_string_problem(argv: Sequence[str]) -> str | None:
@@ -427,47 +637,43 @@ def _env_split_string_problem(argv: Sequence[str]) -> str | None:
     (same fail-closed posture as _ALWAYS_DENY_WRAPPERS)."""
     if not argv or _basename(argv[0]) != "env":
         return None
-    for tok in argv[1:]:
+    i, n = 1, len(argv)
+    while i < n:
+        tok = argv[i]
         if not isinstance(tok, str):
+            i += 1
             continue
         if tok == "--":
             break
-        if tok == "--split-string" or tok.startswith("--split-string="):
-            return ("env --split-string splits a string into argv and hides the "
-                    "real command; run the command directly")
-        if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1:
-            for k, ch in enumerate(tok[1:]):
+        if tok.startswith("--"):
+            name, eq, _val = tok[2:].partition("=")
+            canonical, prob = _resolve_long_option(name, _ENV_LONGS)
+            if canonical == "split-string":
+                return ("env --split-string splits a string into argv and hides the "
+                        "real command; run the command directly")
+            if prob is not None or canonical in _ENV_SPEC.stops:
+                return None  # unknown/ambiguous is _wrapper_option_problem's job
+            mode = _ENV_LONGS[canonical]
+            i += 1 if (eq or mode != _LONG_REQUIRED) else 2
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            # Scan the whole cluster left to right. A value-taking char
+            # (u/C/a) ends it; an unrecognised flag (-v, -0, ...) does not
+            # stop the scan, so -vS and -0vS still reach their -S.
+            for ch in tok[1:]:
                 if ch == "S":
                     return ("env -S splits a string into argv and hides the "
                             "real command; run the command directly")
                 if ch in "uCa":
                     break  # the rest of the token is this option's value
-                if ch not in "i0":
-                    break
+            i += 1
+            continue
+        break
     return None
 
 
 def _idx_after_nice(s: Sequence[str]) -> int | None:
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-n", "--adjustment"):
-            i += 2
-            continue
-        if tok.startswith("--adjustment=") or tok.startswith("--"):
-            i += 1
-            continue
-        if re.match(r"^-\d+$", tok) or (tok.startswith("-n") and len(tok) > 2):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    return i if i < n else None
+    return _scan_wrapper_options(s, _NICE_SPEC)[0]
 
 
 def _idx_after_simple_flags(s: Sequence[str]) -> int | None:
@@ -485,102 +691,19 @@ def _idx_after_simple_flags(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_timeout(s: Sequence[str]) -> int | None:
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-s", "--signal", "-k", "--kill-after"):
-            i += 2
-            continue
-        if tok.startswith("--signal=") or tok.startswith("--kill-after=") or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            if len(tok) > 2 and tok[1] in "sk":
-                i += 1
-                continue
-            i += 1
-            continue
-        break
-    if i < n and not s[i].startswith("-") and _looks_like_duration(s[i]):
-        i += 1
-    return i if i < n else None
+    return _scan_wrapper_options(s, _TIMEOUT_SPEC)[0]
 
 
 def _idx_after_xargs(s: Sequence[str]) -> int | None:
-    shorts_val = set("adEeILnsP")
-    longs_val = {"--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
-                 "--max-args", "--max-chars", "--max-procs", "--process-slot-var"}
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok.startswith("--"):
-            if "=" in tok:
-                i += 1
-                continue
-            i += 2 if tok in longs_val else 1
-            continue
-        if tok.startswith("-") and len(tok) > 1 and tok != "-":
-            if tok in ("-a", "-d", "-E", "-e", "-I", "-L", "-n", "-s", "-P"):
-                i += 2
-                continue
-            i += 1
-            continue
-        break
-    return i if i < n else None
+    return _scan_wrapper_options(s, _XARGS_SPEC)[0]
 
 
 def _idx_after_ionice(s: Sequence[str]) -> int | None:
-    for tok in s[1:]:
-        if tok == "--":
-            break
-        if tok in ("-p", "--pid") or tok.startswith("--pid="):
-            return None  # pid mode: operates on a pid, runs nothing
-        if tok.startswith("-"):
-            continue
-        break
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-c", "--class", "-n", "--classdata"):
-            i += 2
-            continue
-        if tok.startswith("--class=") or tok.startswith("--classdata=") or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    return i if i < n else None
+    return _scan_wrapper_options(s, _IONICE_SPEC)[0]
 
 
 def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-i", "--input", "-o", "--output", "-e", "--error"):
-            i += 2
-            continue
-        if tok.startswith(("--input=", "--output=", "--error=")) or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    return i if i < n else None
+    return _scan_wrapper_options(s, _STDBUF_SPEC)[0]
 
 
 def _idx_after_chrt(s: Sequence[str]) -> int | None:
@@ -608,28 +731,30 @@ def _idx_after_chrt(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_flock(s: Sequence[str]) -> int | None:
-    for tok in s[1:]:
-        if tok in ("-c", "--command") or tok.startswith("--command="):
-            return None  # shell mode: denied separately, no transparent head
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
+    return _scan_wrapper_options(s, _FLOCK_SPEC)[0]
+
+
+def _flock_runs_shell(head: Sequence[str]) -> bool:
+    """flock -c/--command (and any unambiguous abbreviation) runs its argument
+    through a shell, so no transparent head exists and decide() denies it."""
+    if not head or _basename(head[0]) != "flock":
+        return False
+    for tok in head[1:]:
+        if not isinstance(tok, str):
+            continue
         if tok == "--":
-            i += 1
-            break
-        if tok in ("-w", "--timeout", "-E", "--conflict-exit-code"):
-            i += 2
-            continue
-        if tok.startswith(("--timeout=", "--conflict-exit-code=")) or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    if i < n and not s[i].startswith("-"):
-        i += 1  # the locked file
-    return i if i < n else None
+            return False
+        if tok.startswith("--"):
+            name = tok[2:].split("=", 1)[0]
+            canonical, _prob = _resolve_long_option(name, _FLOCK_LONGS)
+            if canonical == "command":
+                return True
+        elif tok.startswith("-") and len(tok) > 1 and tok != "-":
+            if "c" in tok[1:]:
+                return True
+        else:
+            return False
+    return False
 
 
 def _idx_after_taskset(s: Sequence[str]) -> int | None:
