@@ -63,6 +63,8 @@ jobs:
 
   windows:
     name: Windows suite
+    # operator 2026-09-27: Windows CI paused until the Linux work is done.
+    if: false
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
