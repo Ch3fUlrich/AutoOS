@@ -239,7 +239,14 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         return Decision(False, "unknown-actor", (f"actor not declared in policy: {actor!r}",))
 
     argv = list(argv)
-    if not argv or not any(a.strip() for a in argv if isinstance(a, str)):
+    if not argv:
+        return Decision(False, "empty-argv", ("argv is empty",))
+    # Caller-supplied argv (MCP JSON) can carry non-string elements
+    # (numbers, null, nested arrays). Treat that as a caps violation instead
+    # of a TypeError: decide() must never crash on caller input.
+    if any(not isinstance(a, str) for a in argv):
+        return Decision(False, "argv-caps", ("an argv element is not a string",))
+    if not any(a.strip() for a in argv):
         return Decision(False, "empty-argv", ("argv is empty",))
 
     if len(argv) > policy.max_args:

@@ -20,6 +20,8 @@ claude	default	coding-host	[""]	deny	empty-argv	one blank element
 claude	default	coding-host	["","",""]	deny	empty-argv	all blank elements
 claude	default	coding-host	["echo","a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","a1","b1","c1","d1","e1","f1","g1","h1","i1","j1","k1","l1","m1","n1","o1","p1","q1","r1","s1","t1","u1","v1","w1","x1","y1","z1","a2","b2","c2","d2","e2","f2","g2","h2","i2","j2","k2","l2","m2","n2","o2","p2","q2"]	deny	argv-caps	over max_args (64) for the test policy
 claude	default	coding-host	["echo","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]	deny	argv-caps	one argument over max_arg_length (64) for the test policy
+claude	default	coding-host	["echo",123]	deny	argv-caps	a non-string argv element is refused, not a crash (MCP JSON)
+claude	default	coding-host	[null]	deny	argv-caps	a null argv element is refused, not a crash (MCP JSON)
 claude	default	storage	["echo","hi"]	deny	forbid-host	host declared forbid=true
 claude	default	firewall	["echo","hi"]	deny	forbid-host	host declared forbid=true
 claude	default	not-a-declared-host	["echo","hi"]	deny	forbid-host	host missing from policy entirely

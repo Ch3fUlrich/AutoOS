@@ -171,6 +171,36 @@ class HostRunPlainFunctionTests(unittest.TestCase):
             self.assertEqual(ctx.exception.rule, "forbid-host")
             log.close()
 
+    def test_decide_exception_is_refused_and_audited(self):
+        # An unexpected decide() failure must not escape unlogged: host_run
+        # fails closed, writes a deny line, and raises Refused (not the raw
+        # exception, which would bypass the audit record entirely).
+        import io
+        from contextlib import redirect_stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pol = _policy(_make_bindir(tmp))
+            state_dir = os.path.join(tmp, "state")
+            log = audit.AuditLog(state_dir)
+            orig_decide = policy.decide
+
+            def _boom(*a, **k):
+                raise RuntimeError("decide exploded")
+
+            policy.decide = _boom  # type: ignore[assignment]
+            try:
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    with self.assertRaises(server.Refused) as ctx:
+                        server.host_run(pol, log, actor="claude", host="coding-host",
+                                         argv=["echo", "hi"], cwd=tmp)
+            finally:
+                policy.decide = orig_decide  # type: ignore[assignment]
+            log.close()
+            self.assertIn("decide exploded", " ".join(ctx.exception.problems))
+            lines = list(audit.tail(state_dir, decision="deny"))
+            self.assertTrue(any("policy-error" in ln for ln in lines), lines)
+
     @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_fail_closed_when_audit_log_is_unwritable(self):
         with tempfile.TemporaryDirectory() as tmp:

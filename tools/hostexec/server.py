@@ -91,7 +91,16 @@ def host_run(pol: policy.Policy, log: audit.AuditLog, *, actor: str, host: str,
     except audit.AuditWriteError as exc:
         raise Refused(None, [f"audit log unavailable, refusing (fail closed): {exc}"]) from exc
 
-    decision = policy.decide(pol, actor, host, argv, cwd)
+    try:
+        decision = policy.decide(pol, actor, host, argv, cwd)
+    except Exception as exc:  # decide() must not escape unlogged; fail closed
+        # decide() must not crash on caller-supplied input: an uncaught raise
+        # would skip the audit write entirely, leaving no record of the
+        # attempt. Fail closed and log a deny under an internal rule id
+        # (outside the advertised policy-rule set -- host_policy() lists
+        # policy rules, not this failure mode).
+        decision = policy.Decision(False, "policy-error",
+                                    (f"policy decision failed: {exc}",))
     if not decision.allow:
         try:
             log.write(actor=actor, session=session, via=via, host=host, argv=argv, cwd=cwd,
