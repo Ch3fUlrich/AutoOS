@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — provider rate limits as registry data + resolver request-size filter (R4)
+
+- **`catalog/ai-registry.schema.json`**: new `providers.<id>.limits` field (object keyed by the provider's own model spelling) and a `provider_limits` def (`rpm`/`rpd`/`tpm`/`tpd` non-negative ints, each optional; `source` required). The renders never read it; resolver-only.
+- **`catalog/ai-registry.json`**: `providers.groq.limits` carries the three free-tier models measured from the Groq console (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`): 30 rpm, 1000 rpd, 8000 tpm, 200000 tpd, source `operator Groq console screenshot 2026-09-27`. A `models."openai/gpt-oss-20b"` entry was added (mirrors the 120b sibling; non-limit fields unsourced defaults) so the limits key resolves via `resolve_leg`. `version` bumped to `2026-09-27`.
+- **`tools/registry.py`**: `check_registry` rule 10 (`_check_provider_limits`) validates every limits key resolves via `resolve_leg("<provider>/<key>")` (unknown key = error naming it) and every value is a non-negative int.
+- **`tools/autoos_resolver.py`**: `usable_legs` skips a leg whose provider limits for that model carry `tpm` when `need_tokens * 1.3 > tpm` (reason `limit: <provider>/<model> tpm <tpm> < need <n>`), counted as a skipped leg like the context filter. New `provider_tpm()` helper. No clock, no counters: `rpm`/`rpd`/`tpd` are data only for now. This is the data+filter half that lets groq come back safely once the separate `deny-groq` 400 bug is measured fixed (that rule stays).
+- Tests: `tests/test_registry.py::ProviderLimitsTests`, `tests/test_autoos_resolver.py::ProviderLimitsFilterTests`.
+
 ### Added — gateway attribution (OR3)
 
 - Spawned opencode runs on the omniroute provider send `x-omniroute-session-id: <lane>/<title>` (env `AUTOOS_SESSION_TAG` overrides) via the `OPENCODE_CONFIG_CONTENT` overlay's provider `headers`, so OmniRoute `call_logs.session_tag` attributes every spawned call.

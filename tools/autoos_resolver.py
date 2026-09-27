@@ -318,6 +318,26 @@ def usable_context(model_id, registry, overlay):
     return int(registry["models"][model_id]["context_usable"]["tokens"])
 
 
+def provider_tpm(provider_id, model_id, registry):
+    """The per-minute token cap for ``provider_id``'s ``model_id`` leg, or None
+    when the provider carries no ``limits`` for that model.
+
+    Brief R4 (2026-09-27): providers.<id>.limits is keyed by the provider's own
+    model spelling (the part of a leg after its ``<provider>/`` prefix), which
+    is exactly ``model_id`` as resolve_leg returns it. Only ``tpm`` is read
+    today -- a request-size filter in usable_legs; rpm/rpd/tpd are data only
+    for now (no clock, no counters). A missing limits table or a missing model
+    key means the leg is not size-filtered.
+    """
+    provider = (registry.get("providers") or {}).get(provider_id) or {}
+    limits = provider.get("limits") or {}
+    entry = limits.get(model_id) or {}
+    tpm = entry.get("tpm")
+    if tpm is None:
+        return None
+    return int(tpm)
+
+
 def _client_reason(client_state, client, registry=None, now=None):
     """The client filter's reason for `client`, or None when it passes.
 
@@ -443,6 +463,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     client_bound checks, which blocked the whole route on one bad leg):
 
     - context: ``need_tokens * 1.3 <= usable_context``.
+    - tpm (brief R4, 2026-09-27): a leg whose provider limits for that model
+      carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
+      request-size cap Groq's free tier enforces (a request above ~8K tokens
+      413s there). rpm/rpd/tpd are data only for now (no clock, no counters).
     - tool_calls (agentic kinds only): a value other than ``"proven"``
       (unproven, broken, or no verdict at all) skips the leg.
     - client_bound: a bound leg is always skipped - a route is served through
@@ -501,6 +525,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if need * 1.3 > usable:
             reasons.append("context: need %sx1.3 > usable %s on %s/%s"
                            % (need, usable, provider_id, model_id))
+
+        # Brief R4 (2026-09-27): a request-size cap from the provider's own
+        # limits table -- need * 1.3 > tpm skips the leg, same shape as the
+        # context filter. tpm is a per-minute token cap Groq's free tier
+        # enforces (a request above ~8K tokens 413s there); rpm/rpd/tpd stay
+        # data-only for now (no clock, no counters).
+        tpm = provider_tpm(provider_id, model_id, registry)
+        if tpm is not None and need * 1.3 > tpm:
+            reasons.append("limit: %s/%s tpm %s < need %s"
+                           % (provider_id, model_id, tpm, need))
 
         value = _tool_calls_value(leg, model_id, registry, overlay)
         proven = value == "proven"
