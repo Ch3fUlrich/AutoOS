@@ -709,11 +709,28 @@ if list(root.glob("autoos.config.json.autoos-backup-*")):
     problems.append("a corrupt config was backed up")
 if sorted(p.name for p in root.iterdir() if p.name.endswith(".tmp")):
     problems.append("a temp file was left behind")
+
+# Bytes that are not valid UTF-8 at all (a file saved in another encoding, an
+# editor that dropped a UTF-16 BOM) fail before the parser is even reached, so
+# they used to escape the 400 as a 500 from the catch-all.
+cfg.write_bytes(b"\xff\xfe{")
+code, obj = post({"version": 3})
+if code != 400:
+    problems.append("non-utf8-status:%s:%s" % (code, obj))
+error = obj.get("error", "") if isinstance(obj, dict) else ""
+if not error.startswith("existing autoos.config.json is corrupt: "):
+    problems.append("non-utf8-message:%s" % error)
+if cfg.read_bytes() != b"\xff\xfe{":
+    problems.append("a non-UTF-8 config was overwritten")
+if list(root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("a non-UTF-8 config was backed up")
+if [p.name for p in root.iterdir() if p.name.endswith(".tmp")]:
+    problems.append("a temp file was left behind after the non-UTF-8 save")
 print(" ".join(problems) or "ok")
 PY
 }
 
-if it "config save: a corrupt existing config answers 400 and echoes nothing"; then
+if it "config save: a corrupt or non-UTF-8 existing config answers 400 and echoes nothing"; then
     assert_eq "$(_cfg_api_corrupt_py 2>&1 | tail -n 1)" "ok"
 fi
 
