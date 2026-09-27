@@ -4429,6 +4429,7 @@ Options:
 """
 
 
+@unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
 def _fake_cli(dirpath, name, version, help_text):
     """A POSIX shell stand-in for an agent CLI: answers --version and --help,
     counts every --help it is asked for (the cache test), and records its own
@@ -4447,6 +4448,7 @@ def _fake_cli(dirpath, name, version, help_text):
     return path
 
 
+@unittest.skipIf(os.name == "nt", "sh stubs; tests/run-tests.sh runs these on Linux")
 class ClientModeHelpTests(unittest.TestCase):
     """SPAWNFREE (S2) item 3: '--permission-mode accept_edits' is not a mode
     qodercli 1.1.63 offers, and 62 runs refused every write before anyone
