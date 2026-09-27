@@ -1940,6 +1940,48 @@ if it "aistack: --dry-run init announces the migration and writes no password"; 
     if (( ok )); then pass; else fail "dry run wrote the opencode password"; fi
 fi
 
+if it "aistack: init reads an api-keys.yml value with a trailing comment"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: '\''sk-x'\''  # client\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OPENCODE_PASSWORD='pw-with-comment'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-x'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: plain-pw # c\nomniroute: sk-plain # note\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    grep -q "^OPENCODE_PASSWORD='plain-pw'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-plain'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a trailing # comment leaked into the value"; fi
+fi
+
+if it "svc: run-opencode-serve reads a quoted opencode_password with a trailing comment"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n[ "$OPENCODE_PASSWORD" = "pw-with-comment" ] && echo "pw-match $*" || echo "pw-other $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: sk-test\n' >"$d/keys.yml"
+    out="$(env -u OPENCODE_PASSWORD HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1)"
+    ok=1
+    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] \
+        || { ok=0; echo "password not from the keys file (with trailing comment): $out" >&2; }
+    [[ "$out" == *"pw-with-comment"* ]] && { ok=0; echo "the password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve does not drop a trailing comment"; fi
+fi
+
 if it "aistack: the container opencode config reaches the gateway by name"; then
     d="$(mktemp -d)"
     mkdir -p "$d/code/repo"

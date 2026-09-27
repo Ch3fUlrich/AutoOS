@@ -22,17 +22,34 @@ $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys
 
 function Get-AutoOSKeyValue {
     # First uncommented `<Name>: <value>` line in a YAML-ish key file.
-    # Strips one pair of surrounding quotes. Returns '' when the file or
-    # key is missing, or when the value starts with REPLACE_WITH_ (the
-    # placeholder marker for "user has not filled this in yet").
+    # YAML plain/quoted scalar parse (enough for this file):
+    #   - starts with " : up to the next " (no escapes)
+    #   - starts with ' : up to the next '
+    #   - otherwise    : up to the first # preceded by space or tab, then trim
+    # CR is stripped. Returns '' when the file or key is missing, or when the
+    # value starts with REPLACE_WITH_ (the placeholder for "not filled in").
     param([string]$Path, [string]$Name)
     if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
-    foreach ($line in (Get-Content -LiteralPath $Path -Encoding utf8)) {
-        $t = $line.Trim()
-        if ($t -match "^$([regex]::Escape($Name))\s*:\s*(.+)$") {
-            $v = $matches[1].Trim()
-            if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
-                $v = $v.Substring(1, $v.Length - 2)
+    $escaped = [regex]::Escape($Name)
+    foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
+        $line = $raw -replace '\r$',''
+        if ($line -match "^\s*$escaped\s*:\s*(.+)$") {
+            $v = $Matches[1]
+            if ($v -match '^\s*#') { continue }
+            if ($v.Length -gt 0 -and $v[0] -eq '"') {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf('"')
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            elseif ($v.Length -gt 0 -and $v[0] -eq "'") {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf("'")
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            else {
+                $m = [regex]::Match($v, '([ \t])#')
+                if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
+                $v = $v.TrimEnd()
             }
             if ($v -like 'REPLACE_WITH_*') { return '' }
             return $v

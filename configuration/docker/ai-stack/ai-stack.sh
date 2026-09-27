@@ -207,13 +207,35 @@ ensure_env_file() {
     else echo "  + wrote $file (${add[*]})"; fi
 }
 
+# keys_value <name>: read $KEYS_FILE, last uncommented `^<name>[[:space:]]*:`
+# line, and parse the scalar. YAML plain/quoted, enough for this file:
+#   - starts with " : up to the next " (no escapes)
+#   - starts with ' : up to the next '
+#   - otherwise    : up to the first # preceded by space or tab, then trim
+# CR is stripped. A value starting with REPLACE_WITH_ counts as empty.
+keys_value() {
+    local name="$1" raw val
+    [[ -f "$KEYS_FILE" ]] || return 0
+    raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$KEYS_FILE" \
+        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r')"
+    [[ -n "$raw" ]] || return 0
+    case "$raw" in
+        \"*) val="${raw#\"}"; val="${val%%\"*}" ;;
+        \'*) val="${raw#\'}"; val="${val%%\'*}" ;;
+        *)   val="$raw"
+             # cut at the first # that is preceded by a space or tab
+             val="$(printf '%s' "$val" | sed -E 's/([[:space:]])#.*$/\1/')"
+             # trim trailing whitespace
+             val="${val%"${val##*[![:space:]]}"}"
+             ;;
+    esac
+    [[ "$val" == REPLACE_WITH_* ]] && return 0
+    printf '%s' "$val"
+}
+
 omniroute_client_key() {
     if [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then printf '%s' "$AUTOOS_OMNIROUTE_KEY"; return; fi
-    [[ -f "$KEYS_FILE" ]] || return 0
-    local key
-    key="$(sed -n 's/^omniroute[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | head -n1 | tr -d '\r' \
-        | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-    [[ "$key" == REPLACE_WITH_* ]] || printf '%s' "$key"
+    keys_value omniroute
 }
 
 # keys_add_opencode_password <value>: append `opencode_password: '<v>'` to
@@ -275,11 +297,7 @@ env_replace_value() {
 opencode_password_sync() {
     local keys_env="$CONFIG_DIR/opencode.env"
     local y="" src="" val backup cur
-    if [[ -f "$KEYS_FILE" ]]; then
-        y="$(sed -n 's/^opencode_password[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | tail -n1 \
-            | tr -d '\r' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-    fi
-    [[ "$y" == REPLACE_WITH_* ]] && y=""
+    y="$(keys_value opencode_password)"
     if [[ "$y" == *$'\n'* || "$y" == *$'\r'* ]]; then
         echo "  ! opencode_password: the value holds a line break (\\n or \\r) - an env file cannot carry it; not used"
         return 1

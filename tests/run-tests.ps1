@@ -6712,6 +6712,15 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
         Set-Content -LiteralPath $keys -Value "opencode_password: REPLACE_WITH_A" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
 
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "pw-with-comment"   # rotated by L0' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'pw-with-comment'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'single-q'  # note" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'single-q'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
+
         Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
     } finally {
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
