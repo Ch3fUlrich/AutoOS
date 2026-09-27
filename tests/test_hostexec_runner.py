@@ -27,6 +27,8 @@ _REAL_BIN_DIRS = ["/usr/bin", "/bin"]
 
 
 def _write_script(path: str, body: str) -> None:
+    if os.name == "nt":
+        raise unittest.SkipTest("chmod mode bits; POSIX only")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(body)
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

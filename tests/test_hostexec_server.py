@@ -56,6 +56,8 @@ def server_sha(token: str) -> str:
 
 
 def _make_bindir(tmp: str) -> str:
+    if os.name == "nt":
+        raise unittest.SkipTest("sh stubs and chmod; POSIX only")
     bindir = os.path.join(tmp, "bin")
     os.makedirs(bindir, exist_ok=True)
     for name in ("echo", "id", "sudo"):
@@ -169,6 +171,7 @@ class HostRunPlainFunctionTests(unittest.TestCase):
             self.assertEqual(ctx.exception.rule, "forbid-host")
             log.close()
 
+    @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_fail_closed_when_audit_log_is_unwritable(self):
         with tempfile.TemporaryDirectory() as tmp:
             pol = _policy(_make_bindir(tmp))

@@ -65,3 +65,10 @@ if it "shellcheck per part: every tests/linux file is clean, one process each"; 
     fi
 fi
 
+# Windows CI failed 8x on Python tests with sh stubs/chmod/signals and 3x on a
+# .ps1 without a BOM before a Linux check existed (K1, 300 CI runs measured
+# 2026-09-27): catch both here, where they are cheap to fix.
+if it "tests: POSIX-only Python tests are guarded for Windows; every .ps1/.psm1 has a BOM"; then
+    out="$(python3 tests/test_windows_portability.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+

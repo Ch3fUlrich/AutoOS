@@ -335,6 +335,7 @@ class AuditLogWriteTests(unittest.TestCase):
             f = next(Path(state_dir).glob("audit-*.jsonl"))
             self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
 
+    @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_fail_closed_on_unwritable_state_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = os.path.join(tmp, "locked")

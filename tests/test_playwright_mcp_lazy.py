@@ -386,6 +386,8 @@ class LazyProxyCase(unittest.TestCase):
         self.addCleanup(self._reap)
 
     def _reap(self):
+        if os.name == "nt":
+            self.skipTest("signal.SIGKILL is POSIX only")
         for s in self.sessions:
             s.close(timeout=8)
         # a broken proxy must not leave fake backends behind
@@ -854,6 +856,8 @@ class CacheHardening(LazyProxyCase):
     gives the handshake, exactly as on a cold start."""
 
     def plant(self, payload=None, mode=0o600, dir_mode=0o700):
+        if os.name == "nt":
+            self.skipTest("os.chmod is POSIX only")
         directory = os.path.dirname(self.cache)
         if not os.path.isdir(directory):
             os.mkdir(directory)
@@ -990,6 +994,8 @@ class CacheOwnership(unittest.TestCase):
         self.plant(poisoned_cache())
 
     def plant(self, payload):
+        if os.name == "nt":
+            self.skipTest("os.chmod is POSIX only")
         with open(self.path, "wb") as fh:
             fh.write(payload)
         os.chmod(self.path, 0o600)
@@ -1039,6 +1045,8 @@ class CacheOwnership(unittest.TestCase):
         self.refused(cache, lines, "belongs to another user")
 
     def test_a_huge_file_is_not_read_into_memory(self):
+        if os.name == "nt":
+            self.skipTest("os.chmod is POSIX only")
         with open(self.path, "wb") as fh:
             fh.truncate(64 * 1024 * 1024)       # sparse: costs no disk
         os.chmod(self.path, 0o600)
@@ -1108,6 +1116,8 @@ class Negotiation(LazyProxyCase):
 class Idle(LazyProxyCase):
     def stub_docker(self):
         """A docker on PATH that only records its calls: it must stay unused here."""
+        if os.name == "nt":
+            self.skipTest("os.chmod is POSIX only")
         bindir = os.path.join(self.tmp, "bin")
         os.makedirs(bindir)
         dlog = os.path.join(self.tmp, "docker.log")
@@ -1267,6 +1277,8 @@ class Shutdown(LazyProxyCase):
         self.assertTrue(self.gone(pid, 2), "the backend outlived the session")
 
     def test_sigterm_stops_the_backend_and_exits_zero(self):
+        if os.name == "nt":
+            self.skipTest("signal.SIGTERM is classified as POSIX-only")
         self.prime_cache()
         s = self.session(idle=30, FAKE_IGNORE_EOF="1")
         s.initialize()
@@ -1424,6 +1436,8 @@ class DefaultCachePath(unittest.TestCase):
         self.assertEqual(path, os.path.join(self.xdg, "autoos", "playwright-mcp", "handshake.json"))
 
     def test_a_group_writable_shared_autoos_directory_does_not_disable_the_cache(self):
+        if os.name == "nt":
+            self.skipTest("os.chmod is POSIX only")
         shared = os.path.join(self.xdg, "autoos")
         os.mkdir(shared)
         os.chmod(shared, 0o775)
