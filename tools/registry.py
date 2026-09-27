@@ -1702,11 +1702,11 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
     """True when either of spec 3.1's two operator-facing unavailability
     flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
     false, or the leg's own provider carries providers.<id>.available:
-    false (today only cxa - openrouter's own blanket flag was lifted
-    2026-09-26; per the 16:4xZ revision OpenRouter is BYOK with no shared
-    credit, and its still-dead legs stay
-    flagged individually via their own unavailable_legs entry instead - see
-    providers.openrouter's $comment). Both flags are registry-only signals the
+    false. Both flags are live today: cxa was switched off in 2026-09-26,
+    and DSMAX (operator 2026-09-27T15:05:54Z) switched openrouter off at the
+    provider level too (a re-probe hit 401 'insufficient credits' even for
+    BYOK), on top of its per-leg unavailable_legs entries - see
+    providers.openrouter's $comment. Both flags are registry-only signals the
     OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -
     this render surfaces them for a human reader, it does not change what a
     caller is served."""

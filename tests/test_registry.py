@@ -856,6 +856,9 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
     def test_missing_available_on_a_provider_is_flagged(self):
         reg = mutated()
+        # DSMAX 2026-09-27 switched openrouter off at the provider level, so
+        # drop that flag before asserting rule 8 fires on the missing one.
+        del reg["providers"]["openrouter"]["available"]
         reg["providers"]["openrouter"]["unavailable_until"] = "2026-10-01T09:05:00Z"
         problems = registry.check_registry(reg)
         self.assertTrue(

@@ -67,14 +67,14 @@ class RoutingTableTests(unittest.TestCase):
         self.assertEqual(combo, "t2-worker")
         self.assertTrue(reason)
 
-    def test_public_1m_orchestrate_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", role="orchestrate"), "t1-orchestrator")
-
-    def test_public_1m_hard_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", complexity="hard"), "t1-orchestrator")
-
-    def test_public_1m_any_role_is_t1_orchestrator(self):
-        self.assertEqual(self.pick(ctx="1m", role="review", spend="credit"), "t1-orchestrator")
+    def test_public_1m_has_no_route(self):
+        # DSMAX 2026-09-27: the only 1M leg was switched off at the provider
+        # level, so a 1M card fails closed instead of landing on t1-orchestrator.
+        for card in ({"ctx": "1m", "role": "orchestrate"},
+                     {"ctx": "1m", "complexity": "hard"},
+                     {"ctx": "1m", "role": "review", "spend": "credit"}):
+            with self.assertRaises(routing.NoRoute, msg=card):
+                routing.select_combo(card)
 
     def test_public_implement_standard_free_is_t2_worker(self):
         self.assertEqual(self.pick(role="implement", complexity="standard", spend="free-ok"), "t2-worker")
@@ -128,7 +128,8 @@ class RoutingTableTests(unittest.TestCase):
             routing.select_combo({"privacy": "sensitive", "ctx": "1m"})
         msg = str(ctx.exception)
         self.assertIn("t2-worker-clean", msg)
-        self.assertIn("--allow-training", msg)
+        self.assertIn("128k", msg)
+        self.assertNotIn("--allow-training", msg)
 
 
 class RoutingBoundaryTests(unittest.TestCase):
@@ -163,21 +164,23 @@ class RoutingBoundaryTests(unittest.TestCase):
     def test_spend_values(self):
         self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
 
-    def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
-        # t1-orchestrator carries 1m, a superset of 128k; the orchestrator is never demoted.
-        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t1-orchestrator")
+    def test_public_128k_orchestrate_goes_to_t2_worker(self):
+        # DSMAX 2026-09-27: t1-orchestrator is gone (its only 1M leg is off), so
+        # a strong 128k card lands on the strong t2 route instead.
+        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t2-worker")
 
-    def test_hard_review_is_t1_orchestrator_not_t3_driver(self):
+    def test_hard_review_is_t2_worker_not_t3_driver(self):
         # orchestrate/hard wins over review/trivial: a hard review needs the strong model.
-        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t1-orchestrator")
+        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t2-worker")
 
     def test_sensitive_orchestrate_128k_is_t2_worker_clean(self):
         self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "t2-worker-clean")
 
-    def test_allow_training_opens_sensitive_1m_and_says_so(self):
-        combo, reason = routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
-        self.assertEqual(combo, "t1-orchestrator-clean")
-        self.assertIn("allow-training", reason)
+    def test_allow_training_no_longer_opens_sensitive_1m(self):
+        # Compatibility flag, inert since DSMAX 2026-09-27: there is no
+        # trainable 1M gateway leg left for it to unlock.
+        with self.assertRaises(routing.NoRoute):
+            routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
 
     def test_allow_training_changes_nothing_else(self):
         self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "t2-worker-clean")
@@ -343,7 +346,8 @@ class ClientCommandTests(unittest.TestCase):
     def test_sensitive_1m_fails_closed_with_next_steps(self):
         r = plan_of("--card", "privacy=sensitive,ctx=1m", "t")
         self.assertEqual(r.returncode, 2)
-        self.assertIn("--allow-training", r.stderr)
+        self.assertIn("128k", r.stderr)
+        self.assertNotIn("--allow-training", r.stderr)
 
     def test_tier_and_card_together_are_refused(self):
         self.assertEqual(plan_of("--tier", "2", "--card", "role=review", "t").returncode, 2)
@@ -366,8 +370,8 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
-        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/t1-orchestrator", "t")
-        self.assertIn("omniroute run qwen --model t1-orchestrator ", r.stdout)
+        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/t2-worker", "t")
+        self.assertIn("omniroute run qwen --model t2-worker ", r.stdout)
 
     def test_mcp_max_depth_as_a_string_is_coerced_not_a_crash(self):
         argv, _ = mcp_server.build_argv({"task": "t", "max_depth": "2"})
@@ -2211,11 +2215,12 @@ class CardV2Tests(unittest.TestCase):
             ({}, ("t2-worker", "public-default")),
             ({"role": "review"}, ("t3-driver", "public-light")),
             ({"privacy": "sensitive"}, ("t2-worker-clean", "sensitive")),
-            ({"complexity": "hard"}, ("t1-orchestrator", "public-strong")),
-            ({"ctx": "1m", "role": "orchestrate"}, ("t1-orchestrator", "public-1m")),
+            ({"complexity": "hard"}, ("t2-worker", "public-strong")),
         ]
         for card, expected in cases:
             self.assertEqual(routing.select_combo(card), expected, card)
+        with self.assertRaises(routing.NoRoute):
+            routing.select_combo({"ctx": "1m", "role": "orchestrate"})
 
 
 def _small_route_registry():
@@ -2710,10 +2715,13 @@ class ModelOverridePrivacyTests(unittest.TestCase):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
         self.assertEqual(rc, 0, err)
 
-    def test_allow_training_keeps_the_documented_escape(self):
+    def test_allow_training_no_longer_opens_the_sensitive_1m_route(self):
+        # Compatibility flag, inert since DSMAX 2026-09-27: the card fails
+        # closed before the explicit --model is even considered.
         rc, out, err = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=True,
-                                    model="omniroute/t1-orchestrator-clean")
-        self.assertEqual(rc, 0, err)
+                                    model="omniroute/t2-worker-clean")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("128k", err)
 
 
 class RunCardV2AcceptanceTests(unittest.TestCase):
