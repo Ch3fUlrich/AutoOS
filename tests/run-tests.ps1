@@ -6522,7 +6522,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $oc = $stripped | ConvertFrom-Json
     Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-free-only,t1-orchestrator-paid,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -7648,7 +7648,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-free-only,t1-orchestrator-paid,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7679,6 +7679,8 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $contexts = @{
         't1-orchestrator' = '1M'
         't1-orchestrator-free-only' = '1M'
+        't1-orchestrator-paid' = '1M'
+        'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
@@ -7690,18 +7692,22 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
-    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
-    # a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
-    # t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
-    # fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
+    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry a
+    # free gemini/gemini-3.8-flash fallback leg again, so they are servable.
+    # MUSEAPI 2026-09-27: spark-1.3-contributor and t1-orchestrator-paid are
+    # servable too — the meta_api contributor leg answers, so both render a
+    # combo (and t1-orchestrator-paid is no longer a legless LiteLLM-only group).
+    # t1-orchestrator-clean and deepseek-v4.1-flash still fail closed (omitted,
+    # never a combo): t1-orchestrator-clean since DSMAX 2026-09-27 (Zen
     # client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
-    # of 2026-09-27T16:4xZ. No 1M context promise survives them.
-    foreach ($gone in @('t1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+    # of 2026-09-27T16:4xZ. No 1M context promise survives those two.
+    foreach ($gone in @('t1-orchestrator-clean', 'deepseek-v4.1-flash')) {
         Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
         Assert-True ($omitted -contains $gone) "$gone missing from omitted"
     }
-    # t1-orchestrator and t1-orchestrator-free-only MUST be in combos now.
-    foreach ($kept in @('t1-orchestrator', 't1-orchestrator-free-only')) {
+    # t1-orchestrator, t1-orchestrator-free-only and spark-1.3-contributor MUST
+    # be in combos now.
+    foreach ($kept in @('t1-orchestrator', 't1-orchestrator-free-only', 'spark-1.3-contributor')) {
         Assert-True ($names -contains $kept) "$kept should be in combos, not omitted"
         Assert-True ($omitted -notcontains $kept) "$kept missing from combos"
     }
@@ -7727,11 +7733,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
     }
-    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no spark leg may
-    # appear in any combo now that t1/spark fail closed.
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry a
+    # plain spark leg. The contributor variant is a different model id, and it is
+    # what the meta_api legs serve (MUSEAPI 2026-09-27).
     $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
-    Assert-True ($allLegs -notmatch 'spark') 'spark leg present in a combo'
 }
 
 Test-Case 'apply --dry-run registers nothing and starts nothing' {
@@ -7776,15 +7782,23 @@ function New-AutoOSPruneSandbox {
     [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
     [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "# no keys: every provider is skipped`n")
     [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+    # The live connection list as `omniroute providers list` prints it (hex id,
+    # name). Empty means the store holds nothing; a test writes a row to make
+    # apply take its "already registered" branch.
+    [IO.File]::WriteAllText((Join-Path $d 'providers.txt'), '')
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $cmd = @'
 @echo off
 if "%~1 %~2"=="combo list" goto list
+if "%~1 %~2"=="providers list" goto plist
 >>"%~dp0..\calls.log" echo %*
 exit /b 0
 :list
 >>"%~dp0..\listed" echo %*
 type "%~dp0..\list.txt"
+exit /b 0
+:plist
+type "%~dp0..\providers.txt"
 exit /b 0
 '@
         [IO.File]::WriteAllText((Join-Path $bin 'omniroute.cmd'), (($cmd -replace "`r", '') -replace "`n", "`r`n"))
@@ -7795,6 +7809,10 @@ d="$(dirname "$0")/.."
 if [ "$1 $2" = "combo list" ]; then
     echo "$*" >>"$d/listed"
     cat "$d/list.txt"
+    exit 0
+fi
+if [ "$1 $2" = "providers list" ]; then
+    cat "$d/providers.txt"
     exit 0
 fi
 echo "$*" >>"$d/calls.log"
@@ -7977,6 +7995,43 @@ Test-Case 'apply prune: a down gateway is never listed and nothing is pruned' {
     }
 }
 
+Test-Case 'apply registers meta_api from the shared meta key and stays idempotent' {
+    # MUSEAPI step 4, the mirror of the bash suite's two svc tests. providers
+    # .meta_api carries key_name, so its credential is the meta entry the user
+    # already has — reading a meta_api entry nobody writes means the connection
+    # is never registered. And the run after the store holds it must say
+    # "already registered" instead of adding a second connection.
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
+        Set-AutoOSPruneList $d @('t2-worker')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
+        Assert-True ($out -like '*  - meta-api : would register (key from meta)*') "plan: $out"
+        Assert-True ($out -notlike '*meta-api : no key in api-keys.yml*') 'read a meta_api key instead'
+
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  + meta-api registered*') "first run: $out"
+        $adds = @(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'providers add meta-api*' })
+        Assert-True (@($adds).Count -eq 1) "add calls: $($adds -join ' | ')"
+        Assert-True ($adds[0] -like '*--credential-env AUTOOS_KEY_META*') "credential env: $($adds[0])"
+
+        # Second run: the store now holds the connection, the log starts empty.
+        Stop-AutoOSTestHttpServer $srv
+        $srv = $null
+        [IO.File]::WriteAllText((Join-Path $d 'providers.txt'), "  a1b2c3d4 meta-api`n")
+        [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  = meta-api already registered*') "second run: $out"
+        Assert-Equal (@(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'providers add meta-api*' }) -join '') ''
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter-first' {
     $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
     $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
@@ -8018,7 +8073,13 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
     $ProviderData = $registry.Data
     Assert-Equal $registry.Map['google_ai_studio'] 'gemini'
-    Assert-True (-not $registry.Map.Contains('meta')) 'meta must not be registered (2026-09-23)'
+    # The Map is keyed by the api-keys.yml NAME, so since MUSEAPI step 4 the
+    # name 'meta' is in it - as meta_api's connection. What must stay true is
+    # that no connection called `meta` is registered (the direct provider has
+    # been unregistered, openrouter-first, since 2026-09-23).
+    Assert-Equal $registry.Map['meta'] 'meta-api'
+    Assert-True (@($registry.Map.Values) -notcontains 'meta') 'meta must not be registered (2026-09-23)'
+    Assert-True (-not $registry.Map.Contains('meta_api')) 'meta_api must read the shared meta key, not a phantom one'
     Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
     # antigravity and cc exist only in the registry (no catalog/providers.json
     # entry - it was deleted in task A5e) - switching the source picks them up
