@@ -323,7 +323,7 @@ if it "playwright lazy proxy installer: a failed backup stops the replace with a
     writes="$(pw_writes "$tmp")"
     rm -rf "$tmp"
     if [[ "$writes" == "0" && "$same" == "1" && "$out" == *"could not back up"* \
-        && "$out" == *"rc=1 recorded: "* && "$out" != *"recorded: mcp-playwright"* ]]; then pass   # the component fails (counted once by install_script's caller), no extra record
+        && "$out" == *"rc=0 recorded: mcp-playwright"* ]]; then pass   # postInstall runs bare under set -e: return 0, record the failure
     else fail "writes=$writes unchanged=$same out=$(printf '%s' "$out" | tail -2)"; fi
 fi
 

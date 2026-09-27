@@ -3512,12 +3512,12 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        # A refused or failed registration fails this component (install_script's
-        # caller counts it); recording it again via autoos_record_failure would
-        # count mcp-playwright twice in the summary.
-        local rc=0
-        register_playwright_lazy_proxy "$playwright_pkg" || rc=$?
-        (( rc == 0 )) || return "$rc"
+        # A postInstall runs bare under setup.sh's `set -euo pipefail`
+        # (run_post_install, and install_agent_skills calls this directly), so a
+        # non-zero return would abort the whole run. Record the failure for the
+        # summary and exit code instead, and return 0.
+        register_playwright_lazy_proxy "$playwright_pkg" \
+            || autoos_record_failure mcp-playwright
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
