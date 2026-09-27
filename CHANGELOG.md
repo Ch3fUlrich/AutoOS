@@ -9,6 +9,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`.agents/skills/unattended-orchestration/SKILL.md`**: 14 new rules (R-spawn-23/24, R-review-09/10, R-tests-23, R-gateway-15/16/17, R-brief-06/07/08, R-level-02, R-handoff-10/11), each with its measured source; R-spawn-18, R-review-05/08, R-tests-03 and R-handoff-04 sharpened (a review pins its model because `--card role=review` routes to t3-driver; gates need `set -o pipefail` + the passed count; the handoff cap comes from `policy.handoff_caps`).
 - **`references/state-file.md`** (new): the status/state file template and the handoff procedure (C4 skill-edit request).
+### Fixed — AGYFIX: agy command form, its default model, its quota exit; --free now Zen Muse Spark
+
+- **`tools/autoos_clients.py`**: agy's `build_command` emits `--model <m>` **before** `-p <task>`
+  (`agy --model <m> -p <task>`), the form measured working in the 2026-09-27 K3 CLI audit; the old
+  `-p --model <m> <task>` made agy 1.2.12 read `--model` as the print prompt and ignore the task.
+- **`tools/autoos_clients.py`**: new `AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"`, supplied when the
+  caller passes no model: agy's own default Gemini quota is out until ~2026-10-01 and exits 3 after
+  ~157 s, while `claude-opus-4-6-thinking` measured PONG in 8 s.
+- **`tools/autoos-agent.py`**: a provider-stop tail now upgrades to exit 8 from rc 3 as well as 0 and 6,
+  so agy's quota exit (`AGY_ERROR: ... RESOURCE_EXHAUSTED (code 429) ... quota reached`, rc 3) is a
+  retryable provider stop for unattended recovery, not the client's own code. `provider_stop()` already
+  matched the line; only the rc gate and the exit-code doc changed.
+- **`tools/autoos-agent.py`**: `DEFAULT_FREE_MODEL` is now `opencode/muse-spark-1.3-contributor-free`
+  (Zen Muse Spark 1.3 through the opencode client, measured 200 on 2026-09-26) instead of
+  `opencode/big-pickle`; `--free --clean` stays refused.
+- Tests: `tests/test_autoos_spawner.py` — `test_agy_puts_an_explicit_model_before_the_print_prompt`,
+  `test_agy_default_model_is_the_measured_working_one`,
+  `test_an_agy_quota_stop_that_exits_3_is_still_a_provider_stop`,
+  `test_free_default_is_the_operators_muse_spark_leg`; `test_agy_uses_its_own_login` and
+  `test_run_goes_ahead_when_agy_is_signed_in` updated for the new agy form and
+  `test_sensitive_card_with_free_is_refused` for the new promo model.
 
 ### Added — provider rate limits as registry data + resolver request-size filter (R4)
 

@@ -291,9 +291,36 @@ class ClientCommandTests(unittest.TestCase):
         self.assertEqual(plan_of("--client", "qwen", "--joinable", "t").returncode, 2)
 
     def test_agy_uses_its_own_login(self):
+        # AGYFIX item 1 (measured 2026-09-27, K3 audit): agy 1.2.12 reads
+        # "--model" as the -p prompt when -p comes first, so the model must
+        # go BEFORE -p. Item 2: with no caller model it gets the measured
+        # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
+        # own default Gemini whose quota is out until ~2026-10-01.
         r = plan_of("--client", "agy", "t")
-        self.assertIn("would run: agy -p t", r.stdout)
+        self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
+
+    def test_agy_puts_an_explicit_model_before_the_print_prompt(self):
+        # AGYFIX item 1: working form measured in the K3 audit is
+        # `agy --model <m> -p <task>`; `agy -p --model <m> <task>` makes agy
+        # take "--model" as the prompt and ignore the task.
+        cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit",
+                                    "claude-sonnet-4-6")
+        self.assertEqual(cmd, ["agy", "--model", "claude-sonnet-4-6", "-p", "task"])
+
+    def test_agy_default_model_is_the_measured_working_one(self):
+        # AGYFIX item 2 (K3 audit addendum 08:1xZ): agy with no --model runs
+        # its default Gemini -> 157 s then rc 3 quota. The spawner supplies
+        # claude-opus-4-6-thinking as data when the caller gives none.
+        self.assertEqual(clients.AGY_DEFAULT_MODEL, "claude-opus-4-6-thinking")
+        cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit", None)
+        self.assertEqual(cmd, ["agy", "--model", "claude-opus-4-6-thinking", "-p", "task"])
+
+    def test_free_default_is_the_operators_muse_spark_leg(self):
+        # AGYFIX item 4 (operator 2026-09-26): the free default is Zen Muse
+        # Spark 1.3 through the opencode client, measured 200 there.
+        self.assertEqual(load_agent().DEFAULT_FREE_MODEL,
+                         "opencode/muse-spark-1.3-contributor-free")
 
     def test_qoder_is_refused_for_sensitive_work(self):
         r = plan_of("--client", "qoder", "--card", "privacy=sensitive", "t")
@@ -509,7 +536,10 @@ class SignInProbeTests(unittest.TestCase):
         d, env = self.stub(self.SIGNED_IN)
         r = run_agent("run", "--client", "agy", "t", env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.calls(d), ["models", "-p t"])
+        # AGYFIX item 1+2 (measured 2026-09-27): the working form is
+        # `agy --model <m> -p <task>`, and with no caller model the spawner
+        # supplies claude-opus-4-6-thinking rather than agy's default Gemini.
+        self.assertEqual(self.calls(d), ["models", "--model claude-opus-4-6-thinking -p t"])
 
     def test_mcp_list_clients_carries_usability(self):
         d, env = self.stub(self.SIGNED_OUT)
@@ -2506,7 +2536,8 @@ class ModelOverridePrivacyTests(unittest.TestCase):
 
     def test_sensitive_card_with_free_is_refused(self):
         # close-priv 2026-09-26: --free swapped a sensitive card's -clean combo
-        # for the promo model (opencode/big-pickle, may train on prompts).
+        # for the promo model (now opencode/muse-spark-1.3-contributor-free,
+        # may train on prompts).
         for card in ("privacy=sensitive", "kind=review,paths=tools/registry.py,privacy=sensitive"):
             with mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}), \
                     mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: {
@@ -2515,7 +2546,7 @@ class ModelOverridePrivacyTests(unittest.TestCase):
                 rc, out, err = self.run_cmd(card=card, free=True)
             self.assertEqual(rc, 2, card + out + err)
             self.assertIn("privacy", err)
-            self.assertNotIn("big-pickle", out)
+            self.assertNotIn("muse-spark", out)
 
     def test_public_card_with_any_model_is_not_checked(self):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
@@ -2866,6 +2897,13 @@ elif mode == "sandbox-write-marker-mid-run":
         fh.write("work\\n")
 elif mode == "provider-stop-only":
     print("Error: Rate limit exceeded. Please try again later.")
+elif mode == "agy-quota-rc3":
+    # AGYFIX item 3 (K3 audit addendum 08:1xZ, measured 2026-09-27): agy
+    # without --model ran its default Gemini, printed exactly this line and
+    # exited 3 after ~157 s. It is a provider stop, so the spawner must
+    # report PROVIDER-STOP (exit 8), not the client's own rc 3.
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached')
+    sys.exit(3)
 elif mode == "parent-leak-provider-stop":
     # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
     with open(os.path.join(root, "tracked.txt"), "a") as fh:
@@ -3315,6 +3353,17 @@ class IsolateContainmentTests(unittest.TestCase):
         # initial commit and no WIP line was printed.
         self.assertNotIn("WIP-COMMITTED", out)
         self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_an_agy_quota_stop_that_exits_3_is_still_a_provider_stop(self):
+        # AGYFIX item 3 (K3 audit addendum 08:1xZ): agy without --model exits
+        # rc 3 with "AGY_ERROR ... RESOURCE_EXHAUSTED ... quota reached" as
+        # its last line. A provider stop outranks the client's own code, so
+        # the run must exit 8, not 3 - unattended recovery keys on the 8.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "agy-quota-rc3")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_parent_leak_wins_over_a_provider_stop(self):
