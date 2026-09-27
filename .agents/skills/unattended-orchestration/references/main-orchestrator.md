@@ -18,12 +18,12 @@ cheaper than asking an L2.
 ## 1a. The heartbeat (every level, from the first minute)
 
 One recurring `CronCreate` job (cron `7-59/10 * * * *`) from launch until you stop, recreated after
-every relaunch or context clear, its prompt naming the round trip: read inbox, status and CI, act,
-continue the plan: each beat pushes your branches, rewrites your status file (timestamp on
-the first line), reads your inbox, and checks your children. The rules that bind it are R-coord-07
-and R-coord-08; `autoos-agent.py heartbeat` is the read-only report of the same state. A background
-shell loop does not replace the cron — the runner kills loops under memory pressure and retires an
-idle session after 8 h.
+every relaunch or context clear. Its prompt names the round trip — read your inbox, the status and
+DONE files you wait for and your CI runs; act; continue your plan — and primary wake-up, because a
+background loop dies under memory pressure. Each beat pushes your branches, rewrites your status
+file (timestamp on the first line), reads your inbox, and checks your children. The rules that bind it are R-coord-07
+and R-coord-08; `autoos-agent.py heartbeat` is the read-only report of the same state, and an idle
+session is retired after 8 h.
 
 ## 2. Start of session
 
