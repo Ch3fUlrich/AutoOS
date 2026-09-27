@@ -57,7 +57,10 @@ Rule ids (fixed; every one has rows in tests/fixtures/hostexec-decisions.tsv):
                              --use-compress-program, -I), editors/pagers
                              with argv commands (vim/vi/nvim/view/ex -c/+!
                              with `!`, less/more +!, man -P/--pager), a bare
-                             shell via a wrapper, script/systemd-run/at/
+                             shell via a wrapper, a transparent launcher whose
+                             command cannot be seen (env -S, flock -c, watch
+                             without -x, chrt/taskset -p/--pid, any unknown or
+                             ambiguous long option), script/systemd-run/at/
                              batch/setpriv/chroot/unshare/nsenter/runuser/sg/
                              tmux/screen/dtach always -- scripts by
                              path are allowed (checked on every head)
@@ -340,6 +343,15 @@ def decide(policy: Policy, actor: str, host: str, argv: Sequence[str], cwd: str)
         if base == "flock" and _flock_runs_shell(head):
             return Decision(False, "no-inline-shell",
                              ("flock -c runs its command via a shell; put the script on disk",))
+        # watch without -x/--exec runs its arguments via a shell (sh -c).
+        if base == "watch" and _watch_runs_shell(head):
+            return Decision(False, "no-inline-shell",
+                             ("watch without -x runs its command via a shell; "
+                              "pass -x or put the script on disk",))
+        # chrt/taskset -p/--pid change an existing pid: no command to audit.
+        pid_problem = _pid_mode_problem(head)
+        if pid_problem:
+            return Decision(False, "no-inline-shell", (pid_problem,))
         shell_problem = _inline_shell_problem(head)
         if shell_problem:
             return Decision(False, "no-inline-shell", (shell_problem,))
@@ -572,23 +584,84 @@ _NOHUP_LONGS = {
     "version": _LONG_NONE,
 }
 
+# util-linux chrt(1) 2.39.3 (`chrt --help`, abbreviations measured against the
+# installed binary: --f/--ba resolve, --r and --s are reported ambiguous,
+# --reset-fork is unrecognized). The policy switches take no value; only the
+# three SCHED_DEADLINE parameters read one. -p/--pid operates on an existing
+# pid, so there is no wrapped command and the walker stops.
+_CHRT_LONGS = {
+    "all-tasks": _LONG_NONE,
+    "batch": _LONG_NONE,
+    "deadline": _LONG_NONE,
+    "fifo": _LONG_NONE,
+    "idle": _LONG_NONE,
+    "other": _LONG_NONE,
+    "rr": _LONG_NONE,
+    "reset-on-fork": _LONG_NONE,
+    "sched-runtime": _LONG_REQUIRED,
+    "sched-period": _LONG_REQUIRED,
+    "sched-deadline": _LONG_REQUIRED,
+    "max": _LONG_NONE,
+    "pid": _LONG_NONE,
+    "verbose": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+# util-linux taskset(1) 2.39.3 (`taskset --help`: --c/--cpu/--cpu-list all
+# resolve). It has no value-taking option at all -- -c only changes the FORMAT
+# of the positional mask/list, so the mask is still the positional that comes
+# before the command.
+_TASKSET_LONGS = {
+    "all-tasks": _LONG_NONE,
+    "cpu-list": _LONG_NONE,
+    "pid": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
+# procps-ng watch(1) 4.0.4 (`watch --help`, measured: --ex/--int resolve,
+# --e and --no are reported ambiguous, --compat is unrecognized). -d takes an
+# optional value (an attached =value only), -n and -q a required one.
+_WATCH_LONGS = {
+    "beep": _LONG_NONE,
+    "color": _LONG_NONE,
+    "no-color": _LONG_NONE,
+    "differences": _LONG_OPTIONAL,
+    "errexit": _LONG_NONE,
+    "chgexit": _LONG_NONE,
+    "equexit": _LONG_REQUIRED,
+    "interval": _LONG_REQUIRED,
+    "precise": _LONG_NONE,
+    "no-rerun": _LONG_NONE,
+    "no-title": _LONG_NONE,
+    "no-wrap": _LONG_NONE,
+    "exec": _LONG_NONE,
+    "help": _LONG_NONE,
+    "version": _LONG_NONE,
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class _WrapperSpec:
     """How one transparent launcher's leading options parse. ``stops`` holds
-    short chars (e.g. env "S", flock "c") *and* canonical long names that
-    make the wrapped command statically unknowable; a stop yields no head.
-    ``lone_dash_is_flag`` marks env, whose bare ``-`` means -i. A wrapper
-    that takes positional arguments *before* its command (only flock, whose
-    lockfile comes first) sets ``positionals_before_command`` so the walker
-    keeps scanning for options that GNU getopt permutes after it."""
+    short chars (e.g. env "S", flock "c", chrt "p") *and* canonical long names
+    that make the wrapped command statically unknowable; a stop yields no head.
+    ``lone_dash_is_flag`` marks env, whose bare ``-`` means -i. A wrapper that
+    takes positional arguments *before* its command (flock's lockfile, chrt's
+    priority, taskset's mask) sets ``positionals_before_command`` so the walker
+    keeps scanning for options that GNU getopt permutes after it -- and keeps
+    consuming that many positionals after ``--``, which ends option parsing but
+    not the positional region. ``trailing`` names the only argument shapes the
+    walker has to recognize *after* the option region: env's NAME=VALUE
+    assignments and timeout's bare duration."""
 
     label: str
     longs: Mapping[str, str]
     short_value: frozenset[str] = frozenset()
     short_optional: frozenset[str] = frozenset()
     stops: frozenset[str] = frozenset()
-    trailing: str = "none"  # none | assignments | duration | file
+    trailing: str = "none"  # none | assignments | duration
     lone_dash_is_flag: bool = False
     positionals_before_command: int = 0
 
@@ -607,17 +680,32 @@ _XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
                            short_value=frozenset("adEeILnsP"),
                            short_optional=frozenset("il"))
 _FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
-                           stops=frozenset(("c", "command")), trailing="file",
+                           stops=frozenset(("c", "command")),
                            positionals_before_command=1)
 _SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
 _NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
+_CHRT_SPEC = _WrapperSpec("chrt", _CHRT_LONGS, short_value=frozenset("TPD"),
+                          stops=frozenset(("p", "pid")),
+                          positionals_before_command=1)
+_TASKSET_SPEC = _WrapperSpec("taskset", _TASKSET_LONGS,
+                             stops=frozenset(("p", "pid")),
+                             positionals_before_command=1)
+_WATCH_SPEC = _WrapperSpec("watch", _WATCH_LONGS, short_value=frozenset("nq"),
+                           short_optional=frozenset("d"))
 
 _WRAPPER_SPECS: dict[str, _WrapperSpec] = {
     spec.label: spec for spec in (
         _ENV_SPEC, _NICE_SPEC, _TIMEOUT_SPEC, _STDBUF_SPEC, _IONICE_SPEC,
-        _XARGS_SPEC, _FLOCK_SPEC, _SETSID_SPEC, _NOHUP_SPEC,
+        _XARGS_SPEC, _FLOCK_SPEC, _SETSID_SPEC, _NOHUP_SPEC, _CHRT_SPEC,
+        _TASKSET_SPEC, _WATCH_SPEC,
     )
 }
+
+# Wrappers whose only stop is "operate on an existing pid": there is no
+# command to audit at all, so decide() refuses the call (the same fail-closed
+# posture as env -S and flock -c) rather than allow an argv nothing here can
+# see. ionice -p is deliberately not in this list: it is a read-only query.
+_PID_MODE_WRAPPERS = frozenset(("chrt", "taskset"))
 
 
 def _resolve_long_option(name: str, longs: Mapping[str, str]) -> tuple[str | None, str | None]:
@@ -648,15 +736,19 @@ def _walk_wrapper_options(
     end). ``options_seen`` holds a normalized name for every option met
     before the command -- the short char for a short option, the canonical
     long name for a long one (so ``-S``, ``--split-string`` and ``-vS`` all
-    surface) -- and is what the split-string / flock-command predicates read
-    instead of re-walking the options with their own rules. ``problem`` is
+    surface) -- and is what the split-string, flock-command, chrt/taskset
+    pid-mode and watch-exec-form predicates read instead of re-walking the
+    options with their own rules. ``problem`` is
     set for an unknown/ambiguous long option so decide() denies rather than
     guessing which token is the command.
 
     Handles short clusters, attached (``-ux``) and detached (``-u x``)
     values, unique-prefix long options with ``=value`` or a next-token
-    value, ``--``, env's bare ``-`` and NAME=VALUE assignments, and flock's
-    lockfile positional (which getopt may leave before later options)."""
+    value, ``--``, env's bare ``-`` and NAME=VALUE assignments, and the
+    positional a wrapper takes before its command (flock's lockfile, chrt's
+    priority, taskset's mask) -- which ``--`` does not reset, so the
+    lockfile stays the token right after it even when that token looks like
+    an option."""
     i, n = 1, len(cur)
     problem: str | None = None
     options: list[str] = []
@@ -713,27 +805,30 @@ def _walk_wrapper_options(
                 return None, options, problem
             i += 2 if consumed_next else 1
             continue
-        # A positional. flock's lockfile is the one a wrapper takes before
-        # its command; consume it and keep walking, because getopt permutes
-        # options that follow it (flock /tmp/l -c cmd) into the option
-        # region. Any later positional is the wrapped command.
+        # A positional. flock's lockfile, chrt's priority and taskset's mask
+        # are the ones a wrapper takes before its command; consume them and
+        # keep walking, because getopt permutes options that follow them
+        # (flock /tmp/l -c cmd) into the option region. Any later positional
+        # is the wrapped command.
         if positionals < spec.positionals_before_command:
             positionals += 1
             i += 1
             continue
         break
+    if saw_dashdash:
+        # `--` ends option parsing, not the positional region, so the
+        # wrapper's own argument is still the next token even when it starts
+        # with '-' (flock -- -c rm -rf / locks on a file named -c and runs
+        # rm). A wrapper whose positional was already consumed before the
+        # `--` hands this token over as the command instead.
+        while i < n and positionals < spec.positionals_before_command:
+            positionals += 1
+            i += 1
     if spec.trailing == "assignments":
         while i < n and _looks_like_assignment(cur[i]):
             i += 1
     elif spec.trailing == "duration":
         if i < n and not cur[i].startswith("-") and _looks_like_duration(cur[i]):
-            i += 1
-    elif spec.trailing == "file":
-        # flock: `--` ends option parsing, so the very next token is the
-        # lockfile even when it starts with '-' (flock -- -c rm -rf / locks
-        # on -c and runs rm). Without `--`, the lockfile was the positional
-        # consumed above and a leading-dash token is an unparsed option.
-        if saw_dashdash and i < n and isinstance(cur[i], str):
             i += 1
     return (i if i < n else None), options, problem
 
@@ -805,27 +900,7 @@ def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_chrt(s: Sequence[str]) -> int | None:
-    for tok in s[1:]:
-        if tok == "--":
-            break
-        if tok in ("-p", "--pid") or tok.startswith("--pid="):
-            return None  # pid mode: no wrapped command
-        if tok.startswith("-"):
-            continue
-        break
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    if i < n and not s[i].startswith("-") and s[i].lstrip("-").isdigit():
-        i += 1
-    return i if i < n else None
+    return _walk_wrapper_options(s, _CHRT_SPEC)[0]
 
 
 def _idx_after_flock(s: Sequence[str]) -> int | None:
@@ -846,53 +921,41 @@ def _flock_runs_shell(head: Sequence[str]) -> bool:
 
 
 def _idx_after_taskset(s: Sequence[str]) -> int | None:
-    for tok in s[1:]:
-        if tok == "--":
-            break
-        if tok in ("-p", "--pid") or tok.startswith("--pid="):
-            return None  # pid mode: no wrapped command
-        if tok.startswith("-"):
-            continue
-        break
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-c", "--cpu-list"):
-            i += 2
-            continue
-        if tok.startswith("--cpu-list=") or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    if i < n and not s[i].startswith("-") and re.match(r"^[0-9a-fA-Fx,\-]+$", s[i]):
-        i += 1  # the cpu mask
-    return i if i < n else None
+    return _walk_wrapper_options(s, _TASKSET_SPEC)[0]
+
+
+def _pid_mode_problem(head: Sequence[str]) -> str | None:
+    """chrt/taskset -p/--pid (or any unambiguous abbreviation of it) operate
+    on an existing pid instead of a command, so there is nothing to audit and
+    decide() refuses -- the same posture as env -S and flock -c. Reads the
+    walker's option list, so a cluster (-pc, -vp) and an abbreviation both
+    surface."""
+    if not head:
+        return None
+    base = _basename(head[0])
+    if base not in _PID_MODE_WRAPPERS:
+        return None
+    spec = _WRAPPER_SPECS[base]
+    if spec.stops.isdisjoint(_walk_wrapper_options(head, spec)[1]):
+        return None
+    return (f"{base} -p/--pid operates on an existing pid, not a command; "
+            "run the command directly")
 
 
 def _idx_after_watch(s: Sequence[str]) -> int | None:
-    i, n = 1, len(s)
-    while i < n:
-        tok = s[i]
-        if tok == "--":
-            i += 1
-            break
-        if tok in ("-n", "--interval"):
-            i += 2
-            continue
-        if tok.startswith("--interval=") or tok.startswith("--"):
-            i += 1
-            continue
-        if tok.startswith("-") and len(tok) > 1:
-            i += 1
-            continue
-        break
-    return i if i < n else None
+    return _walk_wrapper_options(s, _WATCH_SPEC)[0]
+
+
+def _watch_runs_shell(head: Sequence[str]) -> bool:
+    """watch without -x/--exec joins its remaining arguments and runs them
+    through `sh -c` (watch(1)), so the argv the walker yields is not the argv
+    that executes -- the same opacity as flock -c, and refused the same way.
+    The walker canonicalizes the option name, so -x, --exec and --ex all mean
+    the exec form and keep the transparent head."""
+    if not head or _basename(head[0]) != "watch":
+        return False
+    options = _walk_wrapper_options(head, _WATCH_SPEC)[1]
+    return not ("x" in options or "exec" in options)
 
 
 def _idx_after_parallel(s: Sequence[str]) -> tuple[int | None, int | None]:

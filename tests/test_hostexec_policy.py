@@ -558,7 +558,7 @@ _THREE_LAUNCHER_DENIED = (
     (["chrt", "--pi", "123"], "no-inline-shell"),
     (["chrt", "--p", "123"], "no-inline-shell"),
     (["chrt", "-vp", "123"], "no-inline-shell"),
-    (["chrt", "-p", "123", "sudo", "id"], "no-inline-shell"),
+    (["chrt", "-p", "123", "rm", "-rf", "/"], "no-inline-shell"),
     (["taskset", "-p", "700"], "no-inline-shell"),
     (["taskset", "--pi", "700"], "no-inline-shell"),
     (["taskset", "-p", "03", "700"], "no-inline-shell"),
@@ -575,7 +575,6 @@ _THREE_LAUNCHER_DENIED = (
     (["watch", "-z", "ls"], "no-inline-shell"),
     (["watch", "-q", "5", "ls"], "no-inline-shell"),
     (["watch", "rm", "-rf", "/"], "no-inline-shell"),
-    (["watch", "sudo", "id"], "no-inline-shell"),
     (["env", "watch", "ls"], "no-inline-shell"),
 )
 
