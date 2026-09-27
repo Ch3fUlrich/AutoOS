@@ -2125,6 +2125,7 @@
       "class": "cheap",
       "id": "deepseek-v4.1-flash",
       "legs": [
+        "deepseek/deepseek-flash",
         "openrouter/deepseek/deepseek-v4.1-flash",
         "opencode-zen/deepseek-v4.1-flash"
       ],
