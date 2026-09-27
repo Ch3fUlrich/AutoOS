@@ -846,24 +846,26 @@ def render_omniroute(registry: dict) -> dict:
     catalog/ai-registry.json document (spec 3.2 phase 1). Pure: no I/O, no clock,
     no randomness - the same registry always renders the same dict.
 
-    A route becomes a combo iff it has at least one leg (`legs` non-empty): the
-    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
-    the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
+    A route becomes a combo iff it has at least one servable leg. The
+    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid)
+    and the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
     (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
-    combos.json counterpart at all - mapping doc section 4.
+    combos.json counterpart at all - mapping doc section 4. They are served by
+    another router on purpose, not orphaned, so they are never named as omitted.
 
     Only gateway-servable legs are rendered - see gateway_legs(): a leg the
     registry marks unavailable (routes.<id>.unavailable_legs or its provider's
     available: false), a leg policy.leg_rules denies, and a client_bound leg the
-    gateway 403s are all dropped from the combo's `models`. A route whose every
-    leg is dropped therefore renders no combo at all, the same shape a
-    `legs: []` route already has.
+    gateway 403s are all dropped from the combo's `models`.
 
-    Every such route is also named in "omitted": the routes that render no combo.
-    It is the exact complement of the rendered combos (`route ids == combos`
-    names + omitted ids), so apply.sh can prune a live combo the registry
-    stopped serving instead of creating it forever and never removing it
-    (OR1e). It is disjoint from "retired" by construction - `retired` is a
+    "omitted" names the ORPHANED routes, and only those: a route whose `legs`
+    is non-empty but whose every leg was dropped by gateway_legs(), so it once
+    promised a gateway leg and can serve none now. It is the routes that render
+    no combo while still declaring legs, so apply.sh/apply.ps1 can prune a live
+    combo the registry stopped serving instead of leaving it in the store
+    forever (OR1e). A route with `legs: []` is deliberately legless - the
+    *-paid and auto* routes - and is in neither `combos` nor `omitted` (OR1g).
+    `omitted` is disjoint from "retired" by construction - `retired` is a
     fixed hand-maintained list of dead ids no route uses any more.
     """
     routes = registry.get("routes")
@@ -875,9 +877,11 @@ def render_omniroute(registry: dict) -> dict:
         route = routes[route_id]
         if not isinstance(route, dict):
             continue
+        declared_legs = route.get("legs")
         legs = gateway_legs(route, registry)
         if not legs:
-            omitted.append(route_id)
+            if declared_legs:
+                omitted.append(route_id)
             continue
         surfaces = route.get("surfaces")
         omniroute_surface = surfaces.get("omniroute") if isinstance(surfaces, dict) else None

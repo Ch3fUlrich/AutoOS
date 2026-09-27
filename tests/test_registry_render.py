@@ -1174,25 +1174,38 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
 
 
 class OmittedRoutesListTests(unittest.TestCase):
-    """OR1e: render_omniroute names the routes it omits - every route with no
-    gateway-servable leg (both well-intentioned `legs: []` routes and routes
-    whose every leg is dropped). apply.sh prunes exactly this list plus
-    "retired", so a combo the registry stopped serving leaves the live store
-    instead of being created forever and never removed."""
+    """OR1g: render_omniroute names as omitted only the ORPHANED routes - those
+    that declared legs but have no gateway-servable leg left. A deliberately
+    legless route (`legs: []`: the LiteLLM-only *-paid routes and the dynamic
+    auto*/auto-cheap/auto-smart strategy) is not omitted: it never promised a
+    gateway leg, so apply must never prune a live combo with one of its ids.
+    apply.sh/apply.ps1 prune exactly this list plus "retired", so a combo the
+    registry stopped serving leaves the live store instead of being created
+    forever and never removed."""
 
-    def test_omitted_is_exactly_the_routes_with_no_servable_leg(self):
+    def test_omitted_is_exactly_the_orphaned_routes(self):
         reg = real_registry()
         rendered = registry.render_omniroute(reg)
         self.assertEqual(
             rendered["omitted"],
             sorted(route_id for route_id, route in reg["routes"].items()
-                   if not registry.gateway_legs(route, reg)))
+                   if route.get("legs") and not registry.gateway_legs(route, reg)))
 
-    def test_omitted_and_combos_partition_every_route(self):
-        rendered = registry.render_omniroute(real_registry())
+    def test_omitted_and_combos_partition_every_route_with_declared_legs(self):
+        reg = real_registry()
+        rendered = registry.render_omniroute(reg)
         names = [c["name"] for c in rendered["combos"]]
-        self.assertEqual(sorted(names + rendered["omitted"]),
-                         sorted(real_registry()["routes"]))
+        with_legs = sorted(route_id for route_id, route in reg["routes"].items()
+                           if route.get("legs"))
+        self.assertEqual(sorted(names + rendered["omitted"]), with_legs)
+        # A legless route is in neither list - it gets no combo and is never
+        # named as an orphan apply could prune.
+        legless = [route_id for route_id, route in reg["routes"].items()
+                   if not route.get("legs")]
+        self.assertTrue(legless, "no legless route to prove the exclusion with")
+        for route_id in legless:
+            self.assertNotIn(route_id, names)
+            self.assertNotIn(route_id, rendered["omitted"])
 
     def test_omitted_is_disjoint_from_retired(self):
         rendered = registry.render_omniroute(real_registry())
@@ -1206,7 +1219,9 @@ class OmittedRoutesListTests(unittest.TestCase):
         rendered = registry.render_omniroute(real_registry())
         self.assertEqual(rendered["omitted"], real_combos()["omitted"])
 
-    def test_legless_route_is_omitted_not_just_absent(self):
+    def test_legless_route_is_not_omitted(self):
+        # OR1g: a route that never declared a gateway leg (auto*, *-paid) is
+        # deliberately served elsewhere - it must not be named as an orphan.
         reg = {
             "providers": {},
             "models": {},
@@ -1214,7 +1229,26 @@ class OmittedRoutesListTests(unittest.TestCase):
         }
         rendered = registry.render_omniroute(reg)
         self.assertEqual(rendered["combos"], [])
-        self.assertEqual(rendered["omitted"], ["auto"])
+        self.assertEqual(rendered["omitted"], [])
+
+    def test_orphaned_route_is_omitted(self):
+        # A route that did declare a leg but has none servable is a managed
+        # orphan: no combo, and named so apply can prune a stale live combo.
+        reg = {
+            "providers": {"dead": {"id": "dead", "available": False}},
+            "models": {"m": {"id": "m"}},
+            "routes": {
+                "orphan": {
+                    "id": "orphan",
+                    "strategy": "priority",
+                    "legs": ["dead/m"],
+                    "surfaces": {"omniroute": {"context_declared": "8k"}},
+                },
+            },
+        }
+        rendered = registry.render_omniroute(reg)
+        self.assertEqual(rendered["combos"], [])
+        self.assertEqual(rendered["omitted"], ["orphan"])
 
     def test_all_dead_route_has_no_combo_but_is_omitted(self):
         # Every leg dropped by gateway_legs: no combo, but the id must still be

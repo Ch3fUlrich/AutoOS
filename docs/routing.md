@@ -27,7 +27,7 @@ Drift gates (run after any combo/client edit): `audit-router.py` (live) /
 `--offline` (CI), `sync-router-tiers.py --check`, `check-links.py`.
 `apply.sh --drift` compares the live combos against `combos.json` (`omniroute --output json combo list`: name + ordered legs, `retired` ids ignored) and writes nothing.
 Exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot be read (CLI absent or gateway refuses — one reason line, never a key).
-`apply.sh` also prunes the two managed-orphan lists in `combos.json` from the live store: `retired` (dead ids a rename left) and `omitted` (OR1e: every route the render creates no combo for — no servable leg) — never a combo in `combos.json`, and never one the user made.
+`apply.sh` and `apply.ps1` also prune the two managed-orphan lists in `combos.json` from the live store: `retired` (dead ids a rename left) and `omitted` (OR1g: only the orphaned routes — a route that declared legs but the render serves none for) — never a combo in `combos.json`, and never one the user made. A deliberately legless route (`legs: []`: the LiteLLM-only `*-paid` and the dynamic `auto*`) is in neither list, so a live combo with one of its ids is never pruned.
 `--drift` reports an omitted live combo as `extra <id> (omitted: no servable leg)`, and a non-object `combo list` answer as an unreadable store (exit 3), not a crash.
 
 Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--json` for machine-readable).

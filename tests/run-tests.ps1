@@ -7258,9 +7258,12 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True (($r -is [string]) -and $r) "bad retired id: [$r]"
         Assert-True ($names -notcontains $r) "retired combo id back: $r"
     }
-    # OR1e: "omitted" is the other managed-orphan list - every route the render
-    # produced no combo for (no gateway-servable leg). apply.sh prunes it as well,
-    # so it must be non-empty, disjoint from the current combos and from retired.
+    # OR1g: "omitted" is the managed-orphan list - only routes that declared
+    # legs but the render serves none for (orphaned). apply.sh/apply.ps1 prune it,
+    # so it must be disjoint from the current combos and from retired. The
+    # deliberately legless routes (*-paid, auto*) have no gateway combo by
+    # design and are never named here, or apply would delete a live combo a user
+    # or OmniRoute itself named "auto".
     Assert-True ($null -ne $doc.PSObject.Properties['omitted']) 'combos.json has no "omitted" list'
     $omitted = @($doc.omitted)
     Assert-True ($omitted.Count -gt 0) 'combos.json "omitted" is empty'
@@ -7269,10 +7272,8 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True ($names -notcontains $o) "omitted id is also a current combo: $o"
         Assert-True ($retired -notcontains $o) "omitted id is also retired: $o"
     }
-    # The deliberately legless routes (*-paid, auto*) have no combo by design;
-    # OR1e names them here so apply can prune a live orphan the registry stopped serving.
     foreach ($legless in @('auto', 'auto/cheap', 'auto/smart', 't1-orchestrator-paid', 't2-worker-paid', 't3-driver-paid')) {
-        Assert-True ($omitted -contains $legless) "legless route $legless is not omitted"
+        Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
         't1-orchestrator' = '1M'; 'spark-1.3-contributor' = '1M'; 't1-orchestrator-clean' = '1M'; 't2-worker' = '128k'
@@ -7496,7 +7497,7 @@ Test-Case 'apply prune: --dry-run names the retired combo and deletes nothing' {
     }
 }
 
-Test-Case 'apply prune: a second run finds no retired combos and deletes nothing' {
+Test-Case 'apply prune: a second run finds no retired or omitted combos and deletes nothing' {
     $d = New-AutoOSPruneSandbox
     $srv = $null
     try {
@@ -7505,7 +7506,51 @@ Test-Case 'apply prune: a second run finds no retired combos and deletes nothing
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') ''
-        Assert-True ($out -like '*  = no retired combos in the store*') "no clean-store line in: $out"
+        Assert-True ($out -like '*  = no retired or omitted combos in the store*') "no clean-store line in: $out"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# OR1g: "omitted" lists only the ORPHANED routes (declared legs, none servable).
+# A live combo with such an id is a managed orphan apply prunes; a deliberately
+# legless route (*-paid, auto*) is never in that list, so a live "auto" or
+# "t2-worker-paid" is never touched or even named.
+Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('t3-driver-free-only', 't2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t3-driver-free-only --yes'
+        Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
+        Assert-True ($out -like '*  - t3-driver-free-only: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: --dry-run names the omitted combo and never names a live "auto" or "t2-worker-paid"' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('t3-driver-free-only', 'auto', 't2-worker-paid', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like '*  - t3-driver-free-only: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
+        Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
+        Assert-True ($out -notlike '*- t2-worker-paid:*') 'a live "t2-worker-paid" combo was named'
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
         Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue

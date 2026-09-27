@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — "omitted" holds only orphaned routes; Windows apply prunes it too (OR1g)
+
+- **`tools/registry.py`**, **`configuration/omniroute/combos.json`**, **`configuration/omniroute/apply.ps1`**: `render_omniroute` names a route in `"omitted"` only when it declared legs but `gateway_legs` serves none (orphaned) — a deliberately legless route (`legs: []`: `auto`, `auto/cheap`, `auto/smart`, `t1-orchestrator-paid`, `t2-worker-paid`, `t3-driver-paid`) is no longer listed, so apply can never delete a live combo with one of those ids. `apply.ps1` now prunes `retired` + `omitted` like `apply.sh` (`<id>: omitted, would delete`/`deleted`), removing the platform divergence. Tests: `tests/test_registry_render.py::OmittedRoutesListTests`, `tests/linux/34-ai-services.sh`, Pester `apply prune…` / `combos.json is valid…`.
+
 ### Fixed — apply prunes managed combos the registry omitted (OR1e)
 
 - **`configuration/omniroute/apply.sh`**, **`tools/registry.py`**, **`configuration/omniroute/combos.json`**: `render_omniroute` now emits an `"omitted"` list — every route it renders no combo for (no `gateway_legs`) — and `apply.sh` prunes `retired` + `omitted` from the live store, never a user-made combo and never a current one. `--drift` labels an omitted live combo `extra <id> (omitted: no servable leg)`, and a bare-JSON `combo list` answer is an unreadable store (exit 3, one reason line) instead of an `AttributeError` crash. The LiteLLM `t2-worker-free-only` group already mirrors only the servable leg. Tests: `tests/linux/34-ai-services.sh`, `tests/test_registry_render.py::OmittedRoutesListTests`, Pester `combos.json is valid…` / `provider data JSON…`.

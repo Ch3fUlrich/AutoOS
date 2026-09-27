@@ -259,20 +259,21 @@ if it "apply prune: a second run finds no retired or omitted combos and deletes 
     if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
 fi
 
-# OR1e: combos.json "omitted" lists every route the registry renders no combo
-# for (no servable leg). A live combo with such an id is a managed orphan, so
-# apply prunes it - but never a user-made combo, and never a current combo.
-if it "apply prune: deletes an omitted (unservable) combo the store holds, never a user-made one"; then
+# OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
+# declared legs but has no servable one left. A live combo with such an id is a
+# managed orphan, so apply prunes it - but never a user-made combo, and never a
+# current combo.
+if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-paid t2-worker my-own-combo
+    _prune_list "$d" t3-driver-free-only t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete t1-orchestrator-paid --yes" ]] \
+    [[ "$deletes" == "combo delete t3-driver-free-only --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-paid: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -280,16 +281,32 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-paid my-own-combo
+    _prune_list "$d" t3-driver-free-only my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-paid: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the omitted prune dry run is not a dry run"; fi
+fi
+
+# OR1g: a deliberately legless route (*-paid, auto*) is in neither "retired" nor
+# "omitted", so a live combo a user or OmniRoute itself named "auto" (or
+# "t2-worker-paid") is never deleted - and a dry run never even names it.
+if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" auto t2-worker-paid t3-driver-free-only my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
+    [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
 
 # A down gateway must not be listed: the real CLI then falls back to reading
