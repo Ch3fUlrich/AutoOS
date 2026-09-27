@@ -2331,24 +2331,27 @@ fi
 
 if it "litellm fallback config is internally consistent"; then
     report="$(python3 - 2>&1 <<'PY'
-import re, io
+import io, json, re, sys
+sys.path.insert(0, "tools")
+import registry
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
-# Every group the registry can serve through LiteLLM (managed) plus the
-# hand-curated *-paid escalations. An independent second opinion on
-# tools/sync-router-tiers.py --check: it asserts the whole set is present.
-# t1-orchestrator-clean, spark-1.3-contributor (DSMAX 2026-09-27),
-# deepseek-v4.1-flash (deepseek 402) and the cheaperinference pins (wallet
-# empty 2026-09-27T17:2xZ) fail closed and render no block; t1-orchestrator
-# and its free-only twin keep the free gemini leg (T1FREE).
-need = {"t1-orchestrator", "t1-orchestrator-free-only",
-        "gemini-3.8-flash",
-        "t2-worker-paid", "t2-worker", "t2-worker-clean",
-        "t2-worker-free-only", "t3-driver", "t3-driver-clean",
-        "t3-driver-free-only", "t3-driver-paid", "t4-rag"}
+# Expected groups are derived from the registry render: the tiers
+# sync-router-tiers.py manages (every route that declares legs and keeps at
+# least one LiteLLM-servable one) plus the hand-curated legless *-paid
+# escalation chains. An independent second opinion on
+# tools/sync-router-tiers.py --check, with no hand-kept name list to go stale
+# when a provider flips (lesson PROVPIN 2026-09-27: spark-1.3-contributor and
+# t1-orchestrator-paid became servable through meta_api and rendered new blocks).
+reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+need = set(registry.render_litellm_blocks(reg, text))
+need |= {rid for rid, route in reg["routes"].items()
+         if not (route.get("legs") or []) and rid.endswith("-paid")}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
-problems = sorted(list(need - groups))
+problems = sorted(need - groups)
+for extra in sorted(groups - need):
+    problems.append("stale-group:" + extra)
 for src, tgts in refs:
     if src not in groups:
         problems.append("src:" + src)
@@ -2444,7 +2447,15 @@ text = io.open("opencode.jsonc", encoding="utf-8").read()
 text = re.sub(r"(?m)^\s*//.*$", "", text)
 oc = json.loads(text)
 h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
+ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
 p = oc["providers"]
+# The omniroute model list is the managed block rendered from
+# catalog/ide-models.json, so the expectation is derived from that file: which
+# tiers opencode may see follows provider servability and needs no re-pin when
+# a provider flips (lesson PROVPIN 2026-09-27).
+offered = sorted(m["id"] for m in ide
+                 if "opencode" in ((m.get("surfaces") or {}).get("omniroute") or []))
+got = sorted(p["omniroute"]["models"].keys())
 pins = sorted(
     "pin-ok" if h["mcp_servers"][name]["package"] in " ".join(spec.get("command", []))
     else "MISSING:" + name
@@ -2452,14 +2463,17 @@ pins = sorted(
 print("%s|%s|%s|%s|%s|%s" % (
     oc["model"],
     p["omniroute"]["settings"]["baseURL"],
-    ",".join(sorted(p["omniroute"]["models"].keys())),
+    "models-agree" if got == offered else "MODELS-DIFF:%s" % ",".join(
+        sorted(set(got) ^ set(offered))),
     "litellm" in p,
     ",".join(sorted(oc["mcp"]["servers"].keys())),
     ",".join(pins)))
 PY
 )"
+    # The default model and the gateway URL are human-chosen client settings,
+    # pinned on purpose; the model *list* above is derived, never pinned.
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-free-only,t1-orchestrator-paid,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|models-agree|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then

@@ -9,6 +9,11 @@ vault.yml
 !*.example.yml
 !*.example.json
 configuration/api-keys.yml
+# Private scrubber patterns (contains real usernames, emails, domains, IPs, paths)
+scripts/public-scrub/patterns.private.txt
+# infra/ env templates (.env.shared/.server/.client.example) are re-included by
+# infra/.gitignore — the broad `.env.*` above is a basename match and would
+# otherwise reach into infra/mcp-servers/.
 # backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
 configuration/api-keys.yml.*
 
@@ -37,8 +42,11 @@ logs/
 *.autoos-backup-*
 .autoos-state.json
 autoos.config.json
-autoos.config.json.tmp
-!autoos.config.example.json
+# A config save writes through an unpredictable temp name (mkstemp on Linux, a
+# GUID on Windows) so nobody can pre-plant a symlink at a fixed one; these are
+# the shapes a failed save could leave behind, never to be committed.
+.autoos.config.*.tmp
+autoos.config.json.*.tmp
 
 # ─── Agent tooling ──────────────────────────────────────────────────────────
 .serena/

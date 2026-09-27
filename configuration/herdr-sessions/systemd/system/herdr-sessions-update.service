@@ -9,19 +9,19 @@
 # download, a failed update -- the driver logs it and exits 0, and the session
 # is restored on whatever version is on disk.
 Description=Update herdr and claude before the session is restored
-Documentation=file://@APPDIR@/README.md
+Documentation="file://@APPDIR@/README.md"
 After=network-online.target
 Wants=network-online.target
 Before=herdr-server.service
-RequiresMountsFor=@APPDIR@
+RequiresMountsFor="@APPDIR@"
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 Environment=HOME=/root
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HERDR_PROFILE=@PROFILE_PATH@
-ExecStart=@APPDIR@/herdr-sessions.sh update
+Environment=HERDR_PROFILE="@PROFILE_PATH@"
+ExecStart="@APPDIR@/herdr-sessions.sh" update
 # Two downloads at UPDATE_TIMEOUT_SEC (180 s) each, plus slack.
 TimeoutStartSec=420
 StandardOutput=journal

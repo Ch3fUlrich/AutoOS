@@ -384,7 +384,13 @@ def spawn(req: dict) -> dict:
         run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
         path = os.path.join(state_root(), run_id)
         try:
-            os.makedirs(path)
+            # Private like the spawner's workers dir: the run dir holds the task
+            # brief and autoos-ask.py's question/answer pair. makedirs' mode is
+            # masked by the umask and never applied to an existing parent, so
+            # chmod after.
+            os.makedirs(path, mode=0o700)
+            if os.name != "nt":
+                os.chmod(path, 0o700)
             break
         except FileExistsError:
             if attempt == max_attempts - 1:

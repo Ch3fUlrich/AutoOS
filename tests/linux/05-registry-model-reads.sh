@@ -228,27 +228,33 @@ PY
 fi
 
 if it "tier profiles come from the spec, installer and tool agree"; then
-    report="$(python3 - <<'PY'
+    # Expected tiers are the registry's own render: membership follows provider
+    # servability, the push-priority ORDER is the human-approved pin in
+    # tools/registry.py OPENHANDS_TIER_ORDER. Never re-pinned here, so the next
+    # provider flip (a route going servable or failing closed) needs no edit
+    # (lesson PROVPIN 2026-09-27: a literal list here went stale twice).
+    report="$(python3 - 2>&1 <<'PY'
+import json, sys
+sys.path.insert(0, "tools")
+import registry
+reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+tiers = spec.get("tiers") or []
+if not tiers:
+    print("spec-empty")
+else:
+    print(",".join(registry.openhands_diff(registry.render_openhands(reg), spec)))
+PY
+)" || { fail "tier spec render failed: $report"; }
+    assert_eq "$report" ""
+    # Base URLs are infrastructure, not provider state - pinned on purpose.
+    base_urls="$(python3 - <<'PY'
 import json
 spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
-print("%s|%s|%s|%s" % (
-    ",".join(t["id"] for t in spec["tiers"]),
-    spec["gateway_base_url"],
-    spec["litellm_base_url"],
-    ",".join(t["model"] for t in spec["tiers"])))
+print("%s|%s" % (spec["gateway_base_url"], spec["litellm_base_url"]))
 PY
 )"
-    # Pinned on purpose: the order is the OpenHands push priority (the app
-    # keeps 10 profiles), so a reorder must be a deliberate, reviewed edit.
-    # Re-pinned 2026-09-27 (PROVPIN, PROV bab8d70): omniroute-t1-orchestrator-clean
-    # and omniroute-deepseek-v4.1-flash are omitted (their providers' credits are
-    # off, so no leg is servable); t1-orchestrator is servable again through the
-    # free gemini leg, which is what the two t1-orchestrator-free-only tiers carry.
-    # Re-pinned again 2026-09-27 (PROVFIX3 verify): MUSEAPI gave meta_api a paid
-    # contributor key, so spark-1.3-contributor is servable and both spark tiers
-    # are back - the gateway one at the combos.json "1M" floor (1000000) and the
-    # direct openrouter one at the model's advertised 1048576.
-    assert_eq "$report" "omniroute-t1-orchestrator,omniroute-t2-worker,omniroute-t3-driver,omniroute-t2-orchestrator,omniroute-t2-worker-clean,omniroute-t3-driver-clean,omniroute-t4-rag,omniroute-opus-4-6,omniroute-gemini-3.8-flash,omniroute-t2-worker-free-only,omniroute-t3-driver-free-only,omniroute-spark-1.3-contributor,openrouter-muse-spark-1.3-contributor,litellm-t1-orchestrator,litellm-t2-worker,litellm-t3-driver,litellm-t2-worker-free-only,litellm-t3-driver-free-only,litellm-t1-orchestrator-free-only,omniroute-t1-orchestrator-free-only|http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1|openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-orchestrator,openai/t2-worker-clean,openai/t3-driver-clean,openai/t4-rag,openai/opus-4-6,openai/gemini-3.8-flash,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor,openai/t1-orchestrator,openai/t2-worker,openai/t3-driver,openai/t2-worker-free-only,openai/t3-driver-free-only,openai/t1-orchestrator-free-only,openai/t1-orchestrator-free-only"
+    assert_eq "$base_urls" "http://host.docker.internal:20128/v1|http://host.docker.internal:4000/v1"
     # The embedded installer must read the spec, never inline tiers.
     grep -q 'tier-profiles.json' lib/linux/install.sh || { fail "installer does not read the tier spec"; }
     # Generator round-trip with fixture keys (env hidden: the suite never
@@ -257,10 +263,10 @@ PY
     printf 'LITELLM_MASTER_KEY=test-lit-key\n' >"$tmp/.env"
     out="$( ( unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY OPENROUTER_API_KEY; python3 tools/sync-openhands-profiles.py --openhands-dir "$tmp" --keys-file "$tmp/api-keys.yml" --litellm-env "$tmp/.env" ) 2>&1)"
     written="$(printf '%s' "$out" | grep -c written)"
-    rm -rf "$tmp"
+    written_ids="$(printf '%s\n' "$out" | sed -n 's/.*[: ]\([A-Za-z0-9._-]*\)\.json written.*/\1/p' | sort | paste -sd, -)"
     # Every spec tier has a key in the fixture, so the tool must write exactly
-    # as many profiles as the spec lists - derived from the spec, never pinned
-    # to a count that goes stale when a route is omitted or added.
+    # the tiers the spec lists, by name - derived from the spec, never pinned
+    # to a list or count that goes stale when a route is omitted or added.
     spec_tiers="$(python3 - 2>&1 <<'PY'
 import json
 spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
@@ -268,13 +274,46 @@ print(len(spec["tiers"]))
 PY
 )"
     assert_eq "$written" "$spec_tiers"
+    spec_ids="$(python3 - 2>&1 <<'PY'
+import json
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+print(",".join(sorted(t["id"] for t in spec["tiers"])))
+PY
+)"
+    assert_eq "$written_ids" "$spec_ids"
 
-    # A direct-provider tier (gateway: openrouter) must take its OWN key and
-    # endpoint, not the gateway's - that is the effort-ladder surface. The
-    # committed spec has one again since MUSEAPI (openrouter-muse-spark-1.3-
-    # contributor), but the behaviour is still exercised on a synthetic one-tier
-    # spec: a pinned profile name goes stale the moment the provider's credit
-    # state changes, and this assertion is about the rule, not the current route.
+    # A direct-provider tier (the only kind that carries its own base_url) must
+    # take its OWN key and endpoint, not the gateway's - the effort-ladder
+    # surface. Derived from the spec, so it asserts whatever the registry
+    # renders today and needs no re-pin when that route flips.
+    direct_problems="$(python3 - 2>&1 "$tmp" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+spec = json.load(open("configuration/openhands/tier-profiles.json", encoding="utf-8"))
+gateway_keys = {"test-omni-key", "test-lit-key"}
+problems = []
+for tier in spec["tiers"]:
+    if "base_url" not in tier:
+        continue
+    path = os.path.join(d, "profiles", tier["id"] + ".json")
+    if not os.path.exists(path):
+        problems.append("missing:" + tier["id"])
+        continue
+    p = json.load(open(path, encoding="utf-8"))
+    if p.get("base_url") != tier["base_url"]:
+        problems.append("base_url:" + tier["id"])
+    if p.get("model") != tier["model"]:
+        problems.append("model:" + tier["id"])
+    if not p.get("api_key") or p["api_key"] in gateway_keys:
+        problems.append("key:" + tier["id"])
+print(" ".join(problems))
+PY
+)"
+    rm -rf "$tmp"
+    assert_eq "$direct_problems" ""
+
+    # The same behaviour on a synthetic one-tier spec, so it stays exercised
+    # even if the committed spec later renders no direct tier at all.
     synth="$(mktemp -d)"
     cat >"$synth/spec.json" <<JSON
 {"gateway_base_url": "http://gateway.invalid:20128/v1",

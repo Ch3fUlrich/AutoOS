@@ -151,3 +151,33 @@ jobs:
             exit 1
           fi
           echo "no committed installers found"
+
+  public-scrub:
+    name: Public scrub scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan the published trees for site-shaped values
+        run: |
+          # Generic shapes only (private literals live in gitignored
+          # patterns.private.txt, unavailable to CI, and scan-exclude.txt keeps
+          # the scrubber's own rules and fixtures out of its own report). Scope
+          # is everything this repository publishes about a real machine:
+          # infra/ (the imported area) and scripts/, plus docs/, catalog/,
+          # README.md and AGENTS.md (SPEC-OMNI A2). A whole-tree run is not
+          # used: the heuristic unix-home, rfc1918 and private-host shapes
+          # legitimately match test fixtures, example.conf and autoinstall
+          # placeholders under tests/, lib/ and configuration/, and this gate
+          # must stay green to be worth keeping.
+          python3 scripts/public-scrub/scan.py \
+            --patterns scripts/public-scrub/patterns.txt \
+            infra/ scripts/ docs/ catalog/ README.md AGENTS.md
+
+      # The gate is only as good as patterns.txt: these fixtures fail when a shape
+      # stops matching, or when a documentation value starts matching one.
+      # Run directly rather than through pytest — this job installs nothing.
+      - name: Scanner rule tests
+        run: python3 scripts/public-scrub/test_scan.py

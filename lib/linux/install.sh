@@ -192,7 +192,15 @@ custom_is_installed() {
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
         agent-skills)
-            [[ -d "$SYS_HOME/Documents/Code/agent-skills" || -d "$SYS_HOME/Documents/code/agent-skills" ]]
+            # New location: this checkout's .agents/skills + .mcp.json wiring
+            local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+            if [[ -d "$repo_root/.agents/skills" && -f "$repo_root/.mcp.json" ]]; then
+                return 0
+            fi
+            # Fallback: old external clone (for machines mid-migration)
+            local code_root="$SYS_HOME/Documents/Code"
+            [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+            [[ -d "$code_root/agent-skills/skills" ]]
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
@@ -297,6 +305,84 @@ INSTALL_STATE=""
 # current) sets this to "skipped": install_component then reports skipped, not
 # installed. Reset on every call.
 INSTALL_SCRIPT_STATE=""
+# A post-install step can refuse to touch a user's file (a backup that could not
+# be made means no write) without the package install failing. Such a step calls
+# `autoos_record_failure <id>`, and setup.sh folds the ids into the result
+# buckets with autoos_fold_extra_failures, so neither the summary nor the exit
+# code can read "done" over a change that never happened. The id is a catalog
+# component id — that is what lets the fold find the component it belongs to —
+# and it is recorded once, so two call paths in one run cannot double-count.
+AUTOOS_EXTRA_FAILURES=()
+# autoos_list_has <value> <value>...: whether the first argument is one of the
+# rest. Every membership test in this section is the same loop, and "recorded
+# once" / "failed once" / "is this component a refusal" must not drift apart.
+autoos_list_has() {
+    local want="$1" seen
+    shift
+    for seen in "$@"; do
+        [[ "$seen" == "$want" ]] && return 0
+    done
+    return 1
+}
+autoos_record_failure() {
+    local id="$1"
+    autoos_list_has "$id" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}" && return 0
+    AUTOOS_EXTRA_FAILURES+=("$id")
+    return 0
+}
+
+# The three result buckets setup.sh fills while it executes, one component id per
+# element. Ids and not display names: a name with spaces shatters when the list is
+# joined for the state file, and "counted as installed *and* failed" is only
+# detectable by id. The counts are their lengths (autoos_fold_extra_failures).
+AUTOOS_RESULT_INSTALLED=()
+AUTOOS_RESULT_SKIPPED=()
+AUTOOS_RESULT_FAILED=()
+
+# autoos_is_recorded_failure <id>: whether a post-install step refused a change
+# to <id>'s own file. The recorder's list is the one place that knows.
+autoos_is_recorded_failure() {
+    autoos_list_has "$1" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"
+}
+
+# autoos_fold_extra_failures: merge AUTOOS_EXTRA_FAILURES into the buckets.
+# A refusal is a component's ONLY result: leaving the id in the installed (or
+# skipped) bucket as well counted one component in two numbers and wrote it into
+# both buckets of the state file, so "3 installed, 1 failed" described 4 things
+# that happened to 3 components. Called after the execute loop, when the list of
+# refusals is complete — including a refusal recorded under another component.
+autoos_fold_extra_failures() {
+    local extra entry keep
+    for extra in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
+        keep=()
+        for entry in "${AUTOOS_RESULT_INSTALLED[@]+"${AUTOOS_RESULT_INSTALLED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_INSTALLED=("${keep[@]+"${keep[@]}"}")
+        keep=()
+        for entry in "${AUTOOS_RESULT_SKIPPED[@]+"${AUTOOS_RESULT_SKIPPED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_SKIPPED=("${keep[@]+"${keep[@]}"}")
+        # Failed once, even when the install itself failed too.
+        autoos_list_has "$extra" "${AUTOOS_RESULT_FAILED[@]+"${AUTOOS_RESULT_FAILED[@]}"}" \
+            || AUTOOS_RESULT_FAILED+=("$extra")
+    done
+}
+
+# autoos_result_label <id>: one line of the failure report. The catalog name
+# where there is one, the token itself otherwise (a step may record an id of its
+# own); a post-install refusal says so, because "<name> failed" alone reads like
+# a broken package run rather than a step that refused to touch a user's file.
+autoos_result_label() {
+    local id="$1" i name
+    if i="$(catalog_index_of "$id")"; then name="${CAT_NAME[i]}"; else name="$id"; fi
+    if autoos_is_recorded_failure "$id"; then
+        printf '%s (post-install)' "$name"
+    else
+        printf '%s' "$name"
+    fi
+}
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
@@ -1829,8 +1915,16 @@ install_herdr_sessions() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: bash $driver --profile $profile --dry-run"
-        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        # The driver's own dry run can fail; discarding that status (as a plain
+        # `$(...)` did) reported success over a plan the driver refused to
+        # produce. Capture and report it like the real path below.
+        local dry_out dry_rc=0
+        dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)" || dry_rc=$?
         [[ -n "$dry_out" ]] && ui_muted "$dry_out"
+        if (( dry_rc != 0 )); then
+            ui_err "herdr-sessions: driver dry run failed (rc=$dry_rc) for profile $profile"
+            return 1
+        fi
         return 0
     fi
 
@@ -2515,25 +2609,17 @@ route_detected_clis_to_gateway() {
     # install, so without this step they would never point at the gateway).
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
-    # (same file-first pattern as the openhands writer below; never printed).
-    # Without keys the claude step warns and the qwen step is skipped.
+    # (same resolution as the openhands and opencode writers — one chain, one
+    # parser, tools/keys_file.py; never printed). Without keys the claude
+    # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-        _keys_yml="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/api-keys.yml}"
-        _file_key="$(python3 - "$_keys_yml" 2>/dev/null <<'PY'
-import sys
-try:
-    found = ""
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        for line in fh:
-            t = line.strip()
-            if t.startswith("omniroute:") and "REPLACE" not in t:
-                found = t.split(":", 1)[1].strip().strip("\"'")
-                break
-    print(found)
-except Exception:
-    print("")
-PY
-)"
+        _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
+        _file_key=""
+        if [[ -n "$_keys_file" ]]; then
+            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/keys_file.py" \
+                "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
+        fi
+        unset _keys_file
         if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
             export OMNIROUTE_API_KEY="$_file_key"
         fi
@@ -2543,7 +2629,10 @@ PY
         unset _file_key
     fi
     if has_cmd claude; then
-        route_claude_to_gateway
+        # route_claude_to_gateway is `claude-code`'s own postInstall, called
+        # directly from `omniroute`'s step: bare here it would abort the run under
+        # setup.sh's `set -euo pipefail`, so it records the component instead.
+        route_claude_to_gateway || autoos_record_failure claude-code
     else
         ui_muted "Claude Code not installed - skipping gateway routing"
     fi
@@ -3446,7 +3535,7 @@ register_playwright_lazy_proxy() {
         else
             ui_warn "could not back up ${cfg} - the ${kind/-/ } 'playwright' entry was left unchanged"
         fi
-        return 0
+        return 1
     fi
 
     if [[ "$kind" != none ]]; then
@@ -3469,11 +3558,14 @@ register_playwright_lazy_proxy() {
         fi
     elif [[ "$kind" == none ]]; then
         ui_warn "could not register 'playwright'"
+        return 1
     elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
         ui_warn "could not add the lazy proxy - put back the previous ${kind/-/ } entry (config backup: ${backup})"
+        return 1
     else
         printf -v restore '%q ' "${old[@]}"      # quoted: a checkout path may hold a space
         ui_err "could not add the lazy proxy and could not put back the previous ${kind/-/ } entry - restore it with: claude mcp add --scope user playwright -- ${restore}(config backup: ${backup})"
+        return 1
     fi
     return 0
 }
@@ -3486,7 +3578,13 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        register_playwright_lazy_proxy "$playwright_pkg"
+        # run_post_install contains the step's exit code; this record is here
+        # because the step carries on to the Antigravity entry either way, so its
+        # own return says nothing about the proxy. The id is the one the fold
+        # looks for, and it matches the id install_agent_skills' guarded call
+        # records — `autoos_record_failure` keeps it to one entry.
+        register_playwright_lazy_proxy "$playwright_pkg" \
+            || autoos_record_failure mcp-playwright
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
@@ -3653,7 +3751,7 @@ enable_project_mcp_server() {
     mkdir -p "$repo/.claude"
     if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
         ui_warn "could not back up ${path} - left unchanged"
-        return 0
+        return 1
     fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
@@ -3889,13 +3987,7 @@ PY
 }
 
 install_agent_skills() {
-    local code_root="$SYS_HOME/Documents/Code"
-    if [[ -d "$SYS_HOME/Documents/code" ]]; then
-        code_root="$SYS_HOME/Documents/code"
-    fi
-    local dest="$code_root/agent-skills"
-    (( AUTOOS_DRY_RUN )) || mkdir -p "$code_root"
-    clone_or_update https://github.com/Ch3fUlrich/agent-skills.git "$dest"
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
     local base
     base="$(omnigraph_base_url)"
@@ -3903,11 +3995,16 @@ install_agent_skills() {
 
     write_omnigraph_env "$base"
 
-    # Wire user-scope MCP servers across Claude Code and Antigravity
-    install_mcp_graphify
-    install_mcp_serena
-    install_mcp_playwright
-    install_mcp_context7
+    # Wire user-scope MCP servers across Claude Code and Antigravity. These are
+    # catalog postInstalls in their own right, called directly here — so they get
+    # the same containment run_post_install gives them (a bare call under
+    # setup.sh's `set -euo pipefail` would abort the whole run). Each records its
+    # own component id, the id install_mcp_playwright already records internally,
+    # so one broken wiring is counted once.
+    install_mcp_graphify   || autoos_record_failure mcp-graphify
+    install_mcp_serena     || autoos_record_failure mcp-serena
+    install_mcp_playwright || autoos_record_failure mcp-playwright
+    install_mcp_context7   || autoos_record_failure mcp-context7
 
     # omnigraph is the opposite: project scope only, pinned per repo by
     # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
@@ -3917,15 +4014,12 @@ install_agent_skills() {
         ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
         ui_muted "    claude mcp remove omnigraph --scope user"
     fi
-    if [[ -f "$dest/.mcp.json" ]]; then
-        ui_muted "omnigraph is declared per-repo in ${dest}/.mcp.json"
-        enable_project_mcp_server "$dest" omnigraph
+    # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
+    if [[ -f "$repo_root/.mcp.json" ]]; then
+        enable_project_mcp_server "$repo_root" omnigraph || autoos_record_failure agent-skills
+        enable_project_mcp_server "$repo_root" autoos-agent || autoos_record_failure agent-skills
     else
-        ui_warn "no .mcp.json in ${dest} — nothing to pin omnigraph to."
-    fi
-    # The agent spawner is declared in this repo's own .mcp.json.
-    if [[ -n "${AUTOOS_ROOT:-}" && -f "$AUTOOS_ROOT/.mcp.json" ]]; then
-        enable_project_mcp_server "$AUTOOS_ROOT" autoos-agent
+        ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
 
     local omni_pkg omni_spec
@@ -3948,16 +4042,28 @@ print(json.dumps({
 ")"
     register_antigravity_mcp_server omnigraph "$omni_spec"
 
+    # Skills source: this checkout's .agents/skills, or — on a machine mid-way
+    # through the migration, where the vendored copy is not there yet — the
+    # retired clone's skills dir. autoos_skills_source is the one home for that
+    # order, so no client directory can be linked from one and skipped by
+    # another.
+    local skills_source
+    skills_source="$(autoos_skills_source)"
+    if [[ -z "$skills_source" ]]; then
+        ui_warn "no skills to link: neither $repo_root/.agents/skills nor the retired clone's skills dir exists."
+    fi
+
     # Wire skills into Antigravity and Claude Code global skills directories
     local agy_skills="$SYS_HOME/.gemini/config/skills"
     local claude_skills="$SYS_HOME/.claude/skills"
-    if [[ -d "$dest/skills" ]]; then
+    local repo_skills="$skills_source"
+    if [[ -n "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
-            ui_muted "would link skills from $dest/skills to $agy_skills and $claude_skills"
+            ui_muted "would link skills from $repo_skills to $agy_skills and $claude_skills"
         else
             mkdir -p "$agy_skills" "$claude_skills"
             local s_dir s_name
-            for s_dir in "$dest/skills"/*; do
+            for s_dir in "$repo_skills"/*; do
                 [[ -d "$s_dir" ]] || continue
                 s_name="$(basename "$s_dir")"
                 if [[ ! -e "$agy_skills/$s_name" ]]; then
@@ -3974,9 +4080,7 @@ print(json.dumps({
     # Repo skills into project .claude/skills (Claude Code reads only that
     # dir). Symlinks, created at install time (never committed - see
     # .gitignore). Guarded: existing entries win.
-    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    repo_skills="$repo_root/.agents/skills"
-    repo_claude="$repo_root/.claude/skills"
+    local repo_claude="$repo_root/.claude/skills"
     if [[ -d "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
             ui_muted "would link repo skills into $repo_claude"
@@ -3995,8 +4099,6 @@ print(json.dumps({
     # Link repo skills into user-scope directories for clients that read from
     # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
     # link_skill_dirs handles dry-run, idempotency and never-overwrite rules.
-    local skills_source
-    skills_source="$(autoos_skills_source)"
     if [[ -n "$skills_source" ]]; then
         link_skill_dirs "$skills_source" "$SYS_HOME/.agents/skills" || true
         if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
@@ -4004,11 +4106,23 @@ print(json.dumps({
         fi
     fi
 
+    # Check for retired external agent-skills clone and hint it's no longer used
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    local old_clone="$code_root/agent-skills"
+    if [[ -d "$old_clone" && ! -L "$old_clone" ]]; then
+        ui_muted "Note: external agent-skills clone at $old_clone is retired; AutoOS now uses the vendored .agents/skills in this checkout."
+    fi
+
+    # Ensure graphify-mcp symlink points to this repo's infra
+    graphify_mcp_symlink
+
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
         return 0
     fi
-    if omnigraph_readiness "$dest"; then
+    # Check omnigraph readiness using this repo's infra path
+    if omnigraph_readiness "$repo_root"; then
         ui_ok "omnigraph prerequisites are all present."
     fi
     ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
@@ -4058,6 +4172,111 @@ autoos_skills_source() {
     if [[ -d "$skills_source" ]]; then
         printf '%s\n' "$skills_source"
     fi
+    return 0
+}
+
+# autoos_api_keys_conf: the ONE answer to "which file holds this machine's API
+# keys", printed as a path, in priority order:
+# 1. ~/.config/autoos/api_keys.conf (user config, create nothing - just check)
+# 2. the repo's git-ignored keys file, configuration/api-keys.yml
+#    (AUTOOS_KEYS_FILE overrides this entry)
+# 3. Legacy ~/Documents/Code/agent-skills/secrets/api_keys.conf (fallback)
+# Returns 0 and prints the path if one exists, 1 if none does — and nothing is
+# ever invented, so a caller that wants "no keys" gets an empty string rather
+# than a path to a file that does not exist. Whichever file wins, its content is
+# parsed by tools/keys_file.py, which reads both the `name=value` and the
+# `name: value` shape.
+autoos_api_keys_conf() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    # 1. User config (~/.config/autoos/api_keys.conf) - create nothing
+    if [[ -f "$SYS_HOME/.config/autoos/api_keys.conf" ]]; then
+        printf '%s\n' "$SYS_HOME/.config/autoos/api_keys.conf"
+        return 0
+    fi
+    # 2. The repo's git-ignored keys file — configuration/api-keys.yml, what
+    # the browser page writes and tools/mirror-litellm-env.py reads.
+    # AUTOOS_KEYS_FILE replaces that entry (the suite points it at a stub for a
+    # hermetic keyless run), exactly as the gateway writers always did.
+    local keys_yml="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
+    if [[ -f "$keys_yml" ]]; then
+        printf '%s\n' "$keys_yml"
+        return 0
+    fi
+    # 3. Legacy agent-skills clone
+    local code_root="$SYS_HOME/Documents/Code"
+    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
+    if [[ -f "$code_root/agent-skills/secrets/api_keys.conf" ]]; then
+        printf '%s\n' "$code_root/agent-skills/secrets/api_keys.conf"
+        return 0
+    fi
+    return 1
+}
+
+# graphify_mcp_symlink: point ~/.local/bin/graphify-mcp at this checkout's
+# infra/mcp-servers/bin/graphify-mcp.
+#
+# Three shapes mean "AutoOS or the retired agent-skills clone put this here" and
+# are acted on: no link (create one), a link that already lands on the target
+# (skip), and a link into an agent-skills path (repoint it — including one left
+# dangling when the user deleted the clone, which is the common migration
+# case). Anything else is the user's own file or link: reported as left alone and
+# never replaced. The dry run decides from the same verdict, so it can never
+# announce something the real run will not do.
+graphify_mcp_symlink() {
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local target="$repo_root/infra/mcp-servers/bin/graphify-mcp"
+    local link="$SYS_HOME/.local/bin/graphify-mcp"
+
+    if [[ ! -x "$target" ]]; then
+        ui_muted "graphify-mcp is not in this checkout ($target) - nothing to link"
+        return 0
+    fi
+
+    local current="" verdict="create"
+    if [[ -L "$link" ]]; then
+        current="$(readlink "$link")" || current=""
+        # A relative link resolves against its own directory. The clone test
+        # below is a substring match, so making the path absolute is enough —
+        # resolving it through `cd` would fail on a dangling link and hand the
+        # clone's link to the "the user manages this" branch.
+        [[ -z "$current" || "$current" == /* ]] || current="$(dirname "$link")/$current"
+        if [[ "$current" == "$target" ]]; then
+            verdict="already"
+        elif [[ "$current" == */agent-skills/* ]]; then
+            verdict="repoint"
+        else
+            verdict="alone"
+        fi
+    elif [[ -e "$link" ]]; then
+        verdict="alone"
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        case "$verdict" in
+            create)  ui_muted "would link graphify-mcp: $link -> $target" ;;
+            repoint) ui_muted "would repoint graphify-mcp from the clone ($current) to $target" ;;
+            already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+            alone)   ui_muted "would leave graphify-mcp alone (yours: $link)" ;;
+        esac
+        return 0
+    fi
+
+    case "$verdict" in
+        create|repoint)
+            mkdir -p "$(dirname "$link")"
+            if ln -sfn "$target" "$link"; then
+                if [[ "$verdict" == "create" ]]; then
+                    ui_ok "linked graphify-mcp: $link -> $target"
+                else
+                    ui_ok "repointed graphify-mcp from the clone: $link -> $target"
+                fi
+            else
+                ui_warn "could not link graphify-mcp - $link left as it is"
+            fi
+            ;;
+        already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+        alone)   ui_muted "left graphify-mcp alone (yours: $link)" ;;
+    esac
     return 0
 }
 
@@ -4127,11 +4346,17 @@ setup_opencode_config() {
         if has_cmd python3; then
             local harness_out harness_rc skills_source
             skills_source="$(autoos_skills_source)"
-            [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+            # An empty source is passed through and the harness reports
+            # "skills: source missing". Naming the retired agent-skills clone
+            # here would invent a path that does not exist and read as a
+            # machine whose skills are simply absent.
             harness_rc=0
             harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
                 ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+                # Warned is not reported: the component's own harness never
+                # landed, so it is not installed either (setup.sh folds this id).
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
             else
                 while IFS= read -r _harness_line; do
                     [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -4139,6 +4364,7 @@ setup_opencode_config() {
             fi
         else
             ui_warn "agent harness not applied: python3 not found"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
@@ -4165,8 +4391,8 @@ opencode_is_v2() {
 _opencode_merge_config() {
     local config_file="$1"
 
-    local secrets_file="$SYS_HOME/Documents/Code/agent-skills/secrets/api_keys.conf"
-    [[ -f "$secrets_file" ]] || secrets_file="$SYS_HOME/Documents/code/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     # catalog/ai-registry.json models is the single source of truth for model data.
     # The repo root is anchored off this script, never off the caller's cwd.
@@ -4200,6 +4426,13 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location('autoos_registry', _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# The keys-file parse is one module too: api_keys.conf writes `name=value`,
+# configuration/api-keys.yml writes `name: value`, and a reader that knows only
+# one of them reports a configured machine as an unconfigured one.
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'keys_file.py')
+_key_spec = _ilu.spec_from_file_location('keys_file', _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
@@ -4267,22 +4500,17 @@ if os.path.isfile(config_path):
 _before = json.dumps(data) if os.path.isfile(config_path) else None
 
 def _read_secrets_into(path, secrets):
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip('\"\''))
-    except Exception:
-        pass
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _keys_file.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 secrets = {}
-# Only the real conf. api_keys.conf.example is never read: its placeholder
-# keys are truthy and would be written into the config as if real (401s).
-if os.path.isfile(secrets_path):
-    _read_secrets_into(secrets_path, secrets)
+# Only a real file: the .example templates' placeholder keys are truthy and
+# read_keys drops them, so a machine that never configured anything stays
+# keyless rather than writing a 401 into the config.
+_read_secrets_into(secrets_path, secrets)
 
 providers = data.get('provider', {})
 _ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
@@ -4597,7 +4825,8 @@ setup_openhands_config() {
         link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
     fi
 
-    local secrets_file="$code_root/agent-skills/secrets/api_keys.conf"
+    local secrets_file
+    secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 
     catalog_require_python || return 0
 
@@ -4669,6 +4898,12 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# And the keys parse is tools/keys_file.py's: the resolved file may be
+# api_keys.conf (`name=value`) or configuration/api-keys.yml (`name: value`).
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "keys_file.py")
+_key_spec = _ilu.spec_from_file_location("keys_file", _KEYS_TOOL)
+_keys_file = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_keys_file)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
@@ -4685,16 +4920,11 @@ if _ol["base_url"].endswith("/v1"):
     _ol["base_url"] = _ol["base_url"][:-3]
 
 def _read_secrets_file(path, secrets):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip("\"'"))
-    except Exception:
-        pass
+    # Parsing is tools/keys_file.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _keys_file.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 
 def _profile_for(mid, key, name=None):
@@ -4802,21 +5032,12 @@ llm = agent_settings.setdefault("llm", {})
 # with thinking params Ollama rejects outright.
 _default_reasoning = False
 # OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
-# writer below reads). AUTOOS_KEYS_FILE overrides the fallback keys file
-# (the suite points it at a stub for a hermetic keyless run).
-_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-if not _gw_key:
-    # Fall back to the repo's single source of truth for keys.
-    _keys_yml = os.environ.get("AUTOOS_KEYS_FILE") or os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
-    try:
-        with open(_keys_yml, "r", encoding="utf-8") as _kf:
-            for _line in _kf:
-                _t = _line.strip()
-                if _t.startswith("omniroute:") and "REPLACE" not in _t:
-                    _gw_key = _t.split(":", 1)[1].strip().strip("\"'")
-                    break
-    except Exception:
-        pass
+# writer below reads), else the keys file autoos_api_keys_conf resolved —
+# AUTOOS_KEYS_FILE overrides it and the suite points that at a stub for a
+# hermetic keyless run. No second reader of that file lives here: an inline
+# parse is how a `.conf`-only reader once ended up handed a `.yml` and
+# reported a configured machine as an unconfigured one.
+_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
 if _gw_key:
     # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
@@ -5089,6 +5310,7 @@ PY
         # the OpenCode writer; setup runs postInstall under set -e.
         ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
         ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
         return 0
     fi
 
@@ -5102,6 +5324,9 @@ PY
     harness_out="$(python3 "$harness_root/lib/agent_harness.py" openhands --openhands-dir "$openhands_dir" --repo-root "$harness_root" 2>&1)" || harness_rc=$?
     if (( harness_rc != 0 )); then
         ui_warn "agent harness not applied to OpenHands (exit $harness_rc)"
+        # Warned is not reported: the role profiles never landed, so the
+        # component is not applied either (setup.sh folds this id).
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
     else
         while IFS= read -r _harness_line; do
             [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -5143,7 +5368,11 @@ setup_wsl_agent_home() {
     # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
     # so the legacy path never dangles.
     if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
-        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+        # The path goes in as argv, never spliced into the Python source: a CAO
+        # home containing a single quote would otherwise turn the probe itself
+        # into a SyntaxError, read as "no FIFO support", and falsely relocate a
+        # working ext4 home.
+        if ! python3 -c 'import os,sys; os.mkfifo(sys.argv[1])' "$cao_legacy/.autoos-fifo-probe" 2>/dev/null; then
             local ts backup backup_base n=0
             ts="$(date +%Y%m%d-%H%M%S)"
             backup_base="${cao_legacy}.backup-${ts}"
@@ -5176,15 +5405,34 @@ setup_wsl_agent_home() {
     ui_ok "CAO home on native ext4: $cao_home (CAO_HOME_DIR exported)"
 }
 
+# AUTOOS_POST_COMPONENT: the id of the component being installed, published to the
+# step running under it. A recorded failure has to name the plan's id for
+# autoos_fold_extra_failures to find the right bucket, and one step serves several
+# ids (setup_opencode_config is the postInstall of both `opencode` and
+# `opencode-cli`), so the step cannot pick one out of its own head.
+AUTOOS_POST_COMPONENT=""
 run_post_install() {
-    local fn="$1"
+    local fn="$1" id="${2:-}" rc=0
+    AUTOOS_POST_COMPONENT="$id"
     [[ -z "$fn" ]] && return 0
     if ! declare -F "$fn" >/dev/null; then
         ui_warn "post-install '${fn}' not found"
         return 0
     fi
     ui_step "post-install: ${fn}"
-    "$fn"
+    # Contained here, in the one place that runs a step, not in every step:
+    # setup.sh calls this bare under `set -euo pipefail`, so a step returning
+    # non-zero used to abort the whole run — no summary, no state file, and
+    # every later component silently never installed. A failed step is still a
+    # result, so it is recorded for the fold instead: the component reads as
+    # failed (post-install) and setup.sh still exits non-zero.
+    "$fn" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "post-install '${fn}' failed (exit ${rc}) - the run continues"
+        autoos_record_failure "${id:-$fn}"
+    fi
+    AUTOOS_POST_COMPONENT=""
+    return 0
 }
 
 # ─── Post-install verification ──────────────────────────────────────────────

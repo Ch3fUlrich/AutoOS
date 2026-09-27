@@ -68,6 +68,150 @@ if it "a dry run saves no state"; then
     if [[ -f "$tmp" ]]; then rm -f "$tmp"; fail "dry run wrote a state file"; else pass; fi
 fi
 
+# A post-install step that refuses to change a user's file records its id with
+# autoos_record_failure; setup.sh folds those ids into the summary. The fold lives
+# in lib/linux/install.sh next to the recorder, so both halves of one rule have
+# one home (and the buckets are ids, not printed names: "OpenClaw Desktop CLI"
+# shatters into three tokens when a list is joined for the state file).
+if it "summary: a recorded post-install refusal is not also counted as installed"; then
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_INSTALLED=(git agent-skills tmux)
+        AUTOOS_RESULT_SKIPPED=(opencode-cli)
+        AUTOOS_RESULT_FAILED=()
+        autoos_fold_extra_failures
+        printf 'installed=%s skipped=%s failed=%s list=[%s]\n' \
+            "${#AUTOOS_RESULT_INSTALLED[@]}" "${#AUTOOS_RESULT_SKIPPED[@]}" \
+            "${#AUTOOS_RESULT_FAILED[@]}" "${AUTOOS_RESULT_INSTALLED[*]}"
+        printf 'failed=[%s]\n' "${AUTOOS_RESULT_FAILED[*]}"
+    )"
+    assert_eq "$out" "installed=2 skipped=1 failed=1 list=[git tmux]
+failed=[agent-skills]"
+fi
+
+if it "summary: a recorded refusal that also failed its install is listed once"; then
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_INSTALLED=()
+        AUTOOS_RESULT_SKIPPED=()
+        AUTOOS_RESULT_FAILED=(agent-skills)
+        autoos_fold_extra_failures
+        printf '%s' "${#AUTOOS_RESULT_FAILED[@]}"
+    )"
+    assert_eq "$out" "1"
+fi
+
+if it "summary: a recorded refusal is labelled failed (post-install)"; then
+    catalog_load catalog/linux.json x64 0
+    git_name="${CAT_NAME[$(catalog_index_of git)]}"
+    skill_name="${CAT_NAME[$(catalog_index_of agent-skills)]}"
+    out="$(
+        AUTOOS_EXTRA_FAILURES=(agent-skills)
+        AUTOOS_RESULT_FAILED=(agent-skills git not-a-real-id)
+        for f in "${AUTOOS_RESULT_FAILED[@]}"; do printf '%s\n' "$(autoos_result_label "$f")"; done
+    )"
+    # One line per component: the old `for f in $failed_names` printed the words
+    # of a multi-word display name as separate failures.
+    assert_eq "$(printf '%s\n' "$out" | grep -c '')" "3"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 1p)" "$skill_name (post-install)"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 2p)" "$git_name"
+    assert_eq "$(printf '%s\n' "$out" | sed -n 3p)" "not-a-real-id"
+fi
+
+# The fold above only matters if the run lives long enough to reach it. A
+# postInstall is called bare from setup.sh's execute loop, which runs under
+# `set -euo pipefail`, so one step returning non-zero killed the whole run
+# mid-plan: no summary, no state file, and every component after it silently
+# never installed. The real entry point is what is exercised here because the
+# defect is in the call, not in the step.
+if it "post-install: a failing postInstall is recorded and the run still finishes"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tree="$(mktemp -d)"
+    mkdir -p "$tree/home"
+    # A scratch tree: the code under test is linked, never copied-and-edited;
+    # only the catalog gets two test-only components. `custom` installs nothing
+    # (its work is entirely the postInstall), so the run touches nothing but $tree.
+    ln -s "$ROOT/setup.sh" "$tree/setup.sh"
+    ln -s "$ROOT/lib" "$tree/lib"
+    cp -a catalog "$tree/catalog"
+    python3 - "$tree/catalog/linux.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+doc["categories"][0]["components"] += [
+    {"id": "postinstall-fail-demo", "name": "Demo failing step",
+     "description": "test double", "provider": "custom", "package": "demo-fail",
+     "profiles": [], "postInstall": "autoos_test_failing_post_install"},
+    {"id": "postinstall-second-demo", "name": "Demo second component",
+     "description": "test double", "provider": "custom", "package": "demo-second",
+     "profiles": []},
+]
+json.dump(doc, open(path, "w", encoding="utf-8"), indent=2)
+PY
+    out="$(
+        # The step is an exported shell function because a postInstall is, by
+        # contract, just a named function run with no arguments (see
+        # run_post_install); the fake keeps that shape.
+        autoos_test_failing_post_install() { echo "DEMO post-install step ran"; return 1; }
+        export -f autoos_test_failing_post_install
+        HOME="$tree/home" bash "$tree/setup.sh" \
+            --only postinstall-fail-demo,postinstall-second-demo \
+            --yes --no-color --save-state "$tree/state.json" 2>&1
+    )"; rc=$?
+    saved="$(python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))["results"]
+print("installed=[%s] failed=[%s]" % (",".join(r["installed"]), ",".join(r["failed"])))
+' "$tree/state.json" 2>/dev/null || echo "no state file")"
+    rm -rf "$tree"
+    problems=""
+    [[ "$out" == *"DEMO post-install step ran"* ]] \
+        || problems+="[the fake postInstall never ran: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$out" == *"[2/2] Demo second component"* ]] \
+        || problems+="[the run stopped at the failing step, step 2/2 never ran] "
+    [[ "$out" == *"Demo failing step (post-install)"* ]] \
+        || problems+="[the summary does not name the component a post-install failure] "
+    # Listed once, as a failure — not also as installed.
+    listed="$(printf '%s\n' "$out" | grep -c '(post-install)')"
+    [[ "$listed" == "1" ]] || problems+="[the post-install failure line count is $listed, expected 1] "
+    [[ "$saved" == "installed=[postinstall-second-demo] failed=[postinstall-fail-demo]" ]] \
+        || problems+="[state file says: $saved] "
+    (( rc == 1 )) || problems+="[exit code $rc, expected 1 (the run must not read as success)] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+# run_post_install owns the containment, so every step gets it without each one
+# re-implementing it: it returns 0 whatever the step returned, warns with the
+# step's own exit code, and records the component. With no component id (a step
+# called from elsewhere) it records the step name, which the fold prints as-is.
+if it "post-install: run_post_install contains the step's exit code and records it"; then
+    out="$(
+        demo_step_fails() { echo "STEP RAN"; return 3; }
+        AUTOOS_EXTRA_FAILURES=()
+        run_post_install demo_step_fails demo-component
+        rc_own=$?
+        printf 'rc=%s recorded=[%s]\n' "$rc_own" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )"
+    problems=""
+    [[ "$out" == *"STEP RAN"* ]] || problems+="[the step never ran: $out] "
+    [[ "$out" == *"rc=0"* ]] || problems+="[run_post_install propagated a non-zero exit code] "
+    [[ "$out" == *"recorded=[demo-component]"* ]] || problems+="[the component id was not recorded: $out] "
+    [[ "$out" == *"demo_step_fails"* && "$out" == *"3"* ]] \
+        || problems+="[no warning naming the step and its exit code: $out] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "post-install: a step with no component id records the step name"; then
+    out="$(
+        demo_step_bare_fails() { return 1; }
+        AUTOOS_EXTRA_FAILURES=()
+        run_post_install demo_step_bare_fails
+        printf 'recorded=[%s]\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )"
+    assert_eq "$(printf '%s\n' "$out" | grep '^recorded=')" "recorded=[demo_step_bare_fails]"
+fi
+
 if it "undo restores a backed-up file"; then
     scratch="$(mktemp -d)"
     target="$scratch/.zshrc"
@@ -600,5 +744,137 @@ PY
 
 if it "config: an unchanged POST saves nothing and creates no backup"; then
     assert_eq "$(_cfg_api_post_py 2>&1 | tail -n 1)" "ok"
+fi
+
+# POST /api/config wrote its temp under a fixed, guessable name
+# (autoos.config.json.tmp), so anyone who could plant a symlink there - another
+# user's file in a shared checkout, a component that runs before the save -
+# turned a config save into a write into a file they chose. The temp is now
+# created unpredictably in the config's own directory and renamed onto it.
+_cfg_api_atomic_py() {
+    python3 - <<'PY'
+import atexit, importlib.util, io, json, pathlib, shutil, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-atomic-"))
+atexit.register(shutil.rmtree, root, True)
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+
+def post(body):
+    h = mod.Handler.__new__(mod.Handler)
+    raw = json.dumps(body).encode()
+    h.headers = {"Content-Length": str(len(raw))}
+    h.rfile = io.BytesIO(raw)
+    sent = {}
+    h._json = lambda code, obj: sent.update(code=code, obj=obj)
+    mod.Handler._post_config(h)
+    return sent["code"], sent["obj"]
+
+problems = []
+cfg = root / "autoos.config.json"
+victim = root / "victim.txt"
+victim.write_text("DO NOT TOUCH\n", encoding="utf-8")
+link = root / "autoos.config.json.tmp"
+try:
+    link.symlink_to(victim)
+except OSError:
+    problems.append("skip-reason: no symlink support on this host")
+else:
+    cfg.write_text(json.dumps({"version": 1}) + "\n", encoding="utf-8")
+    code, obj = post({"version": 1, "profile": "workstation"})
+    if code != 200 or obj.get("ok") is not True:
+        problems.append("save:%s:%s" % (code, obj))
+    if not link.is_symlink():
+        problems.append("the planted link was replaced")
+    if victim.read_text() != "DO NOT TOUCH\n":
+        problems.append("the save wrote through the planted link")
+    if cfg.is_symlink() or not cfg.is_file():
+        problems.append("the saved config is not a regular file")
+    if json.loads(cfg.read_text()) != {"version": 1, "profile": "workstation"}:
+        problems.append("merged content")
+leftovers = sorted(p.name for p in root.iterdir()
+                   if p.name.endswith(".tmp") and p.name != "autoos.config.json.tmp")
+if leftovers:
+    problems.append("temp file left behind:%s" % leftovers)
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "config save: the Serve module writes through a unique temp and never follows a planted link"; then
+    out="$(_cfg_api_atomic_py 2>&1 | tail -n 1)"
+    case "$out" in
+        *"no symlink support"*) skip "the host refuses symlinks ($out)"; assert_not_contains "$out" "link was replaced" ;;
+        *) assert_eq "$out" "ok" ;;
+    esac
+fi
+
+# A hand-edited autoos.config.json that is not valid JSON used to surface as a
+# 500 from the catch-all, which is both the wrong status and a message that
+# leaks the parser's detail as an internal failure. It is the caller's existing
+# file that is broken, so it is a 400 - and the file is left exactly as it is,
+# unread and un-backed-up, because nothing may be merged onto a config we could
+# not parse.
+_cfg_api_corrupt_py() {
+    python3 - <<'PY'
+import atexit, importlib.util, io, json, pathlib, shutil, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-corrupt-"))
+atexit.register(shutil.rmtree, root, True)
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+
+def post(body):
+    h = mod.Handler.__new__(mod.Handler)
+    raw = json.dumps(body).encode()
+    h.headers = {"Content-Length": str(len(raw))}
+    h.rfile = io.BytesIO(raw)
+    sent = {}
+    h._json = lambda code, obj: sent.update(code=code, obj=obj)
+    mod.Handler._post_config(h)
+    return sent["code"], sent["obj"]
+
+problems = []
+cfg = root / "autoos.config.json"
+broken = '{"version": 1, "answers": {"git_user_name": "SENTINEL-DO-NOT-ECHO", broken\n'
+cfg.write_text(broken, encoding="utf-8")
+code, obj = post({"version": 2})
+if code != 400:
+    problems.append("status:%s:%s" % (code, obj))
+error = obj.get("error", "") if isinstance(obj, dict) else ""
+if not error.startswith("existing autoos.config.json is corrupt: "):
+    problems.append("message:%s" % error)
+if "SENTINEL-DO-NOT-ECHO" in json.dumps(obj):
+    problems.append("the response echoed the file content")
+if cfg.read_text() != broken:
+    problems.append("a corrupt config was overwritten")
+if list(root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("a corrupt config was backed up")
+if sorted(p.name for p in root.iterdir() if p.name.endswith(".tmp")):
+    problems.append("a temp file was left behind")
+
+# Bytes that are not valid UTF-8 at all (a file saved in another encoding, an
+# editor that dropped a UTF-16 BOM) fail before the parser is even reached, so
+# they used to escape the 400 as a 500 from the catch-all.
+cfg.write_bytes(b"\xff\xfe{")
+code, obj = post({"version": 3})
+if code != 400:
+    problems.append("non-utf8-status:%s:%s" % (code, obj))
+error = obj.get("error", "") if isinstance(obj, dict) else ""
+if not error.startswith("existing autoos.config.json is corrupt: "):
+    problems.append("non-utf8-message:%s" % error)
+if cfg.read_bytes() != b"\xff\xfe{":
+    problems.append("a non-UTF-8 config was overwritten")
+if list(root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("a non-UTF-8 config was backed up")
+if [p.name for p in root.iterdir() if p.name.endswith(".tmp")]:
+    problems.append("a temp file was left behind after the non-UTF-8 save")
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "config save: a corrupt or non-UTF-8 existing config answers 400 and echoes nothing"; then
+    assert_eq "$(_cfg_api_corrupt_py 2>&1 | tail -n 1)" "ok"
 fi
 

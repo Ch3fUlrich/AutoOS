@@ -30,3 +30,7 @@ JSON
     fi
 fi
 
+if it "no catalog file duplicates a provider+package+arch+cask+source"; then
+    out="$(python3 tests/test_catalog_uniqueness.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+

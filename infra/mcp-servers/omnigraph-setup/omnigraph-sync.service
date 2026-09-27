@@ -1,0 +1,14 @@
+# setup-sync.sh generates and installs this unit automatically (it writes
+# ExecStart=<resolved path> into ~/.config/systemd/user/, not from this file).
+# This file is a manual-reference copy for a client that does not run
+# setup-sync.sh: replace @AUTOOS_ROOT@ with your AutoOS checkout root first.
+[Unit]
+Description=Reconcile local Omnigraph memory with the central server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Point at your checkout; secrets/config resolved from omnigraph-setup/.env next to it.
+ExecStart=@AUTOOS_ROOT@/infra/mcp-servers/omnigraph-setup/omnigraph-sync.sh
+Nice=10
