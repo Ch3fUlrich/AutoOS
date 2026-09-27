@@ -2309,11 +2309,13 @@
       }
     },
     "t1-orchestrator": {
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry",
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
         "opencode-zen/muse-spark-1.3-contributor-free",
-        "openrouter/meta/muse-spark-1.3-contributor"
+        "openrouter/meta/muse-spark-1.3-contributor",
+        "gemini/gemini-3.8-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2388,10 +2390,12 @@
       "unavailable_legs": {}
     },
     "t1-orchestrator-free-only": {
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry",
       "class": "free",
       "id": "t1-orchestrator-free-only",
       "legs": [
-        "opencode-zen/muse-spark-1.3-contributor-free"
+        "opencode-zen/muse-spark-1.3-contributor-free",
+        "gemini/gemini-3.8-flash"
       ],
       "strategy": "priority",
       "surfaces": {
