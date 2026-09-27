@@ -100,8 +100,8 @@ merges (L1, and an L2 for its own lanes); `orch` rules bind whoever briefs or re
 - R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
 - R-orch-11: A lane that retires or re-legs a route greps its id as a DEFAULT in tests/, configuration/, lib/, start-stack.*. (why: stale ids break CI silently; source: CI 36320592493, inbox 17:09:02Z)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
-- R-orch-13: Before ready: cross-family review (model pinned; queue a slow free reviewer, never skip), then Sonnet. (why: same family repeats writer blind spots; source: cao/dispatch.py, HAIKU-EVAL.md)
-- R-orch-14: Haiku is an extra first pass only, never the Sonnet final; record reviewer, model, verdict in the lane record. (why: Haiku caught 1 of 9 known defects; source: HAIKU-EVAL.md, L0 18:02:55Z)
+- R-orch-13: Plan, spec, decision or bigger change: a pinned cross-family review before execute or merge, then Sonnet. (why: same family repeats writer blind spots; source: common.md Second opinion)
+- R-orch-14: Never skip a slow free reviewer; Haiku stays an extra pass; record writer, reviewer, verdict. (why: a small reviewer's no-issues is not evidence; source: HAIKU-EVAL.md, inbox 17:52:55Z)
 
 ### worker (L3)
 
