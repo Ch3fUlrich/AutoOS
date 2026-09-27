@@ -29,6 +29,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (preflight guards); a failed state write leaves no state file; `off` without
   a state file still stops a standby on the port; the Ctrl-C path waits a
   short health window; TERM->KILL is tested.
+- Review round (lstby2d): `failover off` accepts a gateway that already serves
+  the port and clears the stale state instead of refusing forever; it finds a
+  standby holding the port even with no state dir (the dir is a hint, never a
+  gate); and a stale state-file pid that is simply gone is reported as
+  "already gone", not signalled as if it belonged to a foreign program.
 ### Changed — t1-orchestrator keeps a free gemini leg (T1FREE, 2026-09-27)
 
 - **`catalog/ai-registry.json`** + renders: `gemini/gemini-3.8-flash` appended to `t1-orchestrator` and `t1-orchestrator-free-only`, so the default model of start-stack, the installer and OpenHands stays servable while OpenRouter, DeepSeek and cheapinference credit is out; `t1-orchestrator-clean`, `spark-1.3-contributor`, `deepseek-v4.1-flash` and the cheaperinference pins stay omitted. Open: `t1-orchestrator-paid` (LiteLLM picker) has no leg until MUSEAPI.

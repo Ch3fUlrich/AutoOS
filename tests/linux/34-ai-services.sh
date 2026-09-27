@@ -4094,9 +4094,18 @@ if it "aistack: failover off accepts a gateway already serving the port and clea
     # goes to the refusal (the next test).
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    sleep 300 </dev/null >/dev/null 2>&1 &
+    # A pid that is real (was a genuine process, so /proc once had it) but
+    # provably gone by the time `off` reads it: fork a subshell that exits on
+    # its own and `wait` for that exit (a signal is never in the loop) -
+    # `sleep 300 & ...; kill; wait` used to do this by racing a TERM against
+    # the sleep's own timeout. That race intermittently lost deep in this
+    # suite's long-lived shell (kill reported success, wait still blocked for
+    # the sleep's full 300 s - reproduced twice; a fresh, otherwise-idle shell
+    # never lost it in 260+ tries), which is exactly the 5+ minute stall this
+    # file used to add to `--filter=failover` (lstby2e). Waiting on a job that
+    # dies by itself needs no signal to land in time, so the race cannot recur.
+    ( : ) &
     dead=$!
-    kill "$dead" 2>/dev/null || true
     wait "$dead" 2>/dev/null || true
     mkdir -p "$d/cfg"
     printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
@@ -4146,9 +4155,10 @@ if it "aistack: failover off names a stale state pid as already gone, not as a f
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
-    sleep 300 </dev/null >/dev/null 2>&1 &
+    # See the sibling "already serving the port" case above for why this is a
+    # self-exiting subshell rather than a killed `sleep 300` (lstby2e).
+    ( : ) &
     dead=$!
-    kill "$dead" 2>/dev/null || true
     wait "$dead" 2>/dev/null || true
     mkdir -p "$d/cfg"
     printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
