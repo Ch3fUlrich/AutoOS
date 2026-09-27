@@ -458,8 +458,10 @@ def _backup_and_write(path, text, stamp=None):
     # raced). This is a best-effort check; the real protection is O_NOFOLLOW.
     if os.path.islink(path):
         return False
+    backup = None
     if os.path.exists(path):
-        shutil.copy2(path, _backup_path(path, stamp))
+        backup = _backup_path(path, stamp)
+        shutil.copy2(path, backup)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     # Open with O_NOFOLLOW so the write fails with ELOOP if path becomes a
     # symlink between the check above and this open. This makes the check
@@ -471,6 +473,15 @@ def _backup_and_write(path, text, stamp=None):
         fd = os.open(path, flags, 0o644)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
+            # The pre-check passed and copy2 already ran, so the refusal below
+            # has to take its own backup back -- the promise above is that a
+            # refused write changes nothing, and a stray copy of the target's
+            # bytes is a change the user never asked for.
+            if backup is not None:
+                try:
+                    os.unlink(backup)
+                except OSError:
+                    pass
             return False
         raise
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -695,12 +706,19 @@ def cmd_openhands(args):
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))
+    # Every refusal to write must reach the caller: "left alone (symlink)"
+    # printed on stdout and exit 0 told the installer a config was applied when
+    # nothing was touched, so the component reported installed and the user's
+    # file stayed as it was. Same contract as cmd_opencode, whose caller folds
+    # a non-zero exit into autoos_record_failure.
+    refused = False
 
     settings_path = os.path.join(args.openhands_dir, "settings.json")
     status = _settings_status(settings_path, enable, args.dry_run)
     if status is None:
         print("agent-harness openhands: left alone %s" % settings_path)
     else:
+        refused = refused or status == "left alone (symlink)"
         print("agent-harness openhands: %s %s" % (status, settings_path))
 
     for role_name, role in roles.items():
@@ -711,8 +729,9 @@ def cmd_openhands(args):
             base = vendored_base(args.repo_root, profile)
         rendered = render_profile(role_name, role, base, contract_ref)
         status = _apply_file(path, _serialize_profile(rendered), args.dry_run)
+        refused = refused or status == "left alone (symlink)"
         print("agent-harness openhands: %s %s" % (status, path))
-    return 0
+    return 1 if refused else 0
 
 
 # --------------------------------------------------------------------------- cli
