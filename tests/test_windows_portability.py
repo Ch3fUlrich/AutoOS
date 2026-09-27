@@ -22,19 +22,18 @@ REPO = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 # POSIX-only names (stdlib modules and functions that do not exist on Windows)
 # ---------------------------------------------------------------------------
-_POSIX_NAMES = frozenset({
-    "os.chmod",
-    "os.killpg",
-    "os.setsid",
-    "os.getpgid",
-    "os.fork",
-    "fcntl",
-    "pwd",
-    "grp",
+# os functions that do not exist on Windows (AttributeError there) or, for
+# chmod, silently ignore the POSIX mode bits a test asserts on.
+_OS_POSIX_FUNCS = frozenset({
+    "chmod", "killpg", "setsid", "getpgid", "fork", "mkfifo",
+    "getuid", "geteuid", "getgid", "getegid",
 })
+# POSIX-only modules.
+_POSIX_MODULES = frozenset({"fcntl", "pwd", "grp"})
 
-# signal.SIGKILL and signal.SIGTERM are referenced as attributes on 'signal'
-_SIGNAL_ATTRS = frozenset({"SIGKILL", "SIGTERM"})
+# signal.* members Windows does not define (SIGTERM exists there but cannot
+# reach a process group, which is what these tests use it for).
+_SIGNAL_ATTRS = frozenset({"SIGKILL", "SIGTERM", "SIGALRM", "SIGPIPE", "SIGUSR1", "SIGUSR2", "SIGHUP"})
 
 # Shebang prefixes we look for in string constants
 _SHEBANG_PREFIXES = ("#!/bin/sh", "#!/usr/bin/env sh", "#!/usr/bin/env bash")
@@ -48,7 +47,7 @@ def _posix_call_names(node: ast.AST) -> set[str]:
         # os.chmod(x), os.killpg(...), etc.
         if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
             if isinstance(child.func.value, ast.Name) and child.func.value.id == "os":
-                if child.func.attr in ("chmod", "killpg", "setsid", "getpgid", "fork"):
+                if child.func.attr in _OS_POSIX_FUNCS:
                     found.add(f"os.{child.func.attr}")
             elif isinstance(child.func.value, ast.Attribute) and \
                     isinstance(child.func.value.value, ast.Name) and \
@@ -56,14 +55,14 @@ def _posix_call_names(node: ast.AST) -> set[str]:
                 if child.func.value.attr in _SIGNAL_ATTRS:
                     found.add(f"signal.{child.func.value.attr}")
             elif isinstance(child.func.value, ast.Name) and \
-                    child.func.value.id in ("fcntl", "pwd", "grp"):
+                    child.func.value.id in _POSIX_MODULES:
                 found.add(child.func.value.id)
 
         # Bare references like `signal.SIGKILL` as a name constant (e.g. in kill)
         if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
             if child.value.id == "signal" and child.attr in _SIGNAL_ATTRS:
                 found.add(f"signal.{child.attr}")
-            if child.value.id in ("fcntl", "pwd", "grp"):
+            if child.value.id in _POSIX_MODULES:
                 found.add(child.value.id)
 
         # String constants with shebang prefixes
@@ -230,10 +229,11 @@ def lint_posix_guards(repo: Path | None = None) -> list[str]:
         source_lines = source.splitlines()
 
         # Build class->decorator guard map (class-level guards protect methods)
-        class_guarded: dict[str, bool] = {}
+        # Keyed by the node itself: two classes may share a name.
+        class_guarded: dict[ast.ClassDef, bool] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                class_guarded[node.name] = _is_guarded(node, source_lines)
+                class_guarded[node] = _is_guarded(node, source_lines)
 
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -254,7 +254,7 @@ def lint_posix_guards(repo: Path | None = None) -> list[str]:
                         if isinstance(parent, ast.ClassDef):
                             for child in ast.walk(parent):
                                 if child is node:
-                                    if class_guarded.get(parent.name, False):
+                                    if class_guarded.get(parent, False):
                                         guarded = True
                                     break
 

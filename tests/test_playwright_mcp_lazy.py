@@ -965,6 +965,7 @@ class CacheHardening(LazyProxyCase):
                 self.assert_replaced_by_a_good_cache()
                 self.again(s)
 
+    @unittest.skipIf(os.name == "nt", "os.mkfifo; POSIX only")
     def test_a_named_pipe_at_the_cache_path_cannot_hang_the_proxy(self):
         self.plant()
         os.remove(self.cache)
@@ -1038,6 +1039,7 @@ class CacheOwnership(unittest.TestCase):
             cache, lines = self.load()
         self.refused(cache, lines, "belongs to another user")
 
+    @unittest.skipIf(os.name == "nt", "os.getuid; POSIX only")
     def test_the_owner_is_compared_with_the_effective_uid(self):
         # a setuid or sudo'd process: the real uid owns the file, the effective one does not
         with mock.patch.object(self.module.os, "geteuid", return_value=os.getuid() + 1):
