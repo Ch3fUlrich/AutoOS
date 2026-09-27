@@ -1620,7 +1620,15 @@ if it "graphify link prepare announces the verdict a real run then acts on"; the
     for shape in free cloned wrapper ownfile ownlink uvtool; do
         rm -f "$tmp/.local/bin/graphify-mcp"
         [[ "$shape" == free ]] || gfy_link_shape "$tmp" "$shape"
-        want="$shape"; [[ "$shape" == free ]] && want=free
+        # The link shape is what the driver creates; GRAPHIFY_LINK_STATE is what
+        # the installer decides. Two shapes per verdict (the clone's link and the
+        # wrapper's are both recognised leftovers), so the map is explicit.
+        case "$shape" in
+            free) want=free ;;
+            cloned | wrapper) want=removed ;;
+            ownfile | ownlink) want=blocked ;;
+            uvtool) want=uv ;;
+        esac
         before="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
         dry="$(gfy_link_run "$tmp" 1)"
         after_dry="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
@@ -1645,16 +1653,17 @@ fi
 
 # gfy_tool_run <tmp> <have> <dry> <log> <state-file>: install_graphify_tool against a
 # fake uv. The fake records every argv in <log> and keeps the installed version in
-# <state-file> (seeded from <have>, which may be ""), so `tool list` after an install
-# reports what was just installed — a second run meets the real tool's contract
-# instead of a frozen answer. The pin and the distribution name come from the
-# catalog, never from this file.
+# <state-file>, so `tool list` after an install reports what was just installed — a
+# second run meets the real tool's contract instead of a frozen answer. <have> seeds
+# that file only when it does not exist yet: a caller that runs twice wants the
+# second run to read the first one's result. The pin and the distribution name come
+# from the catalog, never from this file.
 gfy_tool_run() {
     local tmp="$1" have="$2" dry="$3" log="$4" state="$5"
     local name pin
     name="$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')"
     pin="$(mcp_package graphify | sed -e 's/.*==//')"
-    printf '%s' "$have" >"$state"
+    [[ -f "$state" ]] || printf '%s' "$have" >"$state"
     (
         SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
         uv_log="$log" uv_state="$state" uv_name="$name"
@@ -1767,8 +1776,10 @@ if it "graphify tool install: a stale agent-skills link is cleared, then the pin
     pin_pkg="$(mcp_package graphify)"
     out="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
     problems=""
-    [[ -e "$tmp/.local/bin/graphify-mcp" || -L "$tmp/.local/bin/graphify-mcp" ]] \
-        && problems+="[the agent-skills link survived] "
+    # uv writes its own link at that path when it installs, so what must be gone is
+    # the link into the retired clone — not every file named graphify-mcp.
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+    [[ "$got" == *"/agent-skills/"* ]] && problems+="[the agent-skills link survived: $got] "
     grep -qxF "tool install $pin_pkg" "$log" \
         || problems+="[no install ran: $(tr '\n' '|' <"$log")] "
     [[ "$out" == *"removed"* ]] || problems+="[the removal went unreported: $out] "
@@ -1811,21 +1822,28 @@ if it "graphify tool install: the dry run names the action the real run takes"; 
     problems=""
     for have in "" "0.0.1-other" "$pin"; do
         : >"$log"
+        # Each case starts from an empty bin dir and an empty uv receipt, so the
+        # version below is the only thing that decides --force — not the link or
+        # the install the previous case left behind.
+        rm -f "$tmp/.local/bin/graphify-mcp" "$state"
         dry="$(gfy_tool_run "$tmp" "$have" 1 "$log" "$state")"
         grep -q '^tool install' "$log" && problems+="[the dry run installed for have=$have] "
         live="$(gfy_tool_run "$tmp" "$have" 0 "$log" "$state")"
+        # One verb decides both branches: install / update / skip. The dry run
+        # prefixes it with "would", the real run reports it in the past tense.
         case "$have" in
-            "") [[ "$dry" == *"installed"* ]] || problems+="[fresh host, dry run: $dry] "
-                [[ "$live" == *"installed"* ]] || problems+="[fresh host, real run: $live] "
-                grep -qxF "tool install $pin_pkg" "$log" \
+            "") stem=install ;;
+            "$pin") stem=skipped ;;
+            *) stem=updat ;;
+        esac
+        [[ "$dry" == *"$stem"* ]] || problems+="[have=$have, dry run: $dry] "
+        [[ "$live" == *"$stem"* ]] || problems+="[have=$have, real run: $live] "
+        case "$have" in
+            "") grep -qxF "tool install $pin_pkg" "$log" \
                     || problems+="[live plan for a fresh host: $(tr '\n' '|' <"$log")] " ;;
-            "$pin") [[ "$dry" == *"skipped"* ]] || problems+="[already pinned, dry run: $dry] "
-                [[ "$live" == *"skipped"* ]] || problems+="[already pinned, real run: $live] "
-                grep -q '^tool install' "$log" \
+            "$pin") grep -q '^tool install' "$log" \
                     && problems+="[re-installed although pinned: $(tr '\n' '|' <"$log")] " ;;
-            *) [[ "$dry" == *"updated"* ]] || problems+="[other version, dry run: $dry] "
-                [[ "$live" == *"updated"* ]] || problems+="[other version, real run: $live] "
-                grep -qxF "tool install --force $pin_pkg" "$log" \
+            *) grep -qxF "tool install --force $pin_pkg" "$log" \
                     || problems+="[no --force for have=$have: $(tr '\n' '|' <"$log")] " ;;
         esac
     done
@@ -1976,7 +1994,6 @@ oh_agent_skills_run() {
         enable_project_mcp_server() { :; }
         register_antigravity_mcp_server() { :; }
         omnigraph_readiness() { return 0; }
-        graphify_mcp_symlink() { :; }
         answer() { echo ""; }
         has_cmd() { return 1; }
         install_agent_skills
@@ -2154,7 +2171,7 @@ if it "homelab: an agent-skills PYTHONPATH entry is backed up and removed"; then
     kept="$(python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(','.join(sorted(d.get('mcpServers', {}))), 'firstTimeRun' if 'firstTimeRun' in d else 'LOST')
+print(','.join(sorted(d.get('mcpServers', {})) + ['firstTimeRun' if 'firstTimeRun' in d else 'LOST']))
 " "$tmp/.claude.json" 2>/dev/null || echo unreadable)"
     [[ "$kept" == "serena,firstTimeRun" ]] \
         || problems+="[the config lost or kept the wrong keys: $kept] "
@@ -2218,6 +2235,35 @@ if it "homelab: no user-scope entry says skipped, not failed"; then
     rm -rf "$tmp"
 fi
 
+if it "homelab: a config outside this run's home is never touched"; then
+    # The claude CLI reads $HOME, but the home this run configures is $SYS_HOME.
+    # When the two differ - setup under sudo, or a harness that fakes SYS_HOME and
+    # leaves HOME at the operator's real one - the file the resolver names belongs
+    # to somebody else's session, and removing an entry from it edits a config
+    # this run was never pointed at. Refuse, say skipped, touch nothing.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    run_home="$tmp/run"; cfg_home="$tmp/cfg"
+    mkdir -p "$run_home"
+    hl_cfg_write "$cfg_home" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
+    before="$(cat "$cfg_home/.claude.json")"
+    out="$( (
+        SYS_HOME="$run_home" HOME="$cfg_home" AUTOOS_DRY_RUN=0
+        unset CLAUDE_CONFIG_DIR
+        claude() { printf 'claude %s\n' "$*" >>"$tmp/claude.log"; return 0; }
+        remove_stale_homelab_mcp_entry 2>&1
+    ) )"
+    problems=""
+    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed an entry outside this run's home] "
+    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
+    [[ "$(cat "$cfg_home/.claude.json")" == "$before" ]] || problems+="[the config outside this run's home was rewritten] "
+    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *"the stale user-scope"* ]] || problems+="[claimed a removal it did not do: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
 if it "homelab: a project-scoped entry of that name is not the user scope"; then
     # ~/.claude.json also carries per-project servers. Those belong to the repo's
     # own .mcp.json approval, never to a user-scope cleanup.
@@ -2254,10 +2300,10 @@ fi
 if it "homelab: the removal runs on the path that wires the MCP stack up"; then
     # An orphan function nothing calls is a test fixture, not a feature: the
     # retirement cleanup belongs in install_agent_skills, next to the graphify
-    # link it shares a reason with.
-    if grep -q "remove_stale_homelab_mcp_entry" lib/linux/install.sh &&
-       grep -A80 '^install_agent_skills()' lib/linux/install.sh |
-           grep -q "remove_stale_homelab_mcp_entry"; then pass
+    # link it shares a reason with. The body is taken whole — a fixed window of
+    # lines would miss the call as the function grows.
+    if awk '/^install_agent_skills\(\) \{/{on=1} on{print} on && /^\}$/{exit}' \
+            lib/linux/install.sh | grep -q "remove_stale_homelab_mcp_entry"; then pass
     else fail "remove_stale_homelab_mcp_entry is defined but never called by install_agent_skills"; fi
 fi
 
