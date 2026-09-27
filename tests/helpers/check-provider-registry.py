@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -140,10 +141,33 @@ def main() -> int:
         if "ai-registry.json" not in text:
             problems.append(f"{rel} does not read catalog/ai-registry.json")
 
-    # 6. the docs table names the registry as its source.
+    # 6. the docs table names the registry as its source AND its provider-id
+    #    column matches every omniroute_id (PROV finding 5: the human view of
+    #    exactly what apply reads had drifted - free_ai vs free-ai - and
+    #    nothing compared it). A provider with a null omniroute_id must show a
+    #    dash, never a bare id.
     docs = (ROOT / "docs" / "api-keys.md").read_text(encoding="utf-8")
     if "catalog/ai-registry.json" not in docs:
         problems.append("docs/api-keys.md does not name catalog/ai-registry.json")
+    table_ids = {}
+    for line in docs.splitlines():
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|", line)
+        if m:
+            table_ids[m.group(1)] = m.group(2).strip()
+    for name, entry in registry_providers.items():
+        if name not in table_ids:
+            continue
+        cell = table_ids[name]
+        omni = entry.get("omniroute_id")
+        if omni is None:
+            if not cell.startswith("—"):
+                problems.append(
+                    f"docs/api-keys.md row {name}: expected — for a null "
+                    f"omniroute_id, got {cell!r}")
+        elif cell != f"`{omni}`":
+            problems.append(
+                f"docs/api-keys.md row {name}: provider id {cell!r} != "
+                f"omniroute_id {omni!r}")
 
     if problems:
         for problem in problems:

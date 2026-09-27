@@ -44,12 +44,16 @@
     "         3.7-flash free input quota is also tiny). The antigravity",
     "         3.7-flash-medium leg in t2-worker is a separate OAuth pool",
     "         (ack 1.6s) — allowed as t2 overflow.",
-    "deepseek-v4.1-flash = pinned single-model route: openrouter paid →",
-    "         zen paid. Probe-falsified 2026-09-22: the deepseek-DIRECT leg",
-    "         400s ('not available in the active live catalog for provider",
-    "         deepseek'), so it was dropped; zen leg is real but 402s until",
-    "         the Zen balance is topped up (chain hops by design). Exact model",
-    "         only: no v4-flash (no suffix 1) or deepseek-flash legs",
+    "deepseek-v4.1-flash = pinned single-model route: native",
+    "         deepseek/deepseek-flash, then zen paid as overflow. The direct",
+    "         leg was probe-falsified 2026-09-22 ('not available in the active",
+    "         live catalog for provider deepseek') and dropped; operator",
+    "         restored it at L0 2026-09-27T12:55:16Z and it was re-measured 200",
+    "         through the gateway 2026-09-27T14:5xZ, so it LEADS now (D20: an",
+    "         unmeasured lesson is not a rule). Zen is real but 402s until the",
+    "         Zen balance is topped up (chain hops by design). Exact model only:",
+    "         no v4-flash (no suffix 1) leg; OpenRouter is unavailable (DSMAX",
+    "         2026-09-27), so its paid leg is no longer part of the route.",
     "opus-4-6 = pinned single-model route (2026-09-24): antigravity Opus 4.6",
     "         Thinking (OAuth free, ack 3.4s) → cc Opus 4.6 (subscription,",
     "         429-quota-1h at probe = overflow-only, never a head). Lives in",
@@ -208,6 +212,9 @@
   "omitted": [
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
+    "spark-1.3-contributor",
+    "t1-orchestrator",
+    "t1-orchestrator-clean",
     "t1-orchestrator-free-only"
   ],
   "combos": [
@@ -228,30 +235,6 @@
       ]
     },
     {
-      "name": "t1-orchestrator",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "openrouter/meta/muse-spark-1.3-contributor"
-      ]
-    },
-    {
-      "name": "spark-1.3-contributor",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "openrouter/meta/muse-spark-1.3-contributor"
-      ]
-    },
-    {
-      "name": "t1-orchestrator-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "openrouter/meta/muse-spark-1.3-contributor"
-      ]
-    },
-    {
       "name": "t2-worker",
       "strategy": "priority",
       "context": "128k",
@@ -259,7 +242,6 @@
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
         "cheaperinference/kimi-k3",
-        "openrouter/deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-flash"
       ]
     },
@@ -269,7 +251,6 @@
       "context": "128k",
       "models": [
         "deepseek/deepseek-flash",
-        "openrouter/deepseek/deepseek-v4.1-flash",
         "mistral/mistral-small-latest"
       ]
     },
@@ -288,8 +269,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "agy/claude-opus-4-6-thinking",
-        "openrouter/deepseek/deepseek-v4.1-flash"
+        "agy/claude-opus-4-6-thinking"
       ]
     },
     {
@@ -344,8 +324,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "deepseek/deepseek-flash",
-        "openrouter/deepseek/deepseek-v4.1-flash"
+        "deepseek/deepseek-flash"
       ]
     },
     {

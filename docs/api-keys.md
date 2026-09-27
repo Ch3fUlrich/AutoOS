@@ -53,7 +53,7 @@ registry that `apply`, `tools/mirror-litellm-env.py` and
 | `openrouter` | `openrouter` | |
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
-| `free_ai` | `free_ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
+| `free_ai` | `free-ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
 | `omniroute` | — | the **client** key apps use; not a provider |
 
 ## Where to get them

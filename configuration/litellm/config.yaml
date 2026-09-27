@@ -95,10 +95,6 @@ model_list:
       api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t2-worker
@@ -109,10 +105,6 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: t2-worker-clean
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -246,10 +238,6 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: deepseek-v4.1-flash
-    litellm_params:
-      model: openrouter/deepseek/deepseek-v4.1-flash
-      api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END deepseek-v4.1-flash
 
   # AUTOOS-MANAGED-START gemini-3.8-flash

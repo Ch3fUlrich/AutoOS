@@ -187,8 +187,11 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # credits exhausted 2026-09-27), so it does not reach the combo.
         self.assertNotIn("openrouter/openai/gpt-oss-120b",
                          combos_by_name["t2-worker"]["models"])
-        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
-                      combos_by_name["t2-worker"]["models"])
+        # DSMAX 2026-09-27: the whole openrouter provider is off
+        # (providers.openrouter.available: false), so its deepseek leg is
+        # gated out of the combo too.
+        self.assertNotIn("openrouter/deepseek/deepseek-v4.1-flash",
+                         combos_by_name["t2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
         # t1-orchestrator-paid/t2-worker-paid/t3-driver-paid (LiteLLM-only) and
@@ -221,7 +224,7 @@ class GatewayRefTests(unittest.TestCase):
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
+        self.assertIn("deepseek/deepseek-flash",
                       by_name["t2-worker"]["models"])
         self.assertIn("gemini/gemini-3.8-flash", by_name["t2-worker"]["models"])
 

@@ -206,12 +206,12 @@ silence as stuck — with one exception for rate limits (below):
 
 | Tier | Role | Context | Chain head (free-first) |
 |---|---|---|---|
-| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, spark-only + `#high` (xhigh effort) | zen spark-contributor-free → openrouter spark-contributor → zen spark (paid). No gemini-3.1-pro (reasons worse than 3.8-flash). |
-| `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only | openrouter plain spark → zen paid spark. No free legs (any big free model may train). |
-| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k | gemini-3.8-flash → groq/cerebras/sambanova gpt-oss-120b → cheap-inference deepseek/glm/kimi → openrouter/deepseek flash |
-| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct → openrouter/zen flash → mistral-small direct. No free legs, no reseller legs. |
-| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k | mistral-code → groq/cerebras qwen3.8-27b → cheap-inference glm-4.5-air/minimax-m2.7 → mistral-small → deepseek/zen flash |
-| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct → mistral-small direct → zen paid flash. No free legs. |
+| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, spark-only + `#high` (xhigh effort) | UNSERVABLE since 2026-09-27 (route omitted): zen spark-contributor-free is client-bound → openrouter spark-contributor is off (DSMAX). Muse remains free Zen through the opencode client only. No gemini-3.1-pro (reasons worse than 3.8-flash). |
+| `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only | UNSERVABLE since 2026-09-27 (route omitted): its only leg was openrouter spark, now off (DSMAX). |
+| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k | gemini-3.8-flash → antigravity 3.7-flash-high → kimi-k3 (cheap-inference allow-list) → deepseek/deepseek-flash direct `#low`/`#high`/`#max`. groq/cerebras/sambanova/openrouter/zen legs are gated unavailable. |
+| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct `#low`/`#high`/`#max` → mistral-small direct. openrouter/zen legs are gated unavailable. No free legs, no reseller legs. |
+| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k | mistral-code → cheap-inference glm-5.2/minimax-m2.7 (allow-list) → deepseek/deepseek-flash direct → mistral-small. groq/cerebras/openrouter/zen legs are gated unavailable; glm-4.5-air is DENIED by `deny-cheaperinference`. |
+| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k | deepseek direct `#low`/`#high`/`#max` → mistral-small direct. zen paid flash is gated unavailable. No free legs. |
 
 Rule: anything under 1M context belongs in t2/t3, never t1
 (`opencode.jsonc` limits enforce this: 1M vs 128k). Small-context models
