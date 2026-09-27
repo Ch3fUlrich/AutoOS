@@ -3878,9 +3878,12 @@ class _WorkerRecordBase(unittest.TestCase):
         self.addCleanup(self._restore)
         # cmd_run refuses (rc 3) when no gateway answers; CI has none, a dev host
         # usually does - pin it so these tests never depend on the host's stack.
-        patcher = mock.patch.object(self.agent, "gateway_up", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # CI also has no configuration/api-keys.yml, so no client key (rc 3 before
+        # the gateway check); a dev host reads the main checkout's. Pin both.
+        for name, value in (("gateway_up", True), ("client_key", "sk-test-key")):
+            patcher = mock.patch.object(self.agent, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _restore(self):
         if self.old is None:
