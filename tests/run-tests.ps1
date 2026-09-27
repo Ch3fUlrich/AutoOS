@@ -1153,6 +1153,50 @@ Test-Case 'config save: an empty object in the config is compared, not a crash' 
     }
 }
 
+Test-Case 'config save: the Serve module temp name is unpredictable and a planted link is never followed' {
+    # The old line was $tmpPath = "$Path.tmp", a fixed and guessable name: a
+    # symlink planted there took the config bytes - a write into a file the
+    # caller never chose - and the rename then moved the link itself onto the
+    # config path, so the config BECAME that file. A GUID in the name leaves
+    # nothing predictable to plant.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('autoos-cfgsave-' + [Guid]::NewGuid().ToString('N'))
+    # paths before the try: the finally has to be able to name them even when an
+    # assertion threw first, and Set-StrictMode makes an unset one fatal
+    $cfg = Join-Path $scratch 'autoos.config.json'
+    $victim = Join-Path $scratch 'victim.txt'
+    $link = "$cfg.tmp"
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        if ($serveSource -match '\$tmpPath = "\$Path\.tmp"') { throw 'the fixed temp name is back' }
+        if ($serveSource -notmatch '\$tmpPath = "\$Path\.\$\(\[[Gg]uid\]::NewGuid') { throw 'the temp name is not unique per call' }
+        [IO.File]::WriteAllText($victim, 'DO NOT TOUCH')
+        [IO.File]::WriteAllText($cfg, '{"version":1}')
+        $planted = $false
+        try { New-Item -ItemType SymbolicLink -Path $link -Target $victim | Out-Null; $planted = $true } catch { }
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates ('{"version":1,"profile":"workstation","answers":{"git_user_name":"Alice"}}' | ConvertFrom-Json)
+        Assert-True $result.ok 'a changed save did not report ok'
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Alice'
+        $cfgItem = Get-Item -LiteralPath $cfg
+        if (($cfgItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'the saved config is a reparse point, not a regular file' }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.tmp' | Where-Object { $_.Name -ne 'autoos.config.json.tmp' }).Count) { throw 'a temp file was left beside the config' }
+        if (-not $planted) {
+            Skip 'the host refuses unprivileged symlinks (Windows needs privilege or developer mode)'
+            return
+        }
+        if ([IO.File]::ReadAllText($victim) -ne 'DO NOT TOUCH') { throw 'the save wrote through the planted link' }
+        $linkItem = Get-Item -LiteralPath $link
+        if (($linkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw 'the planted link was replaced' }
+        # a second changing save claims its own name; the planted link stays alone
+        $null = Save-AutoOSWebConfig -Path $cfg -Updates ('{"profile":"light"}' | ConvertFrom-Json)
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).profile) 'light'
+        if ([IO.File]::ReadAllText($victim) -ne 'DO NOT TOUCH') { throw 'the second save wrote through the planted link' }
+    } finally {
+        # drop the planted link before the recursive delete, so nothing follows it
+        if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue }
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'a page whose server has gone tears itself down' {
     if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
     if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }

@@ -602,3 +602,118 @@ if it "config: an unchanged POST saves nothing and creates no backup"; then
     assert_eq "$(_cfg_api_post_py 2>&1 | tail -n 1)" "ok"
 fi
 
+# POST /api/config wrote its temp under a fixed, guessable name
+# (autoos.config.json.tmp), so anyone who could plant a symlink there - another
+# user's file in a shared checkout, a component that runs before the save -
+# turned a config save into a write into a file they chose. The temp is now
+# created unpredictably in the config's own directory and renamed onto it.
+_cfg_api_atomic_py() {
+    python3 - <<'PY'
+import atexit, importlib.util, io, json, pathlib, shutil, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-atomic-"))
+atexit.register(shutil.rmtree, root, True)
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+
+def post(body):
+    h = mod.Handler.__new__(mod.Handler)
+    raw = json.dumps(body).encode()
+    h.headers = {"Content-Length": str(len(raw))}
+    h.rfile = io.BytesIO(raw)
+    sent = {}
+    h._json = lambda code, obj: sent.update(code=code, obj=obj)
+    mod.Handler._post_config(h)
+    return sent["code"], sent["obj"]
+
+problems = []
+cfg = root / "autoos.config.json"
+victim = root / "victim.txt"
+victim.write_text("DO NOT TOUCH\n", encoding="utf-8")
+link = root / "autoos.config.json.tmp"
+try:
+    link.symlink_to(victim)
+except OSError:
+    problems.append("skip-reason: no symlink support on this host")
+else:
+    cfg.write_text(json.dumps({"version": 1}) + "\n", encoding="utf-8")
+    code, obj = post({"version": 1, "profile": "workstation"})
+    if code != 200 or obj.get("ok") is not True:
+        problems.append("save:%s:%s" % (code, obj))
+    if not link.is_symlink():
+        problems.append("the planted link was replaced")
+    if victim.read_text() != "DO NOT TOUCH\n":
+        problems.append("the save wrote through the planted link")
+    if cfg.is_symlink() or not cfg.is_file():
+        problems.append("the saved config is not a regular file")
+    if json.loads(cfg.read_text()) != {"version": 1, "profile": "workstation"}:
+        problems.append("merged content")
+leftovers = sorted(p.name for p in root.iterdir()
+                   if p.name.endswith(".tmp") and p.name != "autoos.config.json.tmp")
+if leftovers:
+    problems.append("temp file left behind:%s" % leftovers)
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "config save: the Serve module writes through a unique temp and never follows a planted link"; then
+    out="$(_cfg_api_atomic_py 2>&1 | tail -n 1)"
+    case "$out" in
+        *"no symlink support"*) skip "the host refuses symlinks ($out)"; assert_not_contains "$out" "link was replaced" ;;
+        *) assert_eq "$out" "ok" ;;
+    esac
+fi
+
+# A hand-edited autoos.config.json that is not valid JSON used to surface as a
+# 500 from the catch-all, which is both the wrong status and a message that
+# leaks the parser's detail as an internal failure. It is the caller's existing
+# file that is broken, so it is a 400 - and the file is left exactly as it is,
+# unread and un-backed-up, because nothing may be merged onto a config we could
+# not parse.
+_cfg_api_corrupt_py() {
+    python3 - <<'PY'
+import atexit, importlib.util, io, json, pathlib, shutil, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-cfg-corrupt-"))
+atexit.register(shutil.rmtree, root, True)
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+
+def post(body):
+    h = mod.Handler.__new__(mod.Handler)
+    raw = json.dumps(body).encode()
+    h.headers = {"Content-Length": str(len(raw))}
+    h.rfile = io.BytesIO(raw)
+    sent = {}
+    h._json = lambda code, obj: sent.update(code=code, obj=obj)
+    mod.Handler._post_config(h)
+    return sent["code"], sent["obj"]
+
+problems = []
+cfg = root / "autoos.config.json"
+broken = '{"version": 1, "answers": {"git_user_name": "SENTINEL-DO-NOT-ECHO", broken\n'
+cfg.write_text(broken, encoding="utf-8")
+code, obj = post({"version": 2})
+if code != 400:
+    problems.append("status:%s:%s" % (code, obj))
+error = obj.get("error", "") if isinstance(obj, dict) else ""
+if not error.startswith("existing autoos.config.json is corrupt: "):
+    problems.append("message:%s" % error)
+if "SENTINEL-DO-NOT-ECHO" in json.dumps(obj):
+    problems.append("the response echoed the file content")
+if cfg.read_text() != broken:
+    problems.append("a corrupt config was overwritten")
+if list(root.glob("autoos.config.json.autoos-backup-*")):
+    problems.append("a corrupt config was backed up")
+if sorted(p.name for p in root.iterdir() if p.name.endswith(".tmp")):
+    problems.append("a temp file was left behind")
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "config save: a corrupt existing config answers 400 and echoes nothing"; then
+    assert_eq "$(_cfg_api_corrupt_py 2>&1 | tail -n 1)" "ok"
+fi
+
