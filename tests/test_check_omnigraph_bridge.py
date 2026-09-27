@@ -9,6 +9,11 @@ server (the stub the `--fake-server` mode starts) and a fake stdio bridge
 hits the same paths as the real `@modernrelay/omnigraph-mcp` package. No npm, no
 network, no token.
 
+A bridge that wedges is the other half of what is tested here: `npx` leaves
+`npm`-spawned grandchildren behind if only the direct child is killed, and a
+Ctrl-C must stop the wave rather than wait out every remaining deadline. The
+stub's `hang` mode reproduces both shapes.
+
 Run from the repo root:
 
     python3 -m pytest -q tests/test_check_omnigraph_bridge.py
@@ -17,8 +22,12 @@ import importlib.util
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -174,6 +183,157 @@ class BridgeBenchmarkTests(unittest.TestCase):
                     ["--root", str(ROOT / "nope"), "--bridge-cmd", stub_cmd()]):
             rc, _, err = run_main(bad)
             self.assertEqual(rc, 2, f"{bad} -> {rc}\n{err}")
+
+
+def pid_exists(pid):
+    """Whether *pid* is still there — a zombie counts, so 'killed' is not 'gone'.
+
+    POSIX only: on Windows os.kill(pid, 0) *terminates* the process instead of
+    probing it, so every caller of this stays behind an os.name guard.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class WedgedBridgeProcessTests(unittest.TestCase):
+    """What a bridge that never answers leaves behind (A5 review).
+
+    `npx` starts `npm`, which starts `node`; killing only the direct child the
+    tool spawned leaves the rest of that tree running under init, and a Ctrl-C
+    during the wave waited out every remaining --timeout instead of stopping.
+    The stub's `hang` mode is the reproduction: a real descendant *process*, a
+    bridge that ignores SIGTERM and never replies, and both pids written to a
+    temp file so they can be watched after the tool has returned.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="autoos-bridge-hang-")
+        self.pid_file = Path(self.tmp.name) / "pids"
+        self.pids = []
+
+    def tearDown(self):
+        for pid in self.pids:  # a red run must not leave a sleeper behind
+            try:
+                os.kill(pid, 9)  # 9 = SIGKILL, written as a number: no signal.SIGKILL on Windows
+            except OSError:
+                pass
+        self.tmp.cleanup()
+
+    def hang_env(self, extra=None):
+        env = {"FAKE_BRIDGE_MODE": "hang", "FAKE_BRIDGE_PID_FILE": str(self.pid_file)}
+        env.update(extra or {})
+        return env
+
+    def wedged_pids(self, timeout=20):
+        """The fixture reports '<bridge pid> <grandchild pid>' before it wedges."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                fields = self.pid_file.read_text(encoding="utf-8").split()
+            except OSError:
+                fields = []
+            if len(fields) == 2:
+                self.pids = [int(f) for f in fields]
+                return self.pids
+            time.sleep(0.05)
+        self.fail(f"the wedged bridge never wrote its pids to {self.pid_file}")
+
+    def assert_gone(self, pid, what, timeout=20):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not pid_exists(pid):
+                return
+            time.sleep(0.1)
+        self.fail(f"{what} (pid {pid}) is still alive after the tool returned")
+
+    def interrupt_a_wedged_run(self, extra):
+        """Run the real entry point as its own process and SIGINT it once wedged.
+
+        The signal goes to the tool's pid alone, exactly as Ctrl-C reaches a
+        terminal's foreground process — the bridges must be stopped by the tool,
+        not by the signal themselves.
+        """
+        env = os.environ.copy()
+        env.update(self.hang_env())
+        proc = subprocess.Popen(
+            [sys.executable, str(MODULE_PATH), "--fake-server", "--bridge-cmd", stub_cmd(),
+             "--graph-id", "autoos", "--timeout", "60", *extra],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.wedged_pids()
+        started = time.monotonic()
+        os.kill(proc.pid, signal.SIGINT)
+        try:
+            out, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            self.fail("Ctrl-C did not stop the run — it is still waiting out the 60 s "
+                      f"per-bridge timeout.\n--- stdout\n{out}\n--- stderr\n{err}")
+        return proc.returncode, out + err, time.monotonic() - started
+
+    def test_a_wedged_bridge_takes_its_grandchildren_with_it(self):
+        rc, out, err = run_main(
+            ["--fake-server", "--bridge-cmd", stub_cmd(), "--graph-id", "autoos",
+             "--parallel", "2", "--cold", "--timeout", "1", "--json"],
+            env=self.hang_env())
+        bridge_pid, grandchild_pid = self.wedged_pids()
+        self.assertEqual(rc, 1, f"a wedged bridge must fail the run\n{out}{err}")
+        report = json.loads(out)
+        self.assertEqual(report["healthy"], 0, report)
+        self.assertTrue(any("timeout" in f["reason"].lower() for f in report["failures"]),
+                        "the old failure output is kept: a hang reads as a timeout, not silence")
+        self.assert_gone(grandchild_pid, "the grandchild the wedged bridge spawned")
+        self.assert_gone(bridge_pid, "the wedged bridge")
+
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX; Windows kills the tree with taskkill")
+    def test_a_wedged_bridge_is_closed_without_leaving_a_zombie(self):
+        env = os.environ.copy()
+        env.update(self.hang_env())
+        client = module.McpStdioClient([sys.executable, str(STUB)], env,
+                                       time.monotonic() + 1, None)
+        self.pids.append(client.proc.pid)
+        client.close()
+        self.assert_gone(client.proc.pid, "the bridge close() killed")
+
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX; Windows kills the tree with taskkill")
+    def test_a_bridge_leads_its_own_process_group(self):
+        # killpg only reaches the bridge's tree — and may only ever be aimed at a
+        # group the bridge leads, never at the benchmark's own.
+        env = os.environ.copy()
+        env.update(self.hang_env())
+        client = module.McpStdioClient([sys.executable, str(STUB)], env,
+                                       time.monotonic() + 1, None)
+        self.pids.append(client.proc.pid)
+        try:
+            self.assertEqual(os.getpgid(client.proc.pid), client.proc.pid,
+                             "the bridge shares the benchmark's process group")
+        finally:
+            client.close()
+
+    @unittest.skipIf(os.name == "nt", "SIGINT semantics; Windows kills the tree with taskkill")
+    def test_ctrl_c_stops_the_wave_instead_of_waiting_it_out(self):
+        rc, combined, elapsed = self.interrupt_a_wedged_run(["--parallel", "2", "--cold"])
+        self.assertNotIn("Traceback", combined, f"an interrupt must be handled, not crash\n{combined}")
+        self.assertEqual(rc, 130, f"Ctrl-C must exit 130 (128+SIGINT), not a scored run\n{combined}")
+        self.assertIn("interrupt", combined.lower())
+        self.assertLess(elapsed, 20, "the wave was interrupted, so it must not sit out --timeout 60")
+        for pid in self.pids:
+            self.assert_gone(pid, "a process from the interrupted wave")
+
+    @unittest.skipIf(os.name == "nt", "SIGINT semantics; Windows kills the tree with taskkill")
+    def test_ctrl_c_while_priming_a_warm_cache_stops_too(self):
+        rc, combined, elapsed = self.interrupt_a_wedged_run(["--parallel", "1", "--warm"])
+        self.assertNotIn("Traceback", combined)
+        self.assertEqual(rc, 130, combined)
+        self.assertIn("interrupt", combined.lower())
+        self.assertLess(elapsed, 20)
+        for pid in self.pids:
+            self.assert_gone(pid, "the priming bridge")
 
 
 class BridgeConfigTests(unittest.TestCase):

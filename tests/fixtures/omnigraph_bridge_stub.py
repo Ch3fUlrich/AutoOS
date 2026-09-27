@@ -17,6 +17,9 @@ Set FAKE_BRIDGE_MODE to bend the contract for a specific test:
   lock_noise    log an npm cache-contention line on stderr, then answer normally
   leak_token    log the bearer token on stderr (verbose npm), then answer normally
   slow          take ~40 ms to answer health
+  hang          spawn a grandchild, then wedge forever ignoring SIGTERM — the shape
+                of a hung `npx` that left an `npm`-started `node` behind. Its own pid
+                and the grandchild's go to $FAKE_BRIDGE_PID_FILE for the test to watch.
 
 Run from the repo root (not useful on its own):
 
@@ -25,6 +28,8 @@ Run from the repo root (not useful on its own):
 """
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -32,6 +37,10 @@ import urllib.parse
 import urllib.request
 
 MODE = os.environ.get("FAKE_BRIDGE_MODE", "ok")
+
+# Long enough that a test which fails to kill it still cannot report a live
+# process as dead, short enough that a leftover from a red run dies by itself.
+GRANDCHILD_LIFETIME_S = 600
 
 
 def reply(message):
@@ -112,7 +121,31 @@ def handle(message):
                "error": {"code": -32601, "message": f"unknown method {method}"}})
 
 
+def hang_with_a_grandchild():
+    """Wedge forever, holding a descendant process open behind us.
+
+    A separate process, not a thread: `npx` -> `npm` -> `node` has exactly this
+    shape, and it is why killing the bridge's direct child is not enough. Both
+    pids go to $FAKE_BRIDGE_PID_FILE so the test can watch them after the tool
+    has returned.
+    """
+    if os.name != "nt":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # only a killpg kills us
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c", f"import time; time.sleep({GRANDCHILD_LIFETIME_S})"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pid_file = os.environ.get("FAKE_BRIDGE_PID_FILE")
+    if pid_file:
+        with open(pid_file, "w", encoding="utf-8") as fh:
+            fh.write(f"{os.getpid()} {grandchild.pid}\n")
+    while True:
+        time.sleep(3600)
+
+
 def main():
+    if MODE == "hang":
+        hang_with_a_grandchild()
+        return
     if MODE == "exit_early":
         sys.stderr.write("npm ERR! code E404 The requested resource 'omnigraph-mcp' not found\n")
         sys.exit(1)
