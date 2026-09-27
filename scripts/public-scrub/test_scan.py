@@ -295,6 +295,27 @@ def test_that_skipping_is_the_default_and_not_an_accident(tmp_path):
     assert "test_scan.py" in proc.stdout
 
 
+def _runs_this_file(text):
+    """True when a line *executes* this file — a mention in a comment is not wiring."""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if "test_scan.py" in line and "python3" in line:
+            return True
+    return False
+
+
+def test_this_file_is_run_by_ci_and_the_linux_suite():
+    # Nothing executed this file from the day it was committed until SPEC-OMNI A2:
+    # a test nobody runs still reads as a passing test. Guard both callers.
+    repo = REPO_PATTERNS.parents[2]
+    ci = (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert _runs_this_file(ci), "ci.yml no longer runs the scanner's rule tests"
+    suite = "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                      for p in sorted((repo / "tests" / "linux").glob("*.sh")))
+    assert _runs_this_file(suite), "no tests/linux suite runs the scanner's rule tests"
+
+
 if __name__ == "__main__":
     # Runnable without pytest on purpose: CI's scrub job and the Linux suite both
     # execute this file, and neither installs anything (AGENTS.md: the suites have
