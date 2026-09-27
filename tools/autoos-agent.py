@@ -296,6 +296,29 @@ def slugify(text: str) -> str:
     return slug or "task"
 
 
+SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+SESSION_TAG_HEADER = "x-omniroute-session-id"
+
+
+def session_tag(title: str, env=None) -> str:
+    """The lane tag stamped on every spawned gateway request (OR3).
+
+    OmniRoute fills call_logs.session_tag from the request header
+    `x-omniroute-session-id` (chatCore.ts explicitSessionIdHeader wins over
+    the conversation id). Env AUTOOS_SESSION_TAG wins when it is a valid tag
+    ([A-Za-z0-9._/-]{1,120}); anything else warns once and falls back to
+    "<lane worktree basename>/<slugified title>".
+    """
+    env = os.environ if env is None else env
+    raw = env.get("AUTOOS_SESSION_TAG")
+    if raw:
+        if SESSION_TAG_RE.match(raw):
+            return raw
+        print("autoos-agent: AUTOOS_SESSION_TAG %r is not [A-Za-z0-9._/-]{1,120} - "
+              "falling back to <lane>/<title>" % raw, file=sys.stderr)
+    return "%s/%s" % (os.path.basename(ROOT), slugify(title))
+
+
 def unique_suffix() -> str:
     """Six random hex chars that keep a sandbox name and branch unique.
 
@@ -468,6 +491,7 @@ def build_plan(args, cfg: dict) -> dict:
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
     title = args.title or ("t%d %s" % (route["tier"], args.task[:50]))
+    tag = None
     if client.name == "opencode":
         agent = TIERS[route["tier"]]
         if args.free:
@@ -477,6 +501,18 @@ def build_plan(args, cfg: dict) -> dict:
             model = route["model"]
         if args.lean:
             overlay.update(lean_overlay(cfg))
+        # OR3: a spawned opencode run whose model sits on the omniroute
+        # provider stamps every gateway request with the lane tag, so
+        # call_logs.session_tag attributes the call (1881 live calls carried
+        # none). Provider-level `headers` (opencode v2 config schema
+        # packages/schema/src/config/provider.ts:32, spread into the provider
+        # at :90 and merged onto each model's requests in
+        # packages/core/src/model.ts:198) - merged into any existing provider
+        # block, never replacing it.
+        if model.startswith("omniroute/"):
+            tag = session_tag(title)
+            prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
+            prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -522,7 +558,8 @@ def build_plan(args, cfg: dict) -> dict:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
-            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd()}
+            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            "session_tag": tag}
 
 
 def cmd_list(cfg: dict) -> int:
@@ -1548,6 +1585,8 @@ def cmd_run(args, cfg: dict) -> int:
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     print("depth: %d/%d" % plan["depth"])
+    if plan.get("session_tag"):
+        print("session-tag: %s" % plan["session_tag"])
     if args.lean:
         print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":

@@ -1543,6 +1543,94 @@ class SandboxUniquenessTests(unittest.TestCase):
                             os.path.basename(second["sandbox"]["path"]).rsplit("-", 1)[1])
 
 
+class SessionTagTests(unittest.TestCase):
+    """OR3: every spawned opencode gateway request carries a lane tag in the
+    `x-omniroute-session-id` header so OmniRoute call_logs.session_tag can
+    attribute the call to a lane/session."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def _args(self, **overrides):
+        ns = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            title=None)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def _cfg(self, providers):
+        providers.setdefault("omniroute", {"models": {"t2-worker": {}}})
+        return {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+                "providers": providers}
+
+    def _overlay(self, plan):
+        return json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}"))
+
+    def test_omniroute_model_carries_the_session_header_from_title(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.cli.build_plan(self._args(title="Fix The Router!"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(
+            prov["headers"]["x-omniroute-session-id"],
+            "%s/fix-the-router" % os.path.basename(self.cli.ROOT))
+
+    def test_autoos_session_tag_overrides_the_default(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
+            plan = self.cli.build_plan(self._args(title="ignored"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"], "lane/one.two_3-x")
+
+    def test_an_invalid_tag_falls_back_with_one_warning(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "bad tag with spaces!!"}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"],
+                         "%s/t" % os.path.basename(self.cli.ROOT))
+        warns = [l for l in err.getvalue().splitlines()
+                 if "AUTOOS_SESSION_TAG" in l]
+        self.assertEqual(len(warns), 1, err.getvalue())
+
+    def test_a_non_omniroute_model_gets_no_header(self):
+        cfg = self._cfg({"other": {"models": {"m": {}}}})
+        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        plan = self.cli.build_plan(self._args(title="T"), cfg)
+        self.assertNotIn("providers", self._overlay(plan))
+
+    def test_an_existing_overlay_provider_block_keeps_its_other_keys(self):
+        # A pre-existing providers.omniroute block in the overlay (e.g. from a
+        # future overlay helper) must be merged into, never replaced.
+        cfg = self._cfg({})
+        with mock.patch.object(self.cli, "lean_overlay",
+                               lambda c: {"providers": {"omniroute": {
+                                   "settings": {"baseURL": "http://x/v1"}}}}):
+            plan = self.cli.build_plan(self._args(title="T", lean=True), cfg)
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"],
+                         "%s/t" % os.path.basename(self.cli.ROOT))
+
+    def test_the_plan_output_prints_the_session_tag(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("session-tag: %s/my-tag" % os.path.basename(self.cli.ROOT),
+                      r.stdout)
+
+    def test_a_non_opencode_client_prints_no_session_tag(self):
+        r = run_agent("run", "--dry-run", "--client", "gemini", "--tier", "2",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("session-tag:", r.stdout)
+
+
 class HeadlessRefusalTests(unittest.TestCase):
     """Measured 2026-09-25 (run 20260925-215048-85ba11): agy auto-denied a tool
     headless mode cannot prompt for, printed a refusal and still exited 0. A

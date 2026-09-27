@@ -30,6 +30,13 @@ Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--js
 It reads the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key from the ai-stack
 config dir. Heartbeats print `usage --since 1h --by provider,lane`.
 
+Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
+header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
+tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).
+OmniRoute copies that header into the `session_tag` field of each `call_logs` row, so a lane's calls
+are the rows of `/api/usage/call-logs` whose `session_tag` equals the tag (the route has no
+`session_tag` filter param yet — page and match client-side).
+
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which
 is load shedding, not a dead leg. 400, 404 and transport errors are drift and are never
