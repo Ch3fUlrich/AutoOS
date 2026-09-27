@@ -7275,6 +7275,7 @@ Test-Case 'secrets: 400 cases incl. quotes' {
             @{ id = 'groq'; value = ' leading' },
             @{ id = 'groq'; value = 'trailing ' },
             @{ id = 'groq'; value = 'REPLACE_WITH_KEY' },
+            @{ id = 'groq'; value = 'replace_with_x' },
             @{ id = 'groq'; value = "has'quote" },
             @{ id = 'groq'; value = 'has"quote' }
         )
@@ -7338,6 +7339,61 @@ Test-Case 'secrets: payload JSON never contains the value' {
             $payload = Get-AutoOSSecretsPayload -RepoRoot $scratch -ClientIsLoopback $true
             $json = $payload | ConvertTo-Json -Depth 10
             Assert-True ($json -notmatch 'SUPERSECRET') 'a secret value leaked into the GET payload'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: key match is exact-case and leaves differently-cased lines alone' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "GROQ: 'x'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $haveBefore = Get-AutoOSConfiguredIds -RepoRoot $scratch
+            Assert-True (-not $haveBefore.Contains('groq')) 'configured_ids returned groq for uppercase GROQ line'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_CASETEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-True ($after -match "GROQ: 'x'") 'the uppercase GROQ line was altered'
+            Assert-True ($after -match "groq: 'gsk_CASETEST'") 'lowercase groq line was not appended'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: new file inside a git work tree with no .gitignore -> 409' {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "  [skip] git not on PATH"
+        return
+    }
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+        $prevDir = Get-Location
+        try {
+            Set-Location $scratch
+            $null = & git init -q 2>$null | Out-Null
+            $null = & git config user.email "t@t" 2>$null | Out-Null
+            $null = & git config user.name "t" 2>$null | Out-Null
+        } finally { Set-Location $prevDir }
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_GITTEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 409 "expected 409 for non-ignored new file, got $($result.Code)"
+            Assert-True (-not (Test-Path $keysFile)) 'keys file was written despite git refusal'
         } finally {
             if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
             else { $env:AUTOOS_KEYS_FILE = $prev }

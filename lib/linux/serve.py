@@ -135,7 +135,7 @@ def configured_ids() -> set:
         key, _, val = t.partition(":")
         scalar = _yaml_scalar(val)
         if scalar and not scalar.upper().startswith(_PLACEHOLDER_PREFIX):
-            have.add(key.strip().lower())
+            have.add(key.strip())
     return have
 
 
@@ -214,7 +214,7 @@ def _secret_value_error(value) -> str | None:
         return "value must not start or end with whitespace"
     if "'" in value or '"' in value:
         return "value must not contain quote characters (' or \"): the shell and PowerShell readers of api-keys.yml take the value literally"
-    if value.startswith(_PLACEHOLDER_PREFIX):
+    if value.upper().startswith(_PLACEHOLDER_PREFIX):
         return "value still looks like the placeholder it replaces"
     return None
 

@@ -723,7 +723,7 @@ function Get-AutoOSConfiguredIds {
     foreach ($line in (Get-Content $file -Encoding utf8)) {
         $t = $line.Trim()
         if ($t -eq '' -or $t.StartsWith('#') -or -not $t.Contains(':')) { continue }
-        $key = ($t -split ':', 2)[0].Trim().ToLowerInvariant()
+        $key = ($t -split ':', 2)[0].Trim()
         $val = ($t -split ':', 2)[1].Trim().Trim(@('"', "'")).Trim()
         if ($val -and -not $val.ToUpperInvariant().StartsWith('REPLACE_WITH_')) {
             [void]$have.Add($key)
@@ -779,7 +779,7 @@ function Get-AutoOSSecretValueError {
     if ($Value.Length -lt 1 -or $Value.Length -gt 4096) { return 'value must be 1..4096 characters' }
     if ($Value.IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0) { return 'value must not contain a newline or NUL' }
     if ($Value -ne $Value.Trim()) { return 'value must not start or end with whitespace' }
-    if ($Value.StartsWith('REPLACE_WITH_')) { return 'value still looks like the placeholder it replaces' }
+    if ($Value.ToUpperInvariant().StartsWith('REPLACE_WITH_')) { return 'value still looks like the placeholder it replaces' }
     if ($Value.IndexOfAny([char[]]@("'", '"')) -ge 0) { return 'value must not contain a quote character' }
     $null
 }
@@ -793,18 +793,21 @@ function Get-AutoOSGitIgnoreRefusal {
         discovers the work tree the file belongs to.
     #>
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return $null }
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
     $dir = Split-Path -Parent $Path
+    if (-not $dir -or -not (Test-Path $dir)) { return $null }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
     $exitCode = 128
     $prevDir = $null
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         $prevDir = Get-Location
         Set-Location $dir
-        $null = & git check-ignore -q -- $Path 2>&1
+        $null = & git check-ignore -q -- $Path 2>$null | Out-Null
         $exitCode = $LASTEXITCODE
     } finally {
         if ($prevDir) { Set-Location $prevDir }
+        $ErrorActionPreference = $prevEAP
     }
     if ($exitCode -eq 1) {
         return "$Path is not git-ignored; refusing to write a secret there"
@@ -860,7 +863,7 @@ function Set-AutoOSKeyValue {
         $colonIdx = $core.IndexOf(':')
         $head = $core.Substring(0, $colonIdx)
         $after = $core.Substring($colonIdx + 1)
-        if ($head.Trim().ToLowerInvariant() -ne $KeyId.ToLowerInvariant()) { continue }
+        if ($head.Trim() -cne $KeyId) { continue }
 
         $found = $true
         $split = Split-AutoOSTrailingComment -After $after
@@ -890,26 +893,48 @@ function Set-AutoOSKeyValue {
         $newText = $baseText + $KeyId + ": '" + $Value + "'`n"
     }
 
-    if ($bytes) {
-        $dir = Split-Path -Parent $file
-        $baseName = [System.IO.Path]::GetFileName($file)
-        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $backupBase = Join-Path $dir "$baseName.autoos-backup-$stamp"
-        $backup = $backupBase
-        $n = 0
-        while (Test-Path $backup) {
-            $n++
-            $backup = "$backupBase-$n"
-        }
-        [System.IO.File]::WriteAllBytes($backup, $bytes)
-    }
-
     $dir = Split-Path -Parent $file
     $baseName = [System.IO.Path]::GetFileName($file)
-    $tmp = Join-Path $dir "$baseName.autoos-tmp-$PID-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
     $newBytes = [System.Text.Encoding]::UTF8.GetBytes($newText)
-    [System.IO.File]::WriteAllBytes($tmp, $newBytes)
-    Move-Item -LiteralPath $tmp -Destination $file -Force
+    $tmp = $null
+    try {
+        if ($bytes) {
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $backupBase = Join-Path $dir "$baseName.autoos-backup-$stamp"
+            $backup = $backupBase
+            $n = 0
+            while (Test-Path $backup) {
+                $n++
+                $backup = "$backupBase-$n"
+            }
+            [System.IO.File]::WriteAllBytes($backup, $bytes)
+            try {
+                $srcAcl = Get-Acl -LiteralPath $file
+                Set-Acl -LiteralPath $backup -AclObject $srcAcl -ErrorAction Stop
+            } catch { }
+        }
+
+        $rand = [Guid]::NewGuid().ToString('N').Substring(0,8)
+        $tmp = Join-Path $dir "$baseName.autoos-tmp-$PID-$rand"
+        $fs = [System.IO.File]::Open($tmp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $fs.Write($newBytes, 0, $newBytes.Length)
+        } finally {
+            $fs.Dispose()
+        }
+        if ($bytes) {
+            try {
+                $srcAcl = Get-Acl -LiteralPath $file
+                Set-Acl -LiteralPath $tmp -AclObject $srcAcl -ErrorAction Stop
+            } catch { }
+        }
+        Move-Item -LiteralPath $tmp -Destination $file -Force
+        $tmp = $null
+    } finally {
+        if ($tmp -and (Test-Path $tmp)) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
 
     @{ ok = $true; id = $KeyId; configured = $true; apply = $script:SecretKeys[$KeyId].apply }
 }

@@ -523,6 +523,7 @@ cases = [
     {"id": "groq", "value": "has\x00nul"},
     {"id": "groq", "value": "  padded"},
     {"id": "groq", "value": "REPLACE_WITH_your_key"},
+    {"id": "groq", "value": "replace_with_x"},
     {"id": "groq", "value": "has'quote"},
     {"id": "groq", "value": 'has"double'},
     {"id": "groq", "value": 123},
@@ -537,6 +538,38 @@ for body in cases:
     if hashlib.sha256(keys.read_bytes()).hexdigest() != digest:
         bad.append("the file changed after rejecting %r" % (body,))
         break
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
+if it "the browser UI matches keys exact-case and leaves differently-cased lines alone"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response, configured_ids
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+keys.write_text("GROQ: 'x'\n", encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+have_before = configured_ids()
+if "groq" in have_before:
+    bad.append("configured_ids() returned 'groq' for uppercase GROQ line")
+
+code, body = secrets_post_response({"id": "groq", "value": "test-value-case"}, "127.0.0.1")
+text = keys.read_text(encoding="utf-8")
+if code != 200:
+    bad.append("case-sensitive POST code=%s body=%s" % (code, body))
+if "GROQ: 'x'" not in text:
+    bad.append("the uppercase GROQ line was altered")
+if "groq: 'test-value-case'" not in text:
+    bad.append("lowercase groq line was not appended")
 print("; ".join(bad))
 PY
 )"
