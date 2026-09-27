@@ -286,6 +286,162 @@ forbid = true
                          '[actors.new]\nname = "claude"\ntier = "default"\n')
 
 
+# ─── round 3 (hx3): generated wrapper-option bypass matrix ───────────────
+#
+# Each transparent launcher parses its leading options with one walker, so a
+# value-taking option given in any spelling cannot hide a forbidden command
+# behind it. The matrix is generated, not hand-listed: every wrapper x every
+# value-option spelling x every forbidden child, plus the env split-string
+# and flock -c/-- forms the walker exists to catch.
+
+# (argv, rule) triples a generated case must produce.
+_FORBIDDEN_CHILDREN = (
+    (("sudo", "id"), "no-sudo"),
+    (("sh", "-c", "x"), "no-inline-shell"),
+    (("rm", "-rf", "/"), "destructive"),
+)
+
+# Per launcher: option spellings that each already have their value supplied,
+# so the very next token is the wrapped command (flock's lockfile is included
+# because flock requires it before the command; timeout's duration likewise).
+_WRAPPER_OPTION_SPELLINGS: dict[str, list[list[str]]] = {
+    "env": [
+        ["-u", "x"], ["-ux"], ["--unset", "x"], ["--unset=x"],
+        ["-C", "/tmp"], ["-C/tmp"], ["--chdir", "/tmp"], ["--chdir=/tmp"],
+        ["-a", "M"], ["-aM"], ["--argv0", "M"], ["--argv0=M"],
+        ["-i"], ["-"],
+    ],
+    "nice": [
+        ["-n", "5"], ["-n5"], ["--adjustment", "5"], ["--adjustment=5"],
+    ],
+    "timeout": [
+        ["-s", "TERM", "5"], ["-sTERM", "5"],
+        ["--signal", "TERM", "5"], ["--signal=TERM", "5"],
+        ["-k", "1", "5"], ["-k1", "5"],
+        ["--kill-after", "1", "5"], ["--kill-after=1", "5"],
+    ],
+    "stdbuf": [
+        ["-i", "L"], ["-iL"], ["--input", "L"], ["--input=L"],
+        ["-o", "0"], ["-o0"], ["--output", "0"], ["--output=0"],
+        ["-e", "L"], ["-eL"], ["--error", "L"], ["--error=L"],
+    ],
+    "ionice": [
+        ["-c", "2"], ["-c2"], ["--class", "2"], ["--class=2"],
+        ["-n", "3"], ["-n3"], ["--classdata", "3"], ["--classdata=3"],
+    ],
+    "xargs": [
+        ["-n", "1"], ["-n1"], ["--max-args", "1"], ["--max-args=1"],
+        ["-a", "/tmp/f"], ["-a/tmp/f"], ["--arg-file", "/tmp/f"], ["--arg-file=/tmp/f"],
+        ["-s", "100"], ["-s100"], ["--max-chars", "100"], ["--max-chars=100"],
+    ],
+    "flock": [
+        ["-w", "5", "/tmp/l"], ["-w5", "/tmp/l"],
+        ["--timeout", "5", "/tmp/l"], ["--timeout=5", "/tmp/l"],
+        ["-E", "1", "/tmp/l"], ["-E1", "/tmp/l"],
+        ["--conflict-exit-code", "1", "/tmp/l"], ["--conflict-exit-code=1", "/tmp/l"],
+    ],
+    "setsid": [[], ["--wait"], ["-w"], ["--fork"]],
+    "nohup": [[], ["--"]],
+}
+
+# env -S/--split-string after a value-taking option: the value hides the
+# option region from a naive scan, so the split string survives to argv.
+_ENV_SPLIT_OPTIONS = (["-S"], ["--split-string"], ["-vS"])
+
+# flock runs `-c`/`--command` through a shell; `--` makes the next token the
+# lockfile even when it starts with `-` (so `flock -- -c rm -rf /` locks on
+# the file named `-c` and runs `rm -rf /`).
+_FLOCK_COMMAND_FORMS = (
+    (["flock", "-c", "rm -rf /"], "no-inline-shell"),
+    (["flock", "--command", "rm -rf /"], "no-inline-shell"),
+    (["flock", "/tmp/l", "-c", "rm -rf /"], "no-inline-shell"),
+    (["flock", "/tmp/l", "--command", "rm -rf /"], "no-inline-shell"),
+    (["flock", "--", "-c", "sh", "-c", "x"], "no-inline-shell"),
+    (["flock", "--", "-c", "python3", "-c", "x"], "no-inline-shell"),
+    (["flock", "--", "-c", "rm", "-rf", "/"], "destructive"),
+)
+
+# Harmless forms that must stay allowed: proving the walker does not simply
+# deny every option it meets.
+_HARMLESS_ALLOWED = (
+    ["env", "FOO=1", "ls"],
+    ["env", "-i", "ls"],
+    ["env", "-", "ls"],
+    ["nice", "-n", "5", "ls"],
+    ["timeout", "5", "ls", "-la"],
+    ["xargs", "-0", "echo"],
+    ["flock", "/tmp/l", "ls"],
+    ["flock", "--", "/tmp/l", "ls"],
+    ["flock", "--", "-", "ls"],
+    ["setsid", "ls"],
+    ["nohup", "ls"],
+)
+
+
+def _generated_wrapper_cases():
+    cases = []
+    for wrapper, spellings in _WRAPPER_OPTION_SPELLINGS.items():
+        for spelling in spellings:
+            for child, rule in _FORBIDDEN_CHILDREN:
+                cases.append(([wrapper, *spelling, *child], rule))
+    for spelling in (["-u", "x"], ["-ux"], ["-C", "/tmp"], ["-a", "M"],
+                     ["--unset", "x"], ["--unset=x"]):
+        for split in _ENV_SPLIT_OPTIONS:
+            cases.append((["env", *spelling, *split, "sudo id"], "no-inline-shell"))
+    cases.extend(_FLOCK_COMMAND_FORMS)
+    return cases
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
+class WrapperOptionBypassMatrixTests(unittest.TestCase):
+    """Round 3: one option walker per wrapper closes the value-option and
+    flock `--`/`-c` bypasses; generated so a new spelling is covered without
+    a new hand-written row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.bindir = _make_fixed_path(cls._tmp.name)
+        cls.policy = _test_policy(cls.bindir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _decide(self, argv):
+        return policy.decide(self.policy, "claude", "coding-host", argv, cwd="/tmp")
+
+    def test_generated_matrix_denies_every_hidden_forbidden_child(self):
+        cases = _generated_wrapper_cases()
+        self.assertGreater(len(cases), 150)
+        for argv, rule in cases:
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow,
+                                 f"{argv!r} was allowed (rule={decision.rule!r})")
+                self.assertEqual(decision.rule, rule, f"{argv!r}")
+
+    def test_harmless_option_forms_stay_allowed(self):
+        for argv in _HARMLESS_ALLOWED:
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertTrue(decision.allow,
+                                f"{argv!r} denied as {decision.rule!r}: {decision.problems}")
+
+    def test_flock_dashdash_next_token_is_always_the_lockfile(self):
+        # The head after `--` is the command, never the `-c` that is really
+        # the lockfile; the brief names these exact heads.
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "-c", "rm", "-rf", "/"]),
+            [["rm", "-rf", "/"]])
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "/tmp/l", "ls"]),
+            [["ls"]])
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "-", "ls"]),
+            [["ls"]])
+
+
 class CliCheckTests(unittest.TestCase):
     """`hostexec.py check` is a dry decision printer: never runs anything."""
 
