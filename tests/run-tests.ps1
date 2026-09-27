@@ -7620,13 +7620,14 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     # entry - it was deleted in task A5e) - switching the source picks them up
     # for the first time.
     Assert-Equal $registry.Map['antigravity'] 'antigravity'
-    Assert-Equal $registry.Map['cc'] 'cc'
+    # cc: provider available:false since 2026-09-27 (operator: never connected
+    # to OmniRoute), so it now lands in Skipped with the dead providers below.
     # Regression lock for today's registry (2026-09-27, OR1e): cerebras (402/401
     # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27) and the zen
     # free pool are all-unavailable across every route that lists them; openrouter
     # and antigravity still each carry a live leg, so they are offered. A dead
     # provider must land in Skipped and never in Map.
-    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba')) {
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc')) {
         Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
         Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
     }
