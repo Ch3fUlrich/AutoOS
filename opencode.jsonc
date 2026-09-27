@@ -253,6 +253,11 @@
           "name": "t3 cheap-driver-128k — no training (sensitive data)",
           "limit": { "context": 131072, "output": 16384 }
         },
+        "t3-driver-free-only": {
+          "modelID": "t3-driver-free-only",
+          "name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
         "spark-1.3-contributor": {
           "modelID": "spark-1.3-contributor",
           "name": "spark-1.3-contributor — zen free → openrouter paid (1M)",
@@ -395,6 +400,11 @@
         "t3-driver-paid": {
           "modelID": "t3-driver-paid",
           "name": "t3 cheap-driver-128k — paid legs (escalation)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
+        "t3-driver-free-only": {
+          "modelID": "t3-driver-free-only",
+          "name": "t3 cheap-driver-128k — zero spend (free legs only)",
           "limit": { "context": 131072, "output": 16384 }
         },
         "t4-rag": {

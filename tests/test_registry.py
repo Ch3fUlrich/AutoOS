@@ -1175,5 +1175,80 @@ class ClaudeCodeLegsUnavailableTests(unittest.TestCase):
                              "route %s still serves a cc leg" % rid)
 
 
+class FreeAiProviderTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): Free.ai joins as the free provider `free_ai`
+    with model `qwen7b`, wired as the LAST free leg of both zero-spend routes
+    so `t3-driver-free-only` serves again. `free_ai` is a public pool whose
+    terms allow training on prompts, so it is never private-safe and never
+    enters a -clean route."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_entry_shape(self):
+        provider = self.reg["providers"]["free_ai"]
+        self.assertEqual(provider["api_base"], "https://api.free.ai/v1")
+        self.assertEqual(provider["omniroute_id"], "free_ai")
+        self.assertEqual(provider["litellm_prefix"], "openai")
+        self.assertEqual(provider["litellm_env"], "FREE_AI_API_KEY")
+        self.assertEqual(provider["tier"], "free")
+        self.assertIs(provider["trains_on_prompts"], True)
+
+    def test_provider_limits_are_rpm_and_tpd_only(self):
+        # free_ai's terms cap requests per minute and tokens per DAY; there is
+        # no published per-minute token cap, so only rpm/tpd are declared (the
+        # resolver reads only `tpm`, which is deliberately absent).
+        limits = self.reg["providers"]["free_ai"]["limits"]
+        self.assertEqual(sorted(limits), ["qwen7b"])
+        entry = limits["qwen7b"]
+        self.assertEqual(entry["rpm"], 10)
+        self.assertEqual(entry["tpd"], 30000)
+        self.assertNotIn("tpm", entry)
+        self.assertTrue(entry["source"].strip())
+
+    def test_model_qwen7b_mirrors_its_qwen_sibling(self):
+        model = self.reg["models"]["qwen7b"]
+        self.assertEqual(model["context_advertised"], 131072)
+        self.assertEqual(model["output_max"], 16384)
+        self.assertEqual(model["price_in"], 0.0)
+        self.assertEqual(model["price_out"], 0.0)
+
+    def test_free_ai_is_never_private_safe(self):
+        safe, reason = registry.private_safe("free_ai", "qwen7b", self.reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_free_ai_leg_is_last_on_both_free_only_routes(self):
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            legs = self.reg["routes"][route_id]["legs"]
+            self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
+
+    def test_no_clean_route_carries_free_ai(self):
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            self.assertFalse(
+                [leg for leg in route.get("legs") or []
+                 if leg.startswith("free_ai/")],
+                "clean route %s carries free_ai" % route_id)
+
+    def test_gateway_legs_keep_free_ai_on_the_free_only_routes(self):
+        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+            kept = registry.gateway_legs(self.reg["routes"][route_id], self.reg)
+            self.assertIn("free_ai/qwen7b", kept, route_id)
+
+    def test_t3_driver_free_only_serves_again(self):
+        ids = registry.servable_route_ids(self.reg)
+        self.assertIn("t3-driver-free-only", ids)
+        self.assertIn("t2-worker-free-only", ids)
+
+    def test_leg_rules_allow_the_free_ai_leg(self):
+        self.assertFalse(registry.leg_denied("free_ai/qwen7b", self.reg))
+
+    def test_real_registry_passes_check_with_free_ai(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
 if __name__ == "__main__":
     unittest.main()
