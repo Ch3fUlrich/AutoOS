@@ -3876,6 +3876,11 @@ class _WorkerRecordBase(unittest.TestCase):
         self.old = os.environ.get("AUTOOS_WORKERS_DIR")
         os.environ["AUTOOS_WORKERS_DIR"] = self.workers
         self.addCleanup(self._restore)
+        # cmd_run refuses (rc 3) when no gateway answers; CI has none, a dev host
+        # usually does - pin it so these tests never depend on the host's stack.
+        patcher = mock.patch.object(self.agent, "gateway_up", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _restore(self):
         if self.old is None:
