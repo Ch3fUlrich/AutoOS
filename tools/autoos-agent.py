@@ -127,6 +127,7 @@ import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_track as track  # noqa: E402
+import autoos_usage as usage_mod  # noqa: E402
 from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1679,8 +1680,14 @@ def cmd_run(args, cfg: dict) -> int:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
+        return usage_mod.main(list(argv[1:]))
     ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("usage", help="usage report by provider/combo/lane from the OmniRoute "
+                                 "gateway (OR4); its own flags follow `usage`, e.g. "
+                                 "`usage --since 1h --by provider,lane`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
