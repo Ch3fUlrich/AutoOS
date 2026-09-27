@@ -3892,7 +3892,7 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops):
+    def _run(self, route_ids, stops, clock=None):
         """Run cmd_run with the resolver and the client replaced by fakes; the
         sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -3946,6 +3946,9 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         # here. The key is what makes the run track-recorded at all.
         env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
         out, err = io.StringIO(), io.StringIO()
+        old_time = agent.time.time
+        if clock is not None:
+            agent.time.time = clock
         try:
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(agent, "load_registry",
@@ -3968,6 +3971,7 @@ class ProviderStopFallthroughTests(unittest.TestCase):
                                                 contextlib.redirect_stderr(err):
                                             rc = agent.cmd_run(args, cfg)
         finally:
+            agent.time.time = old_time
             calls["track"] = agent.track.load(agent.TRACK_RECORD)
             (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
                 old_root, old_track, old_overlay)
@@ -4024,6 +4028,18 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         # record when the loop never falls through.
         _, out, err, calls, _ = self._run(["r-free"], stops=0)
         self.assertEqual(self._records(calls), [("r-free", "pass", None)], out + err)
+
+    def test_the_surviving_routes_latency_excludes_the_dead_attempts(self):
+        # REVFIX review 2: the final record used the cumulative `start`, so the
+        # surviving route's latency sample included the dead attempt's seconds
+        # (which are already their own sample). One tick per time.time() call:
+        # each attempt spans exactly one tick, so the survivor's latency is 1s.
+        ticks = iter(range(1000))
+        _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                          clock=lambda: float(next(ticks)))
+        by_route = {r["route"]: r["latency_s"] for r in calls["track"]}
+        self.assertEqual(by_route["r-free"], 1.0, out + err)  # its own attempt
+        self.assertEqual(by_route["r-cheap"], 1.0, out + err)  # not 2+ (cumulative)
 
     def test_the_cap_records_every_fallthrough_attempt(self):
         _, out, err, calls, _ = self._run(

@@ -195,6 +195,14 @@ class TestsFeatureTests(RepoTestCase):
         self.assertIsNone(m._covered(repo, ["lib/util.py"],
                                      ["tests/test_utility.py"]))
 
+    def test_generic_stem_tokens_do_not_cover_unrelated_tests(self):
+        # REVFIX review 10: a touched docs/test_plan.md yields the token
+        # "test", so the first test file in tracked order "covered" it. The
+        # generic tokens (test/tests/py/ps1/sh) must not count as a match.
+        self.assertIsNone(
+            m._covered(str(self.repo), ["docs/test_plan.md"],
+                       ["tests/test_alpha.py"]))
+
     def test_a_multi_token_stem_matches_by_token_intersection(self):
         # REVFIX: the stem "decision_engine" was compared whole against the
         # test name's tokens, so tests/test_decision_engine.py did not cover

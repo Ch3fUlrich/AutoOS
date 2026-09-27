@@ -72,6 +72,16 @@ class ConsumersShareTheOneLoaderTests(unittest.TestCase):
     """Each of the four tools imports the shared loader instead of defining
     its own."""
 
+    def test_the_registry_model_reads_heredoc_uses_the_shared_loader(self):
+        # REVFIX review 8: tests/linux/05-registry-model-reads.sh carried its
+        # own spec_from_file_location("autoos_registry", ...) copy. CONSUMERS
+        # only names Python tools, so a .sh copy passed the guard; pin the
+        # heredoc directly.
+        sh = (ROOT / "tests" / "linux" / "05-registry-model-reads.sh").read_text(
+            encoding="utf-8")
+        self.assertNotIn('spec_from_file_location("autoos_registry"', sh)
+        self.assertIn("from registry_loader import load_registry_tool", sh)
+
     def test_no_consumer_still_defines_its_own_loader(self):
         for name in CONSUMERS:
             module = _load_by_path(TOOLS / name, "autoos_consumer_" + name)

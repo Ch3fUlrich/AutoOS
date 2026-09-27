@@ -24,16 +24,13 @@ fi
 
 if it "registry model reads project a fixture with no legacy catalog present"; then
     if python3 - <<'PY'
-import importlib.util, json, os, tempfile
+import json, os, sys, tempfile
 
-def load_registry_tool():
-    # The real read path: the installers import tools/registry.py by path
-    # (as tools/audit-router.py does) and call legacy_models(); this test
-    # loads the same module the same way, never a copy of its logic.
-    spec = importlib.util.spec_from_file_location("autoos_registry", "tools/registry.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+# The real read path: the installers import tools/registry.py by path (as
+# tools/audit-router.py does) and call legacy_models(); this test uses the
+# one shared loader, never a copy of its logic (REVFIX review 8).
+sys.path.insert(0, "tools")
+from registry_loader import load_registry_tool
 registry = load_registry_tool()
 fixture = {"models": {
     "muse-spark": {

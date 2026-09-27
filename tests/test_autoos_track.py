@@ -47,8 +47,11 @@ def entry(**overrides):
     return base
 
 
-def rec(route="r", cls="free", bucket="S0", effort="low", gate="pass"):
-    return entry(route=route, gate=gate, failure_class=None,
+def rec(route="r", cls="free", bucket="S0", effort="low", gate="pass",
+        failure_class=None):
+    if gate == "fail" and failure_class is None:
+        failure_class = "logic"  # a route's own failure, so p_success counts it
+    return entry(route=route, gate=gate, failure_class=failure_class,
                  **{"class": cls, "bucket": bucket, "effort": effort})
 
 
@@ -126,6 +129,14 @@ class RecordLoadTests(unittest.TestCase):
                 track.record(path, entry(gate="maybe"))
             self.assertEqual(len(track.load(path)), 1)
 
+    def test_the_minimal_rung_is_a_known_effort(self):
+        # The resolver's CANONICAL_EFFORT_ORDER can hand a model "minimal"; a
+        # record naming it must not be rejected and silently dropped.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            track.record(path, entry(effort="minimal"))
+            self.assertEqual(len(track.load(path)), 1)
+
 
 class SuccessEstimateTests(unittest.TestCase):
     def test_no_observations_falls_back_to_the_prior(self):
@@ -164,6 +175,47 @@ class SuccessEstimateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             track.p_success([], "r1", "free", "S4", "low", PRIORS)
 
+    def test_a_provider_or_containment_failure_does_not_lower_p(self):
+        # REVFIX review 3: only `logic`/`capability` are the route's own answer
+        # quality (spec 5.7). A provider (rc 8) or containment (rc 7) record
+        # stays in the file for availability/escalation but must not move p.
+        records = [rec(route="r1", gate="fail", failure_class="provider"),
+                   rec(route="r1", gate="fail", failure_class="containment")]
+        p, source = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(source, "route")
+        self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 0))  # no failures counted
+
+    def test_a_headless_refusal_does_not_lower_p(self):
+        # rc 6 (the client could not prompt headlessly) is not the route's answer.
+        records = [rec(route="r1", gate="fail", failure_class="refusal")]
+        p, _ = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(p, 1 / 2)
+
+    def test_a_logic_failure_at_the_chosen_effort_does_lower_p(self):
+        records = [rec(route="r1", gate="fail", failure_class="logic")]
+        p, source = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(source, "route")
+        self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 1))  # 1/3
+
+    def test_an_unstamped_legacy_failure_still_lowers_p(self):
+        # Fail closed: a record from before classes were stamped carries
+        # failure_class None; it must count, or every historical failure
+        # silently stops moving the estimate.
+        records = [rec(route="r1", gate="fail")]
+        records[0]["failure_class"] = None
+        p, source = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(source, "route")
+        self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 1))  # 1/3
+
+    def test_an_unknown_effort_record_matches_any_effort(self):
+        # REVFIX review 1: a record stamped "unknown" (no rung known at write
+        # time) must still be matched by a real query rung, or it never moves p.
+        records = [rec(route="r1", gate="fail", failure_class="logic",
+                       effort="unknown")]
+        p, source = track.p_success(records, "r1", "free", "S0", "low", PRIORS)
+        self.assertEqual(source, "route")
+        self.assertEqual(p, (1 + 0) / (1 + 1 + 0 + 1))
+
 
 class SpawnerRecordTests(unittest.TestCase):
     def _spawner_plan(self):
@@ -171,14 +223,39 @@ class SpawnerRecordTests(unittest.TestCase):
         return {"client": "opencode", "free": False,
                 "route": {"combo": "t2-worker-clean", "class": "cheap", "card": {}}}
 
+    def test_track_entry_stamps_the_resolvers_chosen_effort(self):
+        # REVFIX review 1: without the rung, every record reads as effort
+        # "unknown" and (before the wildcard) never matches the resolver's
+        # bucket+effort filter, so a fail record could not lower p.
+        cli = load_agent()
+        plan = self._spawner_plan()
+        plan["route"]["effort"] = "medium"
+        tracked = cli.track_entry(plan, 0, 1.0)
+        self.assertEqual(tracked["effort"], "medium")
+
+    def test_track_entry_maps_a_none_effort_to_none(self):
+        # A resolver route whose leg is not a reasoning model carries effort
+        # None; the resolver scores it as "none", so the record must say so.
+        cli = load_agent()
+        plan = self._spawner_plan()
+        plan["route"]["effort"] = None
+        tracked = cli.track_entry(plan, 0, 1.0)
+        self.assertEqual(tracked["effort"], "none")
+
+    def test_track_entry_leaves_a_v1_route_effort_unknown(self):
+        # A v1/--tier route carries no effort key at all.
+        cli = load_agent()
+        tracked = cli.track_entry(self._spawner_plan(), 0, 1.0)
+        self.assertEqual(tracked["effort"], "unknown")
+
     def test_record_run_accepts_every_failure_class_track_entry_emits(self):
-        # autoos-agent.track_entry() maps rc 5/6/7/8 to capability/logic/
+        # autoos-agent.track_entry() maps rc 5/6/7/8 to capability/refusal/
         # containment/provider. Before FAILURES named containment and provider,
         # validate() raised and record_run()'s except swallowed it - the record
         # was silently dropped (REVFIX). Pipe the real track_entry() output
         # through record_run(), not just assert on the returned dict.
         cli = load_agent()
-        fields = {0: None, 5: "capability", 6: "logic", 7: "containment",
+        fields = {0: None, 5: "capability", 6: "refusal", 7: "containment",
                   8: "provider"}
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "track-record.jsonl")

@@ -101,6 +101,13 @@ def _module_of(path):
     return path.split("/", 1)[0]
 
 
+# Tokens too generic to prove coverage: a touched docs/test_plan.md must not
+# read as covered by whichever test file a shared "test" token reaches first
+# (REVFIX review 10). "install"/"common" can still over-match; sources["tests"]
+# names the covering file, so that residue stays inspectable.
+_GENERIC_TOKENS = frozenset(("test", "tests", "py", "ps1", "sh"))
+
+
 def _covered(repo, touched, tracked):
     """The first tracked test file that covers a touched file, else None.
 
@@ -110,11 +117,13 @@ def _covered(repo, touched, tracked):
     sides are tokenised, so a multi-token stem - decision_engine.py matched by
     test_decision_engine.py - is covered by name alone; comparing the stem
     whole missed it (REVFIX). The whole-token rule still keeps lib/i.py from
-    reading as covered by tests/test_maintenance.py. Text is read with
-    errors="replace" so one odd byte cannot hide a reference.
+    reading as covered by tests/test_maintenance.py, and _GENERIC_TOKENS keeps
+    a stem's "test"/"py"/"sh" from standing in for a real match. Text is read
+    with errors="replace" so one odd byte cannot hide a reference.
     """
     stem_tokens = {tok for path in touched
-                   for tok in re.split(r"[_.\-]", Path(path).stem) if tok}
+                   for tok in re.split(r"[_.\-]", Path(path).stem)
+                   if tok and tok not in _GENERIC_TOKENS}
     for candidate in tracked:
         if not _is_test_file(candidate):
             continue
