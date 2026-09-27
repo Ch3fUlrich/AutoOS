@@ -3343,6 +3343,22 @@ if it "aistack: verify prints the failover line when on and never FAILs it"; the
     if (( ok )); then pass; else fail "verify does not report the standby"; fi
 fi
 
+if it "aistack: failover on refreshes a stale client.key from the current gateway key"; then
+    # A rotated client key must not leave the standby router serving the old
+    # one: every failover on rewrites client.key when it differs (0600 kept).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ( umask 077; printf 'sk-stale-old-key\n' >"$d/cfg/client.key" )
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc: $out" >&2; }
+    grep -q 'sk-stale-old-key' "$d/cfg/client.key" && { ok=0; echo "client.key still holds the stale key" >&2; }
+    grep -q 'sk-test-client-key' "$d/cfg/client.key" || { ok=0; echo "client.key does not hold the current key" >&2; }
+    [[ "$(stat -c %a "$d/cfg/client.key")" == 600 ]] || { ok=0; echo "client.key mode is not 600" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on kept a stale client key"; fi
+fi
+
 if it "aistack: failover on without a client key refuses before stopping anything"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"

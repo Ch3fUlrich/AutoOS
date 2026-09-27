@@ -1092,10 +1092,11 @@ failover_litellm_ok() {
     [[ "$(http_code "http://127.0.0.1:$FAILOVER_PORT/health/liveliness")" == 200 ]]
 }
 
-# Materialize client.key (0600) when missing; an existing one is kept as-is.
+# Materialize client.key (0600) from the current gateway client key.
 # The value is redirected, never echoed: no log or output line can carry it.
 ensure_client_key_file() {
-    if [[ -s "$CLIENT_KEY_FILE" ]]; then return 0; fi
+    # Rebuilt from the current key on every call: a rotated key must not leave
+    # the standby serving the old one. Replaced only when it differs.
     if [[ $DRY -eq 1 ]]; then echo "  - would write the gateway client key to $CLIENT_KEY_FILE (0600)"; return 0; fi
     mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" || return 1
     local tmp="$CLIENT_KEY_FILE.tmp-$$"
@@ -1110,6 +1111,9 @@ ensure_client_key_file() {
         rm -f "$tmp"
         echo "  ! no omniroute client key (configuration/api-keys.yml) - failover needs the key the clients use"
         return 1
+    fi
+    if [[ -f "$CLIENT_KEY_FILE" ]] && cmp -s "$tmp" "$CLIENT_KEY_FILE"; then
+        rm -f "$tmp"; chmod 600 "$CLIENT_KEY_FILE"; return 0
     fi
     mv "$tmp" "$CLIENT_KEY_FILE" || { rm -f "$tmp"; return 1; }
     chmod 600 "$CLIENT_KEY_FILE"
