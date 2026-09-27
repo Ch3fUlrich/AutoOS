@@ -258,7 +258,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["cheaperinference/glm-5.2", "cheaperinference/kimi-k3", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "opus-4-6"]:
+if names != ["gemini-3.8-flash", "opus-4-6", "t1-orchestrator", "t1-orchestrator-free-only", "t2-orchestrator", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
@@ -279,18 +279,23 @@ for c in d["combos"]:
             problems.append(c["name"] + ":" + m)
 by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
-# t1-orchestrator, t1-orchestrator-clean, t1-orchestrator-free-only,
-# spark-1.3-contributor and deepseek-v4.1-flash fail closed (omitted, never a
-# combo): t1/spark since DSMAX 2026-09-27 (Zen client-bound, OpenRouter off),
-# deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ. No 1M
-# context promise survives them, and no combo may carry their legs.
-for gone in ("t1-orchestrator", "t1-orchestrator-clean",
-             "t1-orchestrator-free-only", "spark-1.3-contributor",
+# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only now carry
+# a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
+# t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
+# fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
+# client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
+# of 2026-09-27T16:4xZ. No 1M context promise survives them, and no combo
+# may carry their legs.
+for gone in ("t1-orchestrator-clean", "spark-1.3-contributor",
              "deepseek-v4.1-flash"):
     if gone in by:
         problems.append(gone + "-should-be-omitted")
     if gone not in omitted:
         problems.append(gone + "-not-in-omitted")
+# t1-orchestrator and t1-orchestrator-free-only MUST be in combos now.
+for kept in ("t1-orchestrator", "t1-orchestrator-free-only"):
+    if kept not in by:
+        problems.append(kept + "-should-be-in-combos")
 # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry
 # a spark leg at all now that t1/spark fail closed.
 import re as _re2
@@ -729,12 +734,17 @@ for name, ctx in (("t2-worker", 131072), ("t3-driver", 131072),
                   ("gemini-3.8-flash", 131072)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
         problems.append(name)
-# t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
+# t1-orchestrator-clean, spark-1.3-contributor and
 # deepseek-v4.1-flash fail closed (omitted) - they must NOT be client models.
-for gone in ("t1-orchestrator", "t1-orchestrator-clean", "spark-1.3-contributor",
+# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only are back.
+for gone in ("t1-orchestrator-clean", "spark-1.3-contributor",
              "deepseek-v4.1-flash"):
     if gone in m:
         problems.append(gone + "-should-be-omitted")
+# t1-orchestrator and t1-orchestrator-free-only MUST be available.
+for kept in ("t1-orchestrator", "t1-orchestrator-free-only"):
+    if kept not in m:
+        problems.append(kept + "-should-be-in-client-models")
 print(" ".join(problems))
 PY
 )"

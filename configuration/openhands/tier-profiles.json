@@ -78,6 +78,13 @@
   ],
   "tiers": [
     {
+      "id": "omniroute-t1-orchestrator",
+      "model": "openai/t1-orchestrator",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
       "id": "omniroute-t2-worker",
       "model": "openai/t2-worker",
       "max_input_tokens": 131072,
@@ -148,6 +155,14 @@
       "reasoning": false
     },
     {
+      "id": "litellm-t1-orchestrator",
+      "gateway": "litellm",
+      "model": "openai/t1-orchestrator",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
       "id": "litellm-t2-worker",
       "gateway": "litellm",
       "model": "openai/t2-worker",
@@ -178,6 +193,21 @@
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
+    },
+    {
+      "id": "litellm-t1-orchestrator-free-only",
+      "gateway": "litellm",
+      "model": "openai/t1-orchestrator-free-only",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
+      "id": "omniroute-t1-orchestrator-free-only",
+      "model": "openai/t1-orchestrator-free-only",
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "reasoning": true
     }
   ]
 }

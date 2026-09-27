@@ -1702,7 +1702,8 @@
     "cheapinference": {
       "$comment": [
         "Privacy research 2026-09-26 (Q1 lane): https://www.cheaperinference.com/legal/privacy states 'We do not use customer prompt or response bodies to train Keak models' and 'Cheaper Inference does not store prompt or response bodies in its application database' - only operational/billing metadata (model, endpoint, timestamps, token usage, latency) is retained, generally 12 months. CheaperInference is itself a marketplace proxy to upstream providers (OpenAI/Anthropic/Google/Meta/etc, owned by Keak) - this citation covers CheaperInference's own handling only, not each upstream provider's separate policy. trains_on_prompts: false confirmed (was unsourced before this migration).",
-        "Operator 2026-09-27T12:55Z re-enabled with a small balance, cheap efficient models only. The 10:12Z 'no top-up / all credits exhausted' note above is withdrawn: only cheaperinference/kimi-k3, cheaperinference/glm-5.2 and cheaperinference/minimax-m2.7 are allowed to serve (policy.leg_rules allow entries, then a deny cheaperinference/*); every other cheaperinference leg stays off - cheaperinference/glm-4.5-air is route-gated in t2-worker/t3-driver, cheaperinference/deepseek-v4-flash keeps its t2-worker entry. Source: L0 2026-09-27T12:55:16Z (operator)."
+        "Operator 2026-09-27T12:55Z re-enabled with a small balance, cheap efficient models only. The 10:12Z 'no top-up / all credits exhausted' note above is withdrawn: only cheaperinference/kimi-k3, cheaperinference/glm-5.2 and cheaperinference/minimax-m2.7 are allowed to serve (policy.leg_rules allow entries, then a deny cheaperinference/*); every other cheaperinference leg stays off - cheaperinference/glm-4.5-air is route-gated in t2-worker/t3-driver, cheaperinference/deepseek-v4-flash keeps its t2-worker entry. Source: L0 2026-09-27T12:55:16Z (operator).",
+        "Operator 2026-09-27T17:2xZ: wallet balance exhausted (402), operator rule: credits out -> off until topped up. Provider marked available:false. Its pinned combos cheaperinference/{glm-5.2,kimi-k3} then go to omitted like deepseek - re-pin tests accordingly."
       ],
       "api_base": "https://api.cheaperinference.com/v1",
       "id": "cheapinference",
@@ -1711,7 +1712,8 @@
       "omniroute_id": "cheaperinference",
       "provider_data": null,
       "tier": "paid",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "cloudflare_workers_ai": {
       "$comment": "Unverified default: not registered with any Account ID yet (combos.json $comment) and no combo references this provider.",

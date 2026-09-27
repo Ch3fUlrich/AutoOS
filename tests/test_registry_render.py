@@ -353,14 +353,14 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
             self.assertIn(managed, rendered)
 
     def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
-        # An all-gateway-only route (opus-4-6) and a route whose every leg is
-        # unavailable/denied (t1-orchestrator-free-only and the samba one-leg
-        # routes) render no block at all - the same shape render_omniroute()
-        # gives an all-dead route, not an empty model list. t3-driver-free-only
-        # left this set when FREEAI gave it a servable free_ai/qwen7b leg.
+        # An all-gateway-only route (opus-4-6) and the samba one-leg routes
+        # (provider available:false) render no block at all - the same shape
+        # render_omniroute() gives an all-dead route, not an empty model list.
+        # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
+        # servable leg. t3-driver-free-only left this set when FREEAI gave it
+        # a servable free_ai/qwen7b leg.
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        for gone in ("opus-4-6", "t1-orchestrator-free-only",
-                     "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+        for gone in ("opus-4-6", "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, rendered)
 
     def test_a_legless_hand_group_is_never_rendered(self):
@@ -1149,10 +1149,11 @@ class GatewayLegsFilterTests(unittest.TestCase):
             combos["t2-worker-clean"]["models"],
             ["mistral/mistral-small-latest"])
         # samba/SambaNova is available: false, so every one of its legs goes -
-        # including the pinned one-leg routes and the zero-spend t1 route.
-        # t3-driver-free-only is NOT gone: FREEAI gave it a servable leg.
-        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3",
-                     "t1-orchestrator-free-only"):
+        # including the pinned one-leg routes.
+        # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
+        # servable leg. t3-driver-free-only is NOT gone: FREEAI gave it a
+        # servable leg.
+        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, combos)
 
     def test_real_litellm_drops_gated_legs(self):
@@ -1204,8 +1205,9 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
 
     def test_ide_drops_a_route_that_declares_legs_but_serves_none(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
-        for gone in ("t1-orchestrator-free-only",
-                     "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+        # t1-orchestrator-free-only is NOT dropped: T1FREE gave it a gemini
+        # servable leg.
+        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, ids)
 
     def test_ide_keeps_a_deliberately_legless_route(self):
@@ -1223,9 +1225,9 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
 
     def test_openhands_drops_a_tier_that_declares_legs_but_serves_none(self):
         ids = {t["id"] for t in registry.render_openhands(real_registry())["tiers"]}
-        for gone in ("omniroute-t1-orchestrator-free-only",
-                     "litellm-t1-orchestrator-free-only"):
-            self.assertNotIn(gone, ids)
+        # t1-orchestrator-free-only is NOT dropped: T1FREE gave it a gemini
+        # servable leg.
+        # No other route currently declares legs but serves none.
 
     def test_openhands_keeps_a_tier_whose_route_now_declares_no_legs(self):
         # The rule reaches a route that DECLARED legs and cannot serve them -

@@ -1073,12 +1073,13 @@ class LegRulesTests(unittest.TestCase):
 
     def test_providers_key_spelling_is_flagged_when_serving(self):
         """A denied leg is only tolerated while the route gates it by the same
-        exact string; a providers-key spelling with no gate is still a problem."""
+        exact string; a providers-key spelling with no gate is still a problem.
+        Use groq (available) since cheaperinference is now provider-off."""
         reg = mutated()
-        reg["routes"]["t2-worker"]["legs"].append("cheapinference/glm-4.5-air")
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("leg_rules" in p and "cheapinference/glm-4.5-air" in p
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p
                 for p in problems), problems)
 
     def test_available_true_entry_does_not_gate_a_denied_leg(self):
@@ -1209,30 +1210,24 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
-class CheaperinferenceReenabledTests(unittest.TestCase):
-    """Operator 2026-09-27T12:55Z: cheaperinference re-enabled with a small
-    balance, cheap efficient models only - exactly kimi-k3, glm-5.2 and
-    minimax-m2.7 may serve; a trailing deny cheaperinference/* gates every
-    other leg (glm-4.5-air route-gated in t2-worker/t3-driver)."""
+class CheaperinferenceUnavailableTests(unittest.TestCase):
+    """Operator 2026-09-27T17:2xZ: wallet balance exhausted (402), operator
+    rule: credits out -> off until topped up. Provider marked available:false.
+    Its pinned combos cheaperinference/{glm-5.2,kimi-k3} then go to omitted
+    like deepseek - re-pin tests accordingly."""
 
-    ALLOWED = ("cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
-               "cheaperinference/minimax-m2.7")
-
-    def test_provider_is_available(self):
+    def test_provider_is_unavailable(self):
         entry = load_registry()["providers"]["cheapinference"]
-        self.assertIsNot(entry.get("available"), False)
+        self.assertIs(entry.get("available"), False)
 
-    def test_the_three_allowed_legs_are_the_only_servable_ones(self):
+    def test_no_cheaperinference_legs_are_servable(self):
         reg = load_registry()
-        allowed = set(self.ALLOWED)
         served = set()
         for rid, route in reg["routes"].items():
             for leg in registry.gateway_legs(route, reg):
                 if leg.startswith("cheaperinference/"):
                     served.add(leg)
-                    self.assertIn(leg, allowed,
-                                  "route %s serves %s" % (rid, leg))
-        self.assertEqual(served, allowed)
+        self.assertEqual(served, set())
 
     def test_glm_4_5_air_and_deepseek_flash_stay_out(self):
         reg = load_registry()
@@ -1251,8 +1246,14 @@ class CheaperinferenceReenabledTests(unittest.TestCase):
 
     def test_leg_rules_allow_the_three_and_deny_the_rest(self):
         reg = load_registry()
-        for leg in self.ALLOWED:
+        # The three legs are allowed by leg_rules (explicit allow rules), but
+        # unavailable due to provider-level available:false.
+        for leg in ("cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+                    "cheaperinference/minimax-m2.7"):
             self.assertFalse(registry.leg_denied(leg, reg), leg)
+            self.assertTrue(registry._leg_is_unavailable(leg, reg["routes"]["t2-worker"], reg), leg)
+        # Other cheaperinference legs are denied by leg_rules (deny-cheaperinference)
+        # AND by provider-level available:false.
         for leg in ("cheaperinference/glm-4.5-air",
                     "cheaperinference/deepseek-v4-flash",
                     "cheaperinference/claude-sonnet-5",

@@ -43,7 +43,7 @@ CARD_VALUES = {
 CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
 ALL_COMBOS = ("t1-orchestrator", "t2-worker", "t3-driver",
-              "t2-worker-clean", "t3-driver-clean", "t1-orchestrator-clean")
+              "t2-worker-clean", "t3-driver-clean")
 
 # Card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4). v1 stays valid:
 # role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy

@@ -6497,9 +6497,9 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
-    Assert-Equal $oc.model 'omniroute/t2-worker'
+    Assert-Equal $oc.model 'omniroute/t1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,gemini-3.8-flash,opus-4-6,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
+    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') 'auto,auto/cheap,auto/smart,gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -6587,7 +6587,10 @@ Test-Case 'litellm fallback config is internally consistent' {
     # hand-curated *-paid escalations, mirroring the Linux consistency test.
     # t1/spark (DSMAX 2026-09-27) and deepseek-v4.1-flash (deepseek 402,
     # 2026-09-27T16:4xZ) fail closed and render no block.
-    foreach ($g in @('cheaperinference/glm-5.2', 'cheaperinference/kimi-k3', 'gemini-3.8-flash', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't3-driver-paid', 't4-rag')) {
+    # cheaperinference legs omitted: wallet exhausted 2026-09-27T17:2xZ (402).
+    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
+    # a free gemini/gemini-3.8-flash fallback leg.
+    foreach ($g in @('gemini-3.8-flash', 't1-orchestrator', 't1-orchestrator-free-only', 't2-worker', 't2-worker-clean', 't2-worker-free-only', 't2-worker-paid', 't3-driver', 't3-driver-clean', 't3-driver-free-only', 't3-driver-paid', 't4-rag')) {
         Assert-Contains $groups $g
     }
     $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
@@ -7252,7 +7255,7 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
     $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
         ConvertFrom-Json).combos
     $names = @($combos | ForEach-Object { $_.name })
-    Assert-Equal ($names -join ',') 'cheaperinference/glm-5.2,cheaperinference/kimi-k3,t2-worker,t2-worker-clean,t2-worker-free-only,t2-orchestrator,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag,gemini-3.8-flash,opus-4-6'
+    Assert-Equal ($names -join ',') 'gemini-3.8-flash,opus-4-6,t1-orchestrator,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag'
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7281,10 +7284,11 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
+        't1-orchestrator' = '1M'
+        't1-orchestrator-free-only' = '1M'
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
-        'cheaperinference/glm-5.2' = '128k'; 'cheaperinference/kimi-k3' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -7293,13 +7297,20 @@ Test-Case 'combos.json is valid, named and provider/model shaped' {
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
-    # t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor and
-    # deepseek-v4.1-flash fail closed (omitted, never a combo): t1/spark since
-    # DSMAX 2026-09-27, deepseek-v4.1-flash since the deepseek 402 of
-    # 2026-09-27T16:4xZ. No 1M context promise survives them.
-    foreach ($gone in @('t1-orchestrator', 't1-orchestrator-clean', 't1-orchestrator-free-only', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
+    # T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry
+    # a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
+    # t1-orchestrator-clean, spark-1.3-contributor and deepseek-v4.1-flash still
+    # fail closed (omitted, never a combo): t1/spark since DSMAX 2026-09-27 (Zen
+    # client-bound, OpenRouter off), deepseek-v4.1-flash since the deepseek 402
+    # of 2026-09-27T16:4xZ. No 1M context promise survives them.
+    foreach ($gone in @('t1-orchestrator-clean', 'spark-1.3-contributor', 'deepseek-v4.1-flash')) {
         Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
         Assert-True ($omitted -contains $gone) "$gone missing from omitted"
+    }
+    # t1-orchestrator and t1-orchestrator-free-only MUST be in combos now.
+    foreach ($kept in @('t1-orchestrator', 't1-orchestrator-free-only')) {
+        Assert-True ($names -contains $kept) "$kept should be in combos, not omitted"
+        Assert-True ($omitted -notcontains $kept) "$kept missing from combos"
     }
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini

@@ -67,14 +67,15 @@ class RoutingTableTests(unittest.TestCase):
         self.assertEqual(combo, "t2-worker")
         self.assertTrue(reason)
 
-    def test_public_1m_has_no_route(self):
-        # DSMAX 2026-09-27: the only 1M leg was switched off at the provider
-        # level, so a 1M card fails closed instead of landing on t1-orchestrator.
+    def test_public_1m_routes_to_t1_orchestrator(self):
+        # T1FREE 2026-09-27: t1-orchestrator now carries a free gemini/gemini-3.8-flash
+        # fallback leg, so ctx=1m public cards route there again.
         for card in ({"ctx": "1m", "role": "orchestrate"},
                      {"ctx": "1m", "complexity": "hard"},
                      {"ctx": "1m", "role": "review", "spend": "credit"}):
-            with self.assertRaises(routing.NoRoute, msg=card):
-                routing.select_combo(card)
+            combo, reason = routing.select_combo(card)
+            self.assertEqual(combo, "t1-orchestrator")
+            self.assertEqual(reason, "public-1m")
 
     def test_public_implement_standard_free_is_t2_worker(self):
         self.assertEqual(self.pick(role="implement", complexity="standard", spend="free-ok"), "t2-worker")
@@ -164,14 +165,16 @@ class RoutingBoundaryTests(unittest.TestCase):
     def test_spend_values(self):
         self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
 
-    def test_public_128k_orchestrate_goes_to_t2_worker(self):
-        # DSMAX 2026-09-27: t1-orchestrator is gone (its only 1M leg is off), so
-        # a strong 128k card lands on the strong t2 route instead.
-        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t2-worker")
+    def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
+        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again (ctx=128k +
+        # orchestrate/hard) through its gemini fallback leg.
+        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t1-orchestrator")
+        self.assertEqual(routing.select_combo({"role": "orchestrate"})[1], "public-strong")
 
-    def test_hard_review_is_t2_worker_not_t3_driver(self):
+    def test_hard_review_is_t1_orchestrator_not_t3_driver(self):
         # orchestrate/hard wins over review/trivial: a hard review needs the strong model.
-        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t2-worker")
+        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again.
+        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t1-orchestrator")
 
     def test_sensitive_orchestrate_128k_is_t2_worker_clean(self):
         self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "t2-worker-clean")
@@ -2215,12 +2218,11 @@ class CardV2Tests(unittest.TestCase):
             ({}, ("t2-worker", "public-default")),
             ({"role": "review"}, ("t3-driver", "public-light")),
             ({"privacy": "sensitive"}, ("t2-worker-clean", "sensitive")),
-            ({"complexity": "hard"}, ("t2-worker", "public-strong")),
+            ({"complexity": "hard"}, ("t1-orchestrator", "public-strong")),
+            ({"ctx": "1m", "role": "orchestrate"}, ("t1-orchestrator", "public-1m")),
         ]
         for card, expected in cases:
             self.assertEqual(routing.select_combo(card), expected, card)
-        with self.assertRaises(routing.NoRoute):
-            routing.select_combo({"ctx": "1m", "role": "orchestrate"})
 
 
 def _small_route_registry():

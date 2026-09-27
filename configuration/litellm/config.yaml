@@ -40,11 +40,6 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t2-worker
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
@@ -91,21 +86,6 @@ model_list:
     litellm_params:
       model: mistral/mistral-code-latest
       api_key: os.environ/MISTRAL_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/glm-5.2
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openai/minimax-m2.7
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-small-latest
@@ -159,6 +139,24 @@ model_list:
       additional_drop_params: ["strict"]
   # AUTOOS-MANAGED-END t4-rag
 
+  # ── t1-orchestrator: orchestrator-1M, free gemini fallback while OpenRouter/DeepSeek off ─────────
+  # AUTOOS-MANAGED-START t1-orchestrator
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  # AUTOOS-MANAGED-END t1-orchestrator
+
+  # ── t1-orchestrator-free-only: zero spend, gemini free leg ──────────────────────
+  # AUTOOS-MANAGED-START t1-orchestrator-free-only
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  # AUTOOS-MANAGED-END t1-orchestrator-free-only
+
   # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
   # deepseek-v4.1-flash omitted: providers.deepseek 402 (2026-09-27T16:4xZ),
   # no servable leg left - re-add the managed block when topped up.
@@ -171,21 +169,7 @@ model_list:
   # AUTOOS-MANAGED-END gemini-3.8-flash
 
   # ── cheaperinference pinned single-model aliases ───────────────────────────
-  # AUTOOS-MANAGED-START cheaperinference/glm-5.2
-  - model_name: cheaperinference/glm-5.2
-    litellm_params:
-      model: openai/glm-5.2
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  # AUTOOS-MANAGED-END cheaperinference/glm-5.2
 
-  # AUTOOS-MANAGED-START cheaperinference/kimi-k3
-  - model_name: cheaperinference/kimi-k3
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://api.cheaperinference.com/v1
-      api_key: os.environ/CHEAPINFERENCE_API_KEY
-  # AUTOOS-MANAGED-END cheaperinference/kimi-k3
 
 router_settings:
   # simple-shuffle: deterministic and DB-less. `usage-based-routing-v2` tracks

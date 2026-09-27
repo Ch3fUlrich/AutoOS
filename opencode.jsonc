@@ -186,6 +186,32 @@
       // regenerated; hand entries above START / below END are kept.
       "models": {
         // AUTOOS-MANAGED-START omniroute
+        "t1-orchestrator": {
+          "modelID": "t1-orchestrator",
+          "name": "t1 orchestrator-1M — 1M ctx (free-first)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
+        },
+        "t1-orchestrator-free-only": {
+          "modelID": "t1-orchestrator-free-only",
+          "name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
+        },
         "t2-worker": {
           "modelID": "t2-worker",
           "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
@@ -271,16 +297,6 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
-        "cheaperinference/kimi-k3": {
-          "modelID": "cheaperinference/kimi-k3",
-          "name": "cheaperinference kimi-k3 (S1-S2 credit)",
-          "limit": { "context": 131072, "output": 32768 }
-        },
-        "cheaperinference/glm-5.2": {
-          "modelID": "cheaperinference/glm-5.2",
-          "name": "cheaperinference glm-5.2 (S0-S1 credit)",
-          "limit": { "context": 131072, "output": 16384 }
-        },
         "auto/smart": {
           "modelID": "auto/smart",
           "name": "bootstrap: auto smart (no combo needed)",
@@ -309,10 +325,36 @@
       // Generated from catalog/ide-models.json (rendered from catalog/ai-registry.json), like the omniroute models.
       "models": {
         // AUTOOS-MANAGED-START litellm
+        "t1-orchestrator": {
+          "modelID": "t1-orchestrator",
+          "name": "t1 orchestrator-1M — 1M ctx (free-first)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
+        },
         "t1-orchestrator-paid": {
           "modelID": "t1-orchestrator-paid",
           "name": "t1 orchestrator-1M — openrouter first (paid)",
           "limit": { "context": 1000000, "output": 32768 }
+        },
+        "t1-orchestrator-free-only": {
+          "modelID": "t1-orchestrator-free-only",
+          "name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
         },
         "t2-worker": {
           "modelID": "t2-worker",
