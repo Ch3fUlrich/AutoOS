@@ -271,8 +271,8 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | local `autoos/omniroute:3.8.50-autoos2` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> `/home/qoder` (`HOME`) |
-| `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/opencode`; the code tree at the same path |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos2` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> the service user's home (`/home/<service-user>`, `HOME`) |
+| `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/<service-user>`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
 All three sit on the network `autoos-ai`, so OpenHands and opencode reach the
@@ -450,10 +450,10 @@ runs; npm fetches it at build, no binary is kept in git; image 4.14 GB ->
 Two measurements decide the rest of the service:
 
 - **`qodercli` needs a writable `HOME`, even for `--version`.** It creates
-  `$HOME/.qoder` on start and crashes (`ENOENT ... mkdir '/home/node/.qoder'`)
+  `$HOME/.qoder` on start and crashes (`ENOENT ... mkdir '/home/<base-image-user>/.qoder'`)
   when it cannot; the root filesystem is read-only. OmniRoute runs
   `qodercli --version` itself to find out whether the CLI is usable, so the
-  gateway needs a `HOME` it can write. `compose.yml` sets `HOME=/home/qoder` and
+  gateway needs a `HOME` it can write. `compose.yml` sets `HOME=/home/<service-user>` and
   mounts `~/.local/share/autoos/ai-stack/qoder-home` there (a tmpfs would give
   the gateway a new machine id on every restart). `ai-stack.sh init` creates it
   (`0700`, the operator's) - and so does `up`, because on a host initialised

@@ -119,15 +119,27 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(audit.redact_argv(["sshpass", "-p", "hunter2", "ssh", "h"]),
                           ["sshpass", "-p", "***", "ssh", "h"])
 
-    def test_argv_sha256_is_over_the_raw_unredacted_form(self):
-        raw = ["tool", "--token", "abc123"]
-        redacted_first = audit.redact_argv(raw)
-        h1 = audit.hash_argv(raw)
-        # a different secret value with the same shape hashes differently:
-        # the hash must come from the RAW argv, not the (identical) redacted form
+    def test_argv_sha256_is_over_the_redacted_form(self):
+        # item 5: hashing the RAW argv stores an offline-guessable digest of
+        # a secret (a short or known-shape token can be brute-forced from
+        # it). The hash must come from the REDACTED form, so a secret's
+        # value never influences the stored digest: two calls that differ
+        # only in a redacted secret hash alike.
+        h1 = audit.hash_argv(["tool", "--token", "abc123"])
         h2 = audit.hash_argv(["tool", "--token", "xyz999"])
-        self.assertNotEqual(h1, h2)
-        self.assertEqual(audit.redact_argv(["tool", "--token", "xyz999"]), redacted_first)
+        self.assertEqual(h1, h2)
+        self.assertEqual(h1, audit.hash_argv(["tool", "--token", "***"]))
+        # a call that redacts to a different shape still hashes differently
+        self.assertNotEqual(h1, audit.hash_argv(["tool", "--other", "abc123"]))
+
+    def test_non_string_argv_element_is_rendered_not_crashed(self):
+        # A non-str element (MCP JSON can carry a number/bool/null) is
+        # refused by policy as argv-caps, but the deny still has to be
+        # RECORDED: redaction must render it, never raise.
+        self.assertEqual(audit.redact_argv(["echo", 123, None, True]),
+                          ["echo", "123", "null", "true"])
+        self.assertEqual(audit.hash_argv(["echo", 123]),
+                          audit.hash_argv(["echo", 123]))
 
 
 class SanitizeTests(unittest.TestCase):

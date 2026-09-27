@@ -102,6 +102,16 @@ class DecisionTableTests(unittest.TestCase):
     def test_fixture_is_not_empty(self):
         self.assertGreater(len(self.rows), 50)
 
+    def test_dead_wrapper_helpers_are_gone(self):
+        # item 4: _strip_wrappers was never called (the command-head walker
+        # _command_heads replaced it) and _WRAPPERS existed only for it.
+        # Keep them deleted rather than letting a future edit re-add dead
+        # code that looks live.
+        self.assertFalse(hasattr(policy, "_strip_wrappers"),
+                         "_strip_wrappers is dead code; do not reintroduce it")
+        self.assertFalse(hasattr(policy, "_WRAPPERS"),
+                         "_WRAPPERS existed only for _strip_wrappers")
+
     def test_every_rule_id_has_at_least_one_row(self):
         rule_ids = {
             "unknown-actor", "empty-argv", "argv-caps", "forbid-host",
@@ -274,6 +284,391 @@ forbid = true
             policy.loads('path = ["/bin"]\n[hosts.h]\nkind = "local"\n'
                          '[actors.old]\nname = "claude"\ntier = "default"\n'
                          '[actors.new]\nname = "claude"\ntier = "default"\n')
+
+
+# ─── round 3 (hx3): generated wrapper-option bypass matrix ───────────────
+#
+# Each transparent launcher parses its leading options with one walker, so a
+# value-taking option given in any spelling cannot hide a forbidden command
+# behind it. The matrix is generated, not hand-listed: every wrapper x every
+# value-option spelling x every forbidden child, plus the env split-string
+# and flock -c/-- forms the walker exists to catch.
+
+# (argv, rule) triples a generated case must produce.
+_FORBIDDEN_CHILDREN = (
+    (("sudo", "id"), "no-sudo"),
+    (("sh", "-c", "x"), "no-inline-shell"),
+    (("rm", "-rf", "/"), "destructive"),
+)
+
+# Per launcher: option spellings that each already have their value supplied,
+# so the very next token is the wrapped command (flock's lockfile is included
+# because flock requires it before the command; timeout's duration likewise).
+_WRAPPER_OPTION_SPELLINGS: dict[str, list[list[str]]] = {
+    "env": [
+        ["-u", "x"], ["-ux"], ["--unset", "x"], ["--unset=x"],
+        ["-C", "/tmp"], ["-C/tmp"], ["--chdir", "/tmp"], ["--chdir=/tmp"],
+        ["-a", "M"], ["-aM"], ["--argv0", "M"], ["--argv0=M"],
+        ["-i"], ["-"],
+    ],
+    "nice": [
+        ["-n", "5"], ["-n5"], ["--adjustment", "5"], ["--adjustment=5"],
+    ],
+    "timeout": [
+        ["-s", "TERM", "5"], ["-sTERM", "5"],
+        ["--signal", "TERM", "5"], ["--signal=TERM", "5"],
+        ["-k", "1", "5"], ["-k1", "5"],
+        ["--kill-after", "1", "5"], ["--kill-after=1", "5"],
+    ],
+    "stdbuf": [
+        ["-i", "L"], ["-iL"], ["--input", "L"], ["--input=L"],
+        ["-o", "0"], ["-o0"], ["--output", "0"], ["--output=0"],
+        ["-e", "L"], ["-eL"], ["--error", "L"], ["--error=L"],
+    ],
+    "ionice": [
+        ["-c", "2"], ["-c2"], ["--class", "2"], ["--class=2"],
+        ["-n", "3"], ["-n3"], ["--classdata", "3"], ["--classdata=3"],
+    ],
+    "xargs": [
+        ["-n", "1"], ["-n1"], ["--max-args", "1"], ["--max-args=1"],
+        ["-a", "/tmp/f"], ["-a/tmp/f"], ["--arg-file", "/tmp/f"], ["--arg-file=/tmp/f"],
+        ["-s", "100"], ["-s100"], ["--max-chars", "100"], ["--max-chars=100"],
+    ],
+    "flock": [
+        ["-w", "5", "/tmp/l"], ["-w5", "/tmp/l"],
+        ["--timeout", "5", "/tmp/l"], ["--timeout=5", "/tmp/l"],
+        ["-E", "1", "/tmp/l"], ["-E1", "/tmp/l"],
+        ["--conflict-exit-code", "1", "/tmp/l"], ["--conflict-exit-code=1", "/tmp/l"],
+    ],
+    "setsid": [[], ["--wait"], ["-w"], ["--fork"]],
+    "nohup": [[], ["--"]],
+}
+
+# env -S/--split-string after a value-taking option: the value hides the
+# option region from a naive scan, so the split string survives to argv.
+_ENV_SPLIT_OPTIONS = (["-S"], ["--split-string"], ["-vS"])
+
+# flock runs `-c`/`--command` through a shell; `--` makes the next token the
+# lockfile even when it starts with `-` (so `flock -- -c rm -rf /` locks on
+# the file named `-c` and runs `rm -rf /`).
+_FLOCK_COMMAND_FORMS = (
+    (["flock", "-c", "rm -rf /"], "no-inline-shell"),
+    (["flock", "--command", "rm -rf /"], "no-inline-shell"),
+    (["flock", "/tmp/l", "-c", "rm -rf /"], "no-inline-shell"),
+    (["flock", "/tmp/l", "--command", "rm -rf /"], "no-inline-shell"),
+    (["flock", "--", "-c", "sh", "-c", "x"], "no-inline-shell"),
+    (["flock", "--", "-c", "python3", "-c", "x"], "no-inline-shell"),
+    (["flock", "--", "-c", "rm", "-rf", "/"], "destructive"),
+)
+
+# Harmless forms that must stay allowed: proving the walker does not simply
+# deny every option it meets.
+_HARMLESS_ALLOWED = (
+    ["env", "FOO=1", "ls"],
+    ["env", "-i", "ls"],
+    ["env", "-", "ls"],
+    ["nice", "-n", "5", "ls"],
+    ["timeout", "5", "ls", "-la"],
+    ["xargs", "-0", "echo"],
+    ["flock", "/tmp/l", "ls"],
+    ["flock", "--", "/tmp/l", "ls"],
+    ["flock", "--", "-", "ls"],
+    ["setsid", "ls"],
+    ["nohup", "ls"],
+)
+
+
+def _generated_wrapper_cases():
+    cases = []
+    for wrapper, spellings in _WRAPPER_OPTION_SPELLINGS.items():
+        for spelling in spellings:
+            for child, rule in _FORBIDDEN_CHILDREN:
+                cases.append(([wrapper, *spelling, *child], rule))
+    # Nest one level: a wrapper wrapping another wrapper must still expose
+    # the innermost command head. The outer walker must find the inner
+    # wrapper as the child, and the inner walker the forbidden child -- so a
+    # value-option disagreement at either layer is a bypass. One
+    # representative spelling per inner wrapper keeps the matrix bounded.
+    for outer, outer_spellings in _WRAPPER_OPTION_SPELLINGS.items():
+        for inner, inner_spellings in _WRAPPER_OPTION_SPELLINGS.items():
+            inner_option = inner_spellings[0]
+            for outer_option in outer_spellings:
+                for child, rule in _FORBIDDEN_CHILDREN:
+                    cases.append(([outer, *outer_option, inner, *inner_option, *child], rule))
+    for spelling in (["-u", "x"], ["-ux"], ["-C", "/tmp"], ["-a", "M"],
+                     ["--unset", "x"], ["--unset=x"]):
+        for split in _ENV_SPLIT_OPTIONS:
+            cases.append((["env", *spelling, *split, "sudo id"], "no-inline-shell"))
+    cases.extend(_FLOCK_COMMAND_FORMS)
+    return cases
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
+class WrapperOptionBypassMatrixTests(unittest.TestCase):
+    """Round 3: one option walker per wrapper closes the value-option and
+    flock `--`/`-c` bypasses; generated so a new spelling is covered without
+    a new hand-written row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.bindir = _make_fixed_path(cls._tmp.name)
+        cls.policy = _test_policy(cls.bindir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _decide(self, argv):
+        return policy.decide(self.policy, "claude", "coding-host", argv, cwd="/tmp")
+
+    def test_generated_matrix_denies_every_hidden_forbidden_child(self):
+        cases = _generated_wrapper_cases()
+        # flat spellings + one level of nesting must both be present, so the
+        # bound proves the nested matrix was generated, not silently dropped.
+        self.assertGreater(len(cases), 2000)
+        for argv, rule in cases:
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow,
+                                 f"{argv!r} was allowed (rule={decision.rule!r})")
+                self.assertEqual(decision.rule, rule, f"{argv!r}")
+
+    def test_harmless_option_forms_stay_allowed(self):
+        for argv in _HARMLESS_ALLOWED:
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertTrue(decision.allow,
+                                f"{argv!r} denied as {decision.rule!r}: {decision.problems}")
+
+    def test_flock_dashdash_next_token_is_always_the_lockfile(self):
+        # The head after `--` is the command, never the `-c` that is really
+        # the lockfile; the brief names these exact heads.
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "-c", "rm", "-rf", "/"]),
+            [["rm", "-rf", "/"]])
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "/tmp/l", "ls"]),
+            [["ls"]])
+        self.assertEqual(
+            policy._direct_child_heads(["flock", "--", "-", "ls"]),
+            [["ls"]])
+
+
+# ─── round 4 (hx4): generated long-option abbreviation matrix ────────────
+#
+# Every deny gate in the policy names its long options in full (the
+# policy._FlaggedLongs instances), and GNU getopt_long / git parse-options
+# select an option from any unambiguous abbreviation -- so `rm --recurs /`,
+# `tar --to-com id` and `git push --mir origin` executed while the full
+# spelling was denied. The matrix below is generated from the policy's own
+# tables: it walks each flagged option from a 3-character prefix up to the
+# full name, in both the bare and the `--abbrev=value` form, placed where the
+# rule expects it. A new flagged option in the policy is covered by this test
+# without writing a new case; a gate with no template here fails the test.
+
+# Dangerous value per full option name -- what the `--abbrev=value` form
+# carries and what a detached-value option reads from the next token, so the
+# generated argv is one the rule must deny for its own reason, not merely one
+# that trips a neighbouring rule.
+_OPTION_VALUES = {
+    "--pager": "evil-pager",
+    "--git-dir": "/tmp/repo", "--work-tree": "/tmp", "--exec-path": "/tmp",
+    "--output": "/tmp/out", "--upload-pack": "evil", "--receive-pack": "evil",
+    "--config-env": "GIT_CONFIG", "--exec": "evil",
+    "--checkpoint-action": "exec=id", "--to-command": "id",
+    "--use-compress-program": "id",
+    "--pid": "host", "--userns": "host", "--cap-add": "all",
+    "--device": "/dev/mem", "--privileged": "true", "--volume": "/:/host",
+    "--mount": "type=bind,src=/,dst=/host", "--user": "0",
+    "--sshlogin": "other", "--sshloginfile": "/tmp/hosts", "--transfer": "f",
+    "--return": "f", "--ssh": "other",
+    "--force-with-lease": "refs/heads/main", "--force-if-includes": "true",
+}
+
+# Gate name in tools/hostexec/policy.py -> (rule id, argv shape). The shape
+# places the option token where the rule reads it, followed by the detached
+# value a value-taking option reads from the next token ("" for a
+# presence-only flag, or when the generated form already carries `=value`).
+def _opt(prefix, tok, val, suffix=()):
+    return [*prefix, tok, *([val] if val else []), *suffix]
+
+
+_LONG_PREFIX_GATES = {
+    "_RM_DESTRUCTIVE_LONGS": ("destructive",
+                              lambda tok, val: _opt(["rm"], tok, val, ["/"])),
+    "_CHMOD_DESTRUCTIVE_LONGS": ("destructive",
+                                 lambda tok, val: _opt(["chmod"], tok, val, ["/"])),
+    "_GIT_PUSH_DESTRUCTIVE_LONGS": ("destructive",
+                                    lambda tok, val: _opt(["git", "push"], tok, val, ["origin"])),
+    "_IPTABLES_DESTRUCTIVE_LONGS": ("destructive",
+                                    lambda tok, val: _opt(["iptables"], tok, val)),
+    "_GIT_INJECT_LONGS": ("git-option-injection",
+                          lambda tok, val: _opt(["git"], tok, val, ["status"])),
+    "_GIT_REBASE_LONGS": ("git-option-injection",
+                          lambda tok, val: _opt(["git", "rebase"], tok, val, ["origin/main"])),
+    "_MAN_INLINE_LONGS": ("no-inline-shell",
+                          lambda tok, val: _opt(["man"], tok, val, ["ls"])),
+    "_TAR_INLINE_LONGS": ("no-inline-shell",
+                          lambda tok, val: _opt(["tar", "-cf", "/tmp/x.tar"], tok, val)),
+    "_DOCKER_RUN_ROOT_LONGS": ("docker-root",
+                               lambda tok, val: _opt(["docker", "run"], tok, val, ["alpine"])),
+    "_DOCKER_EXEC_ROOT_LONGS": ("docker-root",
+                                lambda tok, val: _opt(["docker", "exec"], tok, val, ["web", "ls"])),
+    # parallel's flag region is walked by _idx_after_parallel, which knows only
+    # the exact long spellings; an abbreviation there mis-locates the wrapped
+    # command, and the bogus head denies as path-hijack before the host-alias
+    # gate is reached. Either way the call is refused -- both are accepted here
+    # so the matrix says what actually stops it.
+    "_PARALLEL_HOST_LONGS": (("use-host-alias", "path-hijack"),
+                             lambda tok, val: _opt(["parallel"], tok, val, ["id", ":::", "x"])),
+}
+
+
+def _flagged_gates():
+    """Every _FlaggedLongs the policy declares, by module attribute name."""
+    return {name: value for name, value in vars(policy).items()
+            if isinstance(value, policy._FlaggedLongs)}
+
+
+def _prefixes(full: str):
+    """Every abbreviation of `full` from 3 option characters up to itself."""
+    body = full[2:]
+    for size in range(3, len(body) + 1):
+        yield "--" + body[:size]
+
+
+def _generated_long_prefix_cases():
+    cases = []
+    for attr, (rule, shape) in _LONG_PREFIX_GATES.items():
+        gate = _flagged_gates()[attr]
+        for full in gate.names:
+            value = _OPTION_VALUES.get(full, "x")
+            for tok in _prefixes(full):
+                if full in gate.takes_value:
+                    # inline `--abbrev=value` and the detached form getopt_long
+                    # reads the same value from the next token.
+                    cases.append((shape(f"{tok}={value}", ""), rule))
+                    cases.append((shape(tok, value), rule))
+                else:
+                    cases.append((shape(tok, ""), rule))
+    return cases
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
+class LongOptionPrefixMatrixTests(unittest.TestCase):
+    """Round 4: one abbreviation-aware matcher (_long_opt_hits) behind every
+    deny gate, generated over the policy's own option tables."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.bindir = _make_fixed_path(cls._tmp.name)
+        cls.policy = _test_policy(cls.bindir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _decide(self, argv):
+        return policy.decide(self.policy, "claude", "coding-host", argv, cwd="/tmp")
+
+    def test_every_flagged_gate_has_a_template(self):
+        # A new _FlaggedLongs in the policy must be covered here, or this fails.
+        gates = set(_flagged_gates())
+        covered = set(_LONG_PREFIX_GATES)
+        self.assertEqual(gates - covered, set(),
+                         f"gates with no prefix template: {sorted(gates - covered)}")
+        missing = {name for name in covered if not hasattr(policy, name)}
+        self.assertEqual(missing, set(), f"templates naming a deleted gate: {sorted(missing)}")
+
+    def test_generated_matrix_denies_every_abbreviation(self):
+        cases = _generated_long_prefix_cases()
+        # proves the matrix was generated from the tables, not hand-trimmed
+        self.assertGreater(len(cases), 400)
+        for argv, rules in cases:
+            with self.subTest(argv=argv, rules=rules):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow,
+                                 f"{argv!r} was allowed (rule={decision.rule!r})")
+                self.assertIn(decision.rule, rules, f"{argv!r}")
+
+    def test_shortest_abbreviation_is_denied_too(self):
+        # 1-2 option characters: over-deny is the documented fail-closed side
+        # of the rule -- a token the real program would reject as ambiguous
+        # still names the dangerous option.
+        for argv, rule in (
+                (["rm", "--r", "/"], "destructive"),
+                (["chmod", "--re", "/"], "destructive"),
+                (["git", "push", "--m", "origin"], "destructive"),
+                (["git", "--g", "/tmp", "status"], "git-option-injection"),
+                (["iptables", "--f"], "destructive"),
+                (["man", "--p", "evil"], "no-inline-shell"),
+                (["tar", "--u", "id", "-f", "x"], "no-inline-shell"),
+                (["docker", "run", "--p", "alpine"], "docker-root"),
+                (["parallel", "--s=other", "id", ":::", "x"], "use-host-alias")):
+            with self.subTest(argv=argv, rule=rule):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, rule, f"{argv!r}")
+
+    def test_harmless_spellings_stay_allowed(self):
+        # The matching is prefix-aware on the DENY side only; an ordinary
+        # option that merely shares a letter with a flagged one is untouched.
+        for argv in (
+                ["rm", "-i", "f"],
+                ["rm", "--interactive=never", "f"],
+                ["rm", "--preserve-root", "f"],
+                ["chmod", "--verbose", "644", "f"],
+                ["chmod", "644", "/tmp/file"],
+                ["git", "push", "origin", "main"],
+                ["git", "log", "--oneline"],
+                ["git", "status", "--ignored"],
+                ["git", "diff", "--unified=3"],
+                ["git", "commit", "--only", "-m", "msg"],
+                ["tar", "-tf", "x.tar"],
+                ["tar", "--checkpoint=1", "-cf", "/tmp/x.tar", "/tmp/f"],
+                ["tar", "--to-stdout", "-xf", "/tmp/x.tar"],
+                ["man", "ls"],
+                ["man", "--local-file", "ls"],
+                ["docker", "run", "--rm", "alpine"],
+                ["docker", "run", "--detach", "alpine"],
+                ["docker", "exec", "--workdir", "/tmp", "web", "ls"],
+                ["iptables", "-L"],
+                ["parallel", "--tag", "echo", "hi", ":::", "a"],
+                ["parallel", "-I", "foo", "echo", "foo", ":::", "a"],
+                ["parallel", "--replace", "foo", "echo", "foo", ":::", "a"],
+                ["flock", "--", "-evil", "ls"]):
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertTrue(decision.allow,
+                                f"{argv!r} denied as {decision.rule!r}: {decision.problems}")
+
+    def test_flock_dashdash_lockfile_may_start_with_a_dash(self):
+        # Documented intent (hx4 item 4): after `--` the *next* token is the
+        # lockfile even when it looks like an option, so `-evil` is a file
+        # name and `ls` is the child -- the child is what the rules see.
+        decision = self._decide(["flock", "--", "-evil", "ls"])
+        self.assertTrue(decision.allow, decision.reason)
+        self.assertEqual(policy._direct_child_heads(["flock", "--", "-evil", "ls"]),
+                         [["ls"]])
+        # and the same shape with a forbidden child still denies
+        self.assertEqual(self._decide(["flock", "--", "-evil", "rm", "-rf", "/"]).rule,
+                         "destructive")
+
+    def test_docker_global_option_abbreviation_cannot_hide_the_subcommand(self):
+        # The subcommand scan is prefix-aware too: `docker --log-l info run`
+        # must not read "info" as the subcommand and skip the run checks.
+        for argv in (
+                ["docker", "--log-l", "info", "run", "-v", "/:/h", "alpine"],
+                ["docker", "--ho", "tcp://127.0.0.1:2376", "run", "--priv", "alpine"],
+                ["docker", "--con", "ctx", "exec", "--us", "root", "web", "ls"],
+                ["docker", "--conf", "/tmp/c", "run", "--vol", "/:/h", "alpine"],
+                ["podman", "--log-l", "debug", "create", "--device", "/dev/mem", "alpine"]):
+            with self.subTest(argv=argv):
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, "docker-root", f"{argv!r}")
 
 
 class CliCheckTests(unittest.TestCase):
