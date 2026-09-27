@@ -1812,8 +1812,8 @@ cmd_verify() {
 # with the new password, and POST the edge webhook so the edge pulls the new
 # secret. The edge's copy of the opencode credential is refreshed by a
 # Semaphore template that PULLS the password from the coding VM's opencode.env.
-# AutoOS holds NO Semaphore API token and sends NO secret - it only POSTs the
-# webhook bound to that one template.
+# AutoOS holds NO Semaphore API token and never sends the opencode password -
+# it only POSTs the webhook bound to that one template.
 #
 # Keys (configuration/api-keys.yml):
 #   semaphore_edge_webhook_url    - the webhook URL (http(s)://...)
@@ -1861,6 +1861,7 @@ cmd_opencode_rotate() {
     fi
 
     # Validate header name (must match ^[A-Za-z0-9-]+$)
+    # alnum and hyphen only, by policy (a subset of the HTTP token charset)
     if [[ ! "$edge_webhook_header" =~ ^[A-Za-z0-9-]+$ ]]; then
         echo "  ! edge: semaphore_edge_webhook_header is not a header name"
         return 1
