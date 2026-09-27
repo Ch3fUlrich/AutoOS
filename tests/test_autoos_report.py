@@ -9,6 +9,11 @@ report's claims against the actual diff.
 Run from the repo root:
 
     python3 tests/test_autoos_report.py
+
+Exit codes (tools/autoos_report.py):
+    0  — parsed successfully, or check found no problems
+    1  — no BRIEF/REPORT block found (parse), or problems found (check)
+    2  — usage error, or unreadable/missing file
 """
 import importlib.util
 import json
@@ -63,6 +68,68 @@ class TestParseReport(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["tests"], [{"cmd": "test", "result": "FAIL → timeout"}])
+
+    # --- Defect 1: single-line form with space/colon field-name prefixes ---
+
+    def test_single_line_form_space_field_names(self):
+        """Each · segment may start with 'field value' (space, no colon)."""
+        text = "REPORT c4 · status completed · files a.py; b.py · tests python3 t.py -> OK · blockers none · lessons none"
+        result = self.mod.parse_report(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "c4")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["files"], ["a.py", "b.py"])
+        self.assertEqual(result["tests"], [{"cmd": "python3 t.py", "result": "OK"}])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["lessons"], [])
+        self.assertEqual(result["missing"], [])
+
+    def test_single_line_form_colon_field_names(self):
+        """Each · segment may start with 'field: value'."""
+        text = "REPORT c4 · status: completed · files: a.py; b.py · tests: python3 t.py -> OK · blockers: none · lessons: none"
+        result = self.mod.parse_report(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "c4")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["files"], ["a.py", "b.py"])
+        self.assertEqual(result["tests"], [{"cmd": "python3 t.py", "result": "OK"}])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["lessons"], [])
+        self.assertEqual(result["missing"], [])
+
+    def test_mixed_field_prefix_forms(self):
+        """Mix of no-prefix, space-prefix and colon-prefix segments.
+
+        Segment positions still determine which field receives the value; the
+        field-name prefix is simply stripped.
+        """
+        text = "REPORT task-mix · failed · blockers: need info; timeout · tests test.sh -> FAIL · lessons none · files a.py"
+        result = self.mod.parse_report(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "task-mix")
+        self.assertEqual(result["status"], "failed")
+        # Position 2 = files, even though the segment says "blockers:"
+        self.assertEqual(result["files"], ["need info", "timeout"])
+        # Position 3 = tests
+        self.assertEqual(result["tests"], [{"cmd": "test.sh", "result": "FAIL"}])
+        # Position 4 = blockers, value "lessons none" → "none" → []
+        self.assertEqual(result["blockers"], [])
+        # Position 5 = lessons, "files a.py" → "a.py"
+        self.assertEqual(result["lessons"], ["a.py"])
+
+    def test_none_and_dash_mean_empty_list(self):
+        """'none' and '-' for files/blockers/lessons produce [].
+
+        The spec says "none" / "-" for blockers/lessons/files means an empty list.
+        """
+        text = "REPORT task-empty · completed · none · pytest -> pass · - · none"
+        result = self.mod.parse_report(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["lessons"], [])
+
+    # --- end defect 1 tests ---
 
     def test_multi_line_form(self):
         text = """Some intro text.
@@ -177,6 +244,38 @@ class TestParseBrief(unittest.TestCase):
         self.assertEqual(result["skills"], ["coding-principles"])
         self.assertEqual(result["effort"], "medium")
         self.assertEqual(result["budget"], "10")
+
+    # --- Defect 1: BRIEF single-line with field-name prefixes ---
+
+    def test_single_line_form_brief_space_field_names(self):
+        """BRIEF with space-separated field-name prefixes, including done-when."""
+        text = "BRIEF task-x · goal fix the bug · paths src/; tools/ · spec exact · done-when tests pass · skills a; b · effort medium · budget 5"
+        result = self.mod.parse_brief(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "task-x")
+        self.assertEqual(result["goal"], "fix the bug")
+        self.assertEqual(result["paths"], ["src/", "tools/"])
+        self.assertEqual(result["spec"], "exact")
+        self.assertEqual(result["done_when"], "tests pass")
+        self.assertEqual(result["skills"], ["a", "b"])
+        self.assertEqual(result["effort"], "medium")
+        self.assertEqual(result["budget"], "5")
+
+    def test_single_line_form_brief_colon_field_names(self):
+        """BRIEF with colon-separated field-name prefixes, including done-when handled as done-when."""
+        text = "BRIEF task-y · goal: implement feature · paths: src/; docs/ · spec: partial · done-when: it works · skills: coding · effort: high · budget: 20"
+        result = self.mod.parse_brief(text)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "task-y")
+        self.assertEqual(result["goal"], "implement feature")
+        self.assertEqual(result["paths"], ["src/", "docs/"])
+        self.assertEqual(result["spec"], "partial")
+        self.assertEqual(result["done_when"], "it works")
+        self.assertEqual(result["skills"], ["coding"])
+        self.assertEqual(result["effort"], "high")
+        self.assertEqual(result["budget"], "20")
+
+    # --- end defect 1 tests ---
 
     def test_multi_line_form(self):
         text = """BRIEF my-brief
@@ -364,38 +463,72 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(data["id"], "task-stdin")
         self.assertEqual(data["status"], "failed")
 
+    def test_parse_no_block_exits_1(self):
+        """parse on input with no BRIEF/REPORT block exits 1."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "parse", "-"],
+            input="Just some plain text with no block.\n",
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no BRIEF or REPORT block found", result.stderr)
+
+    def test_parse_missing_file_exits_2(self):
+        """parse on a nonexistent file prints one-line error and exits 2."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "parse", "/nonexistent/report.txt"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        # One-line error (no traceback)
+        self.assertEqual(len(result.stderr.strip().split("\n")), 1)
+
+    # --- Defect 2: check command changes ---
+
+    def test_check_stdin(self):
+        """check - reads report from stdin."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "-", "--changed", "a.py"],
+            input="REPORT task-check-stdin · completed · a.py · pytest -> pass · · \n",
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("ok", result.stdout)
+
+    def test_check_missing_report_file_exits_2(self):
+        """check with a missing report file prints one-line error and exits 2."""
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "/nonexistent/report.txt", "--changed", "a.py"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        # One-line error (no traceback)
+        self.assertEqual(len(result.stderr.strip().split("\n")), 1)
+
     def test_check_subcommand_no_problems(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("REPORT task-check · completed · a.py · pytest -> pass · · \n")
-            f.flush()
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as cf:
-                cf.write("a.py\n")
-                cf.flush()
-                result = subprocess.run(
-                    [sys.executable, str(REPORT_TOOL), "check", f.name, "--changed", cf.name],
-                    capture_output=True,
-                    text=True,
-                )
-                Path(cf.name).unlink()
-            Path(f.name).unlink()
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "-", "--changed", "a.py"],
+            input="REPORT task-check · completed · a.py · pytest -> pass · · \n",
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(result.returncode, 0)
 
     def test_check_subcommand_with_problems(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("REPORT task-check2 · completed · a.py · pytest -> pass · · \n")
-            f.flush()
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as cf:
-                cf.write("a.py\nb.py\n")
-                cf.flush()
-                result = subprocess.run(
-                    [sys.executable, str(REPORT_TOOL), "check", f.name, "--changed", cf.name],
-                    capture_output=True,
-                    text=True,
-                )
-                Path(cf.name).unlink()
-            Path(f.name).unlink()
+        result = subprocess.run(
+            [sys.executable, str(REPORT_TOOL), "check", "-", "--changed", "a.py", "b.py"],
+            input="REPORT task-check2 · completed · a.py · pytest -> pass · · \n",
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("b.py", result.stdout)
+
+    # --- end defect 2 tests ---
 
 
 if __name__ == "__main__":
