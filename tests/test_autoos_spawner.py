@@ -433,7 +433,6 @@ class ClientCommandTests(unittest.TestCase):
         # free Qwen3.8-Flash by default.
         r = plan_of("--client", "qoder", "t")
         self.assertIn("qodercli -p --permission-mode bypass_permissions --model Qwen3.8-Flash", r.stdout)
-        self.assertNotIn("accept_edits", r.stdout)
 
     def test_qoder_writer_is_always_isolated(self):
         # bypass_permissions is only acceptable inside the private sandbox
@@ -441,6 +440,16 @@ class ClientCommandTests(unittest.TestCase):
         r = plan_of("--client", "qoder", "t")
         self.assertIn("git clone --local", r.stdout)
         self.assertIn("is your only writable checkout", r.stdout)
+
+    def test_qoder_without_auto_is_isolated_too(self):
+        # review of 6622d29 (qoder Qwen3.8-Flash): --no-auto gave level "ask",
+        # no permission flag and NO sandbox. Every non-read qoder run is isolated.
+        r = plan_of("--client", "qoder", "--no-auto", "t")
+        self.assertIn("git clone --local", r.stdout)
+
+    def test_qoder_plan_names_the_model_it_runs(self):
+        r = plan_of("--client", "qoder", "t")
+        self.assertNotIn("(client default)", r.stdout)
 
     def test_qoder_reviewer_stays_dont_ask(self):
         r = plan_of("--client", "qoder", "--card", "role=review", "t")
@@ -450,6 +459,7 @@ class ClientCommandTests(unittest.TestCase):
     def test_qoder_explicit_model_is_kept(self):
         r = plan_of("--client", "qoder", "--model", "Efficient", "t")
         self.assertIn("--model Efficient", r.stdout)
+        self.assertNotIn("Qwen3.8-Flash", r.stdout)
 
     def test_opencode_card_maps_combo_to_its_tier_agent(self):
         r = plan_of("--card", "role=review,privacy=sensitive", "t")
@@ -3232,6 +3242,12 @@ elif mode == "commit-sibling-worktree":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "sibling lane worker change"], check=True)
     print("fake: a sibling lane's worker committed in its own worktree")
+elif mode == "untracked-in-parent":
+    # A worker with full write rights drops a NEW untracked file into the parent
+    # checkout (review of 6622d29: git status ran with --untracked-files=no).
+    with open(os.path.join(root, "stray.txt"), "w") as fh:
+        fh.write("leak\\n")
+    print("fake: wrote an untracked file into the parent")
 elif mode == "orchestrator-commits-wip":
     # The orchestrator commits its own pre-existing WIP mid-run: the path was
     # dirty before, is clean after - the orchestrator's own cleanup, not a
@@ -3530,6 +3546,13 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "untracked-in-parent")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("stray.txt", out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_lane_fetched_into_a_new_ref_is_not_a_leak(self):

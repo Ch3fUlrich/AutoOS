@@ -158,6 +158,7 @@ MCP spawn:
 | opencode `omniroute/deepseek-v4.1-flash` | works | same |
 | opencode `omniroute/spark-1.3-contributor` (Muse Spark 1.3) | works | same |
 | qoder (`--permission-mode dont_ask`, no shell) | no | printed the stdout QUESTION + REPORT `input_required` |
+| qoder writer (`--permission-mode bypass_permissions`, Qwen3.8-Flash, sandbox forced) | not measured | shell + write work headless (2026-09-27, scratch repo); ask-back not yet measured |
 | agy (default model) | not measured | Gemini quota 429 before the task ran |
 
 ### Stdout channel

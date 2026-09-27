@@ -646,15 +646,21 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     else:
         agent = client.name
         level = "ask" if not args.auto else ("read" if route["review"] else "edit")
-        if client.name == "qoder" and level == "edit":
+        if client.name == "qoder" and level != "read":
             # qoder writes with bypass_permissions (no other headless write mode
             # exists) - only inside a private clone, where the leak check applies.
+            # Not only "edit": --no-auto ("ask") ran with no flag and no sandbox
+            # (review of 6622d29). qodercli has no path fence of its own, so the
+            # containment prompt + leak check are the controls; writes outside
+            # the parent checkout (e.g. $HOME) are not detected.
             args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
         if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
+        if client.name == "qoder":
+            model = model or clients.QODER_DEFAULT_MODEL
         model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.isolate:
@@ -1122,15 +1128,17 @@ def _porcelain_path_is_logs(p: str) -> bool:
 
 
 def _filtered_parent_status(root: str) -> dict:
-    """{path-part: XY} of `git status --porcelain --untracked-files=no`, logs/ excluded.
+    """{path-part: XY} of `git status --porcelain --untracked-files=all`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
     so logs/ paths are the spawner's own, never a worker's leak. Only entries
     where EVERY path is under logs/ drop; a rename with one side outside
     (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
     """
+    # Untracked files count too: a worker with write rights (qoder
+    # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
-                        "--untracked-files=no"], capture_output=True, text=True)
+                        "--untracked-files=all"], capture_output=True, text=True)
     out = {}
     if r.returncode != 0:
         return out
