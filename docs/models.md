@@ -141,13 +141,17 @@ generated table above already shows it):
 A tier combo is a *role*; sometimes a caller pins one model. Each pinned model
 degrades along its own chain, cheapest leg first, exactly:
 
-- `spark-1.3-contributor`: **zen (client-bound) → openrouter paid**, and no
-  longer servable through the gateway. The Zen contributor leg answers only
-  the opencode client (403 for the gateway), and the OpenRouter paid fallback
-  is now off (DSMAX 2026-09-27). The combo is omitted from `combos.json`, and
-  `muse-spark-1.3-contributor` is available as the free Zen leg through the
-  opencode client only. When it last ran it was ack-proven 2026-09-22 incl. the
-  `#low` / `#medium` / `#high` effort variants.
+- `spark-1.3-contributor`: **meta_api direct paid → zen (client-bound) →
+  openrouter paid**, cheapest-first. MUSEAPI 2026-09-27 put the direct Meta
+  Model API leg in front: it is the one leg the gateway can address, so the
+  combo is back in `combos.json` and the route is servable again. The Zen
+  contributor leg still answers only the opencode client (403 for the gateway)
+  and the OpenRouter paid fallback stays off (DSMAX 2026-09-27). The effort
+  rungs render on the surfaces that carry a ladder — opencode `variants`, IDE
+  `effort_ladder` — while a gateway combo has no per-effort alias at all, and
+  the direct Meta ladder has no `max` rung (the vendor rejects it; OpenRouter
+  advertises `max` on its own twin). When it last ran it was ack-proven
+  2026-09-22 incl. the `#low` / `#medium` / `#high` effort variants.
 - `gemini-3.8-flash`: **gemini free (until throttled) → openrouter paid twin**.
   The head rides the Google AI Studio free pool; the Google-scoped OpenRouter
   twin (the bare spelling 400s — probe-falsified) is now off (DSMAX
@@ -388,9 +392,9 @@ The browser UI shows the same state without ever showing a key value:
   only bites hand-rolled curl probes.
 - **Zen paid legs return 402** ("requires an opencode API key"): top up the
   Zen balance / finish key setup in the Zen console. The free promo leg
-  (`muse-spark-1.3-contributor-free`) currently answers 500 at peak — the
-  priority chain hops past both to OpenRouter, which is why `t1-orchestrator` still
-  works today.
+  (`muse-spark-1.3-contributor-free`) currently answers 500 at peak and the
+  OpenRouter twin is off, so as of MUSEAPI 2026-09-27 `t1-orchestrator` works
+  because its head leg is `meta_api` — direct Meta, which answers.
 - **"All credentials for model gemini-3.7-flash are cooling down" inside
   opencode is a HAND-PICKED model, not a combo.** Corrected diagnosis
   2026-09-22 (the first pass wrongly called these synthetic self-tests — the
