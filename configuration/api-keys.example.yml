@@ -54,7 +54,7 @@ omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
 # The edge's copy of the opencode credential is refreshed by a Semaphore
 # template that PULLS the password from the coding VM's opencode.env.
 # ai-stack.sh opencode-rotate POSTs this webhook (AutoOS holds no Semaphore
-# token and sends no secret).
+# token and never sends the opencode password).
 # Three keys are used:
 #   semaphore_edge_webhook_url    - the webhook URL (http(s)://...) — an http:// URL is allowed (LAN) but rotate warns: the token crosses the network in cleartext
 #   semaphore_edge_webhook_header - the header NAME only (e.g. X-AutoOS-Token)

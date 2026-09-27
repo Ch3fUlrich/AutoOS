@@ -717,6 +717,75 @@ class LeanTests(unittest.TestCase):
     def test_lean_is_refused_where_it_cannot_be_applied(self):
         self.assertEqual(plan_of("--client", "qwen", "--lean", "t").returncode, 2)
 
+    # SPAWNFREE (S2) item 4: role=review qoder runs are briefed --lean, and the
+    # blunt refusal (rc 2, "qoder would still start its MCP servers") killed them
+    # (inbox 2026-09-27T17:42:09Z, work/L2-general/review-edgesecret-brief.out).
+    # qodercli 1.1.63 does take --strict-mcp-config (its own --help, read
+    # 2026-09-27), so qoder is a client --lean is implemented for. A client that
+    # cannot drop its servers - qwen, gemini, codex, agy - gets a note and runs
+    # when the route is read-only, because there the servers cost memory, not
+    # safety; a writer run still refuses, because --lean there is also asking for
+    # that tool surface back.
+
+    def test_lean_qoder_drops_its_servers_in_the_client_argv(self):
+        r = plan_of("--client", "qoder", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qodercli --strict-mcp-config -p", r.stdout)
+        self.assertIn("lean: no MCP servers", r.stdout)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+
+    def test_lean_never_lands_in_the_omniroute_wrapper_argv(self):
+        # qwen runs as `omniroute run qwen -- ...`: claude's flag belongs to the
+        # client behind the --, and `omniroute --strict-mcp-config run ...` is an
+        # unknown option that would kill the run. --lean must not inject it there.
+        r = plan_of("--client", "qwen", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("omniroute run qwen", r.stdout)
+        self.assertNotIn("strict-mcp-config", r.stdout)
+
+    def test_lean_on_a_read_only_review_run_notes_and_continues(self):
+        r = plan_of("--client", "qwen", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qwen cannot drop its MCP servers", r.stdout)
+        self.assertIn("read-only", r.stdout)
+
+    def test_lean_on_tier_3_notes_and_continues(self):
+        r = plan_of("--client", "qwen", "--lean", "--tier", "3", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qwen cannot drop its MCP servers", r.stdout)
+
+    def test_the_decision_follows_route_review_not_the_card_dialect(self):
+        # A v2 card (kind=review,paths=...) reaches the same branch through
+        # route["review"]; its CLI case is host-dependent (need_tokens measured
+        # from the real tree), so the shape is asserted on the helper.
+        agent = load_agent()
+        note, refusal = agent.lean_decision("qwen", {"review": True, "kind": "review"})
+        self.assertIsNone(refusal)
+        self.assertIn("qwen cannot drop its MCP servers", note)
+        note, refusal = agent.lean_decision("qwen", {"review": False, "kind": "implement"})
+        self.assertIsNone(note)
+        self.assertIn("writer", refusal)
+        for client in agent.LEAN_CLIENTS:
+            self.assertEqual(agent.lean_decision(client, {"review": False}), (None, None))
+
+    def test_lean_on_a_writer_run_still_refuses(self):
+        # Only cards the planner accepts reach the decision; a v2 kind=implement
+        # without paths dies earlier ("card paths is empty"), which is not this
+        # test's business (the helper case above covers the v2 shape).
+        for card in (["--card", "role=implement"], ["--tier", "2"]):
+            with self.subTest(card=card):
+                r = plan_of("--client", "qwen", "--lean", *card, "t")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("writer", r.stderr)
+
+    def test_a_client_that_can_drop_its_servers_gets_no_note(self):
+        r = plan_of("--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+        r = plan_of("--client", "claude", "--lean", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+
 
 class PromoProbeTests(unittest.TestCase):
     def test_probe_is_stale_after_seven_days(self):
@@ -4139,16 +4208,19 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
-def _fallthrough_registry(route_ids):
+def _fallthrough_registry(route_ids, policy=None):
     """A registry whose routes are exactly `route_ids`, plus the clients the
-    capability gate reads. The resolver itself is replaced by
-    `_fallthrough_plan`, so providers/models/policy are not consulted."""
+    capability gate reads and an optional `policy` section (SPAWNFREE: the
+    ordered free-model list a --free fallthrough reads from here). The resolver
+    itself is replaced by `_fallthrough_plan`, so providers/models are not
+    consulted."""
     return {
         "clients": {
             "opencode": {"capabilities": {"shell": True, "write": True}},
             "claude": {"capabilities": {"shell": True, "write": True}},
         },
         "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+        "policy": policy or {},
     }
 
 
@@ -4166,6 +4238,112 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
                 "defer_until": None}
     return {"route": routes[0], "state": "ready", "reason": "stub", "bucket": "S1",
             "defer_until": None}
+
+
+def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None):
+    """Run cmd_run with the resolver and the client replaced by fakes; the
+    sandbox is a real temp clone so WIP commits and re-runs are real.
+
+    `case` is the running TestCase (its `agent` attribute is the module under
+    test; its addCleanup removes the temp root and state dir).
+
+    Returns (rc, out, err, calls, sandbox_names): `calls` is
+    {"n": int, "cwds": [str], "cmds": [argv], "free_models": [str],
+    "track": [record]}. The run is a gateway (opencode) run so `track_entry`
+    emits a record per attempt - an own-account client's run is tracked as None
+    (SPAWNCAP fallthrough records every provider-stopped attempt, not just the
+    final plan).
+
+    `args_over` (SPAWNFREE) overrides run-args fields (free, free_model, card,
+    isolate); `policy` is the registry's policy section.
+    """
+    agent = case.agent
+    root = _init_git_root()
+    statedir = tempfile.mkdtemp()
+    case.addCleanup(shutil.rmtree, root, True)
+    case.addCleanup(shutil.rmtree, statedir, True)
+    old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
+                                        agent.MEASURED_OVERLAY_PATH)
+    agent.ROOT = root
+    # A run without --isolate works in the caller's own directory (plan["cwd"] is
+    # os.getcwd()), and the fake client writes there — so the whole run happens
+    # inside the throwaway root, never in the checkout running the suite.
+    old_cwd = os.getcwd()
+    os.chdir(root)
+    agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
+    agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
+
+    calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
+             "track": []}
+    real_build_plan = agent.build_plan
+
+    def marking_build_plan(*a, **k):
+        # Tag each plan's env with its route, so a re-run that kept the
+        # first plan's env shows up as a stale mark.
+        plan = real_build_plan(*a, **k)
+        plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+        return plan
+
+    def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+        calls["n"] += 1
+        calls["cwds"].append(cwd)
+        calls["cmds"].append(cmd)
+        calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
+        calls["free_models"].append(
+            (json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}") or {}).get("model"))
+        with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                  encoding="utf-8") as fh:
+            fh.write("work\n")
+        if calls["n"] <= stops:
+            return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+        return agent.ClientExit(0, tail="done\n")
+
+    args = argparse.Namespace(
+        client="opencode", tier=None, card="kind=implement", task="edit README.md",
+        free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
+        joinable=False, model=None, clean=False, allow_training=False,
+        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+    args.__dict__.update(args_over or {})
+    env = dict(os.environ)
+    env["AUTOOS_STATE_DIR"] = statedir
+    # A gateway run needs a client key and a live gateway; both are faked
+    # here. The key is what makes the run track-recorded at all.
+    env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
+    out, err = io.StringIO(), io.StringIO()
+    old_time = agent.time.time
+    if clock is not None:
+        agent.time.time = clock
+    try:
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(agent, "load_registry",
+                                   lambda path: _fallthrough_registry(route_ids, policy)):
+                with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
+                        mock.patch.object(agent, "build_plan", marking_build_plan), \
+                        mock.patch.object(agent, "gateway_up", lambda: True), \
+                        mock.patch.object(agent, "resolve_model",
+                                          lambda cfg, tier, clean, override:
+                                              override or "omniroute/r-t2"):
+                    with mock.patch.object(agent, "run_client", fake_run_client):
+                        with mock.patch.object(agent.measure_mod, "client_state",
+                                               lambda *a, **k: {}):
+                            with mock.patch.object(
+                                    agent.clients, "signin_state",
+                                    lambda client, env=None: (None, "")):
+                                with mock.patch("shutil.which",
+                                                return_value="/usr/bin/opencode"):
+                                    with contextlib.redirect_stdout(out), \
+                                            contextlib.redirect_stderr(err):
+                                        rc = agent.cmd_run(args, cfg)
+    finally:
+        os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
+        agent.time.time = old_time
+        calls["track"] = agent.track.load(agent.TRACK_RECORD)
+        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
+            old_root, old_track, old_overlay)
+    base = os.path.join(statedir, "sandboxes")
+    names = os.listdir(base) if os.path.isdir(base) else []
+    return rc, out.getvalue(), err.getvalue(), calls, names
 
 
 class ProviderStopFallthroughTests(unittest.TestCase):
@@ -4191,92 +4369,9 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops, clock=None):
-        """Run cmd_run with the resolver and the client replaced by fakes; the
-        sandbox is a real temp clone so WIP commits and re-runs are real.
-
-        Returns (rc, out, err, calls, sandbox_names): `calls` is
-        {"n": int, "cwds": [str], "track": [record]}. The run is a gateway
-        (opencode) run so `track_entry` emits a record per attempt - an
-        own-account client's run is tracked as None (SPAWNCAP fallthrough
-        records every provider-stopped attempt, not just the final plan).
-        """
-        root = _init_git_root()
-        self.addCleanup(shutil.rmtree, root, True)
-        statedir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, statedir, True)
-        agent = self.agent
-        old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
-                                            agent.MEASURED_OVERLAY_PATH)
-        agent.ROOT = root
-        agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
-        agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
-        cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
-
-        calls = {"n": 0, "cwds": [], "route_marks": [], "track": []}
-        real_build_plan = agent.build_plan
-
-        def marking_build_plan(*a, **k):
-            # Tag each plan's env with its route, so a re-run that kept the
-            # first plan's env shows up as a stale mark.
-            plan = real_build_plan(*a, **k)
-            plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
-            return plan
-
-        def fake_run_client(cmd, cwd, env, reap=True, capture=False):
-            calls["n"] += 1
-            calls["cwds"].append(cwd)
-            calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
-            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
-                      encoding="utf-8") as fh:
-                fh.write("work\n")
-            if calls["n"] <= stops:
-                return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
-            return agent.ClientExit(0, tail="done\n")
-
-        args = argparse.Namespace(
-            client="opencode", tier=None, card="kind=implement", task="edit README.md",
-            free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
-            joinable=False, model=None, clean=False, allow_training=False,
-            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
-        env = dict(os.environ)
-        env["AUTOOS_STATE_DIR"] = statedir
-        # A gateway run needs a client key and a live gateway; both are faked
-        # here. The key is what makes the run track-recorded at all.
-        env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
-        out, err = io.StringIO(), io.StringIO()
-        old_time = agent.time.time
-        if clock is not None:
-            agent.time.time = clock
-        try:
-            with mock.patch.dict(os.environ, env, clear=True):
-                with mock.patch.object(agent, "load_registry",
-                                       lambda path: _fallthrough_registry(route_ids)):
-                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
-                            mock.patch.object(agent, "build_plan", marking_build_plan), \
-                            mock.patch.object(agent, "gateway_up", lambda: True), \
-                            mock.patch.object(agent, "resolve_model",
-                                              lambda cfg, tier, clean, override:
-                                                  override or "omniroute/r-t2"):
-                        with mock.patch.object(agent, "run_client", fake_run_client):
-                            with mock.patch.object(agent.measure_mod, "client_state",
-                                                   lambda *a, **k: {}):
-                                with mock.patch.object(
-                                        agent.clients, "signin_state",
-                                        lambda client, env=None: (None, "")):
-                                    with mock.patch("shutil.which",
-                                                    return_value="/usr/bin/opencode"):
-                                        with contextlib.redirect_stdout(out), \
-                                                contextlib.redirect_stderr(err):
-                                            rc = agent.cmd_run(args, cfg)
-        finally:
-            agent.time.time = old_time
-            calls["track"] = agent.track.load(agent.TRACK_RECORD)
-            (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
-                old_root, old_track, old_overlay)
-        base = os.path.join(statedir, "sandboxes")
-        names = os.listdir(base) if os.path.isdir(base) else []
-        return rc, out.getvalue(), err.getvalue(), calls, names
+    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None):
+        return _fallthrough_run(self, route_ids, stops, clock=clock,
+                                args_over=args_over, policy=policy)
 
     def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
         rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
@@ -4348,6 +4443,632 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             [("r-free", "fail", "provider"),
              ("r-cheap", "fail", "provider"),
              ("r-cheap2", "fail", "provider")], out + err)
+
+
+FREE_MODELS = ["opencode/nemotron-3-ultra-free",
+               "opencode/muse-spark-1.3-contributor-free",
+               "opencode/mimo-v2.6-flash-free"]
+
+
+class FreeModelFallthroughTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 1: a --free run's model is not a route, so the
+    SPAWNCAP fallthrough never reached it — the first 'Rate limit exceeded'
+    ended the run with exit 8 (inbox 2026-09-27T17:08:22Z and 17:19:45Z,
+    work/L1-routing/T1FREE.r2.out). A free run now re-runs the SAME task in the
+    SAME sandbox on the next model of the registry's ordered free-model list
+    (policy.free_client_models), the --free-model it was given first, with the
+    same WIP-preserve logic and the same MAX_FALLTHROUGH bound."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def _run(self, stops, clock=None, policy=None, **args_over):
+        over = {"free": True, "free_model": FREE_MODELS[1], "isolate": True}
+        over.update(args_over)
+        return _fallthrough_run(
+            self, ["r-free"], stops, clock=clock, args_over=over,
+            policy=policy if policy is not None
+            else {"free_client_models": {"opencode": FREE_MODELS}})
+
+    def test_the_chain_puts_the_given_free_model_first(self):
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": FREE_MODELS}}, "opencode", FREE_MODELS[1])
+        self.assertEqual(chain, [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]])
+
+    def test_the_chain_never_repeats_a_model(self):
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": FREE_MODELS}}, "opencode", FREE_MODELS[0])
+        self.assertEqual(chain, FREE_MODELS)
+
+    def test_a_chain_with_no_policy_is_the_single_given_model(self):
+        self.assertEqual(self.agent.free_model_chain(None, "opencode", "m-x"), ["m-x"])
+
+    def test_a_free_provider_stop_re_runs_the_next_free_model_in_the_same_sandbox(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the stopped attempt plus one re-run")
+        self.assertEqual(calls["cwds"][0], calls["cwds"][1], "same sandbox, same cwd")
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        self.assertEqual(calls["free_models"], [FREE_MODELS[1], FREE_MODELS[0]],
+                         "the given model first, then the next of the chain")
+
+    def test_the_free_rerun_carries_the_new_model_in_the_client_command(self):
+        _, out, err, calls, _ = self._run(stops=1)
+        for cmd, model in zip(calls["cmds"], [FREE_MODELS[1], FREE_MODELS[0]]):
+            self.assertEqual(cmd[cmd.index("--model") + 1], model, out + err)
+
+    def test_the_free_fallthrough_wip_commits_the_stopped_attempt(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WIP-COMMITTED", out + err)
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        # calls["cwds"][0] is the sandbox clone itself (the client's cwd).
+        files = subprocess.run(["git", "-C", calls["cwds"][0], "ls-files"],
+                               capture_output=True, text=True).stdout.split()
+        self.assertIn("attempt1.txt", files, "the stopped attempt's work survives on the branch")
+
+    def test_the_free_fallthrough_line_names_both_models(self):
+        _, out, err, _, _ = self._run(stops=1)
+        self.assertIn("provider stop on %s: Error: Rate limit exceeded -> falling through to %s"
+                      % (FREE_MODELS[1], FREE_MODELS[0]), out + err)
+
+    def test_a_free_run_respects_max_fallthrough_and_exits_8(self):
+        rc, out, err, calls, _ = self._run(stops=9)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH,
+                         "the first attempt plus MAX_FALLTHROUGH re-runs")
+        self.assertEqual(calls["free_models"],
+                         [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]][:calls["n"]],
+                         "the given model first, then the chain's order, never a repeat")
+
+    def test_a_free_run_with_no_chain_left_exits_8_after_one_attempt(self):
+        rc, out, err, calls, _ = self._run(
+            stops=9, free_model="opencode/only-free-model",
+            policy={"free_client_models": {"opencode": []}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "no other free model to try")
+        self.assertNotIn("falling through to", out + err)
+
+    def test_a_free_fallthrough_never_unlocks_a_privacy_refusal(self):
+        # PRIV3's guard (a model that trains never serves privacy=sensitive)
+        # lives in build_plan, and the re-run goes through build_plan, so a
+        # refused re-plan stops the loop instead of trying another model.
+        agent = self.agent
+        real = agent.build_plan
+        seen = {"n": 0}
+
+        def second_plan_refused(*a, **k):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise agent.PrivacyRefused("privacy: guard says no")
+            return real(*a, **k)
+
+        with mock.patch.object(agent, "build_plan", second_plan_refused):
+            rc, out, err, calls, _ = self._run(stops=1)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "the refused re-plan never starts a client")
+
+    # SPAWNFIX (S2 fix of SPAWNFREE) item 1: `--free` without `--isolate` is the
+    # documented usage (unattended-orchestration.md:71), but the fall-through's
+    # WIP-preserve block read plan["sandbox"]["path"] unguarded, so the first
+    # provider stop of a keyless non-isolated run died on TypeError instead of
+    # moving to the next free model.
+    def test_a_free_fallthrough_without_a_sandbox_re_runs_the_next_free_model(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1, isolate=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the stopped attempt plus one re-run")
+        self.assertEqual(calls["free_models"], [FREE_MODELS[1], FREE_MODELS[0]], out + err)
+        self.assertEqual(sandboxes, [], "nothing was cloned")
+        self.assertNotIn("WIP-COMMITTED", out + err,
+                         "no sandbox, so there is no checkout to commit into")
+        self.assertIn("falling through to", out + err)
+
+    def test_a_free_run_without_a_sandbox_exits_8_when_the_chain_is_spent(self):
+        # the rc is the FINAL attempt's, not the crash's.
+        rc, out, err, calls, _ = self._run(stops=9, isolate=False)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH, out + err)
+        self.assertNotIn("TypeError", out + err)
+
+    def test_a_free_run_without_a_sandbox_and_without_a_chain_exits_8(self):
+        rc, out, err, calls, _ = self._run(
+            stops=9, isolate=False, free_model="opencode/only-free-model",
+            policy={"free_client_models": {"opencode": []}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+
+
+QODERCLI_1_1_63_HELP = """Usage: qodercli [options] [command] [query...]
+
+Qoder CLI - Defaults to interactive mode. Use -p/--print for non-interactive
+output.
+
+Arguments:
+  query                                Initial prompt.
+
+Options:
+  -d, --debug                          Run in debug mode (default: false)
+  -m, --model <model>                  Model for the current session
+  --list-models                        List available models for the current
+                                       user
+  --permission-mode <mode>             Set the permission mode (choices:
+                                       default, accept_edits,
+                                       bypass_permissions, dont_ask, auto)
+  --dangerously-skip-permissions       Bypass all permission checks
+  --output-format <format>             Output format (choices: text, json,
+                                       stream-json)
+"""
+
+
+@unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+def _fake_cli(dirpath, name, version, help_text):
+    """A POSIX shell stand-in for an agent CLI: answers --version and --help,
+    counts every --help it is asked for (the cache test), and records its own
+    path so the checker's PATH lookup is the temp dir, never the host."""
+    path = os.path.join(dirpath, name)
+    script = ("#!/bin/sh\n"
+              "case \"$1\" in\n"
+              "  --version) printf '%%s\\n' '%s' ;;\n"
+              "  --help) printf x >> '%s.help-calls'\n"
+              "cat <<'FAKEHELP'\n%s\nFAKEHELP\n"
+              "    ;;\n"
+              "esac\n" % (version, path, help_text.strip()))
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    os.chmod(path, 0o755)
+    return path
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs; tests/run-tests.sh runs these on Linux")
+class ClientModeHelpTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 3: '--permission-mode accept_edits' is not a mode
+    qodercli 1.1.63 offers, and 62 runs refused every write before anyone
+    noticed (L1-backlog qoder lanes, 2026-09-27). Each client's declared modes
+    are now validated against the client's own --help, once per binary version.
+    """
+
+    def setUp(self):
+        self.clients = clients
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self.old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old_state
+
+    def _env(self, *names):
+        return {"PATH": os.pathsep.join([self.tmp, os.environ.get("PATH", "")]),
+                "HOME": os.environ.get("HOME", "/tmp"),
+                "AUTOOS_STATE_DIR": self.tmp}
+
+    def test_the_choices_list_parses_across_wrapped_lines(self):
+        parsed = self.clients.parse_mode_choices(QODERCLI_1_1_63_HELP)
+        self.assertEqual(parsed["--permission-mode"],
+                         ["default", "accept_edits", "bypass_permissions", "dont_ask", "auto"])
+        self.assertEqual(parsed["--output-format"], ["text", "json", "stream-json"])
+        self.assertNotIn("--list-models", parsed)
+
+    def test_quoted_choices_are_read_as_the_values_they_name(self):
+        # `claude --help` quotes its list (choices: "acceptEdits", "plan"); a
+        # quoted choice that does not match its own unquoted spelling makes the
+        # checker refuse a client that is configured correctly.
+        parsed = self.clients.parse_mode_choices(
+            'Options:\n'
+            '  --permission-mode <mode>   Permission mode (choices: "acceptEdits",\n'
+            '                             "bypassPermissions", "plan".)\n')
+        self.assertEqual(parsed["--permission-mode"],
+                         ["acceptEdits", "bypassPermissions", "plan"])
+
+    def test_a_client_whose_modes_the_help_offers_passes(self):
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        ok, reason = self.clients.check_client_modes(
+            self.clients.CLIENTS["qoder"], env=self._env())
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+
+    def test_a_mode_the_client_does_not_offer_is_refused_with_the_accepted_list(self):
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        bogus = self.clients.Client("qoder", "qodercli", True, False, True, "login",
+                                    modes={"read": ["--permission-mode", "plan"],
+                                           "edit": ["--permission-mode", "acceptEdits"]})
+        ok, reason = self.clients.check_client_modes(bogus, env=self._env())
+        self.assertFalse(ok)
+        self.assertIn("acceptEdits", reason)
+        self.assertIn("plan", reason)
+        self.assertIn("bypass_permissions", reason)  # the accepted list, verbatim
+        self.assertIn("qodercli --help", reason)
+
+    def test_the_help_is_read_once_per_client_binary_version(self):
+        exe = _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        client = self.clients.CLIENTS["qoder"]
+        env = self._env()
+        for _ in range(3):
+            ok, reason = self.clients.check_client_modes(client, env=env)
+            self.assertTrue(ok, reason)
+        self.assertEqual(self._help_calls(exe), 1, "cached by version")
+        with io.open(exe, encoding="utf-8") as fh:
+            script = fh.read()
+        with io.open(exe, "w", encoding="utf-8") as fh:
+            fh.write(script.replace("1.1.63", "1.1.64"))
+        ok, reason = self.clients.check_client_modes(client, env=env)
+        self.assertTrue(ok, reason)
+        self.assertEqual(self._help_calls(exe), 2, "a new version re-reads the help")
+
+    def test_an_entry_from_an_older_parser_is_re_read(self):
+        # A cached reading the checker no longer trusts must not keep deciding
+        # runs: the parser version is part of the cache key.
+        exe = _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        client = self.clients.CLIENTS["qoder"]
+        env = self._env()
+        self.assertTrue(self.clients.check_client_modes(client, env=env)[0])
+        path = self.clients._mode_cache_file(env)
+        with io.open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["qodercli"]["parser"] = self.clients.MODE_PARSER_VERSION - 1
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        self.assertTrue(self.clients.check_client_modes(client, env=env)[0])
+        self.assertEqual(self._help_calls(exe), 2)
+
+    def _help_calls(self, exe):
+        try:
+            return len(io.open(exe + ".help-calls", encoding="utf-8").read())
+        except OSError:
+            return 0
+
+    def test_an_absent_binary_is_not_a_refusal(self):
+        ok, reason = self.clients.check_client_modes(
+            self.clients.CLIENTS["agy"], env={"PATH": self.tmp, "HOME": "/tmp"})
+        self.assertIsNone(ok, reason)
+
+    def test_a_client_with_no_declared_modes_never_asks_for_help(self):
+        exe = _fake_cli(self.tmp, "agy", "1.2.12", "Usage: agy\n")
+        ok, reason = self.clients.check_client_modes(self.clients.CLIENTS["agy"],
+                                                     env=self._env())
+        self.assertIsNone(ok, reason)
+        self.assertEqual(self._help_calls(exe), 0)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_spawner_refuses_a_bad_mode_before_starting_anything(self):
+        agent = load_agent()
+        _fake_cli(self.tmp, "qodercli", "1.1.63", QODERCLI_1_1_63_HELP)
+        bogus = self.clients.Client("qoder", "qodercli", True, False, True, "login",
+                                    promo=True,
+                                    modes={"read": ["--permission-mode", "plan"],
+                                           "edit": ["--permission-mode", "acceptEdits"]})
+        started = []
+        args = argparse.Namespace(
+            client="qoder", tier=2, card=None, task="do it", free=False,
+            free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True, joinable=False,
+            model=None, clean=False, allow_training=False, max_depth=None, lean=False,
+            title=None, dry_run=False, no_defer=False)
+        cfg = {"agents": {a: {"model": "qoder/x"} for a in
+                          ("t1-orchestrator", "t2-worker", "t3-reviewer")},
+               "providers": {"qoder": {"models": {"x": {}}}}}
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_WORKERS_DIR": self.tmp,
+                                          "PATH": self.tmp + os.pathsep + os.environ.get("PATH", "")},
+                             clear=True):
+            with mock.patch.dict(self.clients.CLIENTS, {"qoder": bogus}):
+                with mock.patch.object(agent, "run_client",
+                                       lambda *a, **k: started.append(1)):
+                    with mock.patch.object(self.clients, "signin_state",
+                                           lambda client, env=None: (None, "")):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(args, cfg)
+        self.assertEqual(rc, 2, out.getvalue() + err.getvalue())
+        self.assertEqual(started, [], "refused before the client started")
+        self.assertIn("acceptEdits", err.getvalue())
+        self.assertIn("qodercli --help", err.getvalue())
+
+
+class FreeConcurrencyCapTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 2: three Muse free workers started together on one
+    account and all died on 'Rate limit exceeded' (L1-backlog lanes lstby2e,
+    hx4m, rv3). A --free run now counts the host's live worker records that use
+    the same free provider and waits for a slot (bounded) before starting."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers)
+
+    def record(self, wid, model, state="live", **over):
+        rec = {"id": wid, "pid": os.getpid(),
+               "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "", "client": "opencode",
+               "model": model, "route": "r", "title": "", "cwd": "/x", "sandbox": "",
+               "task_head": "t", "depth": 1}
+        if state == "ended":
+            rec["ended"] = self.agent.utc_now_iso()
+            rec["rc"] = 0
+        if state == "dead":
+            rec["pid"] = 999999999
+            rec["pid_start"] = 1
+        rec.update(over)
+        with io.open(os.path.join(self.workers, wid + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def test_the_free_provider_is_the_model_prefix(self):
+        self.assertEqual(self.agent.free_provider("opencode/muse-spark-1.3-contributor-free"),
+                         "opencode")
+        self.assertEqual(self.agent.free_provider("muse"), "muse")
+        self.assertEqual(self.agent.free_provider(""), "")
+
+    def test_the_cap_is_one_for_an_unlisted_provider(self):
+        agent = self.agent
+        self.assertEqual(agent.free_concurrency_cap({}, "opencode"),
+                         agent.DEFAULT_FREE_CONCURRENCY)
+        self.assertEqual(agent.DEFAULT_FREE_CONCURRENCY, 1,
+                         "zen free is one shared account (3 workers, 3 rate limits)")
+        policy = {"free_concurrency": {"$comment": ["prose"], "opencode": 3, "other": 2}}
+        self.assertEqual(agent.free_concurrency_cap(policy, "opencode"), 3)
+        self.assertEqual(agent.free_concurrency_cap(policy, "other"), 2)
+        self.assertEqual(agent.free_concurrency_cap(policy, "third"), 1)
+
+    def test_only_live_workers_of_the_same_free_provider_count(self):
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        self.record("b", "opencode/nemotron-3-ultra-free")
+        self.record("c", "other/free-model")
+        self.record("d", "opencode/mimo-v2.6-flash-free", state="ended")
+        self.record("e", "opencode/mimo-v2.6-flash-free", state="dead")
+        self.assertEqual(self.agent.live_free_workers(self.workers, "opencode"), 2)
+        self.assertEqual(self.agent.live_free_workers(self.workers, "other"), 1)
+        self.assertEqual(self.agent.live_free_workers(self.workers, "none"), 0)
+        self.assertEqual(self.agent.live_free_workers(os.path.join(self.tmp, "nope"), "opencode"), 0)
+
+    def _clock(self):
+        """A fake (now, sleep) pair: sleep advances the clock, so a bounded
+        wait is measured in the polls it really made."""
+        state = {"t": 0.0}
+
+        def now():
+            return state["t"]
+
+        def sleep(secs):
+            state["t"] += secs
+            sleep.calls.append(secs)
+        sleep.calls = []
+        return now, sleep
+
+    def test_a_queued_run_waits_for_a_slot_and_says_so(self):
+        agent = self.agent
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        lines = []
+        now, sleep = self._clock()
+
+        def sleep_and_free(secs):
+            sleep(secs)
+            if len(sleep.calls) == 2:  # the other worker ends on poll 2
+                os.remove(os.path.join(self.workers, "a.json"))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            live, timed_out = agent.wait_for_free_slot("opencode", 1, self.workers,
+                                                       printer=lines.append,
+                                                       sleep=sleep_and_free, now=now,
+                                                       poll_seconds=1,
+                                                       deadline_seconds=60)
+        self.assertEqual((live, timed_out), (0, False), lines)
+        self.assertEqual(lines, ["queued behind 1 opencode workers",
+                                 "queued behind 1 opencode workers"], lines)
+
+    def test_a_queue_outlasting_the_bound_reports_timed_out(self):
+        agent = self.agent
+        self.record("a", "opencode/muse-spark-1.3-contributor-free")
+        now, sleep = self._clock()
+        lines = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            live, timed_out = agent.wait_for_free_slot(
+                "opencode", 1, self.workers, printer=lines.append, sleep=sleep,
+                now=now, poll_seconds=30, deadline_seconds=120)
+        self.assertTrue(timed_out, lines)
+        self.assertEqual(live, 1)
+        # bounded: polls at 0/30/60/90/120 s, and the fifth refuses to sleep
+        # past the deadline rather than starting a 21st minute.
+        self.assertEqual(lines, ["queued behind 1 opencode workers"] * 5, lines)
+        self.assertEqual(sleep.calls, [30, 30, 30, 30], sleep.calls)
+
+    def _cmd_run_free(self, wait_result, policy=None):
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        out, err = io.StringIO(), io.StringIO()
+        calls = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "wait_for_free_slot",
+                                   lambda *a, **k: wait_result):
+                with mock.patch.object(agent, "run_client",
+                                       lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
+                    with mock.patch.object(agent.clients, "signin_state",
+                                           lambda client, env=None: (None, "")):
+                        with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                                rc = agent.cmd_run(args, cfg)
+        return rc, out.getvalue(), err.getvalue(), calls
+
+    def test_a_free_run_that_cannot_get_a_slot_exits_9_without_starting(self):
+        rc, out, err, calls = self._cmd_run_free((2, True))
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
+        self.assertEqual(calls, [], "the client never started (no 429, no work lost)")
+        self.assertIn("opencode", err)
+        self.assertIn("2", err)
+
+    def test_a_free_run_that_gets_a_slot_starts(self):
+        rc, out, err, calls = self._cmd_run_free((0, False))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls, [1])
+
+    def test_a_dry_run_never_waits_for_a_slot(self):
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=True, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "wait_for_free_slot",
+                                   side_effect=AssertionError("a dry run waited for a slot")):
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    rc = agent.cmd_run(args, cfg)
+        self.assertEqual(rc, 0)
+
+    def test_the_bound_defaults_to_twenty_minutes(self):
+        self.assertEqual(self.agent.FREE_QUEUE_TIMEOUT_SECONDS, 20 * 60)
+
+    # SPAWNFIX (S2 fix of SPAWNFREE) item 2: the cap was check-then-act — the
+    # gate counted the worker records, and the record only lands after the
+    # clone — so N spawners started together each counted 0 live and all N
+    # started into the same 429 the cap exists to prevent. The count and the
+    # reservation are now one critical section under a provider lock in the
+    # spawner state dir.
+    plan = {"model": "opencode/muse-spark-1.3-contributor-free"}
+
+    def reservations(self):
+        return sorted(n for n in os.listdir(self.workers)
+                      if n.endswith(self.agent.FREE_RESERVATION_SUFFIX))
+
+    def test_two_simultaneous_gates_reserve_only_one_slot(self):
+        agent = self.agent
+        real_count = agent.live_free_workers
+        delay = 0.3  # the window the clone used to sit in, between count and record
+
+        def slow_count(directory, provider):
+            live = real_count(directory, provider)
+            time.sleep(delay)
+            return live
+
+        results = []
+        with mock.patch.object(agent, "live_free_workers", slow_count):
+            with contextlib.redirect_stderr(io.StringIO()):
+                threads = [
+                    threading.Thread(
+                        target=lambda: results.append(
+                            agent.free_slot_refusal(dict(self.plan), None,
+                                                    directory=self.workers,
+                                                    poll_seconds=0.05,
+                                                    deadline_seconds=1.0)))
+                    for _ in range(2)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(20)
+        self.assertEqual(len(results), 2, results)
+        proceeds = [r for r in results if r[0] is None]
+        refusals = [r for r in results if r[0] is not None]
+        self.assertEqual(len(proceeds), 1, "exactly one spawner got the one slot")
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertIn("saturated", refusals[0][0])
+        self.assertEqual(len(self.reservations()), 1, self.reservations())
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.free_reservation_release(proceeds[0][1])
+
+    def test_a_held_reservation_blocks_the_gate_until_it_is_released(self):
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNone(refusal, "an empty leg takes the slot at once")
+            self.assertEqual(len(self.reservations()), 1, self.reservations())
+            self.assertEqual(agent.live_free_reservations(self.workers, "opencode"), 1)
+            self.assertEqual(agent.live_free_reservations(self.workers, "other"), 0)
+            second, token2 = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNotNone(second, "the live reservation is the one occupant")
+            self.assertIsNone(token2)
+            agent.free_reservation_release(token)
+            self.assertEqual(self.reservations(), [])
+            third, token3 = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+            self.assertIsNone(third, "releasing the reservation frees the slot")
+        agent.free_reservation_release(token3)
+
+    def test_a_reservation_from_a_dead_pid_does_not_block(self):
+        agent = self.agent
+        path = os.path.join(self.workers, "dead-pid" + agent.FREE_RESERVATION_SUFFIX)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump({"id": "dead-pid", "pid": 999999999, "pid_start": 1,
+                       "started": agent.utc_now_iso(), "provider": "opencode",
+                       "model": self.plan["model"]}, fh)
+        junk = os.path.join(self.workers, "corrupt" + agent.FREE_RESERVATION_SUFFIX)
+        with io.open(junk, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.live_free_reservations(self.workers, "opencode"), 0,
+                         "a stale or unreadable reservation never counts")
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.free_slot_refusal(
+                dict(self.plan), None, directory=self.workers,
+                poll_seconds=0.05, deadline_seconds=0)
+        self.assertIsNone(refusal, "a run killed long ago cannot queue a live one")
+        agent.free_reservation_release(token)
+
+    def test_a_reservation_is_never_a_ps_row(self):
+        # ps reads every *.json in the workers dir; a reservation is a lock-held
+        # placeholder, not a worker, so it must not show up there.
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            _, token = agent.free_slot_refusal(dict(self.plan), None,
+                                                directory=self.workers,
+                                                poll_seconds=0.05, deadline_seconds=0)
+        self.assertEqual([r["model"] for r in agent.list_workers(self.workers)], [])
+        agent.free_reservation_release(token)
+
+    def test_a_started_free_run_releases_its_reservation(self):
+        # The worker record replaces the reservation as the thing that occupies
+        # the slot; nothing of either kind is left live after the run.
+        agent = self.agent
+        rc, out, err, calls = self._cmd_run_free_real()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.reservations(), [], "the reservation was released")
+        rows = agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertTrue(rows[0]["state"].startswith("exited"), rows)
+
+    def _cmd_run_free_real(self):
+        """cmd_run for a --free run with the real gate (nothing patched out but
+        the client itself)."""
+        agent = self.agent
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do it", free=True,
+            free_model="opencode/muse-spark-1.3-contributor-free", isolate=False,
+            auto=True, joinable=False, model=None, clean=False, allow_training=False,
+            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
+               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+        out, err = io.StringIO(), io.StringIO()
+        calls = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "run_client",
+                                   lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
+                with mock.patch.object(agent.clients, "signin_state",
+                                       lambda client, env=None: (None, "")):
+                    with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(args, cfg)
+        return rc, out.getvalue(), err.getvalue(), calls
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):

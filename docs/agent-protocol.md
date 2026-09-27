@@ -1,6 +1,8 @@
 # Agent protocol — BRIEF and REPORT messages
 
-Routing v2 spec §8.2: terse, fixed-field messages between orchestrator and worker. Bulky output (logs, diffs, test output) goes to files; messages carry paths.
+Routing v2 spec §8.2 defines these fields; this file is their home (the one-line-per-fact
+discipline that keeps a message short is skill rule R-orch-01). Bulky output (logs, diffs, test
+output) goes to files; messages carry paths.
 
 ## Templates
 

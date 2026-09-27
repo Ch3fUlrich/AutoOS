@@ -45,8 +45,12 @@ session), qwen / gemini / codex through `omniroute run <target>` on the card's
 combo, agy and qoder on their own account login (no gateway; qoder is a promo
 and takes privacy=public work only).
 
---lean (opencode, claude): no serena/playwright/context7 for research and
-review agents - about 0.7 GB less per agent (LEAN_DROP).
+--lean: no serena/playwright/context7 for research and review agents - about
+0.7 GB less per agent (LEAN_DROP). Implemented for the clients that can honour
+it: opencode (config overlay) and claude / qoder (--strict-mcp-config,
+LEAN_CLIENTS). Another client cannot drop its servers: on a read-only run --lean
+is a note and the run goes ahead (the servers cost memory, not safety); on a
+writer run it still refuses (rc 2), because there the tool surface is the point.
 
 Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
@@ -71,7 +75,11 @@ Usage:
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
 gateway, no key, no spend - for exercising the tier chain and the permission
-fences. Free promo models may train on prompts, so --free refuses --clean.
+fences. Free promo models may train on prompts, so --free refuses --clean. A
+--free run that hits a provider stop re-runs the same task in the same sandbox
+on the next model of policy.free_client_models in catalog/ai-registry.json
+(SPAWNFREE item 1), and waits for a free slot before starting at all when the
+provider's live workers already reach policy.free_concurrency (item 2).
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -89,9 +97,12 @@ output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota
 item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
 deliverable is its diff), so nothing is lost); the child's
-exit code; 2 bad arguments, card or route refused;
+exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
+value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
+mode and the client's accepted list);
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
-PAUSE (R-pause-01); 4 depth budget exhausted.
+PAUSE (R-pause-01); 4 depth budget exhausted; 9 a --free run waited the whole bounded queue
+(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2).
 
 `heartbeat` (R-heartbeat-02/03, R-pause-01, R-handoff-07) is read-only - it never pushes,
 commits or writes anything. Exit codes of its own: 3 an inbox PAUSE is active (takes
@@ -120,6 +131,8 @@ import sys
 import threading
 import time
 import urllib.request
+if os.name != "nt":
+    import fcntl  # the free-leg provider lock (SPAWNFIX item 2); msvcrt on Windows
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
@@ -164,6 +177,17 @@ _TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # (516 MB with graphify off too).
 # The graph lookups stay: research and review agents navigate with them.
 LEAN_DROP = ("serena", "playwright", "context7")
+# Clients whose OWN argv accepts --strict-mcp-config (verified against each CLI's
+# --help on 2026-09-27: qodercli 1.1.63 and claude both document "Only use MCP
+# servers from --mcp-config"). The flag is not universal: qwen / gemini / codex
+# run behind `omniroute run <target>`, where it would land in omniroute's own
+# argument list and be rejected.
+MCP_STRICT_CLIENTS = ("claude", "qoder")
+# The clients --lean is actually implemented for: opencode through a config
+# overlay, these two through --strict-mcp-config. SPAWNFREE (S2) item 4: for any
+# other client --lean is a note on a read-only run and a refusal on a writer one,
+# not a blanket error.
+LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 
 # --isolate containment (ISOfix, measured 2026-09-26): a worker given absolute
 # parent paths edited and committed there; outside_fence only fenced opencode's
@@ -208,6 +232,343 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
 
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
+
+
+# SPAWNFREE (S2) item 1: the one home for the ordered free-model list is the
+# registry's policy section (catalog/ai-registry.json), keyed by client. A
+# --free run that hits a provider stop re-runs on the NEXT model of this list;
+# the --free-model the caller gave goes first, so an explicit model is still
+# what runs.
+FREE_MODEL_POLICY_KEY = "free_client_models"
+
+
+def free_model_chain(policy: dict | None, client: str, first: str) -> list:
+    """The free models to try in order: `first`, then the client's registry
+    list that `first` did not already name. A missing policy section (an old
+    registry, a registry that failed to load) leaves the single given model -
+    exactly today's one-shot --free run."""
+    chain = [first]
+    listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
+    for model in listed:
+        if model and model not in chain:
+            chain.append(model)
+    return chain
+
+
+def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
+                           tried: set) -> tuple:
+    """The next --free attempt: the SAME task in the SAME sandbox on the next
+    untried model of `chain`. Returns (plan, from, to), or (None, None, None)
+    when the chain is spent or the re-plan is refused (privacy, depth, no
+    route) - a refused re-plan ends the run at exit 8, never a silent retry.
+
+    `tried` holds every free model this run has already burned; the model the
+    stop just landed on joins it here, so no later attempt can return to it.
+    """
+    chain = list(chain or [plan["model"]])
+    current = plan["model"]
+    tried.add(current)
+    at = chain.index(current) if current in chain else -1
+    for model in chain[at + 1:]:
+        if model in tried:
+            continue
+        given = args.free_model
+        args.free_model = model
+        try:
+            next_plan = build_plan(args, cfg, sandbox=plan["sandbox"])
+        except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
+                ValueError):
+            return None, None, None  # the guard says no: exit 8 below
+        finally:
+            args.free_model = given
+        tried.add(model)
+        return next_plan, current, model
+    return None, None, None
+
+
+# SPAWNFREE (S2) item 2: one free provider is one shared account, so N workers
+# on it is N times the same rate limit (measured 2026-09-27: 3 Muse free workers
+# started together on the L1-backlog lanes lstby2e, hx4m and rv3, and all three
+# printed 'Rate limit exceeded'). A --free run therefore counts the host's live
+# worker records that use the same free provider before it starts, and waits
+# for a slot rather than starting into a 429. The cap is
+# policy.free_concurrency in catalog/ai-registry.json; the wait is bounded, and
+# a queue that outlasts the bound exits 9 having started nothing.
+DEFAULT_FREE_CONCURRENCY = 1
+FREE_QUEUE_POLL_SECONDS = 15
+FREE_QUEUE_TIMEOUT_SECONDS = 20 * 60
+EXIT_FREE_QUEUE_TIMEOUT = 9
+
+# SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
+# are two steps, and the worker record — the thing the count reads — used to be
+# written only after the clone. N spawners started together each counted the
+# others as absent and all N started, which is the 429 storm the cap exists to
+# prevent. So the count and the taking of a slot are now one critical section:
+# an exclusive lock over FREE_SLOT_LOCK_NAME in the spawner state dir, held while
+# a `.free-reservation` placeholder is written for this run. The placeholder is
+# what the next lock holder counts, so it cannot be shown a slot that another
+# spawner already claimed. It is not `.json`, so `ps` — which reads every `.json`
+# in that dir as a worker — never lists it.
+FREE_SLOT_LOCK_NAME = "free-slot.lock"
+FREE_RESERVATION_SUFFIX = ".free-reservation"
+FREE_LOCK_RETRY_SECONDS = 0.05
+FREE_LOCK_GIVEUP_SECONDS = 60
+
+
+def _free_lock_lock(fh) -> None:
+    """Try once to take `fh`'s exclusive lock; raise OSError when it is held."""
+    if os.name == "nt":
+        import msvcrt
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def free_slot_lock_take(directory: str):
+    """Take the free-leg provider lock, retrying up to FREE_LOCK_GIVEUP_SECONDS.
+
+    Returns the handle to hand back to free_slot_lock_give(), or None when the
+    lock could not be taken at all. A lock that is unavailable (an unwritable
+    state dir, a spawner wedged for a minute) degrades to today's best-effort
+    count — it never refuses a run and never hangs one.
+    """
+    try:
+        fd = os.open(os.path.join(directory, FREE_SLOT_LOCK_NAME),
+                     os.O_RDWR | os.O_CREAT, 0o600)
+        fh = os.fdopen(fd, "r+b")
+    except OSError:
+        return None
+    deadline = time.time() + FREE_LOCK_GIVEUP_SECONDS
+    while True:
+        try:
+            _free_lock_lock(fh)
+            return fh
+        except OSError:
+            if time.time() >= deadline:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                return None
+            time.sleep(FREE_LOCK_RETRY_SECONDS)
+
+
+def free_slot_lock_give(fh) -> None:
+    """Release a handle from free_slot_lock_take(); None (no lock taken) is fine."""
+    if fh is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        fh.close()
+    except OSError:
+        pass
+
+
+def _reservation_rows(directory: str, provider: str) -> tuple:
+    """(live paths, stale paths) of the reservations in `directory` naming `provider`.
+
+    A reservation is claimed by a live process or by none at all: the pid in it
+    is gone (a killed spawner, a reboot) or its file cannot be read, so it is
+    stale and reaped. A stale placeholder must never queue a run — the cost of
+    dropping one is a 429, the cost of trusting it is a leg nothing can leave.
+    """
+    live, stale = [], []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return live, stale
+    for name in names:
+        if not name.endswith(FREE_RESERVATION_SUFFIX):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            stale.append(path)
+            continue
+        if not isinstance(record, dict) or record.get("provider") != provider:
+            continue
+        try:
+            alive = _worker_state(record) == "running"
+        except Exception:  # noqa: BLE001 - an unjudgeable placeholder is a stale one
+            alive = False
+        (live if alive else stale).append(path)
+    return live, stale
+
+
+def live_free_reservations(directory: str, provider: str) -> int:
+    """Reservations in `directory` for `provider` whose spawner is still alive.
+
+    Reaps the stale ones on the way, so a run that died holding a slot leaves it
+    rather than blocking the leg forever.
+    """
+    live, stale = _reservation_rows(directory, provider)
+    for path in stale:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return len(live)
+
+
+def _reserve_free_slot(directory: str, provider: str, model: str):
+    """Write this run's placeholder and return its path (None when it cannot be
+    written — the run then proceeds unreserved, exactly as it used to)."""
+    wid = "free-%d-%s" % (os.getpid(), os.urandom(3).hex())
+    record = {"id": wid, "pid": os.getpid(), "pid_start": _proc_starttime(os.getpid()),
+              "started": utc_now_iso(), "provider": provider, "model": model}
+    path = os.path.join(directory, wid + FREE_RESERVATION_SUFFIX)
+    try:
+        _write_worker_record(path, record)
+    except OSError:
+        return None
+    return path
+
+
+def free_reservation_release(token) -> None:
+    """Give up a slot taken by _reserve_free_slot(); None and an vanished file are
+    both fine — a killed holder's placeholder is stale and reaped by the next
+    count anyway."""
+    if not token:
+        return
+    try:
+        os.remove(token)
+    except OSError:
+        pass
+
+
+def free_provider(model) -> str:
+    """The provider prefix of a model id ('opencode/muse-...-free' -> 'opencode')."""
+    return (model or "").partition("/")[0]
+
+
+def free_concurrency_cap(policy: dict | None, provider: str) -> int:
+    """policy.free_concurrency for `provider`; DEFAULT_FREE_CONCURRENCY (1) for
+    an unlisted provider, a junk value or a cap below 1 (a 0 cap is a queue
+    nothing can ever leave)."""
+    cap = ((policy or {}).get("free_concurrency") or {}).get(provider)
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+        return DEFAULT_FREE_CONCURRENCY
+    return cap
+
+
+def live_free_workers(directory: str, provider: str) -> int:
+    """Worker records in `directory` that are live and run a model of `provider`.
+
+    `died` (gone, or a recycled pid) and `exited` records are not live; an
+    unjudgeable record counts, because the cost of a false queue is a wait and
+    the cost of missing one is a 429.
+    """
+    try:
+        rows = list_workers(directory)
+    except OSError:
+        return 0
+    return sum(1 for row in rows
+               if not row["state"].startswith("exited") and row["state"] != "died"
+               and free_provider(row["model"]) == provider)
+
+
+def wait_for_free_slot(provider: str, cap: int, directory: str, printer=None,
+                       sleep=None, now=None, poll_seconds: int = FREE_QUEUE_POLL_SECONDS,
+                       deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS,
+                       on_free=None) -> tuple:
+    """Poll until fewer than `cap` workers of `provider` are live.
+
+    Counts the live worker records *and* the live reservations (a spawner that
+    claimed a slot but has not got its record down yet occupies it). Every
+    count happens under the free-leg lock, and `on_free` — the caller's
+    reservation — runs in the same critical section, so no two spawners are ever
+    shown the same slot.
+
+    Returns (live_count, timed_out). Each poll with the slot still taken prints
+    the one line 'queued behind <n> <provider> workers', so a log says why a
+    spawn took 20 minutes. Never raises on a registry problem: an unreadable
+    directory reads as 0 live workers (start, and let the client fail loudly).
+    """
+    printer = printer or (lambda line: print(line, file=sys.stderr))
+    sleep = sleep or time.sleep
+    now = now or time.time
+    limit = now() + deadline_seconds
+    while True:
+        lock = free_slot_lock_take(directory)
+        try:
+            live = (live_free_workers(directory, provider)
+                    + live_free_reservations(directory, provider))
+            slot = live < cap
+            if slot and on_free is not None:
+                on_free()
+        finally:
+            free_slot_lock_give(lock)
+        if slot:
+            return live, False
+        printer("queued behind %d %s workers" % (live, provider))
+        if now() + poll_seconds > limit:
+            return live, True
+        sleep(poll_seconds)
+
+
+def free_slot_refusal(plan: dict, policy: dict | None, directory: str | None = None,
+                      printer=None, sleep=None, now=None,
+                      poll_seconds: int = FREE_QUEUE_POLL_SECONDS,
+                      deadline_seconds: int = FREE_QUEUE_TIMEOUT_SECONDS) -> tuple:
+    """Wait for a free slot for `plan`'s model and claim it.
+
+    Returns (None, reservation-token) when the run may start, and
+    (refusal-message, None) when the bounded wait ran out. The token keeps the
+    slot claimed from this count until the run's own worker record exists;
+    release it with free_reservation_release() once that record is down (or the
+    run is over)."""
+    provider = free_provider(plan["model"])
+    cap = free_concurrency_cap(policy, provider)
+    directory = directory or workers_dir()
+    claimed = []
+
+    def reserve():
+        claimed.append(_reserve_free_slot(directory, provider, plan["model"]))
+
+    live, timed_out = wait_for_free_slot(provider, cap, directory, printer=printer,
+                                         sleep=sleep, now=now,
+                                         poll_seconds=poll_seconds,
+                                         deadline_seconds=deadline_seconds,
+                                         on_free=reserve)
+    if not timed_out:
+        return None, (claimed[0] if claimed else None)
+    return ("the %s free leg is saturated: %d worker(s) of the same provider were "
+            "live for %d min (cap %d per provider, policy.free_concurrency). Nothing "
+            "started - retry later, run without --free, or raise the cap if the "
+            "provider says it serves more at once."
+            % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap), None)
+
+
+def lean_decision(client_name: str, route: dict) -> tuple:
+    """(note, refusal) for `--lean` on `client_name` given a planned `route`.
+
+    SPAWNFREE (S2) item 4: --lean on a client that cannot drop its MCP servers
+    used to be a flat refusal, which killed the role=review qoder runs the skill
+    briefs lean (inbox 2026-09-27T17:42:09Z,
+    work/L2-general/review-edgesecret-brief.out). A read-only run pays those
+    servers in RAM only, so note it and continue; on a writer run the servers'
+    write-capable tool surface is the documented reason --lean is asked for, so
+    a client that cannot provide it still refuses. Both are None when the client
+    is in LEAN_CLIENTS, where --lean is honoured outright."""
+    if client_name in LEAN_CLIENTS:
+        return None, None
+    if route.get("review"):
+        return "%s cannot drop its MCP servers" % client_name, None
+    return None, ("--lean cannot be honoured for %s: it would still start its MCP "
+                  "servers, and a writer run is where that tool surface is exactly "
+                  "what --lean asks to remove (%s can drop them)." % (
+                      client_name, " and ".join(LEAN_CLIENTS)))
 
 
 def lean_overlay(cfg: dict) -> dict:
@@ -660,7 +1021,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
-        if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
+        if args.lean and client.name in MCP_STRICT_CLIENTS \
+                and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         if client.name == "qoder":
             model = model or clients.QODER_DEFAULT_MODEL
@@ -2087,6 +2449,14 @@ def cmd_run(args, cfg: dict) -> int:
         if refusal is not None:
             return refuse(refusal)
     client = clients.CLIENTS[args.client]
+    # SPAWNFREE (S2) item 3: a mode the CLI does not offer is not rejected by
+    # the CLI - qodercli 1.1.63 took `--permission-mode accept_edits`, ignored
+    # it, and refused every write (62 runs). Check the adapter's modes against
+    # the client's own --help (cached per binary version) before anything is
+    # cloned, planned or started.
+    modes_ok, modes_why = clients.check_client_modes(client)
+    if modes_ok is False:
+        return refuse(modes_why)
     if args.free and args.clean:
         return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
     if args.tier is not None and args.card is not None:
@@ -2095,9 +2465,6 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--clean is for --tier; with a card say privacy=sensitive.")
     if args.free and client.name != "opencode":
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
-    if args.lean and client.name not in ("opencode", "claude"):
-        return refuse("--lean is implemented for opencode and claude; %s would still start "
-                      "its MCP servers." % client.name)
     if args.joinable and client.name != "claude":
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     try:
@@ -2111,6 +2478,13 @@ def cmd_run(args, cfg: dict) -> int:
     route = plan["route"]
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
+    # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
+    # honoured *and* the run needs what it asks for (lean_decision).
+    lean_note = None
+    if args.lean:
+        lean_note, lean_refusal = lean_decision(client.name, route)
+        if lean_refusal is not None:
+            return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
@@ -2119,7 +2493,10 @@ def cmd_run(args, cfg: dict) -> int:
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
     if args.lean:
-        print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
+        if lean_note:
+            print("note: %s; this run is read-only, so its servers cost memory, not safety" % lean_note)
+        else:
+            print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":
         print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
               "opencode-only, but every client gets the containment prompt line and the "
@@ -2154,6 +2531,39 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
+    # burned, so a fallthrough re-run never picks one of them again.
+    excluded_routes = set()
+    # SPAWNFREE (S2) item 1: and the free models it burned. A --free run's
+    # model is not a route, so the resolver's fallthrough never reached it -
+    # the first 'Rate limit exceeded' ended the run (inbox 2026-09-27T17:08:22Z
+    # and 17:19:45Z, work/L1-routing/T1FREE.r2.out).
+    excluded_free_models = set()
+    # How many re-runs this run has already started (route or free model): the
+    # one bound MAX_FALLTHROUGH is about.
+    fallthroughs = 0
+    free_chain = None
+    free_policy = None
+    if args.free:
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None  # an unreadable registry leaves one free model
+        free_policy = (registry or {}).get("policy") or {}
+        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+    # SPAWNFREE (S2) item 2: a free provider is one shared account, so a second
+    # worker on it does not add capacity, it adds a 429. Wait for a slot before
+    # anything is cloned or started (a queue that outlasts the bound costs
+    # nothing but time and exits 9).
+    # SPAWNFIX (S2) item 2: and claim it while holding the free-leg lock, so a
+    # second spawner that starts at the same moment counts this one instead of
+    # the empty leg. The claim lives until this run's worker record exists.
+    free_reservation = None
+    if args.free:
+        queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
+        if queue_msg is not None:
+            return refuse(queue_msg, EXIT_FREE_QUEUE_TIMEOUT)
     parent_snap = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
@@ -2171,9 +2581,6 @@ def cmd_run(args, cfg: dict) -> int:
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
-    # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
-    # burned, so a fallthrough re-run never picks one of them again.
-    excluded_routes = set()
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
     # WIPfix provider-stop check has the child's tail. A --joinable launcher
@@ -2182,6 +2589,19 @@ def cmd_run(args, cfg: dict) -> int:
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
     while True:
+        # SPAWNFREE (S2) item 2: a fallthrough re-run is a fresh start on the
+        # same shared free account, so it passes the same gate (the first
+        # attempt passed it before the clone was made). Breaking here still
+        # runs the sandbox summary below, so the WIP commit the stopped
+        # attempt left is announced. A --free run never reaches the track
+        # record (track_entry returns None for it), so a queue timeout costs
+        # the route nothing.
+        if args.free and fallthroughs:
+            queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
+            if queue_msg is not None:
+                print("autoos-agent: %s" % queue_msg, file=sys.stderr)
+                rc = EXIT_FREE_QUEUE_TIMEOUT
+                break
         # Worker registry (ps): one record per attempt (a SPAWNCAP fallthrough
         # is its own record), live for the whole run, so `ps` shows this spawn
         # from any checkout. The child inherits the dir so a nested spawn in an
@@ -2195,6 +2615,13 @@ def cmd_run(args, cfg: dict) -> int:
             worker_id, worker_rec = _worker_record_start(plan, args, workers)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
+        if worker_id is not None:
+            # The record is the thing every count reads, so the placeholder this
+            # run claimed the slot with has done its job (SPAWNFIX item 2). It is
+            # kept when there is no record, so a run nobody can see still cannot
+            # share the leg with one.
+            free_reservation_release(free_reservation)
+            free_reservation = None
         attempt_start = time.time()
         run_rc = None
         try:
@@ -2236,45 +2663,74 @@ def cmd_run(args, cfg: dict) -> int:
         # preserved the work but stranded it on a dead route). At most
         # MAX_FALLTHROUGH re-runs; a --joinable/--tier/v1 run keeps today's
         # immediate exit 8 (its combo is not the resolver's to replace).
-        if not (stop is not None and plan["route"].get("resolver") and plan["sandbox"]
-                and not args.joinable and len(excluded_routes) < MAX_FALLTHROUGH):
+        # SPAWNFREE (S2) item 1: a --free run has no route to fall through to
+        # (its model is the caller's --free-model, not the resolver's choice),
+        # so it falls through the registry's ordered free-model list instead.
+        fell_through = False
+        if (stop is not None and not args.joinable
+                and fallthroughs < MAX_FALLTHROUGH):
+            next_plan = None
+            fell_from = fell_to = None
+            if args.free:
+                next_plan, fell_from, fell_to = _free_fallthrough_plan(
+                    args, cfg, plan, free_chain, excluded_free_models)
+            elif plan["route"].get("resolver") and plan["sandbox"]:
+                try:
+                    next_plan = build_plan(args, cfg,
+                                           exclude_routes=excluded_routes | {plan["route"]["combo"]},
+                                           sandbox=plan["sandbox"])
+                except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
+                        ValueError):
+                    next_plan = None  # no route left (or unplannable): exit 8 below
+                next_combo = ((next_plan or {}).get("route") or {}).get("combo")
+                if not next_combo or next_combo == plan["route"]["combo"]:
+                    next_plan = None
+                else:
+                    fell_from, fell_to = plan["route"]["combo"], next_combo
+                    excluded_routes.add(plan["route"]["combo"])
+            if next_plan is not None:
+                fell_through = True
+                fallthroughs += 1
+                # Preserve this stopped attempt before leaving its checkout: the
+                # re-run shares the sandbox (and its branch), so the WIP commit is
+                # what the final `take it:` and the track record see.
+                # SPAWNFIX (S2) item 1: a run without --isolate has no checkout to
+                # preserve (its cwd is the caller's own tree, which we never
+                # commit into) — the guard is the same one the route branch above
+                # and the post-loop summary below use. It still falls through.
+                if plan["sandbox"]:
+                    sb = plan["sandbox"]
+                    changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                             capture_output=True, text=True).stdout.strip()
+                    if changed and not plan["route"].get("review"):
+                        wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
+                        if wip_sha:
+                            print("WIP-COMMITTED: %s" % wip_sha)
+                # REVFIX: each provider-stopped attempt is its own observation,
+                # not just the final plan's. Without this the dead route looked
+                # healthy (no fail record), so the resolver kept handing it the
+                # work. (A --free stop records nothing: the route was never the
+                # thing that failed, the promo model was, and the survivor's own
+                # record follows the loop.)
+                if not args.free:
+                    stopped = track_entry(plan, rc, time.time() - attempt_start)
+                    if stopped is not None:
+                        record_run(TRACK_RECORD, stopped)
+                print(fallthrough_line(fell_from, stop, fell_to), file=sys.stderr)
+                plan = next_plan
+                # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
+                # and session tag), not the stopped route's (qoder review 2026-09-27).
+                env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
+                env.pop("AUTOOS_OMNIROUTE_KEY", None)
+                if uses_key:
+                    env["AUTOOS_OMNIROUTE_KEY"] = key
+        if not fell_through:
             break
-        next_plan = None
-        try:
-            next_plan = build_plan(args, cfg,
-                                   exclude_routes=excluded_routes | {plan["route"]["combo"]},
-                                   sandbox=plan["sandbox"])
-        except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
-                ValueError):
-            next_plan = None  # no route left (or unplannable): exit 8 below
-        next_combo = ((next_plan or {}).get("route") or {}).get("combo")
-        if not next_combo or next_combo == plan["route"]["combo"]:
-            break
-        # Preserve this stopped attempt before leaving its checkout: the
-        # re-run shares the sandbox (and its branch), so the WIP commit is
-        # what the final `take it:` and the track record see.
-        sb = plan["sandbox"]
-        changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                 capture_output=True, text=True).stdout.strip()
-        if changed and not plan["route"].get("review"):
-            wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
-            if wip_sha:
-                print("WIP-COMMITTED: %s" % wip_sha)
-        excluded_routes.add(plan["route"]["combo"])
-        # REVFIX: each provider-stopped attempt is its own observation, not
-        # just the final plan's. Without this the dead route looked healthy
-        # (no fail record), so the resolver kept handing it the work.
-        stopped = track_entry(plan, rc, time.time() - attempt_start)
-        if stopped is not None:
-            record_run(TRACK_RECORD, stopped)
-        print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
-        plan = next_plan
-        # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
-        # and session tag), not the stopped route's (qoder review 2026-09-27).
-        env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-        env.pop("AUTOOS_OMNIROUTE_KEY", None)
-        if uses_key:
-            env["AUTOOS_OMNIROUTE_KEY"] = key
+    # Nothing that runs after here occupies the free leg: whatever is left of the
+    # summary is bookkeeping, and a placeholder with no run behind it would make
+    # the next spawner wait for nothing.
+    free_reservation_release(free_reservation)
+    free_reservation = None
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
