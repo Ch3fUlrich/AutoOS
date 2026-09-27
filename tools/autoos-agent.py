@@ -71,7 +71,11 @@ Usage:
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
 gateway, no key, no spend - for exercising the tier chain and the permission
-fences. Free promo models may train on prompts, so --free refuses --clean.
+fences. Free promo models may train on prompts, so --free refuses --clean. A
+--free run that hits a provider stop re-runs the same task in the same sandbox
+on the next model of policy.free_client_models in catalog/ai-registry.json
+(SPAWNFREE item 1), and waits for a free slot before starting at all when the
+provider's live workers already reach policy.free_concurrency (item 2).
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -208,6 +212,58 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
 
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
+
+
+# SPAWNFREE (S2) item 1: the one home for the ordered free-model list is the
+# registry's policy section (catalog/ai-registry.json), keyed by client. A
+# --free run that hits a provider stop re-runs on the NEXT model of this list;
+# the --free-model the caller gave goes first, so an explicit model is still
+# what runs.
+FREE_MODEL_POLICY_KEY = "free_client_models"
+
+
+def free_model_chain(policy: dict | None, client: str, first: str) -> list:
+    """The free models to try in order: `first`, then the client's registry
+    list that `first` did not already name. A missing policy section (an old
+    registry, a registry that failed to load) leaves the single given model -
+    exactly today's one-shot --free run."""
+    chain = [first]
+    listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
+    for model in listed:
+        if model and model not in chain:
+            chain.append(model)
+    return chain
+
+
+def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
+                           tried: set) -> tuple:
+    """The next --free attempt: the SAME task in the SAME sandbox on the next
+    untried model of `chain`. Returns (plan, from, to), or (None, None, None)
+    when the chain is spent or the re-plan is refused (privacy, depth, no
+    route) - a refused re-plan ends the run at exit 8, never a silent retry.
+
+    `tried` holds every free model this run has already burned; the model the
+    stop just landed on joins it here, so no later attempt can return to it.
+    """
+    chain = list(chain or [plan["model"]])
+    current = plan["model"]
+    tried.add(current)
+    at = chain.index(current) if current in chain else -1
+    for model in chain[at + 1:]:
+        if model in tried:
+            continue
+        given = args.free_model
+        args.free_model = model
+        try:
+            next_plan = build_plan(args, cfg, sandbox=plan["sandbox"])
+        except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
+                ValueError):
+            return None, None, None  # the guard says no: exit 8 below
+        finally:
+            args.free_model = given
+        tried.add(model)
+        return next_plan, current, model
+    return None, None, None
 
 
 def lean_overlay(cfg: dict) -> dict:
@@ -2174,6 +2230,23 @@ def cmd_run(args, cfg: dict) -> int:
     # SPAWNCAP (S2): the route ids a provider-stopped attempt has already
     # burned, so a fallthrough re-run never picks one of them again.
     excluded_routes = set()
+    # SPAWNFREE (S2) item 1: and the free models it burned. A --free run's
+    # model is not a route, so the resolver's fallthrough never reached it -
+    # the first 'Rate limit exceeded' ended the run (inbox 2026-09-27T17:08:22Z
+    # and 17:19:45Z, work/L1-routing/T1FREE.r2.out).
+    excluded_free_models = set()
+    # How many re-runs this run has already started (route or free model): the
+    # one bound MAX_FALLTHROUGH is about.
+    fallthroughs = 0
+    free_chain = None
+    if args.free:
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None  # an unreadable registry leaves one free model
+        free_chain = free_model_chain((registry or {}).get("policy"), client.name,
+                                      args.free_model)
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
     # WIPfix provider-stop check has the child's tail. A --joinable launcher
@@ -2236,45 +2309,64 @@ def cmd_run(args, cfg: dict) -> int:
         # preserved the work but stranded it on a dead route). At most
         # MAX_FALLTHROUGH re-runs; a --joinable/--tier/v1 run keeps today's
         # immediate exit 8 (its combo is not the resolver's to replace).
-        if not (stop is not None and plan["route"].get("resolver") and plan["sandbox"]
-                and not args.joinable and len(excluded_routes) < MAX_FALLTHROUGH):
+        # SPAWNFREE (S2) item 1: a --free run has no route to fall through to
+        # (its model is the caller's --free-model, not the resolver's choice),
+        # so it falls through the registry's ordered free-model list instead.
+        fell_through = False
+        if (stop is not None and not args.joinable
+                and fallthroughs < MAX_FALLTHROUGH):
+            next_plan = None
+            fell_from = fell_to = None
+            if args.free:
+                next_plan, fell_from, fell_to = _free_fallthrough_plan(
+                    args, cfg, plan, free_chain, excluded_free_models)
+            elif plan["route"].get("resolver") and plan["sandbox"]:
+                try:
+                    next_plan = build_plan(args, cfg,
+                                           exclude_routes=excluded_routes | {plan["route"]["combo"]},
+                                           sandbox=plan["sandbox"])
+                except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
+                        ValueError):
+                    next_plan = None  # no route left (or unplannable): exit 8 below
+                next_combo = ((next_plan or {}).get("route") or {}).get("combo")
+                if not next_combo or next_combo == plan["route"]["combo"]:
+                    next_plan = None
+                else:
+                    fell_from, fell_to = plan["route"]["combo"], next_combo
+                    excluded_routes.add(plan["route"]["combo"])
+            if next_plan is not None:
+                fell_through = True
+                fallthroughs += 1
+                # Preserve this stopped attempt before leaving its checkout: the
+                # re-run shares the sandbox (and its branch), so the WIP commit is
+                # what the final `take it:` and the track record see.
+                sb = plan["sandbox"]
+                changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                         capture_output=True, text=True).stdout.strip()
+                if changed and not plan["route"].get("review"):
+                    wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
+                    if wip_sha:
+                        print("WIP-COMMITTED: %s" % wip_sha)
+                # REVFIX: each provider-stopped attempt is its own observation,
+                # not just the final plan's. Without this the dead route looked
+                # healthy (no fail record), so the resolver kept handing it the
+                # work. (A --free stop records nothing: the route was never the
+                # thing that failed, the promo model was, and the survivor's own
+                # record follows the loop.)
+                if not args.free:
+                    stopped = track_entry(plan, rc, time.time() - attempt_start)
+                    if stopped is not None:
+                        record_run(TRACK_RECORD, stopped)
+                print(fallthrough_line(fell_from, stop, fell_to), file=sys.stderr)
+                plan = next_plan
+                # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
+                # and session tag), not the stopped route's (qoder review 2026-09-27).
+                env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
+                env.pop("AUTOOS_OMNIROUTE_KEY", None)
+                if uses_key:
+                    env["AUTOOS_OMNIROUTE_KEY"] = key
+        if not fell_through:
             break
-        next_plan = None
-        try:
-            next_plan = build_plan(args, cfg,
-                                   exclude_routes=excluded_routes | {plan["route"]["combo"]},
-                                   sandbox=plan["sandbox"])
-        except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
-                ValueError):
-            next_plan = None  # no route left (or unplannable): exit 8 below
-        next_combo = ((next_plan or {}).get("route") or {}).get("combo")
-        if not next_combo or next_combo == plan["route"]["combo"]:
-            break
-        # Preserve this stopped attempt before leaving its checkout: the
-        # re-run shares the sandbox (and its branch), so the WIP commit is
-        # what the final `take it:` and the track record see.
-        sb = plan["sandbox"]
-        changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                 capture_output=True, text=True).stdout.strip()
-        if changed and not plan["route"].get("review"):
-            wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
-            if wip_sha:
-                print("WIP-COMMITTED: %s" % wip_sha)
-        excluded_routes.add(plan["route"]["combo"])
-        # REVFIX: each provider-stopped attempt is its own observation, not
-        # just the final plan's. Without this the dead route looked healthy
-        # (no fail record), so the resolver kept handing it the work.
-        stopped = track_entry(plan, rc, time.time() - attempt_start)
-        if stopped is not None:
-            record_run(TRACK_RECORD, stopped)
-        print(fallthrough_line(plan["route"]["combo"], stop, next_combo), file=sys.stderr)
-        plan = next_plan
-        # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
-        # and session tag), not the stopped route's (qoder review 2026-09-27).
-        env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-        env.pop("AUTOOS_OMNIROUTE_KEY", None)
-        if uses_key:
-            env["AUTOOS_OMNIROUTE_KEY"] = key
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]

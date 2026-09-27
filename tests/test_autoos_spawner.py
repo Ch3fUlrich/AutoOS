@@ -4003,16 +4003,19 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
-def _fallthrough_registry(route_ids):
+def _fallthrough_registry(route_ids, policy=None):
     """A registry whose routes are exactly `route_ids`, plus the clients the
-    capability gate reads. The resolver itself is replaced by
-    `_fallthrough_plan`, so providers/models/policy are not consulted."""
+    capability gate reads and an optional `policy` section (SPAWNFREE: the
+    ordered free-model list a --free fallthrough reads from here). The resolver
+    itself is replaced by `_fallthrough_plan`, so providers/models are not
+    consulted."""
     return {
         "clients": {
             "opencode": {"capabilities": {"shell": True, "write": True}},
             "claude": {"capabilities": {"shell": True, "write": True}},
         },
         "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+        "policy": policy or {},
     }
 
 
@@ -4030,6 +4033,106 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
                 "defer_until": None}
     return {"route": routes[0], "state": "ready", "reason": "stub", "bucket": "S1",
             "defer_until": None}
+
+
+def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None):
+    """Run cmd_run with the resolver and the client replaced by fakes; the
+    sandbox is a real temp clone so WIP commits and re-runs are real.
+
+    `case` is the running TestCase (its `agent` attribute is the module under
+    test; its addCleanup removes the temp root and state dir).
+
+    Returns (rc, out, err, calls, sandbox_names): `calls` is
+    {"n": int, "cwds": [str], "cmds": [argv], "free_models": [str],
+    "track": [record]}. The run is a gateway (opencode) run so `track_entry`
+    emits a record per attempt - an own-account client's run is tracked as None
+    (SPAWNCAP fallthrough records every provider-stopped attempt, not just the
+    final plan).
+
+    `args_over` (SPAWNFREE) overrides run-args fields (free, free_model, card,
+    isolate); `policy` is the registry's policy section.
+    """
+    agent = case.agent
+    root = _init_git_root()
+    statedir = tempfile.mkdtemp()
+    case.addCleanup(shutil.rmtree, root, True)
+    case.addCleanup(shutil.rmtree, statedir, True)
+    old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
+                                        agent.MEASURED_OVERLAY_PATH)
+    agent.ROOT = root
+    agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
+    agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
+
+    calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
+             "track": []}
+    real_build_plan = agent.build_plan
+
+    def marking_build_plan(*a, **k):
+        # Tag each plan's env with its route, so a re-run that kept the
+        # first plan's env shows up as a stale mark.
+        plan = real_build_plan(*a, **k)
+        plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+        return plan
+
+    def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+        calls["n"] += 1
+        calls["cwds"].append(cwd)
+        calls["cmds"].append(cmd)
+        calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
+        calls["free_models"].append(
+            (json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}") or {}).get("model"))
+        with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                  encoding="utf-8") as fh:
+            fh.write("work\n")
+        if calls["n"] <= stops:
+            return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+        return agent.ClientExit(0, tail="done\n")
+
+    args = argparse.Namespace(
+        client="opencode", tier=None, card="kind=implement", task="edit README.md",
+        free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
+        joinable=False, model=None, clean=False, allow_training=False,
+        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+    args.__dict__.update(args_over or {})
+    env = dict(os.environ)
+    env["AUTOOS_STATE_DIR"] = statedir
+    # A gateway run needs a client key and a live gateway; both are faked
+    # here. The key is what makes the run track-recorded at all.
+    env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
+    out, err = io.StringIO(), io.StringIO()
+    old_time = agent.time.time
+    if clock is not None:
+        agent.time.time = clock
+    try:
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(agent, "load_registry",
+                                   lambda path: _fallthrough_registry(route_ids, policy)):
+                with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
+                        mock.patch.object(agent, "build_plan", marking_build_plan), \
+                        mock.patch.object(agent, "gateway_up", lambda: True), \
+                        mock.patch.object(agent, "resolve_model",
+                                          lambda cfg, tier, clean, override:
+                                              override or "omniroute/r-t2"):
+                    with mock.patch.object(agent, "run_client", fake_run_client):
+                        with mock.patch.object(agent.measure_mod, "client_state",
+                                               lambda *a, **k: {}):
+                            with mock.patch.object(
+                                    agent.clients, "signin_state",
+                                    lambda client, env=None: (None, "")):
+                                with mock.patch("shutil.which",
+                                                return_value="/usr/bin/opencode"):
+                                    with contextlib.redirect_stdout(out), \
+                                            contextlib.redirect_stderr(err):
+                                        rc = agent.cmd_run(args, cfg)
+    finally:
+        agent.time.time = old_time
+        calls["track"] = agent.track.load(agent.TRACK_RECORD)
+        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
+            old_root, old_track, old_overlay)
+    base = os.path.join(statedir, "sandboxes")
+    names = os.listdir(base) if os.path.isdir(base) else []
+    return rc, out.getvalue(), err.getvalue(), calls, names
 
 
 class ProviderStopFallthroughTests(unittest.TestCase):
@@ -4055,92 +4158,9 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops, clock=None):
-        """Run cmd_run with the resolver and the client replaced by fakes; the
-        sandbox is a real temp clone so WIP commits and re-runs are real.
-
-        Returns (rc, out, err, calls, sandbox_names): `calls` is
-        {"n": int, "cwds": [str], "track": [record]}. The run is a gateway
-        (opencode) run so `track_entry` emits a record per attempt - an
-        own-account client's run is tracked as None (SPAWNCAP fallthrough
-        records every provider-stopped attempt, not just the final plan).
-        """
-        root = _init_git_root()
-        self.addCleanup(shutil.rmtree, root, True)
-        statedir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, statedir, True)
-        agent = self.agent
-        old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
-                                            agent.MEASURED_OVERLAY_PATH)
-        agent.ROOT = root
-        agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
-        agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
-        cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
-
-        calls = {"n": 0, "cwds": [], "route_marks": [], "track": []}
-        real_build_plan = agent.build_plan
-
-        def marking_build_plan(*a, **k):
-            # Tag each plan's env with its route, so a re-run that kept the
-            # first plan's env shows up as a stale mark.
-            plan = real_build_plan(*a, **k)
-            plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
-            return plan
-
-        def fake_run_client(cmd, cwd, env, reap=True, capture=False):
-            calls["n"] += 1
-            calls["cwds"].append(cwd)
-            calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
-            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
-                      encoding="utf-8") as fh:
-                fh.write("work\n")
-            if calls["n"] <= stops:
-                return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
-            return agent.ClientExit(0, tail="done\n")
-
-        args = argparse.Namespace(
-            client="opencode", tier=None, card="kind=implement", task="edit README.md",
-            free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
-            joinable=False, model=None, clean=False, allow_training=False,
-            max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
-        env = dict(os.environ)
-        env["AUTOOS_STATE_DIR"] = statedir
-        # A gateway run needs a client key and a live gateway; both are faked
-        # here. The key is what makes the run track-recorded at all.
-        env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
-        out, err = io.StringIO(), io.StringIO()
-        old_time = agent.time.time
-        if clock is not None:
-            agent.time.time = clock
-        try:
-            with mock.patch.dict(os.environ, env, clear=True):
-                with mock.patch.object(agent, "load_registry",
-                                       lambda path: _fallthrough_registry(route_ids)):
-                    with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
-                            mock.patch.object(agent, "build_plan", marking_build_plan), \
-                            mock.patch.object(agent, "gateway_up", lambda: True), \
-                            mock.patch.object(agent, "resolve_model",
-                                              lambda cfg, tier, clean, override:
-                                                  override or "omniroute/r-t2"):
-                        with mock.patch.object(agent, "run_client", fake_run_client):
-                            with mock.patch.object(agent.measure_mod, "client_state",
-                                                   lambda *a, **k: {}):
-                                with mock.patch.object(
-                                        agent.clients, "signin_state",
-                                        lambda client, env=None: (None, "")):
-                                    with mock.patch("shutil.which",
-                                                    return_value="/usr/bin/opencode"):
-                                        with contextlib.redirect_stdout(out), \
-                                                contextlib.redirect_stderr(err):
-                                            rc = agent.cmd_run(args, cfg)
-        finally:
-            agent.time.time = old_time
-            calls["track"] = agent.track.load(agent.TRACK_RECORD)
-            (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
-                old_root, old_track, old_overlay)
-        base = os.path.join(statedir, "sandboxes")
-        names = os.listdir(base) if os.path.isdir(base) else []
-        return rc, out.getvalue(), err.getvalue(), calls, names
+    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None):
+        return _fallthrough_run(self, route_ids, stops, clock=clock,
+                                args_over=args_over, policy=policy)
 
     def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
         rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
@@ -4212,6 +4232,110 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             [("r-free", "fail", "provider"),
              ("r-cheap", "fail", "provider"),
              ("r-cheap2", "fail", "provider")], out + err)
+
+
+FREE_MODELS = ["opencode/nemotron-3-ultra-free",
+               "opencode/muse-spark-1.3-contributor-free",
+               "opencode/mimo-v2.6-flash-free"]
+
+
+class FreeModelFallthroughTests(unittest.TestCase):
+    """SPAWNFREE (S2) item 1: a --free run's model is not a route, so the
+    SPAWNCAP fallthrough never reached it — the first 'Rate limit exceeded'
+    ended the run with exit 8 (inbox 2026-09-27T17:08:22Z and 17:19:45Z,
+    work/L1-routing/T1FREE.r2.out). A free run now re-runs the SAME task in the
+    SAME sandbox on the next model of the registry's ordered free-model list
+    (policy.free_client_models), the --free-model it was given first, with the
+    same WIP-preserve logic and the same MAX_FALLTHROUGH bound."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def _run(self, stops, clock=None, policy=None, **args_over):
+        over = {"free": True, "free_model": FREE_MODELS[1], "isolate": True}
+        over.update(args_over)
+        return _fallthrough_run(
+            self, ["r-free"], stops, clock=clock, args_over=over,
+            policy=policy if policy is not None
+            else {"free_client_models": {"opencode": FREE_MODELS}})
+
+    def test_the_chain_puts_the_given_free_model_first(self):
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": FREE_MODELS}}, "opencode", FREE_MODELS[1])
+        self.assertEqual(chain, [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]])
+
+    def test_the_chain_never_repeats_a_model(self):
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": FREE_MODELS}}, "opencode", FREE_MODELS[0])
+        self.assertEqual(chain, FREE_MODELS)
+
+    def test_a_chain_with_no_policy_is_the_single_given_model(self):
+        self.assertEqual(self.agent.free_model_chain(None, "opencode", "m-x"), ["m-x"])
+
+    def test_a_free_provider_stop_re_runs_the_next_free_model_in_the_same_sandbox(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the stopped attempt plus one re-run")
+        self.assertEqual(calls["cwds"][0], calls["cwds"][1], "same sandbox, same cwd")
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        self.assertEqual(calls["free_models"], [FREE_MODELS[1], FREE_MODELS[0]],
+                         "the given model first, then the next of the chain")
+
+    def test_the_free_rerun_carries_the_new_model_in_the_client_command(self):
+        _, out, err, calls, _ = self._run(stops=1)
+        for cmd, model in zip(calls["cmds"], [FREE_MODELS[1], FREE_MODELS[0]]):
+            self.assertEqual(cmd[cmd.index("--model") + 1], model, out + err)
+
+    def test_the_free_fallthrough_wip_commits_the_stopped_attempt(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WIP-COMMITTED", out + err)
+        self.assertEqual(len(sandboxes), 1, sandboxes)
+        # calls["cwds"][0] is the sandbox clone itself (the client's cwd).
+        files = subprocess.run(["git", "-C", calls["cwds"][0], "ls-files"],
+                               capture_output=True, text=True).stdout.split()
+        self.assertIn("attempt1.txt", files, "the stopped attempt's work survives on the branch")
+
+    def test_the_free_fallthrough_line_names_both_models(self):
+        _, out, err, _, _ = self._run(stops=1)
+        self.assertIn("provider stop on %s: Error: Rate limit exceeded -> falling through to %s"
+                      % (FREE_MODELS[1], FREE_MODELS[0]), out + err)
+
+    def test_a_free_run_respects_max_fallthrough_and_exits_8(self):
+        rc, out, err, calls, _ = self._run(stops=9)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH,
+                         "the first attempt plus MAX_FALLTHROUGH re-runs")
+        self.assertEqual(calls["free_models"],
+                         [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]][:calls["n"]],
+                         "the given model first, then the chain's order, never a repeat")
+
+    def test_a_free_run_with_no_chain_left_exits_8_after_one_attempt(self):
+        rc, out, err, calls, _ = self._run(
+            stops=9, free_model="opencode/only-free-model",
+            policy={"free_client_models": {"opencode": []}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "no other free model to try")
+        self.assertNotIn("falling through to", out + err)
+
+    def test_a_free_fallthrough_never_unlocks_a_privacy_refusal(self):
+        # PRIV3's guard (a model that trains never serves privacy=sensitive)
+        # lives in build_plan, and the re-run goes through build_plan, so a
+        # refused re-plan stops the loop instead of trying another model.
+        agent = self.agent
+        real = agent.build_plan
+        seen = {"n": 0}
+
+        def second_plan_refused(*a, **k):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise agent.PrivacyRefused("privacy: guard says no")
+            return real(*a, **k)
+
+        with mock.patch.object(agent, "build_plan", second_plan_refused):
+            rc, out, err, calls, _ = self._run(stops=1)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "the refused re-plan never starts a client")
 
 
 class OutsideFenceTaskDirTests(unittest.TestCase):
