@@ -30,6 +30,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `test_free_default_is_the_operators_muse_spark_leg`; `test_agy_uses_its_own_login` and
   `test_run_goes_ahead_when_agy_is_signed_in` updated for the new agy form and
   `test_sensitive_card_with_free_is_refused` for the new promo model.
+- **`configuration/omniroute/apply.sh --drift`** (OR1b): compares the live combos against `combos.json` (name + ordered legs, `retired` ids ignored) without writing; exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot be read.
 
 ### Added — provider rate limits as registry data + resolver request-size filter (R4)
 

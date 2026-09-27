@@ -274,6 +274,157 @@ if it "apply prune: a down gateway is never listed and nothing is pruned"; then
     if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
 fi
 
+# ─── apply.sh --drift: live combos vs combos.json ───────────────────────────
+# Nothing today says whether the live combos equal the file (OR1b). --drift
+# reads `omniroute --output json combo list` ({"combos":[{"name","models":[
+# {"kind":"model","providerId","model"}...]}],...} — a leg ref reconstructs as
+# providerId/model, the same spelling combos.json uses) and compares name +
+# ordered models per combo, ignoring retired ids. The sandbox reuses the prune
+# stand-ins: a stub omniroute on PATH answers the list from drift.json, plus a
+# loopback stand-in gateway for /api/health. Nothing reaches the live gateway.
+_drift_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: no provider step runs under --drift anyway\n' >"$d/keys.yml"
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+for a in "$@"; do
+    if [[ "$a" == list ]]; then
+        # -e, not -s: the unreadable-store case writes the marker with `: >`.
+        if [[ -e "$d/drift.fail" ]]; then
+            echo "Error: connect ECONNREFUSED" >&2
+            exit 1
+        fi
+        printf 'Loaded env from somewhere\n'   # banner the JSON reader must skip
+        cat "$d/drift.json"
+        exit 0
+    fi
+done
+echo "unexpected call: $*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    : >"$d/calls.log"
+    printf '%s\n' "$d"
+}
+# _drift_json <dir> [swap] - render the live list from combos.json itself;
+# "swap" reverses one combo's legs so the orders differ.
+_drift_json() {
+    local d="$1" swap="${2:-}"
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" >"$d/drift.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+combos = []
+for c in data.get("combos", []):
+    models = []
+    for ref in c["models"]:
+        provider, _, model = ref.partition("/")
+        models.append({"kind": "model", "providerId": provider, "model": model})
+    combos.append({"name": c["name"], "strategy": c.get("strategy", "priority"),
+                   "models": models})
+if sys.argv[2] and combos:
+    for c in combos:
+        if len(c["models"]) > 1:
+            c["models"].reverse()
+            break
+print(json.dumps({"combos": combos, "active": None, "error": None}))
+PY
+}
+# _drift_apply <dir> - apply.sh --drift against the two stand-ins.
+_drift_apply() {
+    local d="$1" pid port
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --drift 2>&1
+    local rc=$?
+    kill "$pid" 2>/dev/null
+    return "$rc"
+}
+
+if it "apply drift: live combos equal combos.json -> exit 0, no difference lines"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *drift:* || "$out" == *"missing "* || "$out" == *"extra "* ]] \
+        && { ok=0; echo "differences on an in-sync store: $out" >&2; }
+    # --drift is read-only: it never creates, deletes, patches or registers.
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift reported drift on an in-sync store"; fi
+fi
+
+if it "apply drift: one combo's leg order differs -> exit 1 and names it"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" swap
+    out="$(_drift_apply "$d")"; rc=$?
+    # The first multi-leg combo in combos.json is the one _drift_json swapped.
+    want="$(python3 -c 'import json
+for c in json.load(open("configuration/omniroute/combos.json"))["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"]); break')"
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"drift $want: live=["*" file=["* ]] || { ok=0; echo "no drift line for $want: $out" >&2; }
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not name the reordered combo"; fi
+fi
+
+if it "apply drift: an unreadable live store -> exit 3 with a one-line reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    : >"$d/drift.fail"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -le 3 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *drift* && "$out" == *unreadable* || "$out" == *"could not"* || "$out" == *"failed"* ]] \
+        || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not exit 3 on an unreadable store"; fi
+fi
+
+# The other half of the comparison: a file combo the store lacks is "missing",
+# a store combo the file does not know is "extra", and a store combo whose name
+# is a retired id is ignored (it is not a combo the file forgot; the file
+# itself consigned it). A user-made combo is never a difference.
+if it "apply drift: reports missing and extra, and ignores a retired live combo"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    missing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combos"][0]["name"])' "$doc")"
+    retired="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["retired"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$missing" "$retired" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"] = [c for c in live["combos"] if c["name"] != sys.argv[3]]
+live["combos"].append({"name": "user-made-combo", "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+live["combos"].append({"name": sys.argv[4], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "y"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"missing $missing"* ]] || { ok=0; echo "no missing line: $out" >&2; }
+    [[ "$out" == *"extra user-made-combo"* ]] || { ok=0; echo "no extra line: $out" >&2; }
+    [[ "$out" == *"$retired"* ]] && { ok=0; echo "named the retired live combo: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift missed missing/extra or touched a retired id"; fi
+fi
+
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
 # unit dir, and stubs for systemctl/loginctl that only log their arguments.
 # The stub reports every unit as active, so no port probing reaches the
