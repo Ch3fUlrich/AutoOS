@@ -4464,21 +4464,24 @@ install_graphify_tool() {
     [[ -n "$have" ]] && force=1
     [[ "$GRAPHIFY_LINK_STATE" == uv ]] && force=1
 
-    local -a cmd=(uv tool install)
-    (( force )) && cmd+=(--force)
-    cmd+=("$pkg")
+    # Named, not `cmd`: verify_component below uses a scalar of that name, and
+    # the linter reads a file's variables in one scope (SC2178: an array and a
+    # string cannot share a name here).
+    local -a gfy_cmd=(uv tool install)
+    (( force )) && gfy_cmd+=(--force)
+    gfy_cmd+=("$pkg")
 
     if (( AUTOOS_DRY_RUN )); then
         if (( force )); then
-            ui_muted "would update the pinned graphify tool: ${cmd[*]}"
+            ui_muted "would update the pinned graphify tool: ${gfy_cmd[*]}"
         else
-            ui_muted "would install the pinned graphify tool: ${cmd[*]}"
+            ui_muted "would install the pinned graphify tool: ${gfy_cmd[*]}"
         fi
         return 0
     fi
 
-    ui_muted "run: ${cmd[*]}"
-    "${cmd[@]}" || rc=$?
+    ui_muted "run: ${gfy_cmd[*]}"
+    "${gfy_cmd[@]}" || rc=$?
     if (( rc != 0 )); then
         ui_warn "could not install the pinned graphify tool ($name) - uv exited $rc"
         return 1
