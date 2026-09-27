@@ -2170,7 +2170,98 @@ elif mode == "orchestrator-commits-wip":
     git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
         "commit", "-q", "-m", "orch wip")
     print("fake: orchestrator committed its own WIP")
+elif mode in ("sandbox-write", "sandbox-write-provider-stop"):
+    # The worker edits its own cwd (the --isolate sandbox), then the provider
+    # stops it before it can commit (WIPfix, 2026-09-26). It also touches the
+    # two paths that must NEVER land in a WIP commit (review WIPfix4): a
+    # git-ignored secrets file and the spawner's own logs/ directory.
+    os.makedirs(os.path.join(os.getcwd(), "configuration"), exist_ok=True)
+    with open(os.path.join(os.getcwd(), "configuration", "api-keys.yml"), "w") as fh:
+        fh.write("omniroute: fake-not-a-secret\\n")
+    os.makedirs(os.path.join(os.getcwd(), "logs"), exist_ok=True)
+    with open(os.path.join(os.getcwd(), "logs", "x"), "w") as fh:
+        fh.write("spawner state\\n")
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    if mode.endswith("provider-stop"):
+        print("Error: Rate limit exceeded. Please try again later.")
+    else:
+        print("fake: wrote worker-new.txt in its sandbox")
+elif mode == "sandbox-write-conflicted":
+    # The worker leaves a conflicted cherry-pick behind (WIPfix4 review): an
+    # unmerged index can make the WIP `git commit` refuse outright, and that
+    # failure must be printed, not silent.
+    cwd = os.getcwd()
+    def sgit(*a):
+        subprocess.run(["git", "-C", cwd, *a], check=True,
+                       capture_output=True, text=True)
+    with open(os.path.join(cwd, "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    with open(os.path.join(cwd, "conflict.txt"), "w") as fh:
+        fh.write("worker\\n")
+    sgit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-am", "worker change")
+    r = subprocess.run(["git", "-C", cwd, "-c", "user.name=autoos-worker",
+                        "-c", "user.email=autoos-worker@users.noreply.github.com",
+                        "cherry-pick", "--no-commit", "master"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0, r.stdout + r.stderr
+    # Make the unmerged path unreadable: newer gits auto-resolve a conflicted
+    # path on `commit -a`, but no version can index a file it cannot open, so
+    # the WIP commit refuses on every git.
+    os.chmod(os.path.join(cwd, "conflict.txt"), 0)
+    print("fake: left a conflicted cherry-pick in the sandbox")
+elif mode == "sandbox-write-detached":
+    # The worker detached HEAD in its sandbox (WIPfix4 review): the WIP commit
+    # lands on no branch, so `take it: git fetch <path> <branch>` cannot fetch
+    # it unless the branch is repointed at it.
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    subprocess.run(["git", "-C", os.getcwd(), "checkout", "-q", "--detach", "HEAD"],
+                   check=True)
+    print("fake: detached HEAD in its sandbox")
+elif mode == "refusal-then-provider-stop":
+    # WIPfix4 review: agy auto-denied a tool (jetski refusal) AND the provider
+    # stopped the run (AGY_ERROR 429) - both measured, R-gateway-12. Exit
+    # precedence is 7 > 8 > 5 > 6, so the run must exit 8, failure_class
+    # "provider", not 6 "logic".
+    print('jetski: no output produced - a tool required the "command" '
+          'permission that headless mode cannot prompt for, so it was auto-denied')
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached"')
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+elif mode == "sandbox-write-marker-mid-run":
+    # WIPfix2: the marker appears EARLY (a brief or lesson quoting a past
+    # 429), then the worker prints 20 normal lines, edits its sandbox and
+    # exits 0. A real provider stop is the client's LAST output only, so this
+    # must stay rc 0 with the work WIP-committed.
+    print("Error: Rate limit exceeded. Please try again later.")
+    for _i in range(20):
+        print("normal output line %d" % _i)
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+elif mode == "provider-stop-only":
+    print("Error: Rate limit exceeded. Please try again later.")
+elif mode == "parent-leak-provider-stop":
+    # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
+    with open(os.path.join(root, "tracked.txt"), "a") as fh:
+        fh.write("leaked\\n")
+    print("Error: Rate limit exceeded. Please try again later.")
 sys.exit(0)
+'''
+
+
+_FAKE_JOINABLE_CLAUDE_SRC = '''
+# A joinable (claude --bg --remote-control) session: the launcher exits 0
+# while the session it started lives on. Its last visible lines can even be
+# the background session's mid-flight output (a partial tail with a provider
+# marker) - the spawner must not score it.
+import os
+with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+    fh.write("work\\n")
+print("session started in the background: d1")
+print("Error: Rate limit exceeded. Please try again later.")
 '''
 
 
@@ -2189,12 +2280,17 @@ class IsolateContainmentTests(unittest.TestCase):
     def make_root(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master"]
         subprocess.run(git + ["init", "-q", tmp], check=True)
         with open(os.path.join(tmp, "tracked.txt"), "w", encoding="utf-8") as fh:
             fh.write("base\n")
         subprocess.run(git + ["-C", tmp, "add", "tracked.txt"], check=True)
         subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+        with open(os.path.join(tmp, "conflict.txt"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        subprocess.run(git + ["-C", tmp, "add", "conflict.txt"], check=True)
+        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "conflict base"], check=True)
         # A second EXISTING branch (not checked out) for the side-ref cases;
         # refs created mid-run are new and never scanned.
         subprocess.run(git + ["-C", tmp, "branch", "side"], check=True)
@@ -2218,19 +2314,20 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
-    def run_isolated(self, root, stubdir, statedir, mode):
+    def run_isolated(self, root, stubdir, statedir, mode, card=None):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
         try:
             args = argparse.Namespace(
-                client="agy", tier=2, card=None, task="do the thing",
+                client="agy", tier=None if card else 2, card=card, task="do the thing",
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=True, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
                 title=None, dry_run=False, no_defer=False)
             cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-                   "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+                   "providers": {"omniroute": {"models": {"t2-worker": {},
+                                                          "t3-driver": {}}}}}
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
@@ -2432,6 +2529,308 @@ class IsolateContainmentTests(unittest.TestCase):
         entry = self.agent.track_entry(plan, 7, 1.0)
         self.assertEqual(entry["failure_class"], "containment")
         self.assertEqual(entry["gate"], "fail")
+
+    # WIPfix (rule->code: never lose a worker's uncommitted sandbox work).
+    # Measured 2026-09-26 19:1x-19:3xZ: three --isolate workers were stopped by
+    # the provider right before `git commit`; cmd_run printed 'sandbox changes
+    # (uncommitted)' and exited 0, and the orchestrator WIP-committed by hand.
+
+    def _subject(self, sandbox):
+        return subprocess.run(["git", "-C", sandbox, "log", "-1", "--format=%s"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_provider_stop_with_sandbox_changes_wip_commits_and_exits_8(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write-provider-stop")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        sb = self.lone_sandbox(state)
+        subject = self._subject(sb)
+        self.assertTrue(subject.startswith("WIP(autoos-agent): uncommitted at exit rc=0"),
+                        subject)
+        self.assertIn("provider stop: Error: Rate limit exceeded", subject)
+        files = subprocess.run(["git", "-C", sb, "show", "--name-only", "--format=", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", files)
+        branch = subprocess.run(["git", "-C", sb, "branch", "--show-current"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(branch.startswith("agent/"), branch)
+
+    # WIPfix2 (rule->code: a provider stop is the client's LAST output only).
+    # A worker that merely READS or prints text containing a marker - a brief
+    # quoting a past 429, a lesson - then finishes normally must not exit 8.
+
+    def test_a_marker_quoted_mid_run_is_not_a_provider_stop(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state,
+                                         "sandbox-write-marker-mid-run")
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("PROVIDER-STOP", out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        sb = self.lone_sandbox(state)
+        subject = self._subject(sb)
+        self.assertTrue(subject.startswith("WIP(autoos-agent): uncommitted at exit rc=0"),
+                        subject)
+        self.assertNotIn("provider stop:", subject)
+        files = subprocess.run(["git", "-C", sb, "show", "--name-only", "--format=", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", files)
+
+    def test_provider_stop_ignores_a_marker_outside_the_window(self):
+        # The only marker is 9+ lines from the end: outside PROVIDER_STOP_WINDOW,
+        # so provider_stop returns None (review WIPfix2).
+        agent = self.agent
+        tail = "Error: Rate limit exceeded. Please try again later.\n"
+        tail += "\n".join("normal line %d" % i for i in range(9))
+        self.assertIsNone(agent.provider_stop(tail))
+
+    def test_provider_stop_returns_the_match_nearest_the_end(self):
+        # Two markers inside the window: the one nearest the end is returned.
+        agent = self.agent
+        tail = ("Error: Rate limit exceeded.\n"
+                "normal line\n"
+                "Error: 429 Too Many Requests\n")
+        self.assertEqual(agent.provider_stop(tail), "Error: 429 Too Many Requests")
+
+    def test_provider_stop_still_matches_at_the_end(self):
+        agent = self.agent
+        self.assertEqual(
+            agent.provider_stop("working\nError: Rate limit exceeded.\n"),
+            "Error: Rate limit exceeded.")
+
+    # WIPfix3 (measured 2026-09-26, work/L1-routing/WIPfix2.out): a run that
+    # finished normally was reported PROVIDER-STOP because its last lines had
+    # the spawner's own printed `CODE` line quoting
+    # 'print("Error: Rate limit exceeded. Please try again later.")'. A real
+    # provider stop is an error-prefixed LINE, so the line must both carry a
+    # marker AND start (after lstrip + ANSI-strip) with an error prefix.
+
+    def test_provider_stop_matches_the_measured_client_stop_lines(self):
+        # The four shapes real clients print when the provider stops them
+        # (brief WIPfix3): opencode rate limit and capacity, agy AGY_ERROR
+        # 429 JSON, agy quota line. Each must match.
+        agent = self.agent
+        cases = [
+            "Error: Rate limit exceeded. Please try again later.",
+            "Error: Chat admission capacity is temporarily unavailable. Retry shortly.",
+            'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
+            "error: Individual quota reached. Please upgrade your plan.",
+        ]
+        for line in cases:
+            with self.subTest(line=line):
+                self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
+                                 line)
+
+    def test_provider_stop_ignores_a_marker_in_code_or_prose(self):
+        # WIPfix3: the WIPfix2 false positive and its neighbours - a marker
+        # quoted in a code line, a list entry, or a grep command must NOT
+        # count as a provider stop.
+        agent = self.agent
+        cases = [
+            'CODE: print("Error: Rate limit exceeded.")',
+            '+    "rate limit exceeded",',
+            'grep -n " 429" x',
+        ]
+        for line in cases:
+            with self.subTest(line=line):
+                self.assertIsNone(agent.provider_stop("working\n" + line + "\n"))
+
+    def test_provider_stop_matches_through_ansi_colour(self):
+        # Clients colourise stderr: the prefix check must see past the ANSI
+        # colour/bold codes wrapping the prefix (the returned line is the
+        # cleaned text, so the WIP subject stays readable).
+        agent = self.agent
+        line = "\x1b[91m\x1b[1mError: \x1b[0mRate limit exceeded"
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
+                         "Error: Rate limit exceeded")
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_sandbox_changes_without_a_stop_wip_commit_and_keep_rc_0(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        self.assertNotIn("provider stop:", self._subject(self.lone_sandbox(state)))
+        self.assertNotIn("PROVIDER-STOP", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_provider_stop_without_changes_exits_8_not_5(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "provider-stop-only")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", out + err)
+        # Nothing changed, so nothing was committed: HEAD is still the clone's
+        # initial commit and no WIP line was printed.
+        self.assertNotIn("WIP-COMMITTED", out)
+        self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_parent_leak_wins_over_a_provider_stop(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "parent-leak-provider-stop")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_review_run_is_not_wip_committed(self):
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write",
+                                         card="role=review")
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("WIP-COMMITTED", out)
+        sb = self.lone_sandbox(state)
+        status = subprocess.run(["git", "-C", sb, "status", "--short"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", status)
+        self.assertNotIn("WIP(autoos-agent)", self._subject(sb))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_refusal_then_a_provider_stop_exits_8_with_class_provider(self):
+        # WIPfix4 review (agy: jetski refusal + `AGY_ERROR ... 429`, both
+        # measured, R-gateway-12): the exit precedence is 7 > 8 > 5 > 6, so a
+        # HEADLESS-REFUSAL run that is then provider-stopped exits 8 -
+        # unattended recovery mis-keys on a 6. (agy is an own-account client,
+        # so no track entry is written; the failure_class that WOULD be
+        # recorded for an 8 is pinned below through track_entry itself.)
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "refusal-then-provider-stop")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("HEADLESS-REFUSAL", err)
+        self.assertIn("PROVIDER-STOP", err)
+        entry = self.agent.track_entry(
+            {"client": "opencode", "route": {"combo": "t2-worker-free",
+                                             "card": {}}}, rc, 1.0)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["failure_class"], "provider")
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_conflicted_sandbox_index_names_the_wip_commit_failure(self):
+        # WIPfix4 review: `commit -am` refuses on an unmerged index; the
+        # refusal must be printed (one stderr line), not silent.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write-conflicted")
+        self.assertNotIn("WIP-COMMITTED", out)
+        self.assertIn("WIP-COMMIT FAILED: ", err)
+        line = [ln for ln in err.splitlines() if ln.startswith("WIP-COMMIT FAILED: ")][0]
+        self.assertTrue(line[len("WIP-COMMIT FAILED: "):].strip(), line)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_detached_sandbox_head_still_yields_a_fetchable_wip_commit(self):
+        # WIPfix4 review: a WIP commit on a detached HEAD lands on no branch,
+        # so the printed `take it: git fetch <path> <branch>` cannot fetch it.
+        # The sandbox branch must be pointed at the WIP commit.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "sandbox-write-detached")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WIP-COMMITTED:", out)
+        sb = self.lone_sandbox(state)
+        self.assertTrue(self._subject(sb).startswith("WIP(autoos-agent): uncommitted at exit rc=0"))
+        # The sandbox branch exists and points at the WIP commit even though
+        # HEAD is detached (the worker left it that way).
+        self.assertEqual(subprocess.run(
+            ["git", "-C", sb, "branch", "--show-current"],
+            capture_output=True, text=True, check=True).stdout.strip(), "")
+        take_it = [ln for ln in out.splitlines()
+                   if ln.startswith("take it: git fetch ")][0]
+        # 'take it: git fetch <path> <branch>   (then review FETCH_HEAD)'
+        branch = take_it.split("   ")[0].split()[-1]
+        self.assertTrue(branch.startswith("agent/"), take_it)
+        self.assertEqual(subprocess.run(
+            ["git", "-C", sb, "rev-parse", "refs/heads/" + branch],
+            capture_output=True, text=True, check=True).stdout.strip(),
+            subprocess.run(["git", "-C", sb, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, check=True).stdout.strip())
+        # And the branch really fetches.
+        fetch = subprocess.run(["git", "-C", root, "fetch", "-q", sb, branch],
+                               capture_output=True, text=True)
+        self.assertEqual(fetch.returncode, 0, fetch.stdout + fetch.stderr)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_joinable_isolate_run_is_left_untouched(self):
+        # WIPfix4 review: a --joinable run (claude --bg) exits 0 while the
+        # session still runs - no provider-stop upgrade on a partial tail and
+        # no mid-flight WIP commit. The sandbox stays for the caller.
+        root, stub, state = self.make_root(), self.make_fake_claude(), self.make_state()
+        rc, out, err = self.run_isolated_joinable(root, stub, state)
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("PROVIDER-STOP", out + err)
+        self.assertNotIn("WIP-COMMITTED", out)
+        self.assertNotIn("take it: git fetch", out)
+        self.assertNotIn("discard: rm -rf", out)
+        sb = self.lone_sandbox(state)
+        status = subprocess.run(["git", "-C", sb, "status", "--short"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn("worker-new.txt", status)
+        self.assertNotIn("WIP(autoos-agent)", self._subject(sb))
+
+    def make_fake_claude(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        py = os.path.join(d, "fake_claude.py")
+        with open(py, "w", encoding="utf-8") as fh:
+            fh.write(_FAKE_JOINABLE_CLAUDE_SRC)
+        sh = os.path.join(d, "claude")
+        with open(sh, "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\nexec python3 "%s" "$@"\n' % py)
+        os.chmod(sh, 0o755)
+        return d
+
+    def run_isolated_joinable(self, root, stubdir, statedir):
+        agent = self.agent
+        old_root, old_track = agent.ROOT, agent.TRACK_RECORD
+        agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        try:
+            args = argparse.Namespace(
+                client="claude", tier=2, card=None, task="do the thing",
+                free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                isolate=True, auto=True, joinable=True, model=None,
+                clean=False, allow_training=False, max_depth=None, lean=False,
+                title=None, dry_run=False, no_defer=False)
+            cfg = {"agents": {"t2-worker": {"model": "claude/t2-worker"}},
+                   "providers": {"claude": {"models": {"t2-worker": {}}}}}
+            env = dict(os.environ)
+            env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
+            env["AUTOOS_STATE_DIR"] = statedir
+            env["AUTOOS_FAKE_ROOT"] = root
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = agent.cmd_run(args, cfg)
+        finally:
+            agent.ROOT, agent.TRACK_RECORD = old_root, old_track
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_provider_stop_matches_a_redrawn_line(self):
+        # WIPfix4 review: a stop line redrawn in place ("\r" then erase-line)
+        # carries CSI bytes in front of the prefix; an SGR-only strip misses
+        # it and the run fails open as rc 0.
+        agent = self.agent
+        line = "\r\x1b[2KError: Rate limit exceeded"
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
+                         "Error: Rate limit exceeded")
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_wip_commit_never_contains_secrets_or_logs(self):
+        # Review WIPfix4: a worker writing configuration/api-keys.yml or
+        # logs/x into its sandbox must see neither in the WIP commit; today
+        # that holds only via --exclude-standard + the cloned .gitignore, so a
+        # future edit of either is silent without this pin. The sandbox-write
+        # fakes create both files.
+        for mode in ("sandbox-write", "sandbox-write-provider-stop"):
+            with self.subTest(mode=mode):
+                root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+                rc, out, err = self.run_isolated(root, stub, state, mode)
+                self.assertIn("WIP-COMMITTED:", out)
+                sb = self.lone_sandbox(state)
+                files = subprocess.run(
+                    ["git", "-C", sb, "show", "--name-only", "--format=", "HEAD"],
+                    capture_output=True, text=True, check=True).stdout
+                self.assertNotIn("configuration/api-keys.yml", files)
+                self.assertNotIn("logs/x", files)
+                self.assertNotIn("logs", files.split())
+                self.assertIn("worker-new.txt", files)
 
 
 if __name__ == "__main__":

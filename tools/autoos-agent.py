@@ -82,7 +82,12 @@ exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (
 committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
 branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
 before - the shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; LEAK 7 overrides ANY child rc, including 5 and 6); the child's exit code; 2 bad arguments, card or route refused;
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
+(rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
+output while the client exited 0 (PROVIDER-STOP; the track record carries failure class
+"provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
+deliverable is its diff), so nothing is lost); the child's
+exit code; 2 bad arguments, card or route refused;
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted.
 
@@ -798,7 +803,9 @@ def refuse(msg: str, rc: int = 2) -> int:
 # report quotes the marker must not fail. Matched case-insensitively.
 HEADLESS_REFUSAL_PREFIX = "jetski:"
 # Only these clients are piped (to spot the refusal); every other client keeps
-# the spawner's own stdout/stderr, so a terminal stays a terminal for it.
+# the spawner's own stdout/stderr, so a terminal stays a terminal for it -
+# except that every --isolate run is captured too (tee'd to our stdout), so
+# the provider-stop check has the child's tail.
 CAPTURE_CLIENTS = ("agy",)
 HEADLESS_REFUSAL_MARKERS = ("no output produced", "headless mode cannot prompt")
 
@@ -830,6 +837,67 @@ def refusal_exit(rc: int, tail: str) -> tuple:
         if msg is not None:
             return 6, msg
     return rc, None
+
+
+# A provider that stops a worker mid-task (rate limit, capacity, quota,
+# billing) still lets the client exit 0 with the work uncommitted. WIPfix
+# (measured 2026-09-26 19:1x-19:3xZ): three --isolate workers were cut off
+# right before `git commit`. Matched case-insensitively against the captured
+# client tail (run_client keeps it for CAPTURE_CLIENTS and every --isolate
+# run); the leading space on " 429"/" 402" keeps those digits from matching
+# mid-word. ONE tuple, so the list is the whole contract.
+PROVIDER_STOP_MARKERS = (
+    "rate limit exceeded",
+    "capacity is temporarily unavailable",
+    "resource_exhausted",
+    " 429",
+    "quota reached",
+    "payment required",
+    " 402",
+)
+
+# WIPfix2 (measured 2026-09-26 20:2xZ): a worker that merely READS or prints
+# text containing a marker mid-run - a brief or lesson quoting a past 429 -
+# then finishes normally was reported as a provider stop. A real provider stop
+# is the client's LAST output before it exits, so only this many non-empty
+# lines from the end of the tail are scanned.
+PROVIDER_STOP_WINDOW = 8
+
+# WIPfix3 (measured 2026-09-26, work/L1-routing/WIPfix2.out): the window alone
+# still false-positived - a normal run whose last lines contained a CODE line
+# quoting 'print("Error: Rate limit exceeded.")' was reported PROVIDER-STOP. A
+# real stop is an error-prefixed LINE, so the stripped line must also START
+# with one of these prefixes (case-insensitive); it covers "error: ... 429"
+# status lines as clients print them. The bare " 429"/" 402" markers stay in
+# PROVIDER_STOP_MARKERS and must - it is this prefix requirement, not marker
+# removal, that stops a marker quoted in prose or code from matching.
+PROVIDER_STOP_PREFIXES = ("error", "agy_error", "fatal")
+
+# ANSI escape sequences a client wraps (colour/bold) or redraws (erase-line,
+# cursor moves) its stderr prefix in: every CSI sequence, plus a leading
+# carriage return from an in-place line redraw ("\r\x1b[2KError: ...").
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|^\r")
+
+
+def provider_stop(tail: str) -> str | None:
+    """The provider-stop line among the client's last lines, or None.
+
+    Only the last PROVIDER_STOP_WINDOW non-empty lines of `tail` are scanned:
+    a real provider stop is the client's last output before it exits, so a
+    marker quoted earlier in the run must not match. Inside the window a line
+    only when, after lstrip() and removing ANSI colour codes, it STARTS with
+    an error prefix (PROVIDER_STOP_PREFIXES, case-insensitive) AND contains a
+    PROVIDER_STOP_MARKERS entry (WIPfix3). Returns the matching line nearest
+    the end when several are in the window.
+    """
+    lines = [line for line in (tail or "").splitlines() if line.strip()]
+    for line in reversed(lines[-PROVIDER_STOP_WINDOW:]):
+        clean = _ANSI_RE.sub("", line.lstrip())
+        low = clean.lower()
+        if low.startswith(PROVIDER_STOP_PREFIXES) and any(
+                marker in low for marker in PROVIDER_STOP_MARKERS):
+            return clean
+    return None
 
 
 def _porcelain_path_is_logs(p: str) -> bool:
@@ -1021,6 +1089,65 @@ def sandbox_verdict(route: dict, changed: str, ahead: str):
                "unverified and the run as failed (exit 5)")
 
 
+def wip_commit(sandbox: str, rc: int, stop: str | None, branch: str | None = None) -> str | None:
+    """Commit everything uncommitted in the sandbox; return the sha, or None.
+
+    WIPfix (measured 2026-09-26 19:1x-19:3xZ): three --isolate workers were
+    stopped by the provider right before `git commit`; the spawner printed
+    "sandbox changes (uncommitted)" and exited, leaving the work to be
+    recovered by hand. Commit it on the sandbox branch instead, so `take it:`
+    always has a commit to fetch. The sandbox is a private clone with its push
+    URL disabled, so this can never touch the parent. Untracked files are
+    staged except logs/ (the spawner's own state_dir) and the git-ignored
+    secrets (review WIPfix4: --exclude-standard alone honours the repo's own
+    .gitignore, so the sandbox gets an explicit excludes file that also names
+    configuration/api-keys.yml). A commit that does not land (e.g. an
+    unmerged index the worker left behind) prints one stderr line and returns
+    None; on a detached HEAD the sandbox branch is pointed at the WIP commit,
+    so `take it: git fetch <path> <branch>` can fetch it.
+    """
+    msg = "WIP(autoos-agent): uncommitted at exit rc=%d" % rc
+    if stop:
+        msg += "; provider stop: %s" % stop
+    # The clone carries this repo's .gitignore (which already names both of
+    # these), but the WIP commit must hold even if that file is edited -
+    # belt and braces via the sandbox's own excludes, never the user's.
+    info = os.path.join(sandbox, ".git", "info")
+    os.makedirs(info, exist_ok=True)
+    with io.open(os.path.join(info, "exclude"), "a", encoding="utf-8") as fh:
+        fh.write("configuration/api-keys.yml\nlogs/\n")
+    others = subprocess.run(["git", "-C", sandbox, "ls-files", "--others",
+                             "--exclude-standard", "-z"],
+                            capture_output=True, text=True)
+    add = [p for p in others.stdout.split("\0")
+           if p and not _porcelain_path_is_logs(p)]
+    if add:
+        subprocess.run(["git", "-C", sandbox, "add", "--", *add],
+                       capture_output=True, text=True)
+    done = subprocess.run(["git", "-C", sandbox, "-c", "user.name=autoos-worker",
+                           "-c", "user.email=" + WORKER_EMAIL, "commit", "-am", msg],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        reason = done.stderr.strip() or done.stdout.strip()
+        print("WIP-COMMIT FAILED: %s" % (reason.splitlines()[0] if reason else
+              "git commit exited %d" % done.returncode), file=sys.stderr)
+        return None
+    sha = subprocess.run(["git", "-C", sandbox, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    if not sha:
+        return None
+    if branch:
+        current = subprocess.run(["git", "-C", sandbox, "branch", "--show-current"],
+                                 capture_output=True, text=True).stdout.strip()
+        if current != branch:
+            # A detached sandbox HEAD (the worker checked out a sha) leaves
+            # the WIP commit on no branch; point the sandbox branch at it so
+            # `take it: git fetch <path> <branch>` has something to fetch.
+            subprocess.run(["git", "-C", sandbox, "branch", "-f", branch, "HEAD"],
+                           capture_output=True, text=True)
+    return sha
+
+
 def track_class(combo: str | None) -> str | None:
     """The track-record class for a combo, or None when it is not a tier combo."""
     if not combo:
@@ -1067,7 +1194,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
         "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
-                          ("containment" if rc == 7 else "logic"))),
+                          ("containment" if rc == 7 else
+                           ("provider" if rc == 8 else "logic")))),
     }
 
 
@@ -1418,18 +1546,48 @@ def cmd_run(args, cfg: dict) -> int:
                                     capture_output=True, text=True, check=True).stdout.strip()
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
-    rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                    capture=client.name in CAPTURE_CLIENTS)
-    rc, refusal = refusal_exit(int(rc), getattr(rc, "refusal", None) or "")
+    # Every finished --isolate run is captured (tee'd to our stdout), so the
+    # WIPfix provider-stop check has the child's tail. A --joinable launcher
+    # (claude --bg) exits while its session lives: its tail is a partial
+    # mid-flight score, so it is never captured and never stop-checked or
+    # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
+    capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+    run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                        capture=capture)
+    client_tail = getattr(run_rc, "tail", "") or ""
+    rc, refusal = refusal_exit(int(run_rc), getattr(run_rc, "refusal", None) or "")
+    child_rc = rc  # the WIP message names the client's own rc, not a verdict override
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
     if rc == 0 and client.promo:
         clients.record_probe(client.name)
-    if plan["sandbox"]:
+    # A provider stop is a failure even though the client exited 0: it was cut
+    # off mid-task (WIPfix, 2026-09-26). Only rc 0 and 6 upgrade to 8; a LEAK
+    # (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+    # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
+    # provider-stopped exits 8 with failure_class "provider" (agy measured:
+    # jetski refusal + AGY_ERROR 429, R-gateway-12).
+    stop = provider_stop(client_tail)
+    if stop is not None and rc in (0, 6):
+        print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
+        rc = 8
+    if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
+        branch = sb["branch"]
         changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
                                  capture_output=True, text=True).stdout.strip()
-        ahead = subprocess.run(["git", "-C", sb["path"], "log", "--oneline", sb["base"] + "..HEAD"],
+        # WIPfix: never lose a worker's uncommitted work. Commit it on the
+        # sandbox branch, then re-read changed/ahead so a run that only ever
+        # produced this WIP commit is no longer a NO-OP. A review run's
+        # deliverable is its diff, so leave that one untouched.
+        if changed and not plan["route"].get("review"):
+            wip_sha = wip_commit(sb["path"], child_rc, stop, branch)
+            if wip_sha:
+                print("WIP-COMMITTED: %s" % wip_sha)
+                changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                         capture_output=True, text=True).stdout.strip()
+        ahead = subprocess.run(["git", "-C", sb["path"], "log", "--oneline",
+                                sb["base"] + ".." + branch],
                                capture_output=True, text=True).stdout.strip()
         print("\nsandbox changes (uncommitted):\n" + (changed or "  (none)"))
         if ahead:
