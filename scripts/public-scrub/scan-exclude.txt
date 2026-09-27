@@ -1,0 +1,13 @@
+# Paths the publication gate does not read. scan.py loads this file by default
+# (the --exclude-file argument overrides it), so both CI and a local `scan.py .`
+# share one answer.
+#
+# Deliberately NOT the same list as migrate-exclude.txt: that one says what was never
+# migrated into AutoOS, this one says what carries the shapes themselves. Every entry
+# shrinks the gate, so each needs a reason on the line above it.
+
+# The scrubber's own home: patterns.txt and patterns.private.txt hold the rules and the
+# site literals, and test_scan.py plants fixture specimens of every shape on purpose.
+# None of them is published content. (patterns.txt is additionally auto-skipped as the
+# --patterns argument; the private file and the fixtures are not.)
+scripts/public-scrub/

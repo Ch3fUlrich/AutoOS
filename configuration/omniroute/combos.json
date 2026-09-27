@@ -3,12 +3,20 @@
     "Router tiers for OmniRoute. Applied by apply.ps1 / apply.sh, which",
     "validates every model against the live /v1/models catalog and skips",
     "(with a warning) anything the catalog does not know.",
-    "T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry",
+    "MUSEAPI 2026-09-27: meta_api/muse-spark-1.3-contributor (the Meta Model",
+    "API contributor, providers.meta_api) is the head leg of t1-orchestrator,",
+    "t1-orchestrator-paid and spark-1.3-contributor, and a paid escalation leg",
+    "of t2-worker/t3-driver after their free legs. It trains on prompts by",
+    "contract, so it is in no *-clean route and a privacy=sensitive card never",
+    "reaches it. NOTE: unlike free-ai, 'meta-api' is not a built-in gateway",
+    "connection - the first apply against a live gateway creates it (key 'meta'",
+    "in api-keys.yml); nothing here has called the live gateway.",
+    "T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only keep",
     "a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek",
     "credit is out (L0: every tier keeps a free leg). cheaperinference legs",
     "omitted: wallet exhausted 2026-09-27T17:2xZ (402).",
-    "t1-orchestrator-clean, spark-1.3-contributor, deepseek-v4.1-flash,",
-    "samba/* still omitted (contributor-only, paid, or provider-off)."
+    "t1-orchestrator-clean, deepseek-v4.1-flash and samba/* still omitted",
+    "(contributor-only, paid, or provider-off)."
   ],
   "retired": [
     "tier1",
@@ -30,7 +38,6 @@
     "deepseek-v4.1-flash",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
-    "spark-1.3-contributor",
     "t1-orchestrator-clean"
   ],
   "combos": [
@@ -51,10 +58,19 @@
       ]
     },
     {
+      "name": "spark-1.3-contributor",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "meta-api/muse-spark-1.3-contributor"
+      ]
+    },
+    {
       "name": "t1-orchestrator",
       "strategy": "priority",
       "context": "1M",
       "models": [
+        "meta-api/muse-spark-1.3-contributor",
         "gemini/gemini-3.8-flash"
       ]
     },
@@ -64,6 +80,14 @@
       "context": "1M",
       "models": [
         "gemini/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "t1-orchestrator-paid",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "meta-api/muse-spark-1.3-contributor"
       ]
     },
     {
@@ -80,7 +104,8 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "agy/gemini-3.7-flash-high"
+        "agy/gemini-3.7-flash-high",
+        "meta-api/muse-spark-1.3-contributor"
       ]
     },
     {
@@ -107,7 +132,8 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
-        "mistral/mistral-small-latest"
+        "mistral/mistral-small-latest",
+        "meta-api/muse-spark-1.3-contributor"
       ]
     },
     {

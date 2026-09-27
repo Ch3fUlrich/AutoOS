@@ -19,6 +19,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,13 @@ def real_tier_profiles() -> dict:
 
 def real_models_doc() -> str:
     return MODELS_DOC_PATH.read_text(encoding="utf-8")
+
+
+def _strip_jsonc(text: str) -> str:
+    """opencode.jsonc is JSON with whole-line `//` comments (the same strip
+    tests/test_sync_ide_models.py does - that module is not importable from
+    here, the suites run standalone)."""
+    return re.sub(r"(?m)^\s*//.*$", "", text)
 
 
 def row_for(block_text: str, route_id: str) -> str:
@@ -194,14 +202,25 @@ class RenderMatchesTodayTests(unittest.TestCase):
                          combos_by_name["t2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
-        # t1-orchestrator-paid/t2-worker-paid/t3-driver-paid (LiteLLM-only) and
+        # t2-worker-paid/t3-driver-paid (LiteLLM-only) and
         # auto/auto-smart/auto-cheap (OmniRoute's dynamic strategy) carry
         # legs: [] in the registry and have no combos.json counterpart.
+        # MUSEAPI 2026-09-27 moved t1-orchestrator-paid out of that set: it
+        # declares a servable leg now, so it renders a combo - test_the_legless
+        # _route_renders_no_combo below pins the rule that made it an exception.
         rendered = registry.render_omniroute(real_registry())
         names = {c["name"] for c in rendered["combos"]}
-        for absent in ("t1-orchestrator-paid", "t2-worker-paid", "t3-driver-paid",
+        for absent in ("t2-worker-paid", "t3-driver-paid",
                       "auto", "auto/smart", "auto/cheap"):
             self.assertNotIn(absent, names)
+
+    def test_the_legless_route_renders_no_combo(self):
+        # The rule, kept general: a route with legs: [] is deliberately
+        # LiteLLM-only and never becomes a combo, however it is spelled.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
+        names = {c["name"] for c in registry.render_omniroute(reg)["combos"]}
+        self.assertNotIn("t1-orchestrator-paid", names)
 
 
 class GatewayRefTests(unittest.TestCase):
@@ -364,12 +383,33 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
             self.assertNotIn(gone, rendered)
 
     def test_a_legless_hand_group_is_never_rendered(self):
-        # t1-orchestrator-paid/t2-worker-paid/t3-driver-paid declare no legs;
-        # they are hand-curated fallback chains and must stay outside the
-        # AUTOOS-MANAGED markers.
+        # t2-worker-paid/t3-driver-paid declare no legs; they are hand-curated
+        # fallback chains and must stay outside the AUTOOS-MANAGED markers.
+        # (t1-orchestrator-paid was one of them until MUSEAPI 2026-09-27 gave
+        # it a leg - see test_the_legged_paid_route_is_rendered.)
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        for paid in ("t1-orchestrator-paid", "t2-worker-paid", "t3-driver-paid"):
+        for paid in ("t2-worker-paid", "t3-driver-paid"):
             self.assertNotIn(paid, rendered)
+
+    def test_the_legged_paid_route_is_rendered(self):
+        # MUSEAPI 2026-09-27: t1-orchestrator-paid's LiteLLM group used to 404
+        # (no model_name anywhere in config.yaml, no legs in the registry).
+        # With meta_api/muse-spark-1.3-contributor as its leg the registry owns
+        # the block, so the render must produce it...
+        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        block = rendered["t1-orchestrator-paid"]
+        self.assertIn("model: openai/muse-spark-1.3-contributor", block)
+        self.assertIn("api_base: https://api.meta.ai/v1", block)
+        self.assertIn("api_key: os.environ/META_API_KEY", block)
+        self.assertIn("  # AUTOOS-MANAGED-START t1-orchestrator-paid\n", block)
+        self.assertIn("  # AUTOOS-MANAGED-END t1-orchestrator-paid", block)
+
+        # ...and the rule behind the old test survives: strip the legs and the
+        # block is gone again, marker and all.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
+        self.assertNotIn("t1-orchestrator-paid",
+                         registry.render_litellm_blocks(reg, real_litellm_config()))
 
     def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
         # routes.t2-worker.legs carries antigravity/gemini-3.7-flash-high (a
@@ -658,8 +698,12 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
 
     def test_no_effort_ladder_when_route_has_no_legs(self):
+        # The rule is about a route that declares no legs at all, so it is
+        # tested against a synthesized one - MUSEAPI 2026-09-27 gave the real
+        # t1-orchestrator-paid a leg, and t2-worker-paid/t3-driver-paid would
+        # drift out of the fixture the moment anyone legs them too.
         reg = copy.deepcopy(real_registry())
-        # t1-orchestrator-paid is a legless route
+        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
         # t2-worker has legs whose first model carries a ladder
         t2_route = reg["routes"]["t2-worker"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
@@ -669,6 +713,47 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["t1-orchestrator-paid"])
         self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
+
+    def test_the_contributor_ladder_reaches_every_surface_that_carries_one(self):
+        # MUSEAPI step 3: the effort aliases for the contributor writer are the
+        # ladder the renderers already project - catalog/ide-models.json's
+        # effort_ladder and, from it, opencode.jsonc's per-effort `variants`
+        # (the #minimal/#low/#medium/#high/#xhigh pickers).
+        ladder = real_registry()["models"]["muse-spark-1.3-contributor"]["effort_ladder"]
+        self.assertEqual(ladder, ["minimal", "low", "medium", "high", "xhigh"])
+        by_id = {m["id"]: m for m in real_ide_models()["models"]}
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            self.assertEqual(by_id[route_id]["effort_ladder"], ladder, route_id)
+
+        oc = json.loads(_strip_jsonc((ROOT / "opencode.jsonc").read_text(encoding="utf-8")))
+        seen = set()
+        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
+                         "spark-1.3-contributor"):
+            for provider in by_id[route_id]["surfaces"]:
+                models = oc["providers"][provider]["models"]
+                variants = [v["id"] for v in models[route_id].get("variants", [])]
+                self.assertEqual(variants, ladder,
+                                 "%s/%s variants" % (provider, route_id))
+                for rung in variants:
+                    self.assertEqual(models[route_id]["variants"]
+                                     [variants.index(rung)]["settings"]["reasoningEffort"],
+                                     rung, "%s/%s#%s" % (provider, route_id, rung))
+                seen.add(provider)
+        # spark has no LiteLLM surface, so the loop above is not vacuous only
+        # because omniroute carried everything.
+        self.assertIn("litellm", seen)
+
+    def test_an_omniroute_combo_cannot_carry_a_per_effort_alias(self):
+        # The gap step 3 anticipated: a combos.json entry is
+        # {name, strategy, context, models} and the gateway has no per-effort
+        # parameter, so spark-1.3-contributor-minimal as a *combo* is not
+        # renderable. Pinned here so the day the gateway grows one, this test
+        # fails and the alias is rendered on that surface too.
+        combo = {c["name"]: c for c in real_combos()["combos"]}["spark-1.3-contributor"]
+        self.assertEqual(sorted(combo), ["context", "models", "name", "strategy"])
+        self.assertEqual([c["name"] for c in real_combos()["combos"]
+                          if c["name"].startswith("spark-1.3-contributor-")], [])
 
 
 class OpenhandsRenderMatchesTodayTests(unittest.TestCase):

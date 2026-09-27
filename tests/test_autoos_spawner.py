@@ -1566,6 +1566,142 @@ class AskHelperTests(unittest.TestCase):
         self.assertIn("unavailable", proc.stderr)
 
 
+def load_ask():
+    """tools/autoos-ask.py loaded in-process, so a test can widen the window
+    between its exists() check and its create — something a subprocess race
+    can only hit by luck."""
+    spec = importlib.util.spec_from_file_location("autoos_ask", str(TOOLS / "autoos-ask.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class AskRaceTests(unittest.TestCase):
+    """The check-then-act races in tools/autoos-ask.py: two askers sharing one
+    run dir, and two archives claiming the same qa-<n> slot."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_ask(self, question, *opts):
+        env = clean_env(AUTOOS_TASK_DIR=self.tmp)
+        return subprocess.run([sys.executable, str(TOOLS / "autoos-ask.py"), question, *opts],
+                              env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_two_concurrent_askers_produce_exactly_one_question(self):
+        """Two askers launched together: exactly one may become the asker (it
+        writes the question and times out, exit 3), the other must refuse as
+        already pending (exit 2). Two 3s is the bug - both wrote, so the loser
+        replaced the winner's pending question and the orchestrator answers the
+        wrong worker."""
+        for _round in range(3):
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.tmp = tempfile.mkdtemp()
+            results = []
+            lock = threading.Lock()
+
+            def ask(question):
+                proc = self.run_ask(question, "--poll", "0.05", "--timeout", "0.2")
+                with lock:
+                    results.append((question, proc.returncode))
+
+            threads = [threading.Thread(target=ask, args=("question %s?" % who,))
+                       for who in "ab"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(sorted(rc for _, rc in results), [2, 3], results)
+
+    def test_an_asker_that_loses_the_race_never_replaces_the_pending_question(self):
+        """The window itself, with no timing luck: question.json is on disk, but
+        the module's own exists() reports it missing - exactly what a second
+        asker sees while the first sits between its check and its write. The
+        create must still fail, and the pending question must survive."""
+        mod = load_ask()
+        qpath = os.path.join(self.tmp, "question.json")
+        with io.open(qpath, "w", encoding="utf-8") as fh:
+            json.dump({"text": "first?", "asked": "2026-09-27T00:00:00Z"}, fh)
+
+        class BlindPath:
+            def __init__(self, real):
+                self._real = real
+                self.blinded = False
+
+            def exists(self, path):
+                if path == qpath and not self.blinded:
+                    self.blinded = True  # the other asker has not written yet
+                    return False
+                return self._real.exists(path)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        class BlindOs:
+            def __init__(self, real):
+                self._real = real
+                self.path = BlindPath(real.path)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        blind = BlindOs(mod.os)
+        err = io.StringIO()
+        with mock.patch.object(mod, "os", blind), \
+                mock.patch.dict(os.environ, {"AUTOOS_TASK_DIR": self.tmp}), \
+                contextlib.redirect_stderr(err):
+            rc = mod.main(["second?", "--poll", "0.05", "--timeout", "0.2"])
+        self.assertTrue(blind.path.blinded, "the window never opened: exists() was not consulted")
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("already pending", err.getvalue())
+        with io.open(qpath, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["text"], "first?")
+
+    def test_two_racing_archives_never_share_a_qa_slot(self):
+        """qa-<n> is a history slot. Scanning for the next free number and then
+        writing lets two archivers pick the same n, and the second silently
+        overwrites the first - an exchange vanishes from the record. Each
+        archive has to claim its own number."""
+        mod = load_ask()
+        sentinel = os.path.join(self.tmp, "qa-1.json")
+        with io.open(sentinel, "w", encoding="utf-8") as fh:
+            json.dump({"question": None, "answer": {"text": "already filed"}, "stale": True}, fh)
+
+        writers = 6
+        barrier = threading.Barrier(writers)
+        errors = []
+
+        def archive(i):
+            barrier.wait()
+            try:
+                mod._write_qa(self.tmp, {"question": {"text": "q%d?" % i},
+                                         "answer": {"text": "a%d" % i}})
+            except Exception as exc:  # noqa: BLE001 - surfaced as a failure below
+                errors.append("q%d: %r" % (i, exc))
+
+        threads = [threading.Thread(target=archive, args=(i,)) for i in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        filed = sorted(n for n in os.listdir(self.tmp) if n.startswith("qa-") and n.endswith(".json"))
+        self.assertEqual(len(filed), writers + 1, filed)
+        with io.open(sentinel, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh).get("stale"), "the existing qa-1.json was overwritten")
+        answers = set()
+        for name in filed:
+            if name == "qa-1.json":
+                continue
+            with io.open(os.path.join(self.tmp, name), encoding="utf-8") as fh:
+                answers.add(json.load(fh)["answer"]["text"])
+        self.assertEqual(answers, {"a%d" % i for i in range(writers)}, "an exchange was lost")
+
+
 def uv_mcp_cmd():
     """The registered server command, offline only: tests never download."""
     uv = shutil.which("uv")
@@ -3499,10 +3635,21 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
+    def make_scratch(self):
+        """A working directory for the run itself. cmd_run may start the client
+        before a sandbox exists (a `--version`/`--help` mode probe), and such a
+        probe inherits this process's cwd — without it an argv-naive fake writes
+        its "sandbox" files into the checkout running the suite."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
     def run_isolated(self, root, stubdir, statedir, mode, card=None):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        old_cwd = os.getcwd()
+        os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
                 client="agy", tier=None if card else 2, card=card, task="do the thing",
@@ -3530,6 +3677,7 @@ class IsolateContainmentTests(unittest.TestCase):
                     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                         rc = agent.cmd_run(args, cfg)
         finally:
+            os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
 
@@ -4020,6 +4168,8 @@ class IsolateContainmentTests(unittest.TestCase):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
+        old_cwd = os.getcwd()
+        os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
                 client="claude", tier=2, card=None, task="do the thing",
@@ -4038,8 +4188,36 @@ class IsolateContainmentTests(unittest.TestCase):
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     rc = agent.cmd_run(args, cfg)
         finally:
+            os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
         return rc, out.getvalue(), err.getvalue()
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_the_callers_own_directory_stays_clean(self):
+        # SPAWNFIX2 (S1 test hygiene): cmd_run probes the client binary before
+        # a sandbox exists (`--version`/`--help` through check_client_modes), and
+        # that probe inherits this process's cwd. The claude fake is argv-naive,
+        # so the probe ran the whole worker script and dropped worker-new.txt
+        # into the checkout running the suite. Pinned for the agy fake too: it
+        # writes its "sandbox" files into the cwd as well, and only `agy`
+        # declaring no modes keeps it out of the probe path today.
+        cases = [
+            ("agy sandbox-write", lambda: self.run_isolated(
+                self.make_root(), self.make_fake_agy(), self.make_state(),
+                "sandbox-write")),
+            ("claude joinable", lambda: self.run_isolated_joinable(
+                self.make_root(), self.make_fake_claude(), self.make_state())),
+        ]
+        for name, run in cases:
+            with self.subTest(case=name):
+                cwd = os.getcwd()
+                before = set(os.listdir(cwd))
+                rc, out, err = run()
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(os.getcwd(), cwd, "the helper restored the cwd")
+                self.assertEqual(set(os.listdir(cwd)) - before, set(),
+                                 "the run wrote into the directory the suite "
+                                 "was started in")
 
     def test_provider_stop_matches_a_redrawn_line(self):
         # WIPfix4 review: a stop line redrawn in place ("\r" then erase-line)

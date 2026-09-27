@@ -72,3 +72,61 @@ if it "tests: POSIX-only Python tests are guarded for Windows; every .ps1/.psm1 
     out="$(python3 tests/test_windows_portability.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# The public-scrub gate existed with no caller before asm-a2, so a private
+# literal could reach a tracked file unscanned. Assert CI actually invokes the
+# scanner over the trees this repository publishes about a real machine, that
+# the rules file's own fixtures still behave, and that the scan is clean there.
+# A whole-tree scan is deliberately NOT asserted: the generic unix-home,
+# rfc1918 and private-host shapes legitimately match test fixtures,
+# example.conf and autoinstall placeholders under tests/, lib/ and
+# configuration/, so the gate is scoped (the same command ci.yml runs).
+if it "public-scrub: ci.yml scans the documentation and catalog trees too, and they are clean"; then
+    ci_yml="$ROOT/.github/workflows/ci.yml"
+    if ! grep -qE 'public-scrub/scan\.py' "$ci_yml"; then
+        fail "ci.yml does not invoke scripts/public-scrub/scan.py — the no-secrets gate is wired to nothing"
+    else
+        # The scan step's own lines only — the prose above it mentions the same
+        # paths, and a comment must not be able to satisfy the guard. CI
+        # narrowing the scope back to infra/ would silently un-gate the docs.
+        step="$(awk '/public-scrub\/scan\.py/{f=1; next}
+                     f && /^[[:space:]]*- name:/{exit}
+                     f' "$ci_yml")"
+        missing=""
+        for scope in 'infra/' 'scripts/' 'docs/' 'catalog/' 'README.md' 'AGENTS.md'; do
+            printf '%s\n' "$step" | grep -qE "(^|[[:space:]/])$scope([[:space:]]|\\\\|$)" \
+                || missing+=" $scope"
+        done
+        if [[ -n "$missing" ]]; then
+            fail "ci.yml no longer scans:$missing"
+        elif ! has_cmd python3; then
+            skip "no python3 to run the scanner"
+        else
+            out="$(python3 "$ROOT/scripts/public-scrub/scan.py" \
+                     --patterns "$ROOT/scripts/public-scrub/patterns.txt" \
+                     "$ROOT/infra/" "$ROOT/scripts/" "$ROOT/docs/" "$ROOT/catalog/" \
+                     "$ROOT/README.md" "$ROOT/AGENTS.md" 2>&1)"; rc=$?
+            if [[ $rc -eq 0 ]]; then
+                pass
+            else
+                fail "scan.py reported hits (exit $rc):"$'\n'"$(printf '%s\n' "$out" | head -20)"
+            fi
+        fi
+    fi
+fi
+
+# patterns.txt is the gate's whole contract, so its rules are executed too —
+# a shape that stops matching, or starts matching a documentation value, fails
+# here and in the CI scrub job. Run directly: no pytest is installed anywhere.
+if it "public-scrub: the shipped patterns catch each shape and no documentation value"; then
+    if ! has_cmd python3; then
+        skip "no python3 to run the scanner tests"
+    else
+        out="$(python3 "$ROOT/scripts/public-scrub/test_scan.py" 2>&1)"; rc=$?
+        if [[ $rc -eq 0 && "$out" == *" 0 failed"* ]]; then
+            pass
+        else
+            fail "$(printf '%s\n' "$out" | tail -20)"
+        fi
+    fi
+fi
+

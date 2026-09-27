@@ -18,6 +18,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,8 +76,7 @@ def component_platforms() -> dict:
 #    carry only presence, and POST /api/secrets cannot read one back out.
 APPLY_OMNIROUTE = "bash configuration/omniroute/apply.sh"
 APPLY_OPENCODE_PASSWORD = (
-    "bash configuration/docker/ai-stack/ai-stack.sh init && "
-    "bash configuration/docker/ai-stack/ai-stack.sh up opencode"
+    "bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate"
 )
 
 SECRET_KEYS = {
@@ -1050,9 +1050,17 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 return self._json(400, {"error": "payload must be a JSON object"})
             cfg_file = ROOT / "autoos.config.json"
-            tmp_file = ROOT / "autoos.config.json.tmp"
             original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
-            merged = json.loads(original) if original is not None else {}
+            try:
+                merged = json.loads(original) if original is not None else {}
+            except json.JSONDecodeError as exc:
+                # The config already on disk is the user's and is not JSON. That
+                # is the caller's problem to fix, not a server fault: answer 400,
+                # write nothing, and let the parser's position text stand - it
+                # names an offset, never a value, so nothing of the file echoes
+                # back to the page.
+                return self._json(400, {
+                    "error": f"existing autoos.config.json is corrupt: {exc}"})
             if not isinstance(merged, dict):
                 raise ValueError("Existing configuration must be an object")
             for key, value in body.items():
@@ -1075,8 +1083,33 @@ class Handler(BaseHTTPRequestHandler):
                     n += 1
                     backup = base.with_name(f"{base.name}-{n}")
                 backup.write_text(original, encoding="utf-8")
-            tmp_file.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-            tmp_file.replace(cfg_file)
+            # The temp name must not be guessable: a fixed
+            # autoos.config.json.tmp lets whoever can plant a symlink there take
+            # the save's bytes and, once the rename follows the link, the config
+            # path itself. mkstemp picks an unpredictable name in the config's own
+            # directory, so the replace stays atomic across one filesystem.
+            payload = json.dumps(merged, indent=2) + "\n"
+            fd, tmp_name = tempfile.mkstemp(dir=str(ROOT), prefix=".autoos.config.",
+                                            suffix=".tmp")
+            try:
+                if cfg_file.is_file():
+                    # mkstemp creates 0600; saving new bytes must not also change
+                    # who can read them - setup.sh --config may run as someone
+                    # else.
+                    os.chmod(fd, cfg_file.stat().st_mode & 0o777)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                os.replace(tmp_name, str(cfg_file))
+            except BaseException:
+                try:
+                    os.close(fd)  # already owned (and closed) once fdopen succeeded
+                except OSError:
+                    pass
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
             return self._json(200, {"ok": True, "saved": str(cfg_file)})
         except Exception as exc:
             return self._json(500, {"error": f"failed to save config: {exc}"})
