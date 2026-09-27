@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """MCP server (stdio) over tools/autoos-agent.py: spawn agents from any MCP client.
 
-Tools: list_clients, spawn, status, result, cancel, route, list_agents,
-context, heartbeat (spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01,
-R-handoff-07). spawn is asynchronous: it validates the request (card ->
+Tools: list_clients, spawn, status, result, cancel, respond, route,
+list_agents, context, heartbeat (spec 6.2; heartbeat: R-heartbeat-02/03,
+R-pause-01, R-handoff-07; respond: the spec 9 ask-back). spawn is
+asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
@@ -12,10 +13,19 @@ AUTOOS_STATE_DIR overrides <repo>/logs):
     job.json     the request, the autoos-agent.py argv, pid, route, start time
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
+    question.json  a worker's ask-back question {"text", "asked"} - written by
+                   tools/autoos-ask.py, which run_job points here through the
+                   child's AUTOOS_TASK_DIR
+    answer.json    the respond() answer {"text", "answered"}; the helper prints
+                   it, archives the pair as qa-<n>.json (history kept) and the
+                   run works on
 
 A run's `state` uses the A2A task lifecycle (spec 6.2/9, TASK_STATES):
 submitted (job.json has no pid yet) -> working -> completed | failed | canceled
 (A2A spelling, one l); a spawn this server refuses answers "rejected" instead.
+A working run with a question.json and no answer.json yet is input_required
+(the spec 9 ask-back: a worker blocked on a decision) and carries the question
+text; respond(run_id, text) answers it and the run works on.
 A pid that died without writing exit.json is failed with detail "lost".
 `detail` keeps the pre-A2A value (starting/running/done/cancelled/lost) so the
 rename loses no information.
@@ -60,8 +70,8 @@ TAIL_CHARS = 6000
 _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
 
 # Spec 9 (docs/plans/2026-09-25-routing-v2-spec.md): the A2A task-state names
-# this server reports. input_required is set by a later lane (the ask-back
-# question file); rejected is what spawn() answers a refused request with.
+# this server reports. input_required is the ask-back question file (D2b);
+# rejected is what spawn() answers a refused request with.
 TASK_STATES = ("submitted", "working", "input_required", "completed", "failed",
                "canceled", "rejected")
 
@@ -105,6 +115,12 @@ def _write_json(path: str, data) -> None:
     with io.open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1)
     os.replace(tmp, path)
+
+
+def _now_iso() -> str:
+    # UTC "Z" form, the house style of autoos-agent.py and autoos_heartbeat.py.
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
 
 
 def _run_dir(run_id: str) -> str:
@@ -372,7 +388,11 @@ def run_job(path: str) -> int:
     """The detached runner: one autoos-agent.py run, output and exit code on disk."""
     job = _read_json(os.path.join(path, "job.json"))
     with io.open(os.path.join(path, "output.log"), "ab") as out:
+        # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
+        # at this run dir; the CLI forwards os.environ to the client, so the
+        # worker sees it too.
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
+                             env=dict(os.environ, AUTOOS_TASK_DIR=path),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     return rc
@@ -407,9 +427,13 @@ def _state(path: str) -> dict:
     # Spec 9: `state` is the A2A lifecycle name, `detail` the pre-A2A value
     # (starting/running/done/cancelled/lost) - the rename loses nothing. A pid
     # that died without writing exit.json is failed (the exit code is
-    # unknowable); the old "lost" name survives in detail.
+    # unknowable); the old "lost" name survives in detail. Spec 9 ask-back: a
+    # live run with a question.json and no answer.json yet is input_required
+    # (the worker is blocked on a decision); answered or withdrawn, it is
+    # working again.
     job = _read_json(os.path.join(path, "job.json")) or {}
     ex = _read_json(os.path.join(path, "exit.json"))
+    question = None
     if ex is not None:
         if ex.get("cancelled"):
             state, detail = "canceled", "cancelled"
@@ -421,11 +445,16 @@ def _state(path: str) -> dict:
         state, detail = "submitted", "starting"
     elif _alive(job.get("pid")):
         state, detail = "working", "running"
+        asked = _read_json(os.path.join(path, "question.json"))
+        if isinstance(asked, dict) and _read_json(os.path.join(path, "answer.json")) is None:
+            state, question = "input_required", asked.get("text") or ""
     else:
         state, detail = "failed", "lost"
     out = {"id": job.get("id"), "state": state, "detail": detail,
            "client": (job.get("request") or {}).get("client") or "opencode",
            "route": job.get("route"), "started": job.get("started"), "task": (job.get("task") or "")[:120]}
+    if question is not None:
+        out["question"] = question
     if ex is not None:
         out["rc"] = ex.get("rc")
         out["secs"] = round((ex.get("ended") or time.time()) - (job.get("started") or 0))
@@ -461,6 +490,24 @@ def result(run_id: str, max_chars: int = TAIL_CHARS) -> dict:
     return out
 
 
+def respond(run_id: str, text: str) -> dict:
+    """Answer the question a worker asked through tools/autoos-ask.py (spec 6.2
+    and spec 9 ask-back): writes answer.json into the run dir, the asking
+    helper prints the text and the run returns to working. Only a run in
+    input_required can be answered; empty text is an error."""
+    try:
+        path = _run_dir(run_id)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if not isinstance(text, str) or not text.strip():
+        return {"error": "text is empty"}
+    st = _state(path)
+    if st["state"] != "input_required":
+        return dict(st, error="run is %s, not input_required" % st["state"])
+    _write_json(os.path.join(path, "answer.json"), {"text": text, "answered": _now_iso()})
+    return _state(path)
+
+
 def cancel(run_id: str) -> dict:
     try:
         path = _run_dir(run_id)
@@ -468,7 +515,7 @@ def cancel(run_id: str) -> dict:
         return {"error": str(exc)}
     _reap()
     st = _state(path)
-    if st["state"] != "working":
+    if st["state"] not in ("working", "input_required"):
         return dict(st, note="not working; nothing to cancel")
     job = _read_json(os.path.join(path, "job.json"))
     if not _write_exit(path, {"cancelled": True, "rc": None, "ended": time.time()}):
@@ -526,8 +573,17 @@ def serve() -> None:
 
     @app.tool(name="cancel")
     def _cancel(run_id: str) -> dict:
-        """Stop a working agent (SIGTERM to its process group)."""
+        """Stop a working or input_required agent (SIGTERM to its process
+        group)."""
         return cancel(run_id)
+
+    @app.tool(name="respond")
+    def _respond(run_id: str, text: str) -> dict:
+        """Answer a worker's pending question (spec 9 ask-back): a worker that
+        runs tools/autoos-ask.py parks its run in input_required until this
+        writes answer.json; the helper prints the text, archives the exchange
+        and the run works on. Empty text is refused."""
+        return respond(run_id, text)
 
     @app.tool(name="route")
     def _route(card: str | dict, brief: str = "", explain: bool = False) -> dict:

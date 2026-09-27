@@ -712,6 +712,108 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(st["detail"], "lost")
         self.assertIn("failed", mcp_server.TASK_STATES)
 
+    def make_sleeper(self):
+        """A live process standing in for a working runner, in its own session
+        so the test never leaks it (the same trick the cancel test uses)."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def stop():
+            if proc.poll() is None:  # cancel may already have killed it
+                proc.terminate()
+            proc.wait()
+        self.addCleanup(stop)
+        return proc
+
+    def make_asking_run(self, run_id, text="ship or revert?"):
+        """A synthetic working run whose worker has just asked a question -
+        the file tools/autoos-ask.py writes, exactly as it writes it."""
+        path = self.make_run(run_id, pid=self.make_sleeper().pid)
+        mcp_server._write_json(os.path.join(path, "question.json"),
+                               {"text": text, "asked": "2026-09-27T00:00:00Z"})
+        return path
+
+    def test_a_pending_question_flips_a_working_run_to_input_required(self):
+        """Spec §9 ask-back: question.json with no answer.json yet is the whole
+        input_required signal; `detail` stays "running" and the dict carries
+        the question text the orchestrator has to answer."""
+        path = self.make_asking_run("ask-test")
+        st = mcp_server.status("ask-test")
+        self.assertEqual(st["state"], "input_required")
+        self.assertEqual(st["detail"], "running")
+        self.assertEqual(st["question"], "ship or revert?")
+        # answered -> working again while the helper consumes the answer
+        mcp_server._write_json(os.path.join(path, "answer.json"),
+                               {"text": "ship", "answered": "2026-09-27T00:00:01Z"})
+        st = mcp_server.status("ask-test")
+        self.assertEqual(st["state"], "working")
+        self.assertNotIn("question", st)
+        # consumed (or withdrawn on timeout) -> working again
+        for name in ("answer.json", "question.json"):
+            os.remove(os.path.join(path, name))
+        self.assertEqual(mcp_server.status("ask-test")["state"], "working")
+
+    def test_respond_writes_answer_json_and_reports_the_new_state(self):
+        path = self.make_asking_run("respond-test")
+        out = mcp_server.respond("respond-test", "ship it")
+        self.assertNotIn("error", out)
+        self.assertEqual(out["state"], "working")  # answered -> no longer asking
+        answer = mcp_server._read_json(os.path.join(path, "answer.json"))
+        self.assertEqual(answer["text"], "ship it")
+        self.assertTrue(answer["answered"].endswith("Z"))
+        # after the helper has consumed both files the run is simply working
+        for name in ("answer.json", "question.json"):
+            os.remove(os.path.join(path, name))
+        self.assertEqual(mcp_server.status("respond-test")["state"], "working")
+
+    def test_respond_refuses_a_run_that_is_not_asking(self):
+        """Only an input_required run can be answered: a working run with no
+        question, a finished run, and an unknown id all come back as errors,
+        and none of them writes answer.json."""
+        path = self.make_run("silent-test", pid=self.make_sleeper().pid)
+        out = mcp_server.respond("silent-test", "ship it")
+        self.assertIn("error", out)
+        self.assertIn("input_required", out["error"])
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+        mcp_server._write_exit(path, {"rc": 0, "ended": time.time()})
+        out = mcp_server.respond("silent-test", "ship it")
+        self.assertIn("error", out)
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+        self.assertIn("error", mcp_server.respond("nope", "ship it"))
+
+    def test_respond_refuses_empty_text(self):
+        path = self.make_asking_run("empty-text-test")
+        for text in ("", "   "):
+            self.assertIn("error", mcp_server.respond("empty-text-test", text))
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+
+    def test_cancel_of_an_input_required_run_reports_canceled(self):
+        """A run parked in input_required is blocked, so an operator stop is
+        the only way out: cancel must reach it, not report nothing-to-cancel."""
+        self.make_asking_run("cancel-ask-test")
+        self.assertEqual(mcp_server.status("cancel-ask-test")["state"], "input_required")
+        st = mcp_server.cancel("cancel-ask-test")
+        self.assertEqual(st["state"], "canceled")
+        self.assertEqual(st["detail"], "cancelled")
+
+    def test_run_job_exports_the_task_dir_to_the_child(self):
+        """run_job passes AUTOOS_TASK_DIR=<run dir> so a blocked worker's brief
+        can point tools/autoos-ask.py at this run; autoos-agent.py forwards
+        os.environ to the client, so the worker itself sees it."""
+        path = self.make_run("env-test", argv=["--version"])
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"], box["env"] = argv, kw.get("env")
+            return 0
+
+        with mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            self.assertEqual(mcp_server.run_job(path), 0)
+        self.assertEqual(box["argv"], [sys.executable, mcp_server.AGENT, "--version"])
+        self.assertEqual(box["env"], dict(os.environ, AUTOOS_TASK_DIR=path))
+
     def test_a_refused_spawn_is_rejected(self):
         """Spec §9: a spawn the server refuses never started anything, so its
         answer carries state "rejected" alongside the error. One case per
@@ -730,6 +832,87 @@ class McpToolTests(unittest.TestCase):
             self.assertEqual(out["state"], "rejected", req)
         self.assertIn("rejected", mcp_server.TASK_STATES)
         self.assertEqual(mcp_server.status()["runs"], [])
+
+
+class AskHelperTests(unittest.TestCase):
+    """tools/autoos-ask.py, offline: question/answer/qa files in a temp dir,
+    the helper in a real subprocess, a thread playing the orchestrator."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def ask_argv(self, question, *opts):
+        return [sys.executable, str(TOOLS / "autoos-ask.py"), question, *opts]
+
+    def run_ask(self, question, *opts, task_dir=None):
+        env = clean_env(AUTOOS_TASK_DIR=task_dir if task_dir is not None else self.tmp)
+        return subprocess.run(self.ask_argv(question, *opts), env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_the_helper_round_trips_a_question_and_answer(self):
+        """End to end: the helper parks question.json, a thread playing the
+        orchestrator writes answer.json, the helper prints the answer text to
+        stdout, exits 0 and archives the pair as qa-1.json (history kept)."""
+        box = {}
+
+        def answer_later():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:  # it appeared: read its shape
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "ship it", "answered": "2026-09-27T00:00:01Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_later)
+        thread.start()
+        try:
+            proc = self.run_ask("ship or revert?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread.join()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "ship it")
+        self.assertEqual(box["question"]["text"], "ship or revert?")
+        self.assertTrue(box["question"]["asked"])
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertEqual(qa["question"]["text"], "ship or revert?")
+        self.assertEqual(qa["answer"]["text"], "ship it")
+        for name in ("question.json", "answer.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, name)), name)
+
+    def test_the_helper_times_out_and_withdraws_the_question(self):
+        """No answer within --timeout: the question is withdrawn (the run
+        returns to working), the reason goes to stderr, the exit code is 3."""
+        proc = self.run_ask("anyone?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("no answer within", proc.stderr)
+        for name in ("question.json", "answer.json", "qa-1.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, name)), name)
+
+    def test_the_helper_refuses_a_second_question_while_one_is_pending(self):
+        with io.open(os.path.join(self.tmp, "question.json"), "w", encoding="utf-8") as fh:
+            json.dump({"text": "first?", "asked": "2026-09-27T00:00:00Z"}, fh)
+        proc = self.run_ask("second?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("pending", proc.stderr)
+        with io.open(os.path.join(self.tmp, "question.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["text"], "first?")  # the pending one is untouched
+
+    def test_the_helper_needs_the_task_dir_env(self):
+        env = clean_env()
+        env.pop("AUTOOS_TASK_DIR", None)
+        proc = subprocess.run(self.ask_argv("hello?"), env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("AUTOOS_TASK_DIR", proc.stderr)
 
 
 def uv_mcp_cmd():
@@ -783,7 +966,7 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "route", "list_agents", "context", "heartbeat"})
+                                     "respond", "route", "list_agents", "context", "heartbeat"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
