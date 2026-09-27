@@ -1193,81 +1193,96 @@ if it "install_agent_skills: dry-run links nothing into ~/.agents/skills"; then
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-# ─── autoos_api_keys_conf helper ───
+# ─── keys-file lookup order (autoos_api_keys_conf) ──────────────────────────
+#
+# Each case asserts on the path the helper PRINTS, not on the file it created:
+# every tier's file exists in every sandbox, so cat-ing one of them proves only
+# that the test wrote it. The choice is the whole behaviour under test.
+# All the values are dummies; nothing here reads a real key.
 
-if it "autoos_api_keys_conf prefers ~/.config/autoos/api_keys.conf"; then
+# oh_keys_conf <sandbox dir> -> prints the helper's verdict, returns its rc
+oh_keys_conf() {
+    (
+        SYS_HOME="$1"
+        AUTOOS_ROOT="$1"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+}
+
+if it "keys order: ~/.config/autoos/api_keys.conf beats the agent-skills legacy file"; then
     tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.config/autoos" "$tmp/configuration" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute=from_user_config\n' >"$tmp/.config/autoos/api_keys.conf"
+    printf 'omniroute: from_repo_yml\n'  >"$tmp/configuration/api-keys.yml"
+    printf 'omniroute=from_clone\n'      >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *".config/autoos/api_keys.conf" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the user-scope file"; fi
+fi
+
+if it "keys order: repo api-keys.yml is used before the agent-skills clone"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/configuration" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute: from_repo_yml\n' >"$tmp/configuration/api-keys.yml"
+    printf 'omniroute=from_clone\n'     >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *"configuration/api-keys.yml" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the repo's api-keys.yml"; fi
+fi
+
+if it "keys order: the agent-skills clone file is still the last tier"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute=from_clone\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *"agent-skills/secrets/api_keys.conf" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the retired clone's file"; fi
+fi
+
+if it "keys order: no file anywhere, so no agent-skills path is invented"; then
+    tmp="$(mktemp -d)"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    # Positive control in the same sandbox: an empty rc-only failure is what a
+    # helper that does not exist at all looks like, so the sandbox has to be
+    # able to produce a hit.
     mkdir -p "$tmp/.config/autoos"
-    printf 'test=key\n' >"$tmp/.config/autoos/api_keys.conf"
-    mkdir -p "$tmp/configuration"
-    printf 'omniroute: other\n' >"$tmp/configuration/api-keys.yml"
-    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
-    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"
-        source lib/linux/install.sh
-        autoos_api_keys_conf
-    )
-    rc=$?
-    out="$(cat "$tmp/.config/autoos/api_keys.conf")"
+    printf 'omniroute=from_user_config\n' >"$tmp/.config/autoos/api_keys.conf"
+    found="$(oh_keys_conf "$tmp")"; frc=$?
     rm -rf "$tmp"
-    if [[ $rc -eq 0 && "$out" == "test=key" ]]; then pass
-    else fail "rc=$rc out=$out"; fi
+    if [[ $rc -ne 0 && -z "$got" && $frc -eq 0 && "$found" == *".config/autoos/api_keys.conf" ]]; then pass
+    else fail "empty=${rc} [${got}] then control=${frc} [${found}]: expected a miss and then a hit"; fi
 fi
 
-if it "autoos_api_keys_conf falls back to repo's configuration/api-keys.yml"; then
+if it "keys order: AUTOOS_KEYS_FILE overrides the search without touching agent-skills"; then
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/configuration"
-    printf 'omniroute: from_yml\n' >"$tmp/configuration/api-keys.yml"
-    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
-    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"
+    mkdir -p "$tmp/elsewhere" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute: from_override\n' >"$tmp/elsewhere/keys.yml"
+    printf 'omniroute=from_clone\n'     >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp" AUTOOS_KEYS_FILE="$tmp/elsewhere/keys.yml"
         source lib/linux/install.sh
         autoos_api_keys_conf
-    )
-    rc=$?
-    out="$(cat "$tmp/configuration/api-keys.yml")"
+    )"; rc=$?
     rm -rf "$tmp"
-    if [[ $rc -eq 0 && "$out" == "omniroute: from_yml" ]]; then pass
-    else fail "rc=$rc out=$out"; fi
+    if [[ $rc -eq 0 && "$got" == "$tmp/elsewhere/keys.yml" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the override path"; fi
 fi
 
-if it "autoos_api_keys_conf falls back to legacy agent-skills/secrets/api_keys.conf"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
-    printf 'legacy=key\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"
-        source lib/linux/install.sh
-        autoos_api_keys_conf
-    )
-    rc=$?
-    out="$(cat "$tmp/Documents/code/agent-skills/secrets/api_keys.conf")"
-    rm -rf "$tmp"
-    if [[ $rc -eq 0 && "$out" == "legacy=key" ]]; then pass
-    else fail "rc=$rc out=$out"; fi
-fi
-
-if it "autoos_api_keys_conf returns non-zero when no file exists"; then
-    tmp="$(mktemp -d)"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"
-        source lib/linux/install.sh
-        autoos_api_keys_conf
-    )
-    rc=$?
-    rm -rf "$tmp"
-    if [[ $rc -ne 0 ]]; then pass
-    else fail "rc=$rc (should be non-zero when no file exists)"; fi
+# The python half of the same fact: one parser, tested on its own. Wired here
+# because tests/test_suite_wiring.py refuses a unit-test file no harness runs.
+if it "keys parser: tools/autoos_keys.py unit tests pass (no agent-skills reader)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_autoos_keys.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
 fi
 
 # ─── graphify-mcp symlink handling ───
-
 if it "graphify_mcp_symlink creates symlink when missing"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/.local/bin"
@@ -1530,6 +1545,68 @@ if it "graphify_mcp_symlink announces the verdict a real run then acts on"; then
                 [[ "$after_live" == "$tmp/repo/infra/mcp-servers/bin/graphify-mcp" ]] || problems+="[$shape did not end on the repo target] " ;;
         esac
     done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# A machine mid-migration: this checkout has no vendored .agents/skills yet
+# (an AutoOS clone older than the subtree) but the retired agent-skills clone
+# is still on disk. Every skills link — user scope AND the per-client
+# directories — has to come from that one fallback, or the same run both
+# links ~/.agents/skills and silently skips Antigravity and Claude Code.
+oh_clone_only() {
+    local home="$1"
+    mkdir -p "$home/Documents/code/agent-skills/skills/gamma"
+    printf -- '---\nname: gamma\ndescription: demo\n---\n' \
+        >"$home/Documents/code/agent-skills/skills/gamma/SKILL.md"
+}
+
+oh_agent_skills_run() {
+    local home="$1" repo="$2"
+    (
+        SYS_HOME="$home"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_ROOT="$repo"
+        install_mcp_graphify() { :; }
+        install_mcp_serena() { :; }
+        install_mcp_playwright() { :; }
+        install_mcp_context7() { :; }
+        mcp_has_server() { return 1; }
+        enable_project_mcp_server() { :; }
+        register_antigravity_mcp_server() { :; }
+        omnigraph_readiness() { return 0; }
+        graphify_mcp_symlink() { :; }
+        answer() { echo ""; }
+        has_cmd() { return 1; }
+        install_agent_skills
+    )
+}
+
+if it "install_agent_skills links the retired clone's skills into every client dir"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
+    oh_clone_only "$tmp"
+    oh_agent_skills_run "$tmp" "$tmp/repo" >/dev/null 2>&1
+    problems=""
+    for dest in "$tmp/.claude/skills" "$tmp/.gemini/config/skills" "$tmp/.agents/skills"; do
+        [[ -L "$dest/gamma" && "$(readlink "$dest/gamma")" == *"/agent-skills/skills/gamma" ]] \
+            || problems+="[gamma not linked from the clone into $dest] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "install_agent_skills names it when there is no skills source at all"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
+    out="$(oh_agent_skills_run "$tmp" "$tmp/repo" 2>&1)"
+    problems=""
+    [[ "$out" == *"no skills to link"* ]] \
+        || problems+="[nothing named the missing skills source — $(tail -n 2 <<<"$out")] "
+    [[ ! -d "$tmp/.claude/skills" ]] || problems+="[an empty ~/.claude/skills was created for nothing] "
+    [[ ! -d "$tmp/.gemini/config/skills" ]] || problems+="[an empty ~/.gemini/config/skills was created for nothing] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi

@@ -3939,11 +3939,22 @@ print(json.dumps({
 ")"
     register_antigravity_mcp_server omnigraph "$omni_spec"
 
+    # Skills source: this checkout's .agents/skills, or — on a machine mid-way
+    # through the migration, where the vendored copy is not there yet — the
+    # retired clone's skills dir. autoos_skills_source is the one home for that
+    # order, so no client directory can be linked from one and skipped by
+    # another.
+    local skills_source
+    skills_source="$(autoos_skills_source)"
+    if [[ -z "$skills_source" ]]; then
+        ui_warn "no skills to link: neither $repo_root/.agents/skills nor the retired clone's skills dir exists."
+    fi
+
     # Wire skills into Antigravity and Claude Code global skills directories
     local agy_skills="$SYS_HOME/.gemini/config/skills"
     local claude_skills="$SYS_HOME/.claude/skills"
-    local repo_skills="$repo_root/.agents/skills"
-    if [[ -d "$repo_skills" ]]; then
+    local repo_skills="$skills_source"
+    if [[ -n "$repo_skills" ]]; then
         if (( AUTOOS_DRY_RUN )); then
             ui_muted "would link skills from $repo_skills to $agy_skills and $claude_skills"
         else
@@ -3985,8 +3996,6 @@ print(json.dumps({
     # Link repo skills into user-scope directories for clients that read from
     # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
     # link_skill_dirs handles dry-run, idempotency and never-overwrite rules.
-    local skills_source
-    skills_source="$(autoos_skills_source)"
     if [[ -n "$skills_source" ]]; then
         link_skill_dirs "$skills_source" "$SYS_HOME/.agents/skills" || true
         if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
