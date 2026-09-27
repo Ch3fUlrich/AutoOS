@@ -1206,25 +1206,33 @@
       ]
     },
     "handoff_caps": {
-      "200k-class": {
-        "cap_fraction": 0.75,
-        "cap_tokens": 150000,
-        "source": "2026-09-25"
-      },
       "claude-opus-1m": {
         "cap_fraction": 0.4,
         "cap_tokens": 400000,
-        "source": "2026-09-25"
-      },
-      "gemini-1m": {
-        "cap_fraction": 0.2,
-        "cap_tokens": 200000,
-        "source": "2026-09-25"
+        "match": ["opus", "fable"],
+        "source": "2026-09-25",
+        "window": 1000000
       },
       "muse-spark-1m": {
         "cap_fraction": 0.3,
         "cap_tokens": 300000,
-        "source": "2026-09-25"
+        "match": ["spark"],
+        "source": "2026-09-25",
+        "window": 1000000
+      },
+      "gemini-1m": {
+        "cap_fraction": 0.2,
+        "cap_tokens": 200000,
+        "match": ["gemini"],
+        "source": "2026-09-25",
+        "window": 1000000
+      },
+      "200k-class": {
+        "cap_fraction": 0.75,
+        "cap_tokens": 150000,
+        "match": ["*"],
+        "source": "2026-09-25",
+        "window": 200000
       }
     },
     "latency_seed": {

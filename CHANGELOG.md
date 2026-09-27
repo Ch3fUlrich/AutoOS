@@ -44,6 +44,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added — usage report (OR4)
 
 - `autoos-agent.py usage --since <ISO-8601 UTC | 30m | 6h | 2d> [--by provider,combo,lane,model] [--json]`: pages the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key and prints calls, ok/errors and tokens per group.
+### Added — handoff caps single source: registry policy.handoff_caps (spec 8.3)
+
+- **`catalog/ai-registry.json`** policy.handoff_caps rows now carry `match` (list of lowercased model-id substrings) and `window` (context window in tokens) as required fields; schema updated (additionalProperties stays false). **`tools/autoos_context.py`**: `caps_from_registry(registry_dict)` converts the registry rows to the `(substring, window, cap)` tuple format; `load_caps(path=...)` reads the registry or falls back to `DEFAULT_CAPS` with source `"default"` when the file is missing/unreadable/malformed; `cap_for(model, caps=None)` loads from the registry by default (source `"policy"`), keeps its signature and `[1m]` rule. Drift test pins policy caps equal to `DEFAULT_CAPS`; edited-registry test proves `cap_for` follows the registry; missing/malformed tests prove the fallback. Blocker: `tools/autoos-agent.py:544-600 context_state` hardcodes `source="default"` and must be updated to report `"policy"` when caps come from the registry (diff in REPORT).
+
 ### Fixed — `ai-stack.sh verify` combo probes survive gateway warm-up and reasoning legs
 
 - The keyed combo probe sends `max_tokens` 256 (at 16 a reasoning leg spent its budget thinking and the gateway's

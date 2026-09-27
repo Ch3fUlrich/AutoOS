@@ -418,15 +418,22 @@
         },
         "handoff_caps": {
           "type": "object",
-          "description": "spec 8.3, keyed by orchestrator-model class.",
+          "description": "spec 8.3, keyed by orchestrator-model class. Each row carries a `match` list of lowercased model-id substrings (one entry per alias the row covers, or `[\"*\"]` for the default) and a `window` (the family's context window in tokens).",
           "additionalProperties": {
             "type": "object",
-            "required": ["cap_tokens", "cap_fraction", "source"],
+            "required": ["cap_tokens", "cap_fraction", "match", "source", "window"],
             "additionalProperties": false,
             "properties": {
               "cap_tokens": { "type": "integer", "minimum": 0 },
               "cap_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
-              "source": { "$ref": "#/$defs/source_tag" }
+              "match": {
+                "type": "array",
+                "description": "lowercased substrings that pick a model id out for this row; `[\"*\"]` is the default row.",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "source": { "$ref": "#/$defs/source_tag" },
+              "window": { "type": "integer", "minimum": 1, "description": "the family's context window in tokens (spec 8.3)." }
             }
           }
         },
