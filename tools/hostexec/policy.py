@@ -356,6 +356,69 @@ def _basename(token: str) -> str:
     return token.rsplit("/", 1)[-1]
 
 
+@dataclasses.dataclass(frozen=True)
+class _FlaggedLongs:
+    """The long options one deny gate watches, spelled in full.
+
+    Rules match them with _long_opt_hits() (abbreviation-aware), and
+    tests/test_hostexec_policy.py walks every _FlaggedLongs in this module and
+    asserts each abbreviation is denied, so adding a name here needs no new
+    test row. ``takes_value`` lists the names that read a value -- the gate
+    matrix also generates the ``--abbrev=value`` form for those.
+    """
+
+    names: tuple[str, ...]
+    takes_value: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for full in self.names:
+            if not full.startswith("--") or len(full) <= 2:
+                raise PolicyError(f"flagged option must be a full --name: {full!r}")
+        for full in self.takes_value:
+            if full not in self.names:
+                raise PolicyError(f"takes_value {full!r} is not one of {self.names}")
+
+
+def _long_opt_hits(token: str, flagged) -> str | None:
+    """Return the flagged long option `token` selects, or None.
+
+    GNU getopt_long and git parse-options accept any unambiguous abbreviation
+    of a long option, so comparing a rule's option with ``==`` or ``startswith``
+    lets ``rm --recurs /``, ``tar --to-com id`` and ``git push --mir`` through
+    while the real program does exactly what the rule meant to forbid (hx4).
+
+    FAIL CLOSED: every prefix of a flagged option counts as that option, even
+    one the real program would reject as ambiguous (``--to`` for tar) --
+    over-deny is safe, under-deny is the bug. Consequently this is for DENY
+    gates only; an allow gate (crontab --list, git config --get, a bare
+    ``env bash --version``) stays an exact comparison, because over-matching
+    there would over-*allow*.
+
+    ``flagged`` is a _FlaggedLongs or a plain sequence of full ``--name``
+    spellings. A token that is a prefix of several flagged names reports the
+    first in declaration order; the call site denies either way.
+    """
+    if not isinstance(token, str) or not token.startswith("--") or token == "--":
+        return None
+    name = token[2:].split("=", 1)[0]
+    if not name:
+        return None
+    names = flagged.names if isinstance(flagged, _FlaggedLongs) else flagged
+    for full in names:
+        if full[2:].startswith(name):
+            return full
+    return None
+
+
+def _long_opt_value(token: str, rest: Sequence[str], idx: int) -> str:
+    """The value a long option carries: the attached ``=value``, else the next
+    token -- what getopt_long consumes for a required value, so an abbreviation
+    cannot push the value out of the rule's reach by changing its spelling."""
+    if "=" in token:
+        return token.split("=", 1)[1]
+    return rest[idx + 1] if idx + 1 < len(rest) else ""
+
+
 _SUDO_FAMILY = {"sudo", "su", "doas", "pkexec", "run0", "sudo-rs"}
 # Exec wrappers that are always denied as no-inline-shell (L1 high):
 # script allocates a pty, systemd-run/at/batch create scheduled/transient
@@ -822,11 +885,18 @@ def _idx_after_watch(s: Sequence[str]) -> int | None:
 
 
 def _idx_after_parallel(s: Sequence[str]) -> tuple[int | None, int | None]:
-    shorts_val = set("adEjLmnsST")
+    # -I/--replace takes the replacement string: without it here,
+    # `parallel -I foo echo foo ::: a` read "foo" as the command and denied a
+    # harmless call as path-hijack (hx4 low). Membership has to stay accurate
+    # in both directions -- an option wrongly listed here swallows the real
+    # command, and abbreviating the lookups would do that to a boolean
+    # (--tag is not --tagstring), so this one scan stays an exact match.
+    shorts_val = set("adEjLmnsSTI")
     longs_val = {"--arg-file", "--delimiter", "--jobs", "--load", "--timeout",
                  "--delay", "--joblog", "--results", "--sshlogin", "--sshloginfile",
                  "--transfer", "--return", "--workdir", "--ssh", "--tagstring",
-                 "--header", "--colsep", "--argfilesep", "--max-args", "--number-of-args"}
+                 "--header", "--colsep", "--argfilesep", "--max-args", "--number-of-args",
+                 "--replace"}
     i, n = 1, len(s)
     while i < n:
         tok = s[i]
@@ -1134,6 +1204,13 @@ def _looks_like_rsync_remote(token: str) -> bool:
     return True
 
 
+# parallel options that run a command on another host (short -S is matched by
+# the cluster scan in the rule below, not here).
+_PARALLEL_HOST_LONGS = _FlaggedLongs(
+    ("--sshlogin", "--sshloginfile", "--transfer", "--return", "--ssh"),
+    takes_value=("--sshlogin", "--sshloginfile", "--transfer", "--return", "--ssh"))
+
+
 def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str | None:
     """Brief D + hop: on EVERY host kind, ssh/scp/sftp and rsync-with-remote
     always bypass the policy's host table (forbid-hosts, audit host field) --
@@ -1156,17 +1233,10 @@ def _use_host_alias_problem(head: Sequence[str], host_entry: HostEntry) -> str |
         for tok in head[1:]:
             if tok in (":::", "::::", "--"):
                 break  # flags end here; the rest are the command and inputs
-            if tok in ("--sshlogin", "--sshloginfile", "--transfer", "--return",
-                       "--ssh", "-S"):
-                return (f"parallel {tok} bypasses the host table "
+            hit = _long_opt_hits(tok, _PARALLEL_HOST_LONGS)
+            if hit:
+                return (f"parallel {hit} bypasses the host table "
                         f"(forbid-host, audit host); call host_run with host=<alias>")
-            if tok.startswith(("--sshlogin=", "--sshloginfile=", "--transfer=",
-                               "--return=", "--ssh=")):
-                return (f"parallel {tok.split('=', 1)[0]} bypasses the host table; "
-                        f"call host_run with host=<alias>")
-            if tok.startswith("--sshlogin"):
-                return ("parallel --sshlogin bypasses the host table; "
-                        "call host_run with host=<alias>")
             if tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]:
                 return ("parallel -S bypasses the host table; "
                         "call host_run with host=<alias>")
@@ -1195,10 +1265,29 @@ def _is_system_bind_src(src: str) -> bool:
     return False
 
 
+# docker/podman global options that read a value: an abbreviation of one must
+# not leave the value standing where the subcommand is looked for. Parse
+# aid, not a deny gate.
+_DOCKER_GLOBAL_VALUE_LONGS = ("--config", "--host", "--context", "--log-level")
+
+# run|create flags that put the container on the host (deny gate).
+_DOCKER_RUN_ROOT_LONGS = _FlaggedLongs(
+    ("--privileged", "--pid", "--userns", "--cap-add", "--device",
+     "--volume", "--mount"),
+    takes_value=("--privileged", "--pid", "--userns", "--cap-add",
+                 "--device", "--volume", "--mount"))
+
+# exec flags that run as root inside the container (deny gate).
+_DOCKER_EXEC_ROOT_LONGS = _FlaggedLongs(("--privileged", "--user"),
+                                        takes_value=("--user",))
+
+
 def _docker_root_problem(head: Sequence[str]) -> str | None:
     """Brief E (L1 high docker-root): docker/podman run|create binding / or
     a system dir, --privileged, --pid=host, --userns=host, --cap-add,
-    --device; docker exec with --privileged or -u 0/root."""
+    --device; docker exec with --privileged or -u 0/root. Long options are
+    matched abbreviation-aware (hx4): `docker run --priv web` is
+    --privileged."""
     if not head:
         return None
     base = _basename(head[0])
@@ -1212,11 +1301,11 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
             i += 1
             break
         if tok.startswith("-") and tok != "-":
-            if tok in ("--config", "-H", "--host", "--context", "--log-level", "-c"):
-                i += 2
+            if _long_opt_hits(tok, _DOCKER_GLOBAL_VALUE_LONGS):
+                i += 1 if "=" in tok else 2
                 continue
-            if tok.startswith(("--config=", "--host=", "--context=", "--log-level=")):
-                i += 1
+            if tok in ("-H", "-c"):
+                i += 2
                 continue
             if len(tok) > 2 and tok[1] == "H":
                 i += 1
@@ -1232,48 +1321,28 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
         j = 0
         while j < m:
             tok = rest[j]
-            if tok == "--privileged" or tok.startswith("--privileged="):
-                return f"{base} {sub} --privileged is host root"
-            if (tok == "--pid" and j + 1 < m and rest[j + 1] == "host") or \
-                    (tok.startswith("--pid=") and tok.split("=", 1)[1] == "host"):
-                return f"{base} {sub} --pid=host"
-            if (tok == "--userns" and j + 1 < m and rest[j + 1] == "host") or \
-                    (tok.startswith("--userns=") and tok.split("=", 1)[1] == "host"):
-                return f"{base} {sub} --userns=host"
-            if tok == "--cap-add" or tok.startswith("--cap-add="):
-                return f"{base} {sub} --cap-add"
-            if tok == "--device" or tok.startswith("--device="):
-                return f"{base} {sub} --device"
-            vol_val = None
-            is_mount = False
-            if tok == "-v" and j + 1 < m:
-                vol_val = rest[j + 1]
+            hit = _long_opt_hits(tok, _DOCKER_RUN_ROOT_LONGS)
+            if hit in ("--privileged", "--cap-add", "--device"):
+                if hit == "--privileged":
+                    return f"{base} {sub} --privileged is host root"
+                return f"{base} {sub} {hit}"
+            if hit in ("--pid", "--userns"):
+                if _long_opt_value(tok, rest, j) == "host":
+                    return f"{base} {sub} {hit}=host"
+            elif hit in ("--volume", "--mount"):
+                bind_problem = _dockerbind_problem(base, sub, _long_opt_value(tok, rest, j),
+                                                    is_mount=hit == "--mount")
+                if bind_problem:
+                    return bind_problem
+            elif tok == "-v" and j + 1 < m:
+                bind_problem = _dockerbind_problem(base, sub, rest[j + 1])
+                if bind_problem:
+                    return bind_problem
             elif tok.startswith("-v") and len(tok) > 2 and not tok.startswith("--"):
                 # Attached short form: -v/src:dst, -vX (r2 high).
-                vol_val = tok[2:].lstrip("=")
-            elif tok == "--volume" and j + 1 < m:
-                vol_val = rest[j + 1]
-            elif tok.startswith("--volume="):
-                vol_val = tok.split("=", 1)[1]
-            elif tok == "--mount" and j + 1 < m:
-                vol_val, is_mount = rest[j + 1], True
-            elif tok.startswith("--mount="):
-                vol_val, is_mount = tok.split("=", 1)[1], True
-            if vol_val:
-                if is_mount:
-                    src = None
-                    for part in vol_val.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            if k in ("src", "source"):
-                                src = v
-                                break
-                    if src and _is_system_bind_src(src):
-                        return f"{base} {sub} bind of system path {src!r}"
-                else:
-                    src = vol_val.split(":")[0]
-                    if src and _is_system_bind_src(src):
-                        return f"{base} {sub} bind of system path {src!r}"
+                bind_problem = _dockerbind_problem(base, sub, tok[2:].lstrip("="))
+                if bind_problem:
+                    return bind_problem
             j += 1
         return None
     if sub == "exec":
@@ -1281,22 +1350,41 @@ def _docker_root_problem(head: Sequence[str]) -> str | None:
         j = 0
         while j < m:
             tok = rest[j]
-            if tok == "--privileged" or tok.startswith("--privileged="):
+            hit = _long_opt_hits(tok, _DOCKER_EXEC_ROOT_LONGS)
+            if hit == "--privileged":
                 return f"{base} exec --privileged"
-            if tok == "-u" and j + 1 < m:
+            if hit == "--user":
+                if _long_opt_value(tok, rest, j).split(":")[0] in ("0", "root"):
+                    return f"{base} exec --user 0/root"
+            elif tok == "-u" and j + 1 < m:
                 if rest[j + 1].split(":")[0] in ("0", "root"):
                     return f"{base} exec -u 0/root"
             elif tok.startswith("-u") and len(tok) > 2 and not tok.startswith("--"):
                 if tok[2:].lstrip("=").split(":")[0] in ("0", "root"):
                     return f"{base} exec -u 0/root"
-            elif tok == "--user" and j + 1 < m:
-                if rest[j + 1].split(":")[0] in ("0", "root"):
-                    return f"{base} exec --user 0/root"
-            elif tok.startswith("--user="):
-                if tok.split("=", 1)[1].split(":")[0] in ("0", "root"):
-                    return f"{base} exec --user 0/root"
             j += 1
         return None
+    return None
+
+
+def _dockerbind_problem(base: str, sub: str, vol_val: str, *,
+                        is_mount: bool = False) -> str | None:
+    """The bind-source test shared by --volume/-v and --mount: a mount spec is
+    comma-separated key=value, a volume spec is src:dst[:mode]."""
+    if not vol_val:
+        return None
+    if is_mount:
+        src = None
+        for part in vol_val.split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k in ("src", "source"):
+                    src = v
+                    break
+    else:
+        src = vol_val.split(":")[0]
+    if src and _is_system_bind_src(src):
+        return f"{base} {sub} bind of system path {src!r}"
     return None
 
 
@@ -1344,6 +1432,16 @@ def _short_opt_cluster_has(argv_tail: Sequence[str], letters: str) -> bool:
         if any(ch in tok[1:] for ch in letters):
             return True
     return False
+
+
+# Long options that hand the program an arbitrary command line (deny gate).
+# man's --pager and tar's hooks are abbreviation-matched: `man --page evil`
+# and `tar --to-com id` execute just like the full spelling (hx4).
+_MAN_INLINE_LONGS = _FlaggedLongs(("--pager",), takes_value=("--pager",))
+_TAR_INLINE_LONGS = _FlaggedLongs(("--checkpoint-action", "--to-command",
+                                   "--use-compress-program"),
+                                  takes_value=("--checkpoint-action", "--to-command",
+                                               "--use-compress-program"))
 
 
 def _inline_shell_problem(argv: Sequence[str]) -> str | None:
@@ -1396,26 +1494,23 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
                 return f"{base} +! runs a shell command"
     if base == "man":
         for tok in tail:
-            if tok == "-P" or tok.startswith("--pager"):
-                return "man -P/--pager runs a pager command"
-            if tok.startswith("-P") and len(tok) > 2:
+            if _long_opt_hits(tok, _MAN_INLINE_LONGS) or tok == "-P" \
+                    or (tok.startswith("-P") and len(tok) > 2):
                 return "man -P/--pager runs a pager command"
     if base == "tar":
         for idx, tok in enumerate(tail):
-            if tok.startswith("--checkpoint-action"):
-                rest_val = tok.split("=", 1)[1] if "=" in tok else (
-                    tail[idx + 1] if idx + 1 < len(tail) else "")
-                if "exec" in rest_val.lower():
+            hit = _long_opt_hits(tok, _TAR_INLINE_LONGS)
+            if hit == "--checkpoint-action":
+                # The hook only runs a program when its action says exec; the
+                # value may be attached (--checkpoint-action=exec=id), a
+                # detached token (--checkpoint-action exec=id) or missing, and
+                # abbreviating the option name must not change which of those
+                # the rule sees (hx4).
+                if "exec" in _long_opt_value(tok, tail, idx).lower():
                     return "tar --checkpoint-action=exec runs a command via a shell"
-                if tok == "--checkpoint-action":
-                    # Bare --checkpoint-action with a separate exec= value is
-                    # still an exec hook; fail closed on the flag itself when
-                    # the value is missing (git would error, but deny first).
-                    continue
-            if tok == "--to-command" or tok.startswith("--to-command="):
-                return "tar --to-command runs a command via a shell"
-            if tok == "--use-compress-program" or tok.startswith("--use-compress-program="):
-                return "tar --use-compress-program runs a program"
+                continue
+            if hit:
+                return f"tar {hit} runs a command via a shell"
             if tok.startswith("-") and not tok.startswith("--") and len(tok) > 1 \
                     and "I" in tok[1:]:
                 return "tar -I runs a program"
@@ -1423,6 +1518,16 @@ def _inline_shell_problem(argv: Sequence[str]) -> str | None:
 
 
 _ROOT_PATHS = ("/", "~", "/home", "/etc", "/var", "/usr", "/boot")
+
+# Long options per destructive gate, abbreviation-matched by
+# _destructive_problem (hx4: `rm --recurs /`, `chmod --recurs /`,
+# `git push --mir origin`, `iptables --flu` all do the real thing).
+_RM_DESTRUCTIVE_LONGS = _FlaggedLongs(("--recursive", "--force"))
+_CHMOD_DESTRUCTIVE_LONGS = _FlaggedLongs(("--recursive",))
+_GIT_PUSH_DESTRUCTIVE_LONGS = _FlaggedLongs(
+    ("--force", "--mirror", "--delete", "--force-with-lease", "--force-if-includes"),
+    takes_value=("--force-with-lease", "--force-if-includes"))
+_IPTABLES_DESTRUCTIVE_LONGS = _FlaggedLongs(("--flush",))
 
 
 def _is_dangerous_rm_target(arg: str) -> bool:
@@ -1443,9 +1548,8 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
     tail = argv[1:]
 
     if base == "rm":
-        has_r = _short_opt_cluster_has(tail, "rR") or "--recursive" in tail
-        has_f = _short_opt_cluster_has(tail, "f") or "--force" in tail
-        if has_r or has_f:
+        if _short_opt_cluster_has(tail, "rRf") or any(_long_opt_hits(t, _RM_DESTRUCTIVE_LONGS)
+                                                      for t in tail):
             for a in tail:
                 if not a.startswith("-") and _is_dangerous_rm_target(a):
                     return f"rm -r/-f on a root-ish path: {a!r}"
@@ -1465,16 +1569,15 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
     if base == "systemctl" and any(a in ("poweroff", "reboot", "halt") for a in tail):
         return "systemctl poweroff|reboot|halt stops the host"
     if base in ("chmod", "chown"):
-        has_R = _short_opt_cluster_has(tail, "R") or "--recursive" in tail
-        if has_R and any(a.rstrip("/") in ("", "/") for a in tail if not a.startswith("-")):
-            return f"{base} -R on /"
+        if _short_opt_cluster_has(tail, "R") or any(
+                _long_opt_hits(t, _CHMOD_DESTRUCTIVE_LONGS) for t in tail):
+            if any(a.rstrip("/") in ("", "/") for a in tail if not a.startswith("-")):
+                return f"{base} -R on /"
     if base == "git" and "push" in tail:
         idx = tail.index("push")
         after = tail[idx + 1:]
-        if any(a in ("--force", "-f", "--mirror", "--delete",
-                     "--force-with-lease", "--force-if-includes") for a in after) or \
-                any(a.startswith("--force-with-lease") or a.startswith("--force-if-includes")
-                    for a in after) or \
+        if any(a == "-f" or _long_opt_hits(a, _GIT_PUSH_DESTRUCTIVE_LONGS)
+               for a in after) or \
                 any(a.startswith("+") for a in after if not a.startswith("--")):
             return "git push --force/-f/--mirror/--delete/--force-with-lease/--force-if-includes or a +refspec"
     if base == "docker":
@@ -1482,13 +1585,16 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
             return "docker system prune"
         if "volume" in tail and ("rm" in tail or "prune" in tail):
             return "docker volume rm|prune"
-    if base == "iptables" and ("-F" in tail or "--flush" in tail):
+    if base == "iptables" and ("-F" in tail or any(
+            _long_opt_hits(t, _IPTABLES_DESTRUCTIVE_LONGS) for t in tail)):
         return "iptables -F flushes the firewall"
     if base == "nft" and "flush" in tail:
         return "nft flush"
     if base == "crontab":
         # r2: a crontab file install (or `-`/edit) schedules commands outside
         # the audited call window, like at/batch. Only a pure list stays allowed.
+        # `--list` is matched EXACTLY on purpose: it gates an allow, so an
+        # abbreviation here would widen what is allowed (see _long_opt_hits).
         if "-r" in tail:
             return "crontab -r deletes the crontab"
         asking_list = "-l" in tail or "--list" in tail
@@ -1515,19 +1621,32 @@ def _destructive_problem(argv: Sequence[str]) -> str | None:
     return None
 
 
-_GIT_FLAGGED_OPTIONS = ("-c", "-C", "--git-dir", "--work-tree", "--exec-path",
-                         "--output", "--upload-pack", "--receive-pack",
-                         "--config-env", "--exec")
+# git's option-injection gate (review F2). Short flags have no abbreviations,
+# so they stay an exact comparison; the long ones are matched by
+# _long_opt_hits because git's own parse-options accepts any unambiguous
+# prefix: `git --git-di=/tmp status` reads an arbitrary repository (hx4).
+_GIT_INJECT_SHORTS = ("-c", "-C")
+_GIT_INJECT_LONGS = _FlaggedLongs(
+    ("--git-dir", "--work-tree", "--exec-path", "--output", "--upload-pack",
+     "--receive-pack", "--config-env", "--exec"),
+    takes_value=("--git-dir", "--work-tree", "--exec-path", "--output",
+                 "--upload-pack", "--receive-pack", "--config-env", "--exec"))
+
+# `git rebase --exec <cmd>` runs the command through a shell.
+_GIT_REBASE_LONGS = _FlaggedLongs(("--exec",), takes_value=("--exec",))
 
 
 def _git_option_injection_problem(argv: Sequence[str]) -> str | None:
     if not argv or _basename(argv[0]) != "git":
         return None
     for tok in argv[1:]:
-        for flag in _GIT_FLAGGED_OPTIONS:
-            if tok == flag or tok.startswith(flag + "="):
-                return (f"git {flag} can read .git/config or run an arbitrary program "
-                         "even for a read verb (review F2)")
+        if tok in _GIT_INJECT_SHORTS:
+            return (f"git {tok} can read .git/config or run an arbitrary program "
+                    "even for a read verb (review F2)")
+        hit = _long_opt_hits(tok, _GIT_INJECT_LONGS)
+        if hit:
+            return (f"git {hit} can read .git/config or run an arbitrary program "
+                    "even for a read verb (review F2)")
     sub_problem = _git_exec_subcommand_problem(argv)
     if sub_problem:
         return sub_problem
@@ -1568,10 +1687,10 @@ def _git_exec_subcommand_problem(argv: Sequence[str]) -> str | None:
             if tok.startswith("-") and tok != "-":
                 continue
             return "git bisect run runs its command via a shell"
-    # rebase --exec/-x <cmd>.
+    # rebase --exec/-x <cmd> (abbreviated --exe runs the same shell).
     if sub == "rebase":
         for tok in tail:
-            if tok == "--exec" or tok.startswith("--exec="):
+            if _long_opt_hits(tok, _GIT_REBASE_LONGS):
                 return "git rebase --exec runs its command via a shell"
             if tok == "-x":
                 return "git rebase -x runs its command via a shell"
@@ -1624,6 +1743,8 @@ def _git_config_write_problem(argv: Sequence[str]) -> str | None:
         return None
     after = tail[idx + 1:]
     # Read-only modes stay allowed: --get/--get-all/--get-regexp/--list/-l.
+    # Exact comparison on purpose -- this gates an allow, so matching
+    # abbreviations here would widen what is allowed (see _long_opt_hits).
     for tok in after:
         if tok in ("--get", "--get-all", "--get-regexp", "--list", "-l",
                    "--get-color", "--print", "--get-urlmatch"):
