@@ -170,7 +170,8 @@ REPORT <id> · <status> · <files> · <tests> · <blockers> · <lessons>
 ```
 
 The MCP server reads the tail of `output.log` (last 64 KiB) with `_stdout_channel()` once the run
-has exited. An rc-0 run that printed a `QUESTION` line, or a REPORT with status `input_required`
+has exited. An rc-0 run that printed a `QUESTION` line among its last 12 non-blank lines (an
+earlier QUESTION-shaped line in tool output does not count), or a REPORT with status `input_required`
 (its blockers become the question), and never used the ask-back helper (no `qa-*.json`) is
 `state: input_required, detail: ended`. A REPORT with status `failed` turns an rc-0 run into
 `failed / reported-failed`. Any parsed REPORT is attached to the state as `report`.

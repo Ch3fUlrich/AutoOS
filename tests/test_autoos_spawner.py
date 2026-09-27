@@ -861,6 +861,20 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(st["detail"], "ended")
         self.assertEqual(st["question"], "reply A or B?")
 
+    def test_a_question_line_early_in_the_log_is_not_a_question(self):
+        """Only the worker's closing lines count: a QUESTION-shaped line in
+        earlier tool output ('QUESTION handler: initializing') must not pin
+        a finished run to input_required (Sonnet final review K2)."""
+        body = "QUESTION handler: initializing\n" + "".join("work line %d\n" % i for i in range(40))
+        self._make_ended_run("early-q-test", output=body + "done\n", rc=0)
+        st = mcp_server.status("early-q-test")
+        self.assertEqual(st["state"], "completed")
+        self.assertNotIn("question", st)
+
+    def test_a_vanished_run_dir_does_not_crash_the_channel(self):
+        missing = os.path.join(self.tmp, "agents", "gone")
+        self.assertEqual(mcp_server._stdout_channel(missing, {"rc": 0}), {})
+
     def test_a_answered_stdout_question_and_report_keeps_completed(self):
         """When a qa-1.json (answered question) exists alongside a REPORT
         block in output.log, the state stays completed and carries the

@@ -70,6 +70,7 @@ from registry import resolve_leg, unavailable_now  # noqa: E402
 
 TAIL_CHARS = 6000
 _TAIL_BYTES = 65536
+_CLOSING_LINES = 12  # non-blank lines at the end of output.log that may carry a QUESTION
 _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
 
 # Spec 9 (docs/plans/2026-09-25-routing-v2-spec.md): the A2A task-state names
@@ -458,7 +459,7 @@ def _alive(pid) -> bool:
         return False
 
 
-def _stdout_channel(path: str) -> dict:
+def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     """Parse the tail of output.log for QUESTION/REPORT blocks.
 
     Returns a dict with optional keys ``question`` (str) and ``report``
@@ -479,8 +480,11 @@ def _stdout_channel(path: str) -> dict:
 
     result = {}
 
-    # QUESTION <worker-name>: <text>
-    m = re.findall(r"^QUESTION\s+\S+?:\s*(.+)$", tail, re.MULTILINE)
+    # QUESTION <worker-name>: <text> - only among the closing lines (the
+    # worker's last words plus the spawner's route/depth trailer): a
+    # QUESTION-shaped line in earlier tool output is not the worker asking.
+    closing = "\n".join([ln for ln in tail.splitlines() if ln.strip()][-_CLOSING_LINES:])
+    m = re.findall(r"^QUESTION\s+\S+?:\s*(.+)$", closing, re.MULTILINE)
     if m:
         result["question"] = m[-1].strip()
 
@@ -498,9 +502,13 @@ def _stdout_channel(path: str) -> dict:
     # The one decision (used by _state and _write_fallback): an rc-0 run
     # that asked on stdout, or reported input_required, and never went
     # through the ask-back helper (no qa-*.json) still needs an answer.
-    ex = _read_json(os.path.join(path, "exit.json")) or {}
+    if ex is None:
+        ex = _read_json(os.path.join(path, "exit.json")) or {}
     asked = "question" in result or (result.get("report") or {}).get("status") == "input_required"
-    used_ask_back = any(n.startswith("qa-") and n.endswith(".json") for n in os.listdir(path))
+    try:
+        used_ask_back = any(n.startswith("qa-") and n.endswith(".json") for n in os.listdir(path))
+    except OSError:  # the run dir vanished mid-poll
+        return {}
     if asked and ex.get("rc") == 0 and not ex.get("cancelled") and not used_ask_back:
         result["needs_input"] = True
         if "question" not in result:
@@ -541,7 +549,7 @@ def _state(path: str) -> dict:
     # stdout channel: detect QUESTION/REPORT in output.log for workers
     # that cannot use the ask-back helper (e.g. qoder).
     if ex is not None and not ex.get("cancelled"):
-        channel = _stdout_channel(path)
+        channel = _stdout_channel(path, ex)
         report = channel.get("report")
         if channel.get("needs_input"):
             state, detail, question = "input_required", "ended", channel["question"]
