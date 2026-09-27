@@ -39,6 +39,9 @@ def tracked_files(repo, paths=None):
     """Repo-relative tracked files, optionally scoped to `paths` (dirs or files).
 
     NUL-separated output so a path with a newline or quote survives intact.
+    Deduplicated order-preserving (TOOLFIX item 4, measured 2026-09-27):
+    during an unresolved merge `git ls-files` lists a conflicted path once per
+    index stage (1/2/3), so one file counted as three and bucketed S0 as S2.
     """
     args = ["ls-files", "-z"]
     if paths:
@@ -47,7 +50,13 @@ def tracked_files(repo, paths=None):
     if proc.returncode != 0:
         raise ValueError("git ls-files failed in %s: %s"
                          % (repo, proc.stderr.decode("utf-8", "replace").strip()))
-    return [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
+    seen = set()
+    files = []
+    for p in proc.stdout.decode("utf-8", "replace").split("\0"):
+        if p and p not in seen:
+            seen.add(p)
+            files.append(p)
+    return files
 
 
 def grep_fanout(repo, symbol):

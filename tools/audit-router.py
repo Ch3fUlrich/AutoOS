@@ -296,9 +296,15 @@ def _chat_once(base: str, model: str, key: str, timeout: int,
             json.load(resp)
         return resp.status, "ack"
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(160).decode("utf-8", "replace").replace("\n", " ")[:160]
+        # Never return the provider error body: it can carry org/project ids
+        # and hosts, and the snippet reaches stdout and the report (same leak
+        # class fixed in probe_common's make_post). The HTTP status is the
+        # finding.
+        return exc.code, "HTTP %d" % exc.code
     except Exception as exc:  # noqa: BLE001 - any transport failure is a finding
-        return "ERR", str(exc)[:160]
+        # The exception text can carry a host or org id; only its type is the
+        # finding (same no-leak rule as probe_common's make_post).
+        return "ERR", "transport error: %s" % type(exc).__name__
 
 
 def _chat(base: str, model: str, key: str, timeout: int,
