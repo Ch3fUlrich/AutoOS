@@ -833,6 +833,150 @@ class McpToolTests(unittest.TestCase):
         self.assertIn("rejected", mcp_server.TASK_STATES)
         self.assertEqual(mcp_server.status()["runs"], [])
 
+    # --- stdout channel: workers that cannot use the ask-back helper ------
+
+    def _make_ended_run(self, run_id, output="", rc=0, answered=False):
+        """Synthetic ended run with output.log and exit.json."""
+        path = self.make_run(run_id)
+        if output:
+            with io.open(os.path.join(path, "output.log"), "w",
+                         encoding="utf-8") as fh:
+                fh.write(output)
+        mcp_server._write_exit(path, {"rc": rc, "ended": time.time()})
+        if answered:
+            mcp_server._write_json(os.path.join(path, "qa-1.json"),
+                                   {"question": {"text": "q"},
+                                    "answer": {"text": "a"}})
+        return path
+
+    def test_a_stdout_question_flips_completed_to_input_required_ended(self):
+        """A worker that cannot use the ask-back helper prints QUESTION to
+        stdout.  _state() must detect this and report input_required with
+        detail=ended instead of completed/done."""
+        self._make_ended_run("stdout-q-test",
+            output="line 1\nQUESTION k2-qoder: reply A or B?\nline 3\n",
+            rc=0)
+        st = mcp_server.status("stdout-q-test")
+        self.assertEqual(st["state"], "input_required")
+        self.assertEqual(st["detail"], "ended")
+        self.assertEqual(st["question"], "reply A or B?")
+
+    def test_a_answered_stdout_question_and_report_keeps_completed(self):
+        """When a qa-1.json (answered question) exists alongside a REPORT
+        block in output.log, the state stays completed and carries the
+        parsed report data."""
+        self._make_ended_run("report-qa-test",
+            output=("REPORT my-id · completed · file1.py · test1 -> pass"
+                    " · · lesson1\n"),
+            rc=0, answered=True)
+        st = mcp_server.status("report-qa-test")
+        self.assertEqual(st["state"], "completed")
+        self.assertEqual(st["detail"], "done")
+        self.assertIn("report", st)
+        self.assertEqual(st["report"]["id"], "my-id")
+        self.assertEqual(st["report"]["status"], "completed")
+        self.assertEqual(st["report"]["files"], ["file1.py"])
+
+    def test_a_stdout_failed_report_overrides_exit_code(self):
+        """When the REPORT block says 'failed' but exit code was 0,
+        _state() reports failed with detail='reported-failed'."""
+        self._make_ended_run("report-fail-test",
+            output="REPORT my-id · failed · · · blocker1\n",
+            rc=0)
+        st = mcp_server.status("report-fail-test")
+        self.assertEqual(st["state"], "failed")
+        self.assertEqual(st["detail"], "reported-failed")
+        self.assertEqual(st["rc"], 0)
+
+    def test_respond_refuses_an_ended_run(self):
+        """A run with state input_required but detail=ended (question in
+        stdout from a worker that already exited) cannot be answered via
+        respond() — there is no answer.json to write and the worker is
+        gone."""
+        self._make_ended_run("ended-respond-test",
+            output="QUESTION k2-qoder: reply A or B?\n",
+            rc=0)
+        out = mcp_server.respond("ended-respond-test", "A")
+        self.assertIn("error", out)
+        self.assertIn("exited", out["error"])
+        self.assertIn("follow-up", out["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "agents", "ended-respond-test", "answer.json")))
+
+    def test_a_stdout_input_required_report_without_question_line(self):
+        """A REPORT whose status is input_required counts as a question even
+        without a QUESTION line; its blockers become the question text."""
+        self._make_ended_run("report-ir-test",
+            output="REPORT k2 · input_required · · ask -> no shell · need a decision · \n",
+            rc=0)
+        st = mcp_server.status("report-ir-test")
+        self.assertEqual(st["state"], "input_required")
+        self.assertEqual(st["detail"], "ended")
+        self.assertEqual(st["question"], "need a decision")
+        self.assertEqual(st["report"]["status"], "input_required")
+
+    def _run_job_printing(self, run_id, printed, fallback_dir):
+        path = self.make_run(run_id, argv=["--version"])
+
+        def fake_call(argv, **kw):
+            with io.open(os.path.join(path, "output.log"), "w",
+                         encoding="utf-8") as fh:
+                fh.write(printed)
+            return 0
+
+        with mock.patch.dict(os.environ, {"AUTOOS_FALLBACK_DIR": fallback_dir}):
+            with mock.patch.object(mcp_server.subprocess, "call", fake_call):
+                self.assertEqual(mcp_server.run_job(path), 0)
+        return path
+
+    def test_run_job_writes_the_question_fallback_only_when_ask_back_failed(self):
+        """The primary channel failed (stdout QUESTION, no qa-*.json): run_job
+        writes <id>.question.md into AUTOOS_FALLBACK_DIR with the question and
+        the raw REPORT line, and a second run never overwrites it."""
+        fallback_dir = os.path.join(self.tmp, "fallback")
+        printed = ("QUESTION k2-qoder: reply A or B?\n"
+                   "REPORT k2-qoder · input_required · · ask -> no shell · · \n")
+        self._run_job_printing("fallback-test", printed, fallback_dir)
+        target = os.path.join(fallback_dir, "fallback-test.question.md")
+        with io.open(target, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("reply A or B?", text)
+        self.assertIn("report: REPORT k2-qoder · input_required", text)
+        with io.open(target, "w", encoding="utf-8") as fh:
+            fh.write("parent notes\n")
+        path = os.path.join(self.tmp, "agents", "fallback-test")
+        with mock.patch.dict(os.environ, {"AUTOOS_FALLBACK_DIR": fallback_dir}):
+            mcp_server._write_fallback(path)
+        with io.open(target, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "parent notes\n")
+
+    def test_run_job_writes_no_fallback_when_the_primary_channel_worked(self):
+        fallback_dir = os.path.join(self.tmp, "fallback")
+        self._run_job_printing("primary-test",
+                               "REPORT k2 · completed · · ask -> A · · \n", fallback_dir)
+        self.assertFalse(os.path.exists(fallback_dir) and os.listdir(fallback_dir))
+
+    def test_the_question_fallback_defaults_to_the_run_dir(self):
+        path = self.make_run("fallback-default-test")
+        with io.open(os.path.join(path, "output.log"), "w", encoding="utf-8") as fh:
+            fh.write("QUESTION w: ship or revert?\n")
+        mcp_server._write_exit(path, {"rc": 0, "ended": time.time()})
+        env = {k: v for k, v in os.environ.items() if k != "AUTOOS_FALLBACK_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            mcp_server._write_fallback(path)
+        self.assertTrue(os.path.isfile(os.path.join(path, "fallback-default-test.question.md")))
+
+    def test_stdout_without_channel_keeps_normal_state(self):
+        """A completed run whose output.log has no QUESTION or REPORT block
+        keeps its normal completed/done state without any channel keys."""
+        self._make_ended_run("clean-test",
+            output="Just some regular output\nNothing interesting\n",
+            rc=0)
+        st = mcp_server.status("clean-test")
+        self.assertEqual(st["state"], "completed")
+        self.assertEqual(st["detail"], "done")
+        self.assertNotIn("question", st)
+        self.assertNotIn("report", st)
+
 
 class AskHelperTests(unittest.TestCase):
     """tools/autoos-ask.py, offline: question/answer/qa files in a temp dir,

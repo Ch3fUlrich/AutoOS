@@ -53,6 +53,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -63,10 +64,12 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(TOOLS_DIR, "autoos-agent.py")
 sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
+import autoos_report as report_parser  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
 
 TAIL_CHARS = 6000
+_TAIL_BYTES = 65536
 _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
 
 # Spec 9 (docs/plans/2026-09-25-routing-v2-spec.md): the A2A task-state names
@@ -387,6 +390,34 @@ def spawn(req: dict) -> dict:
     return {"id": run_id, "state": "working", "route": route, "dir": path}
 
 
+def _write_fallback(path: str) -> None:
+    """The file fallback (K2): only when the primary channel failed - the
+    worker could not ask back and put its question on stdout instead
+    (_stdout_channel needs_input) - write <id>.question.md into
+    AUTOOS_FALLBACK_DIR (the orchestrator points it at its RUN/work/<lane>/),
+    else into the run dir. Never overwrites: the parent may have annotated it.
+    Best-effort: a failed write never fails the runner."""
+    channel = _stdout_channel(path)
+    if not channel.get("needs_input"):
+        return
+    run_id = os.path.basename(os.path.normpath(path))
+    target_dir = os.environ.get("AUTOOS_FALLBACK_DIR") or path
+    target = os.path.join(target_dir, "%s.question.md" % run_id)
+    if os.path.exists(target):
+        return
+    text = channel["question"] + "\n"
+    if channel.get("report_line"):
+        text += "report: %s\n" % channel["report_line"]
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        tmp = "%s.tmp-%d" % (target, os.getpid())
+        with io.open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except OSError:
+        pass  # the run itself finished; the fallback copy is optional
+
+
 def run_job(path: str) -> int:
     """The detached runner: one autoos-agent.py run, output and exit code on disk."""
     job = _read_json(os.path.join(path, "job.json"))
@@ -398,6 +429,7 @@ def run_job(path: str) -> int:
                              env=dict(os.environ, AUTOOS_TASK_DIR=path),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
+    _write_fallback(path)
     return rc
 
 
@@ -426,6 +458,57 @@ def _alive(pid) -> bool:
         return False
 
 
+def _stdout_channel(path: str) -> dict:
+    """Parse the tail of output.log for QUESTION/REPORT blocks.
+
+    Returns a dict with optional keys ``question`` (str) and ``report``
+    (dict).  A worker that cannot use the ask-back helper prints
+    ``QUESTION <worker-name>: <text>`` to stdout; it is detected here so
+    ``_state()`` can report it as ``input_required`` with ``detail="ended"``
+    and ``respond()`` can refuse an already-exited worker.
+    """
+    log_path = os.path.join(path, "output.log")
+    try:
+        with io.open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    result = {}
+
+    # QUESTION <worker-name>: <text>
+    m = re.findall(r"^QUESTION\s+\S+?:\s*(.+)$", tail, re.MULTILINE)
+    if m:
+        result["question"] = m[-1].strip()
+
+    # REPORT block — the parser handles both "·"-joined and multi-line forms
+    try:
+        r = report_parser.parse_report(tail)
+        if r is not None:
+            result["report"] = r
+    except Exception:  # noqa: BLE001 — best-effort, never crash _state()
+        pass
+    lines = re.findall(r"^REPORT\s.*$", tail, re.MULTILINE)
+    if lines:
+        result["report_line"] = lines[-1].strip()
+
+    # The one decision (used by _state and _write_fallback): an rc-0 run
+    # that asked on stdout, or reported input_required, and never went
+    # through the ask-back helper (no qa-*.json) still needs an answer.
+    ex = _read_json(os.path.join(path, "exit.json")) or {}
+    asked = "question" in result or (result.get("report") or {}).get("status") == "input_required"
+    used_ask_back = any(n.startswith("qa-") and n.endswith(".json") for n in os.listdir(path))
+    if asked and ex.get("rc") == 0 and not ex.get("cancelled") and not used_ask_back:
+        result["needs_input"] = True
+        if "question" not in result:
+            blockers = (result.get("report") or {}).get("blockers") or []
+            result["question"] = "; ".join(blockers) or "(no question text)"
+    return result
+
+
 def _state(path: str) -> dict:
     # Spec 9: `state` is the A2A lifecycle name, `detail` the pre-A2A value
     # (starting/running/done/cancelled/lost) - the rename loses nothing. A pid
@@ -437,6 +520,7 @@ def _state(path: str) -> dict:
     job = _read_json(os.path.join(path, "job.json")) or {}
     ex = _read_json(os.path.join(path, "exit.json"))
     question = None
+    report = None
     if ex is not None:
         if ex.get("cancelled"):
             state, detail = "canceled", "cancelled"
@@ -453,11 +537,24 @@ def _state(path: str) -> dict:
             state, question = "input_required", asked.get("text") or ""
     else:
         state, detail = "failed", "lost"
+
+    # stdout channel: detect QUESTION/REPORT in output.log for workers
+    # that cannot use the ask-back helper (e.g. qoder).
+    if ex is not None and not ex.get("cancelled"):
+        channel = _stdout_channel(path)
+        report = channel.get("report")
+        if channel.get("needs_input"):
+            state, detail, question = "input_required", "ended", channel["question"]
+        elif report and report.get("status") == "failed" and state == "completed":
+            state, detail = "failed", "reported-failed"
+
     out = {"id": job.get("id"), "state": state, "detail": detail,
            "client": (job.get("request") or {}).get("client") or "opencode",
            "route": job.get("route"), "started": job.get("started"), "task": (job.get("task") or "")[:120]}
     if question is not None:
         out["question"] = question
+    if report is not None:
+        out["report"] = report
     if ex is not None:
         out["rc"] = ex.get("rc")
         out["secs"] = round((ex.get("ended") or time.time()) - (job.get("started") or 0))
@@ -507,6 +604,8 @@ def respond(run_id: str, text: str) -> dict:
     st = _state(path)
     if st["state"] != "input_required":
         return dict(st, error="run is %s, not input_required" % st["state"])
+    if st.get("detail") == "ended":
+        return dict(st, error="worker exited; spawn a follow-up task that includes the answer")
     _write_json(os.path.join(path, "answer.json"), {"text": text, "answered": _now_iso()})
     return _state(path)
 

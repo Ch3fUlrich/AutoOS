@@ -135,3 +135,52 @@ The `check` subcommand verifies:
 - Status `completed` with no tests
 
 The spawner calls this before accepting a report.
+
+## Channels
+
+Two channels for worker → orchestrator communication.
+
+### Ask-back helper (`autoos-ask.py`)
+
+The primary channel: a worker runs `python3 tools/autoos-ask.py "question?"` and blocks
+for an answer via `respond()`. Files involved:
+
+```
+question.json → answer.json → qa-<n>.json  (archived exchange)
+```
+
+Needs a shell tool and `AUTOOS_TASK_DIR` (the MCP spawn sets it). Measured 2026-09-27 through
+MCP spawn:
+
+| worker | ask-back | evidence |
+|---|---|---|
+| opencode `big-pickle` (spawner `--free` default) | works | asked, `respond()` answered, REPORT completed |
+| opencode `omniroute/deepseek-v4.1-flash` | works | same |
+| opencode `omniroute/spark-1.3-contributor` (Muse Spark 1.3) | works | same |
+| qoder (`--permission-mode dont_ask`, no shell) | no | printed the stdout QUESTION + REPORT `input_required` |
+| agy (default model) | not measured | Gemini quota 429 before the task ran |
+
+### Stdout channel
+
+Workers that cannot use the ask-back helper print tagged messages to stdout:
+
+```
+QUESTION <worker-name>: <text>
+REPORT <id> · <status> · <files> · <tests> · <blockers> · <lessons>
+```
+
+The MCP server reads the tail of `output.log` (last 64 KiB) with `_stdout_channel()` once the run
+has exited. An rc-0 run that printed a `QUESTION` line, or a REPORT with status `input_required`
+(its blockers become the question), and never used the ask-back helper (no `qa-*.json`) is
+`state: input_required, detail: ended`. A REPORT with status `failed` turns an rc-0 run into
+`failed / reported-failed`. Any parsed REPORT is attached to the state as `report`.
+
+The worker has already exited, so `respond()` refuses such a run: spawn a follow-up task that
+includes the answer.
+
+### Fallback file
+
+Only when the primary channel failed (the `input_required / ended` case above), the runner
+writes `<run id>.question.md` - the question, then `report: <raw REPORT line>` - into
+`$AUTOOS_FALLBACK_DIR` (point it at `RUN/work/<lane>/`), else into the run dir. It never
+overwrites an existing file, and a failed write never fails the run.
