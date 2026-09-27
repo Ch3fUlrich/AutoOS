@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
+### Fixed — probe-toolcalls uses the shared leg selection (ptc)
+
+- **`tools/probe-toolcalls.py`**: deleted its local `_skip_reason`/`legs_to_probe` copies and imports both from **`tools/probe_common.py`**, so a `policy.leg_rules`-denied leg is skipped with `policy: denied by <id>` and only free legs are probed (D18); its own `make_post`/400 body classification is unchanged. Tests: new `DenyRuleTests` in `tests/test_probe_toolcalls.py`; existing leg fixtures now declare `tier: free` (no skip-reason assertion needed rewording — the shared wording matches).
+
+### Added — Free.ai in the key guide
 
 - **`configuration/litellm/config.yaml`**, **`tools/sync-router-tiers.py`**, **`tools/registry.py`**: every registry route `gateway_legs` can serve through LiteLLM is now an `AUTOOS-MANAGED` block (12 groups) regenerated from the registry, replacing the hardcoded `SYNCED_TIERS` (`t2-worker`, `t3-driver`) pair. A route whose final servable set is empty gets no group (instead of the render raising); the legless `*-paid` chains stay hand-curated. New `managed_tiers` / `litellm_servable_refs`; `registry_refs`/`combos_refs` default to every servable tier. Tests: `tests/test_registry_render.py`, `tests/test_sync_router_tiers_registry.py`, `tests/linux/17-ai-routing.sh`.
 - **`configuration/litellm/start-litellm.sh`**, **`configuration/litellm/start-litellm.ps1`**: `AUTOOS_LITELLM_HOST` (bind address), `AUTOOS_LITELLM_STATE_DIR` (where `litellm.log` lives) and `AUTOOS_LITELLM_MASTER_KEY_FILE` (a private file whose single line overrides `.env`; unreadable or empty is a hard error). Values are never printed. Tests: `tests/linux/34-ai-services.sh`.
@@ -19,6 +24,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed — Claude Code (cc) legs unavailable (operator 2026-09-27: never connected to OmniRoute)
 
 - **`catalog/ai-registry.json`** `providers.cc.available: false` (sourced); `opus-4-6` and `t2-orchestrator` keep their antigravity opus-4-6-thinking leg, the cc leg leaves combos.json.
+
+- **`configuration/docker/ai-stack/compose.yml`**: the omniroute service caps the
+  per-call log artifacts that fed page cache (`CHAT_LOG_MAX_BODY_KB=64`,
+  `CHAT_LOG_TEXT_LIMIT=16384`, `CALL_LOG_RETENTION_DAYS=3`; image defaults
+  1024/65536/7). Measured 2026-09-27: 831 MB in 3905 files under
+  `/app/data/call_logs` in one day left `memory.current` at 2.62G of 2.68G max
+  with only 0.83G `anon` (1.65G reclaimable `file`), and the gateway's
+  pressure guard (503 at >= 92%, not configurable in 3.8.50) tripped 48x/h.
+  The caps reach the gateway only when its container is recreated with the new
+  env (`ai-stack.sh up omniroute` recreates it because the compose config
+  changed). Documented as commented defaults in **`stack.env.example`**.
+- **`configuration/docker/ai-stack/ai-stack.sh`**: new `restart <service>`
+  subcommand (one compose restart through the same wrapper as the other
+  subcommands, no backup; unknown name is a usage error, rc 2), and `verify`
+  prints the real cgroup memory split (`omniroute memory: current … of …
+  (…%), anon …, reclaimable cache …` from the `file` line of `memory.stat`,
+  read with cat+sed only; "no limit" with no ratio when `memory.max` is `max`),
+  informational like the admission gate, and warns with the root-free relief
+  (`ai-stack.sh restart omniroute`; measured 11:04Z, `memory.current`
+  2215M -> 786M) when page cache - not anon - holds the guard at 503.
+  Docs: `docs/web-services.md` "Page-cache pressure guard".
 
 ### Changed — cheaperinference disabled (operator 2026-09-27T10:12Z: no top-up, no free tier) (OR1h)
 

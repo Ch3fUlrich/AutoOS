@@ -87,8 +87,8 @@ class LegsToProbeTests(unittest.TestCase):
         self.mod = _load_module()
         self.registry = {
             "providers": {
-                "clean": {"id": "clean", "available": True},
-                "flaky": {"id": "flaky", "available": False},
+                "clean": {"id": "clean", "tier": "free", "available": True},
+                "flaky": {"id": "flaky", "tier": "free", "available": False},
             },
             "models": {
                 "big": {"id": "big"},
@@ -147,6 +147,28 @@ class LegsToProbeTests(unittest.TestCase):
         legs = [leg for leg, _ in self.mod.legs_to_probe(
             self.registry, only_routes=("r3",))]
         self.assertEqual(legs, ["clean/zen"])
+
+
+class DenyRuleTests(unittest.TestCase):
+    """probe_common's shared skip logic also skips a policy-denied free leg."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.registry = {
+            "providers": {
+                "free": {"id": "free", "tier": "free", "available": True},
+                "groq": {"id": "groq", "tier": "free", "available": True},
+            },
+            "models": {"big": {"id": "big"}},
+            "routes": {"r1": {"id": "r1", "legs": ["free/big", "groq/big"]}},
+            "policy": {"leg_rules": [
+                {"id": "deny-groq", "match": "groq/*", "allow": False, "reason": "x"},
+            ]},
+        }
+
+    def test_a_denied_free_leg_is_skipped_with_the_rule_id(self):
+        reasons = dict(self.mod.legs_to_probe(self.registry))
+        self.assertEqual(reasons["groq/big"], "policy: denied by deny-groq")
 
 
 class SingleCallCheckTests(unittest.TestCase):
@@ -498,7 +520,7 @@ class CliMainTests(unittest.TestCase):
         self.registry_path = os.path.join(self.tmpdir, "registry.json")
         self.overlay_path = os.path.join(self.tmpdir, "measured.json")
         registry = {
-            "providers": {"clean": {"id": "clean", "available": True}},
+            "providers": {"clean": {"id": "clean", "tier": "free", "available": True}},
             "models": {"m": {"id": "m"}},
             "routes": {"r1": {"id": "r1", "legs": ["clean/m"]}},
         }
