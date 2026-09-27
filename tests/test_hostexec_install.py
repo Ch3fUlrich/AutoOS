@@ -38,6 +38,7 @@ def _default_port() -> str:
     return match.group(1)
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class _DriverCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -132,6 +133,7 @@ class _DriverCase(unittest.TestCase):
         }
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class UnitInstallTests(_DriverCase):
     def test_unit_install_and_second_run_already_current(self):
         proc = self.run_driver_ok("--unit")
@@ -253,6 +255,7 @@ class UnitInstallTests(_DriverCase):
         self.assertEqual(unit.read_text(encoding="utf-8"), "# keep me\n")
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class ClientWriterTests(_DriverCase):
     BRIDGE_BIND = "172.17.0.1"
 
@@ -453,6 +456,7 @@ class ClientWriterTests(_DriverCase):
         self.assert_token_nowhere(proc)
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class TokenTests(_DriverCase):
     def test_group_readable_token_is_refused(self):
         self.write_token("claude", mode=0o644)
@@ -486,6 +490,7 @@ class TokenTests(_DriverCase):
         self.assert_token_nowhere(proc)
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class DryRunTests(_DriverCase):
     def test_dry_run_writes_nothing(self):
         self.write_token("claude")
@@ -498,6 +503,7 @@ class DryRunTests(_DriverCase):
         self.assert_token_nowhere(proc)
 
 
+@unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class UnregisterTests(_DriverCase):
     def _install_all(self):
         for client in ("openhands", "claude", "codex", "opencode"):

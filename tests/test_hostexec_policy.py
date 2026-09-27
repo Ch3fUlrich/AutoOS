@@ -51,6 +51,8 @@ _KNOWN_COMMANDS = [
 
 
 def _make_fixed_path(tmp: str) -> str:
+    if os.name == "nt":
+        raise unittest.SkipTest("sh stubs and chmod; POSIX only")
     bindir = os.path.join(tmp, "bin")
     os.makedirs(bindir, exist_ok=True)
     for name in _KNOWN_COMMANDS:
@@ -124,6 +126,7 @@ class DecisionTableTests(unittest.TestCase):
                     self.assertIsNone(decision.rule)
 
 
+@unittest.skipIf(os.name == "nt", "chmod mode bits and sh stubs; POSIX only")
 class PathHijackWorldWritableTests(unittest.TestCase):
     """The world-writable-directory case needs a real temp dir per test, so
     it can't live in the static TSV (paths there must be location-independent)."""

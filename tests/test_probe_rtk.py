@@ -198,6 +198,8 @@ class _Harness(unittest.TestCase):
 
     def config_dir(self, key=SENTINEL):
         """An AUTOOS_AI_STACK_CONFIG dir holding a mode-600 manage.key."""
+        if os.name == "nt":
+            raise unittest.SkipTest("chmod mode bits; POSIX only")
         cfg = self.dir / "ai-stack"
         cfg.mkdir(exist_ok=True)
         key_file = cfg / "manage.key"
