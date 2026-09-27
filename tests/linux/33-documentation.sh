@@ -192,6 +192,12 @@ if it "the IDE model sync tool's unit tests pass (sync-ide-models)"; then
     out="$(python3 tests/test_sync_ide_models.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/registry_loader.py: the one importlib-by-path loader for tools/
+# registry.py that the registry-consuming tools share (REVFIX).
+if it "registry loader: the shared by-path loader and its consumers (unit tests)"; then
+    out="$(python3 tests/test_registry_loader.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "every leg of a combo carries a provider prefix"; then
     bad="$(python3 - 2>&1 <<'PY'
 import json
