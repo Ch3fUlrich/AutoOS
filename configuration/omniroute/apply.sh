@@ -9,10 +9,14 @@
 # Model refs the live catalog does not know are skipped with a warning, so a
 # renamed upstream model degrades one tier leg instead of breaking the run.
 #
-#   ./configuration/omniroute/apply.sh [--dry-run] [--probe]
+#   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift]
 #
 # --probe sends one tiny request per combo and reports what answered
 # (spends a few hundred tokens; skipped under --dry-run).
+# --drift is read-only: it compares the live combos with combos.json (name +
+# ordered models; retired ids ignored), prints one line per difference and
+# exits 0 in sync, 1 on drift, 3 when the live store is unreadable. It skips
+# the provider, resilience and combo steps below.
 # Requires python3 for JSON parsing and the probe's HTTP calls.
 set -euo pipefail
 
@@ -26,10 +30,12 @@ KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
 DRY=0
 PROBE=0
+DRIFT=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --probe)   PROBE=1 ;;
+        --drift)   DRIFT=1 ;;
     esac
 done
 PROBE_COMBOS=()
@@ -196,6 +202,87 @@ omni() {
 }
 
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
+
+# ─── --drift: compare the live combos with combos.json, read-only ───────────
+# Nothing else in this script says whether the live store equals the file
+# (OR1b). The live list comes from `omniroute --output json combo list`:
+# {"combos":[{"name","models":[{"kind":"model","providerId","model"},...]}],
+#  "active":...,"error":...} — a leg ref reconstructs as providerId/model, the
+# spelling combos.json already uses (the CLI splits the leading provider/
+# segment off a plain "provider/model" token when a combo is created).
+# A combo listed in the file's "retired" ids is ignored on the live side; any
+# other live combo absent from the file is reported, never touched.
+if [[ $DRIFT -eq 1 ]]; then
+    if ! command -v omniroute >/dev/null; then
+        echo "drift: live store unreadable - the omniroute CLI is not installed"
+        exit 3
+    fi
+    if ! gateway_up; then
+        echo "drift: live store unreadable - the gateway does not answer on $GATEWAY"
+        exit 3
+    fi
+    # Same banner strip as omni_json below (the CLI prints "Loaded env" lines
+    # before the JSON document). A non-zero exit means a transport or auth
+    # failure - the body may then hold an error page, not JSON.
+    if ! drift_raw="$(cd "$HOME" && omni --output json --no-color combo list 2>/dev/null \
+            | sed -n '/^[[:space:]]*[{[]/,$p')"; then
+        echo "drift: live store unreadable - omniroute combo list failed (gateway down or refused)"
+        exit 3
+    fi
+    drift_rc=0
+    python3 - "$COMBOS_FILE" <<<"$drift_raw" <<'PY' || drift_rc=$?
+import json, sys
+
+try:
+    live_doc = json.load(sys.stdin)
+except Exception:
+    print("drift: live store unreadable - combo list output was not JSON")
+    sys.exit(3)
+if not isinstance(live_doc, dict) or live_doc.get("error"):
+    # The CLI answers a refused management call as {"error": "HTTP 401"}.
+    # The status is a reason, never a key, so it is safe to show.
+    print("drift: live store unreadable - %s" % live_doc.get("error", "unexpected output"))
+    sys.exit(3)
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+retired = set(data.get("retired", []))
+file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
+
+live_combos = {}
+for c in live_doc.get("combos") or []:
+    name = c.get("name")
+    if not name or name in retired:
+        continue
+    refs = []
+    for step in c.get("models") or []:
+        if isinstance(step, str):
+            refs.append(step)
+        elif isinstance(step, dict) and step.get("kind", "model") == "model":
+            provider = step.get("providerId") or step.get("provider") or ""
+            model = step.get("model") or ""
+            refs.append("%s/%s" % (provider, model) if provider else model)
+    live_combos[name] = refs
+
+rc = 0
+for name, file_refs in file_combos.items():
+    if name not in live_combos:
+        print("missing %s" % name)
+        rc = 1
+    elif live_combos[name] != file_refs:
+        print("drift %s: live=[%s] file=[%s]"
+              % (name, ", ".join(live_combos[name]), ", ".join(file_refs)))
+        rc = 1
+for name in live_combos:
+    if name not in file_combos:
+        print("extra %s" % name)
+        rc = 1
+if rc == 0:
+    print("drift: live combos match %s (%d combos)" % (sys.argv[1], len(file_combos)))
+sys.exit(rc)
+PY
+    exit "$drift_rc"
+fi
+
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
         echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
