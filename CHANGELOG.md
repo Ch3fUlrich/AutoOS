@@ -23,6 +23,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`templates/rescue-bootstrap.sh`**: backup stamp uses canonical `%Y%m%d-%H%M%S`.
 - **`tests/run-tests.sh`**: test HTTP server reserves its port file with a real `mktemp`, never `mktemp -u`.
 - **`configuration/herdr-sessions/install.sh`**, **`configuration/herdr-sessions/systemd/{user,system}/*.service`**, **`lib/linux/install.sh`**, **`tests/linux/{18-mcp-wiring,22-herdr-sessions}.sh`** (rv2, 2026-09-27): every rendered user unit now leads `PATH` with `%h/.local/bin`, so a pane inherits the same tools an interactive shell would; `render_unit` applies hostexec's systemd quoting/escaping (`\`, `"`, `%`) to the substituted paths, so a profile directory containing a space or `%` no longer renders an unloadable unit (`WorkingDirectory` stays bare — systemd does not strip quotes there); the herdr binary in both `herdr-server` templates is rendered from the profile's `HERDR_BIN` via `@HERDR_BIN@`, with the per-scope default unchanged (`%h/.local/bin/herdr` user, `/root/.local/bin/herdr` system); and the WSL CAO FIFO probe passes its path as argv instead of splicing it into Python source, so a home path containing a single quote no longer reads as "no FIFO support" and falsely relocates a working ext4 tree.
+### Changed — run rules folded into the orchestration skill, one home per fact (FOLD2, 2026-09-27)
+
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: 30 rules → 28. New from this run's lessons: `R-coord-07`/`R-coord-08` keep a 10-minute `CronCreate` heartbeat from launch to stop (each beat pushes, rewrites the timestamped status file, reads the inbox, checks children — common.md "Heartbeats never stop", 15:3xZ). Extended: `R-orch-13` (a plan, spec, decision or bigger change gets a pinned cross-family review before it is executed or merged — common.md "Second opinion on everything bigger"), `R-orch-14` (new: a slow free reviewer is queued, never skipped; Haiku stays an extra first pass only; the lane record names writer, reviewer, verdict — HAIKU-EVAL.md, inbox 17:52:55Z), `R-coord-02` (findings are judged by the author's orchestrator, Opus decides critical), `R-coord-03` (writers by complexity come from `route --explain`, not a prose model list), `R-coord-06` (the cap is `autoos-agent.py context` against registry `policy.handoff_caps`), `R-orch-06` (relaunch a child that went quiet >25 min), `R-orch-11` (a retired route is grepped as a DEFAULT in `configuration/`, `lib/`, `start-stack.*` too — inbox 17:09:02Z), `R-orch-01` (agent-to-agent text is terse: one line per fact, evidence by pointer). Five rules restated another rule's fact and were folded instead: `R-orch-03`→`R-router-01`, `R-orch-05`→`R-coord-01`, `R-orch-07`→`R-orch-13`, `R-orch-09`→`R-coord-08`, `R-coord-05`→`R-worker-03`; **`references/rule-map.md`** resolves each retired id.
+- **`references/main-orchestrator.md`** gains §1a (the heartbeat, from the first minute) and cites live ids; **`references/{l3-routing,layers,state-file}.md`**, **`unattended-orchestration.md`**, **`docs/agent-protocol.md`**, **`docs/agents/leaf-contract.md`** now point at the rule that owns each fact instead of restating it. The tiers table drops its hand-kept "chain head" column — that is registry data and went stale inside a day.
+
+
+### Fixed — `failover off` really hands the gateway port back (lstby2)
+
+- **`configuration/docker/ai-stack/ai-stack.sh`**: the standby pid is the
+  process listening on the gateway port, found with `ss` exactly like
+  `start-litellm.sh` does and accepted only when `/proc/<pid>/cmdline` is
+  litellm (`start-litellm.sh` writes no pid file — the old pid-file lookup
+  left the standby running with "litellm pid unknown", live 2026-09-27).
+  `off` and every `on` rollback stop the standby (TERM, KILL after 10 s),
+  then refuse when the port stays busy (names the holder from `ss`, starts
+  nothing, rc 1), otherwise recreate the gateway
+  (`compose up -d --no-deps omniroute` — a bare `start` of a port-less
+  container never republishes the port), wait for `/api/health`, check the
+  port is published, and only then remove the state file (on failure: the
+  manual fix `ai-stack.sh up omniroute`, rc 1). Tests: the realistic fakes
+  (no pid file, fake `ss` listener, real `litellm`-renamed sleep) plus
+  busy-port and foreign-listener cases in `tests/linux/34-ai-services.sh`.
+  Docs: `docs/web-services.md` "Standby router (LiteLLM)".
+  Review round (DeepSeek v4.1-flash): a pid counts as the standby only when it
+  is litellm AND holds (or was started with `--port`) the gateway port, so the
+  always-on `:4000` proxy is never signalled; the published-port check rejects
+  `{}` and `{"20128/tcp":null}`; the gateway comes back through `dc_up`
+  (preflight guards); a failed state write leaves no state file; `off` without
+  a state file still stops a standby on the port; the Ctrl-C path waits a
+  short health window; TERM->KILL is tested.
+- Review round (lstby2d): `failover off` accepts a gateway that already serves
+  the port and clears the stale state instead of refusing forever; it finds a
+  standby holding the port even with no state dir (the dir is a hint, never a
+  gate); and a stale state-file pid that is simply gone is reported as
+  "already gone", not signalled as if it belonged to a foreign program.
 ### Changed — t1-orchestrator keeps a free gemini leg (T1FREE, 2026-09-27)
 
 - **`catalog/ai-registry.json`** + renders: `gemini/gemini-3.8-flash` appended to `t1-orchestrator` and `t1-orchestrator-free-only`, so the default model of start-stack, the installer and OpenHands stays servable while OpenRouter, DeepSeek and cheapinference credit is out; `t1-orchestrator-clean`, `spark-1.3-contributor`, `deepseek-v4.1-flash` and the cheaperinference pins stay omitted. Open: `t1-orchestrator-paid` (LiteLLM picker) has no leg until MUSEAPI.

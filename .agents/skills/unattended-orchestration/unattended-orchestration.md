@@ -138,12 +138,17 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   `--max-depth` can only lower the inherited max. This budget is the only
   depth control qwen, gemini, codex, agy and qoder have. Inside one opencode
   process, nesting is still `experimental.subagent_depth`.
-- **`--lean`** (opencode, claude) starts no serena, playwright or context7,
-  which is right for research and review agents. For opencode it overlays
-  each full server entry with `disabled: true`. `enabled: false` is not an
+- **`--lean`** starts no serena, playwright or context7, which is right for
+  research and review agents. Implemented for the clients that can honour it
+  (`LEAN_CLIENTS`): opencode overlays each full server entry with
+  `disabled: true`; claude and qoder get `--strict-mcp-config` (`qodercli`
+  documents it, verified 2026-09-27). Another client cannot drop its servers,
+  so there `--lean` is read-only-vs-writer: a read-only (review) run prints a
+  note and goes ahead — those servers cost memory, not safety — while a writer
+  run still refuses (exit 2), because there removing the write-capable tool
+  surface is the whole point. `enabled: false` is not an
   opencode 2.x field: it is dropped without a warning and the server starts
   anyway. Measured peak process-tree RSS of one run: 1406 MB → 678 MB.
-  claude uses `--strict-mcp-config`.
 - **`--isolate`** runs the agent in a private `git clone --local` on its own
   branch. For opencode it also gets its own data dir and a deny on every path
   outside the clone. **Not a git worktree:** opencode resolves a worktree to
@@ -183,7 +188,8 @@ Only spawning roles list the server (orchestrator, suborchestrator).
 
 ## Stuck-agent watchdog (t1 probes, never waits forever)
 
-T1 owns liveness. Every background t2 gets a heartbeat line in
+T1 owns liveness (the session-side rules for the same job: R-coord-08 watches children,
+R-orch-06 relaunches a quiet one). Every background t2 gets a heartbeat line in
 `logs/orch-<date>.log`; t1 re-checks on a fixed interval and treats
 silence as stuck — with one exception for rate limits (below):
 
@@ -204,14 +210,20 @@ silence as stuck — with one exception for rate limits (below):
 
 ## The tiers (ids are a contract — never rename, only relabel)
 
-| Tier | Role | Context | Chain head (free-first) |
-|---|---|---|---|
-| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, spark-only + `#high` (xhigh effort) | free gemini-3.8-flash (T1FREE 2026-09-27; zen spark-contributor-free is client-bound, openrouter spark off) - slow/429-prone until a paid 1M leg (Meta Muse contributor, MUSEAPI) lands |
-| `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only | UNSERVABLE since 2026-09-27 (route omitted): its only leg was openrouter spark, now off (DSMAX). |
-| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k | gemini-3.8-flash → antigravity 3.7-flash-high → kimi-k3 (cheap-inference allow-list). deepseek/deepseek-flash direct is gated (402, 2026-09-27T16:4xZ) until topped up. groq/cerebras/sambanova/openrouter/zen legs are gated unavailable. |
-| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k | mistral-small direct (deepseek direct gated 402 until topped up). openrouter/zen legs are gated unavailable. No free legs, no reseller legs. |
-| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k | mistral-code → cheap-inference glm-5.2/minimax-m2.7 (allow-list) → mistral-small (deepseek/deepseek-flash direct gated 402 until topped up). groq/cerebras/openrouter/zen legs are gated unavailable; glm-4.5-air is DENIED by `deny-cheaperinference`. |
-| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k | mistral-small direct (deepseek direct gated 402 until topped up). zen paid flash is gated unavailable. No free legs. |
+Which legs each tier runs, in which order, and what is live today is **registry data**
+(`catalog/ai-registry.json`), not a fact this file may restate — a prose copy of the chain heads
+was stale within a day (credit states, gated legs). Read it with
+`python3 tools/autoos-agent.py route --explain --card complexity=hard` and pick writers by
+complexity per R-coord-03. The tier rows below are the structural contract only.
+
+| Tier | Role | Context |
+|---|---|---|
+| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, xhigh effort (`#high`) |
+| `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only |
+| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k |
+| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k |
+| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k |
+| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k |
 
 Rule: anything under 1M context belongs in t2/t3, never t1
 (`opencode.jsonc` limits enforce this: 1M vs 128k). Small-context models
@@ -234,17 +246,16 @@ Rules:
 
 1. **Max fan-out 2+2+2** (1 t1 → ≤2 t2 → ≤2 t3 each). Prevents
    quota collapse and keeps reviews reconcilable.
-2. **Different lenses per t3 pair**: one cheap-codegen leg
-   (`t3-driver`/`t3-driver-clean`, mistral/qwen) + one smart leg
-   (`t2-worker`/`t2-worker-clean`, gpt-oss/deepseek). Different models find
-   different bugs; identical reviewers are wasted tokens.
+2. **Different lenses per t3 pair**: the combo picks them (registry order,
+   `route --explain`); the *why* — same family repeats writer blind spots — is
+   rule R-orch-13, and R-orch-14 keeps Haiku an extra pass only.
 3. **Rate-limit hygiene**: probes are `Reply with exactly: ack` +
    ONE focused review question each, small output budget. Reasoning
    models (spark) need a real budget (≥2048 tokens) or they return
    empty — that is a budget fault, not a routing fault.
 4. **Reviews run in parallel**, reconciled by the owning t2 before
    reporting up. T1 never gets two conflicting reviews directly.
-5. **Verify, don't trust**: every t2 runs its own tests
+5. **Verify, don't trust** (R-coord-02): every t2 runs its own tests
    (`tests/run-tests.ps1`, `tests/run-tests.sh`) and one live `ack`
    probe per touched tier before reporting.
 6. **Non-overlapping files**: t1 assigns tracks with disjoint file
