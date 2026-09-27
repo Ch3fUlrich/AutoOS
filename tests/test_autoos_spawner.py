@@ -2753,6 +2753,8 @@ class IsolateContainmentTests(unittest.TestCase):
         return tmp
 
     def make_fake_agy(self):
+        if os.name == "nt":
+            self.skipTest("shell scripts and os.chmod; POSIX only")
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         py = os.path.join(d, "fake_client.py")
@@ -3239,6 +3241,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.assertNotIn("WIP(autoos-agent)", self._subject(sb))
 
     def make_fake_claude(self):
+        if os.name == "nt":
+            self.skipTest("shell scripts and os.chmod; POSIX only")
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         py = os.path.join(d, "fake_claude.py")
