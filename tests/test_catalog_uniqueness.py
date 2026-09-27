@@ -49,13 +49,17 @@ def component_catalogs():
 
 
 def duplicate_packages(data):
-    """Map each duplicated `(provider, package)` to the ids that share it.
+    """Map each duplicated `(provider, package, arch, cask, source)` to the ids that share it.
 
     A component with no `package` (a `script`/`custom` entry that installs by
     running a function) has nothing to deduplicate and is ignored, as is a
     non-string package. Components with the same package under *different*
     providers are not a conflict: `apt`'s `foo` and a `script`'s `foo` are
     different install paths.
+
+    Legitimate splits with different `arch`, `cask` (macOS), or `source`
+    (winget) are also not conflicts: they target different platforms or
+    installation methods.
 
     Returns `{key: [id, ...]}`, empty when the catalog is clean.
     """
@@ -65,7 +69,15 @@ def duplicate_packages(data):
             package = component.get("package")
             if not isinstance(package, str) or not package:
                 continue
-            key = (component.get("provider"), package)
+            provider = component.get("provider")
+            arch = component.get("arch")
+            cask = component.get("cask")
+            source = component.get("source")
+            # Normalize: None/empty -> empty tuple for arch (which is a list), False -> None for cask
+            arch_key = tuple(sorted(arch)) if isinstance(arch, list) else ()
+            cask_key = cask if cask else None
+            source_key = source if source else None
+            key = (provider, package, arch_key, cask_key, source_key)
             seen.setdefault(key, []).append(component.get("id"))
     return {key: ids for key, ids in seen.items() if len(ids) > 1}
 
@@ -86,7 +98,7 @@ class DetectorSelfTests(unittest.TestCase):
         ])
         self.assertEqual(
             duplicate_packages(data),
-            {("apt", "ripgrep"): ["a", "b"]},
+            {("apt", "ripgrep", (), None, None): ["a", "b"]},
         )
 
     def test_does_not_report_the_same_package_under_different_providers(self):
@@ -100,6 +112,27 @@ class DetectorSelfTests(unittest.TestCase):
         data = synthetic([
             {"id": "a", "provider": "script"},
             {"id": "b", "provider": "script", "package": ""},
+        ])
+        self.assertEqual(duplicate_packages(data), {})
+
+    def test_does_not_report_same_package_different_arch(self):
+        data = synthetic([
+            {"id": "a", "provider": "apt", "package": "foo", "arch": ["x64"]},
+            {"id": "b", "provider": "apt", "package": "foo", "arch": ["arm64"]},
+        ])
+        self.assertEqual(duplicate_packages(data), {})
+
+    def test_does_not_report_same_package_different_cask(self):
+        data = synthetic([
+            {"id": "a", "provider": "brew", "package": "foo", "cask": True},
+            {"id": "b", "provider": "brew", "package": "foo", "cask": False},
+        ])
+        self.assertEqual(duplicate_packages(data), {})
+
+    def test_does_not_report_same_package_different_source(self):
+        data = synthetic([
+            {"id": "a", "provider": "winget", "package": "foo", "source": "msstore"},
+            {"id": "b", "provider": "winget", "package": "foo", "source": "winget"},
         ])
         self.assertEqual(duplicate_packages(data), {})
 
