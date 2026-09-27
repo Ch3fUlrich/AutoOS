@@ -718,7 +718,7 @@ function Get-AutoOSConfiguredIds {
     #>
     param([string]$RepoRoot)
     $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
-    if (-not (Test-Path $file)) { return [System.Collections.Generic.HashSet[string]]::new() }
+    if (-not (Test-Path $file)) { return ,([System.Collections.Generic.HashSet[string]]::new()) }
     $have = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($line in (Get-Content $file -Encoding utf8)) {
         if ($line.Length -eq 0 -or $line[0] -eq ' ' -or $line[0] -eq "`t") { continue }
@@ -729,7 +729,7 @@ function Get-AutoOSConfiguredIds {
             [void]$have.Add($key)
         }
     }
-    $have
+    return ,$have   # unary comma: PowerShell otherwise unrolls the set (empty -> $null; one element -> a string whose .Contains is a substring test)
 }
 
 function Split-AutoOSTrailingComment {

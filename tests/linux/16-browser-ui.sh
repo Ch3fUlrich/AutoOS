@@ -576,6 +576,41 @@ PY
     if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
 fi
 
+if it "the browser UI counts only column-0 keys and treats an indented line as data"; then
+    failures="$(python3 - 2>&1 <<'PY'
+import os, sys, tempfile, pathlib
+sys.path.insert(0, "lib/linux")
+from serve import secrets_post_response, configured_ids
+
+for var in ("GIT_DIR", "GIT_WORK_TREE"):
+    os.environ.pop(var, None)
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-sec-"))
+keys = root / "api-keys.yml"
+original = "some_block:\n  groq: nested_value\nmistral: real_value\n"
+keys.write_text(original, encoding="utf-8")
+os.environ["AUTOOS_KEYS_FILE"] = str(keys)
+bad = []
+
+have = configured_ids()
+if "groq" in have:
+    bad.append("an indented groq line read as a configured key")
+if "mistral" not in have:
+    bad.append("a column-0 mistral line did not read as configured")
+
+code, body = secrets_post_response({"id": "groq", "value": "test-value-col0"}, "127.0.0.1")
+if code != 200:
+    bad.append("column-0 POST code=%s body=%s" % (code, body))
+text = keys.read_text(encoding="utf-8")
+if "  groq: nested_value\n" not in text:
+    bad.append("the indented groq line was not left byte-identical")
+if text != original + "groq: 'test-value-col0'\n":
+    bad.append("the new key did not land at column 0 at the end of the file")
+print("; ".join(bad))
+PY
+)"
+    if [[ -z "$failures" ]]; then pass; else fail "$failures"; fi
+fi
+
 if it "the browser UI sets secrets only from loopback unless opted in"; then
     failures="$(python3 - 2>&1 <<'PY'
 import os, sys, tempfile, pathlib, hashlib
