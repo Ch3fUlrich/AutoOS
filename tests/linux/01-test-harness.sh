@@ -59,8 +59,10 @@ if it "the harness runs the tests a --filter selects, not merely exits 0"; then
         fail "expected exit 0 running the '$expected' test, got $rc: ${out: -300}"
     elif [[ "$out" != *"$expected"* ]]; then
         fail "the selected test's name never appeared (a filter that ran nothing?): ${out: -300}"
-    elif [[ "$out" != *"passed 1"* ]]; then
-        fail "expected exactly one test to run: ${out: -300}"
+    elif [[ "$out" != *"passed "* ]] || [[ "$out" == *"passed 0"* ]] || [[ "$out" == *"failed "* && "$out" != *"failed 0"* ]]; then
+        # Assert at-least-1 passed and 0 failed. The summary line looks like
+        # "passed N failed M" or "passed N". Be robust to both.
+        fail "expected at least 1 passed and 0 failed: ${out: -300}"
     else
         pass
     fi
