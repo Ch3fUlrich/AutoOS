@@ -10,6 +10,7 @@ wider bind is opt-in and warned about, because this endpoint installs software.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import os
 import secrets
@@ -66,39 +67,278 @@ def component_platforms() -> dict:
     return out
 
 
-def provider_status() -> list:
-    """Which AI providers have a key in configuration/api-keys.yml.
+# ── Logins and keys: one allowlist for the status card AND write-only setting
+#    from the page. `id` is a top-level key in configuration/api-keys.yml (a
+#    git-ignored file); `group` is how the page files the row; `apply` is the
+#    command that re-reads the file after a value changes (empty = nothing to
+#    re-apply from this file). A value never leaves the server: the payloads
+#    carry only presence, and POST /api/secrets cannot read one back out.
+APPLY_OMNIROUTE = "bash configuration/omniroute/apply.sh"
+APPLY_OPENCODE_PASSWORD = (
+    "bash configuration/docker/ai-stack/ai-stack.sh init && "
+    "bash configuration/docker/ai-stack/ai-stack.sh up opencode"
+)
 
-    Values never leave this function: the payload carries only the provider
-    id, a display label and whether a key is present.
+SECRET_KEYS = {
+    "groq": {"name": "Groq", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "google_ai_studio": {"name": "Google AI Studio (Gemini)", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "mistral": {"name": "Mistral", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cloudflare_workers_ai": {"name": "Cloudflare Workers AI", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cohere": {"name": "Cohere", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "hugging_face": {"name": "Hugging Face", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cerebras": {"name": "Cerebras", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "sambanova": {"name": "SambaNova", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "deepseek": {"name": "DeepSeek", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "meta": {"name": "Meta Model API", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "openrouter": {"name": "OpenRouter", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "zen": {"name": "OpenCode Zen", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cheapinference": {"name": "Cheaper Inference (paid partner)", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "free_ai": {"name": "Free.ai", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "omniroute": {"name": "OmniRoute client key", "group": "Router", "apply": APPLY_OMNIROUTE},
+    "omniroute_management": {"name": "OmniRoute management token", "group": "Router", "apply": APPLY_OMNIROUTE},
+    "opencode_password": {"name": "opencode serve password (user opencode)", "group": "Local services", "apply": APPLY_OPENCODE_PASSWORD},
+    "qoder_pat": {"name": "Qoder personal access token", "group": "Coding agents", "apply": ""},
+}
+
+# A template value is not a real key: it must read as "missing" everywhere, or
+# the card claims a machine is configured when it is still waiting for input.
+_PLACEHOLDER_PREFIX = "REPLACE_WITH_"
+
+
+def keys_file() -> Path:
+    """The api-keys.yml the page reads and writes.
+
+    Overridable with AUTOOS_KEYS_FILE (the same knob the shell scripts use) so
+    tests - and only tests - point at a throwaway file instead of the real one.
     """
-    labels = {
-        "groq": "Groq",
-        "google_ai_studio": "Google AI Studio (Gemini)",
-        "mistral": "Mistral",
-        "cloudflare_workers_ai": "Cloudflare Workers AI",
-        "cohere": "Cohere",
-        "hugging_face": "Hugging Face",
-        "cerebras": "Cerebras",
-        "sambanova": "SambaNova",
-        "deepseek": "DeepSeek",
-        "meta": "Meta Model API",
-        "openrouter": "OpenRouter",
-        "zen": "OpenCode Zen",
-        "cheapinference": "Cheaper Inference (paid partner)",
-        "omniroute": "OmniRoute client key",
-    }
+    override = os.environ.get("AUTOOS_KEYS_FILE")
+    if override:
+        return Path(override)
+    return ROOT / "configuration" / "api-keys.yml"
+
+
+def _yaml_scalar(raw: str) -> str:
+    """The unquoted value of a YAML scalar as this server writes it."""
+    return raw.strip().strip("\"'").strip()
+
+
+def configured_ids() -> set:
+    """The allowlisted key ids that hold a real value in the keys file."""
+    path = keys_file()
+    if not path.exists():
+        return set()
     have = set()
-    path = ROOT / "configuration" / "api-keys.yml"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            t = line.strip()
-            if not t or t.startswith("#") or ":" not in t:
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        t = line.strip()
+        if not t or t.startswith("#") or ":" not in t:
+            continue
+        key, _, val = t.partition(":")
+        scalar = _yaml_scalar(val)
+        if scalar and not scalar.upper().startswith(_PLACEHOLDER_PREFIX):
+            have.add(key.strip().lower())
+    return have
+
+
+def provider_status() -> list:
+    """Which allowlisted keys have a value in configuration/api-keys.yml.
+
+    Values never leave this function: the payload carries only the key id, a
+    display label and whether a value is present.
+    """
+    have = configured_ids()
+    return [{"id": k, "name": v["name"], "configured": k in have}
+            for k, v in SECRET_KEYS.items()]
+
+
+def _client_is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _secrets_remote_ok(host: str) -> bool:
+    """Secrets may be set only where the file already lives - the loopback -
+    unless a tunnel-aware operator explicitly opts in."""
+    return (os.environ.get("AUTOOS_SERVE_REMOTE_SECRETS") == "1"
+            or _client_is_loopback(host))
+
+
+def _git_ignore_refusal(path: Path) -> str | None:
+    """The 409 reason when `path` is in a git work tree and not git-ignored.
+
+    0 = ignored (safe), 1 = in a work tree but NOT ignored (refuse), 128 =
+    not a work tree at all (safe: nothing here is tracked). Run from the
+    file's own directory so git discovers the work tree the file belongs to,
+    not this checkout's.
+    """
+    try:
+        res = subprocess.run(["git", "check-ignore", "-q", "--", str(path)],
+                             cwd=str(path.parent), capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        return None  # no git, or no parent directory: nothing to protect
+    if res.returncode == 1:
+        return f"{path} is not git-ignored; refusing to write a secret there"
+    return None
+
+
+def secrets_payload(client_host: str = "127.0.0.1") -> dict:
+    """GET /api/secrets body: set/missing per key, an apply hint, no values."""
+    have = configured_ids()
+    refusal = _git_ignore_refusal(keys_file())
+    return {
+        "secrets": [
+            {"id": k, "name": v["name"], "group": v["group"],
+             "configured": k in have, "apply": v["apply"]}
+            for k, v in SECRET_KEYS.items()
+        ],
+        "file": "configuration/api-keys.yml",
+        "writable": refusal is None and _secrets_remote_ok(client_host),
+    }
+
+_SECRET_MAX = 4096
+
+
+def _secret_value_error(value) -> str | None:
+    """Why `value` may not be written, or None when it is acceptable.
+
+    The returned messages never include the value itself.
+    """
+    if not isinstance(value, str):
+        return "value must be a string"
+    if not 1 <= len(value) <= _SECRET_MAX:
+        return f"value must be 1..{_SECRET_MAX} characters"
+    if "\r" in value or "\n" in value or "\0" in value:
+        return "value must not contain a newline or NUL"
+    if value != value.strip():
+        return "value must not start or end with whitespace"
+    if value.startswith(_PLACEHOLDER_PREFIX):
+        return "value still looks like the placeholder it replaces"
+    return None
+
+
+def _split_trailing_comment(after: str) -> tuple:
+    """Split " 'value' # comment" into (" 'value' ", "# comment").
+
+    The scanner matters: a value may itself contain " #" inside its quotes,
+    and a naive split would mistake that for the start of a comment.
+    """
+    in_quote = False
+    i, n = 0, len(after)
+    while i < n:
+        ch = after[i]
+        if ch == "'":
+            if in_quote and i + 1 < n and after[i + 1] == "'":
+                i += 2
                 continue
-            key, _, val = t.partition(":")
-            if val.strip().strip("\"'"):
-                have.add(key.strip().lower())
-    return [{"id": k, "name": v, "configured": k in have} for k, v in labels.items()]
+            in_quote = not in_quote
+        elif ch == "#" and not in_quote and i > 0 and after[i - 1] in " \t":
+            return after[:i], after[i:]
+        i += 1
+    return after, ""
+
+
+def _quote_yaml(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def write_secret(key_id: str, value: str) -> tuple:
+    """Replace or append one `key_id: '<value>'` line, returning (code, body).
+
+    Write-only by construction: the value goes into the file and is never
+    returned, logged or echoed. An identical value is a no-op with no backup.
+    """
+    path = keys_file()
+    raw = path.read_bytes() if path.exists() else None
+    original = raw.decode("utf-8-sig") if raw is not None else None
+    lines = original.splitlines(keepends=True) if original is not None else []
+
+    new_text = None
+    for i, line in enumerate(lines):
+        core = line.rstrip("\r\n")
+        stripped = core.strip()
+        if not stripped or stripped.startswith("#") or ":" not in core:
+            continue
+        head, _, after = core.partition(":")
+        if head.strip() != key_id:
+            continue
+        value_part, comment = _split_trailing_comment(after)
+        if _yaml_scalar(value_part) == value:
+            return 200, {"ok": True, "id": key_id, "unchanged": True}
+        new_line = head.rstrip() + ": " + _quote_yaml(value)
+        if comment:
+            new_line += " " + comment
+        lines[i] = new_line + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
+        new_text = "".join(lines)
+        break
+
+    if new_text is None:
+        text = original or ""
+        if text and not text.endswith("\n"):
+            text += "\n"
+        new_text = text + key_id + ": " + _quote_yaml(value) + "\n"
+
+    if raw is not None:
+        # Same stamp/collision scheme as _post_config: the undo listing only
+        # ranks \d{8}-?\d{6} names, and a name taken inside one second gets -1.
+        base = path.with_name(path.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
+        backup = base
+        n = 0
+        while backup.exists() or backup.is_symlink():
+            n += 1
+            backup = base.with_name(f"{base.name}-{n}")
+        fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+
+    tmp = path.with_name(f"{path.name}.autoos-tmp-{os.getpid()}-{secrets.token_hex(4)}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(new_text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    return 200, {"ok": True, "id": key_id, "configured": True,
+                 "apply": SECRET_KEYS[key_id]["apply"]}
+
+
+def secrets_post_response(body, client_host: str) -> tuple:
+    """Validate and apply a POST /api/secrets body. Returns (code, payload).
+
+    Module-level, not a Handler method, so tests can call it with a synthetic
+    client_host: Handler helpers all take `self`, and classify() /
+    usb_create_response set the same precedent.
+    """
+    if not isinstance(body, dict):
+        return 400, {"error": "payload must be a JSON object"}
+    key_id = body.get("id")
+    if not isinstance(key_id, str) or key_id not in SECRET_KEYS:
+        return 400, {"error": "unknown key id", "allowed": list(SECRET_KEYS)}
+    value = body.get("value")
+    problem = _secret_value_error(value)
+    if problem:
+        return 400, {"error": problem}
+    if not _secrets_remote_ok(client_host):
+        return 403, {"error": "secrets can be set only from this machine (loopback); "
+                              "use an SSH tunnel"}
+    refusal = _git_ignore_refusal(keys_file())
+    if refusal:
+        return 409, {"error": refusal}
+    try:
+        return write_secret(key_id, value)
+    except Exception as exc:
+        detail = str(exc)
+        if value:
+            # Belt-and-suspenders: a value must never reach a response body,
+            # even if some lower layer put it in the exception text.
+            detail = detail.replace(value, "***")
+        return 500, {"error": f"failed to save secret: {detail}"}
 
 
 # ── AI services: live status + the setup actions that already exist ────────
@@ -719,6 +959,14 @@ class Handler(BaseHTTPRequestHandler):
         # first version re-recorded the machine's sessions on every page load.
         return self._json(200, self._claude_state())
 
+    def _handle_get_secrets(self):
+        # No values: set/missing per key, plus the apply hint and whether a
+        # write is possible from here. The page renders an input per row.
+        try:
+            return self._json(200, secrets_payload(self.client_address[0]))
+        except Exception as exc:
+            return self._json(500, {"error": str(exc)})
+
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
@@ -735,6 +983,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/config": self._handle_get_config,
             "/api/claude/sessions": self._handle_get_claude_sessions,
             "/api/services": lambda: self._json(200, {"services": service_status()}),
+            "/api/secrets": self._handle_get_secrets,
         }
 
         if u.path == "/api/log":
@@ -769,6 +1018,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_usb_create()
         if u.path == "/api/install":
             return self._post_install()
+        if u.path == "/api/secrets":
+            return self._post_secrets()
         if u.path == "/api/services/action":
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -824,6 +1075,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "saved": str(cfg_file)})
         except Exception as exc:
             return self._json(500, {"error": f"failed to save config: {exc}"})
+
+    def _post_secrets(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "payload must be JSON"})
+        code, payload = secrets_post_response(body, self.client_address[0])
+        return self._json(code, payload)
 
     def _post_install(self):
         length = int(self.headers.get("Content-Length") or 0)
