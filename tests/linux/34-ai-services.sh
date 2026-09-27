@@ -1391,10 +1391,10 @@ fi
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
 # alone freed nothing and t3-driver/t4-rag still never fit).
-# Re-pinned 2026-09-27 (PROVPIN): the held AutoOS profiles must be ids the
-# spec still ranks. omniroute-spark-1.3-contributor is omitted now, so it went
-# through the retired-delete pass instead of the cap eviction this test is
-# about; the two free-only litellm tiers are the spec's last two ranks.
+# These seeds are the spec's two lowest ranks, which are the litellm
+# free-only twins regardless of which gateway route is servable: a tier that
+# fails closed simply stops being ranked, so this test needed no re-pin for
+# MUSEAPI 2026-09-27 (the omniroute spark tier re-entered the spec above them).
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
     printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/t3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
