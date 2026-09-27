@@ -2,7 +2,7 @@
 
 ```bash
 AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh  # Linux / macOS (full run, opt in)
-bash tests/run-tests.sh --wsl           # same suite, forced through WSL2 from Windows
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh --wsl   # same suite, forced through WSL2 from Windows
 bash tests/run-tests.sh --filter state  # only matching test names
 ```
 

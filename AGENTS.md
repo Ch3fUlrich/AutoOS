@@ -125,7 +125,7 @@ That is the acceptance bar, and it is the single most common source of defects h
 ```bash
 powershell -File tests/run-tests.ps1   # Windows lib + catalog + end-to-end dry runs
 AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh   # Linux lib + catalog + end-to-end dry runs
-bash tests/run-tests.sh --wsl          # same, forced through WSL2 from Windows
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh --wsl   # same, forced through WSL2 from Windows
 bash tests/run-tests.sh --filter catalog
 ```
 

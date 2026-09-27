@@ -5,7 +5,7 @@
 # machine where nothing is installed yet, so the tests must not need bats.
 #
 #   AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh   full local run (opt in)
-#   bash tests/run-tests.sh --wsl                 re-run inside WSL2 (from Windows)
+#   AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh --wsl   full run inside WSL2 (from Windows; the opt-in is passed through)
 #   bash tests/run-tests.sh --filter catalog      run matching tests only
 #   bash tests/run-tests.sh --filter usb,catalog  comma = OR (shard union)
 #
@@ -38,7 +38,7 @@ for arg in "$@"; do
     case "$arg" in
         --wsl)
             wslpath_root="$(wslpath -a "$ROOT" 2>/dev/null || echo "$ROOT")"
-            exec wsl.exe -- bash "$wslpath_root/tests/run-tests.sh"
+            exec wsl.exe -- env AUTOOS_FULL_SUITE="${AUTOOS_FULL_SUITE:-}" bash "$wslpath_root/tests/run-tests.sh"
             ;;
         --filter) shift; FILTER="${1:-}" ;;
         --filter=*) FILTER="${arg#--filter=}" ;;
