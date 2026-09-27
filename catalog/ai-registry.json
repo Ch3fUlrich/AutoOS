@@ -2006,7 +2006,7 @@
       ]
     },
     "meta_api": {
-      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1 (Bearer). Contributor tier: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor); context 1,048,576 in / 131,072 out. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Registers as an OpenAI-compatible endpoint (litellm_prefix openai + its own api_base) exactly like free_ai, so LiteLLM never falls back to api.openai.com. KEY NAME: providers.<id> is normally the api-keys.yml name (that is what tools/mirror-litellm-env.py and apply.sh look up); Meta's key already lives under the name 'meta' (providers.meta, the direct opencode-only record), so this entry carries key_name 'meta' and the two share one vendor key rather than asking the operator for a second one. omniroute_id 'meta-api' is the gateway connection id apply registers; model_prefix 'meta' makes gateway_ref() emit meta/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor. Unlike free-ai, 'meta-api' is NOT a built-in OmniRoute connection: the first apply against a live gateway creates it, so verify the registration there before trusting a meta_api leg.",
+      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1 (Bearer). Contributor tier: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor); context 1,048,576 in / 131,072 out. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Registers as an OpenAI-compatible endpoint (litellm_prefix openai + its own api_base) exactly like free_ai, so LiteLLM never falls back to api.openai.com. KEY NAME: providers.<id> is normally the api-keys.yml name (that is what tools/mirror-litellm-env.py and apply.sh look up); Meta's key already lives under the name 'meta' (providers.meta, the direct opencode-only record), so this entry carries key_name 'meta' and the two share one vendor key rather than asking the operator for a second one. omniroute_id 'meta-api' is the gateway connection id apply registers; model_prefix 'meta-api' - the same string, as free_ai's 'free-ai' does - makes gateway_ref() emit meta-api/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor. It is NOT 'meta': that is another provider's key (the opencode-only direct record), and a combos leg prefixed with a provider name resolves its LiteLLM transport through that name, so borrowing it made tools/sync-router-tiers.py --combos render the leg with no api_base. Unlike free-ai, 'meta-api' is NOT a built-in OmniRoute connection: the first apply against a live gateway creates it, so verify the registration there before trusting a meta_api leg.",
       "api_base": "https://api.meta.ai/v1",
       "id": "meta_api",
       "key_name": "meta",
@@ -2019,7 +2019,7 @@
           "tpm": 3000000
         }
       },
-      "model_prefix": "meta",
+      "model_prefix": "meta-api",
       "omniroute_id": "meta-api",
       "provider_data": null,
       "tier": "paid",

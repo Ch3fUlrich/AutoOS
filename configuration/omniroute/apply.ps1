@@ -165,8 +165,22 @@ function Get-AutoOSProviderMap {
     foreach ($prop in $providers.PSObject.Properties) {
         $entry = $prop.Value
         if (-not $entry.PSObject.Properties['omniroute_id'] -or $null -eq $entry.omniroute_id) { continue }
-        # api-keys.yml keys are lower-cased when read above, so match that.
+        # The api-keys.yml entry the value is read from: the provider's own
+        # name, unless key_name shares another provider's key (MUSEAPI step 4:
+        # meta_api reads the meta key). Asking api-keys.yml for a meta_api
+        # nobody has would skip the connection. Keys are lower-cased when read
+        # above, so match that.
         $keyName = $prop.Name.ToLowerInvariant()
+        if ($entry.PSObject.Properties['key_name'] -and $entry.key_name) {
+            $keyName = ([string]$entry.key_name).ToLowerInvariant()
+        }
+        if ($map.Contains($keyName) -and $map[$keyName] -ne $entry.omniroute_id) {
+            # Two connections from one api-keys.yml name: the ordered map keys
+            # the name once, so the second would be dropped without a word.
+            # apply.sh's pair list cannot lose it; this keeps the two scripts'
+            # registries honest in the same way.
+            throw "api-keys.yml name '$keyName' is claimed by both $($map[$keyName]) and $($entry.omniroute_id) - give one of them its own key entry"
+        }
         $legs = $legsByProvider[$prop.Name]
         # A provider with no leg anywhere is not "every leg unavailable" (it
         # is simply unused elsewhere) - only a used provider whose every leg

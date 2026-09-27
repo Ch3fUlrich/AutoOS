@@ -264,7 +264,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["gemini-3.8-flash", "opus-4-6", "t1-orchestrator", "t1-orchestrator-free-only", "t2-orchestrator", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "spark-1.3-contributor"]:
+if names != ["gemini-3.8-flash", "opus-4-6", "spark-1.3-contributor", "t1-orchestrator", "t1-orchestrator-free-only", "t1-orchestrator-paid", "t2-orchestrator", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
@@ -285,14 +285,16 @@ for c in d["combos"]:
             problems.append(c["name"] + ":" + m)
 by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
-# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only now carry
-# a free gemini/gemini-3.8-flash fallback leg, so they are servable again.
-# t1-orchestrator-clean and deepseek-v4.1-flash still
-# fail closed (omitted, never a combo): t1-orchestrator-clean since DSMAX 2026-09-27 (OpenRouter off),
-# deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ.
-# spark-1.3-contributor is NOW SERVABLE via meta_api (MUSEAPI 2026-09-27).
-# No 1M context promise survives t1-orchestrator-clean/deepseek-v4.1-flash, and no combo
-# may carry their legs.
+# T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only carry a free
+# gemini/gemini-3.8-flash fallback leg again, so they are servable.
+# MUSEAPI 2026-09-27: spark-1.3-contributor and t1-orchestrator-paid are servable
+# too — the meta_api contributor leg answers, so both render a combo (and t1-paid
+# is no longer one of the legless LiteLLM-only groups).
+# t1-orchestrator-clean and deepseek-v4.1-flash still fail closed (omitted, never
+# a combo): t1-orchestrator-clean since DSMAX 2026-09-27 (Zen client-bound,
+# OpenRouter off), deepseek-v4.1-flash since the deepseek 402 of
+# 2026-09-27T16:4xZ. No 1M context promise survives those two, and no combo may
+# carry their legs.
 for gone in ("t1-orchestrator-clean", "deepseek-v4.1-flash"):
     if gone in by:
         problems.append(gone + "-should-be-omitted")
@@ -302,12 +304,12 @@ for gone in ("t1-orchestrator-clean", "deepseek-v4.1-flash"):
 for kept in ("t1-orchestrator", "t1-orchestrator-free-only", "spark-1.3-contributor"):
     if kept not in by:
         problems.append(kept + "-should-be-in-combos")
-# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry
-# a plain spark leg (non-contributor).
+# Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry a
+# plain spark leg. The contributor variant is a different model id and is what
+# the meta_api legs serve (MUSEAPI 2026-09-27).
 import re as _re2
 if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
     problems.append("plain-spark-blocked")
-# spark-1.3-contributor is now allowed (MUSEAPI 2026-09-27): meta_api paid leg makes it servable
 # *-clean = paid legs only: no free pool may train on private prompts.
 # Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
 # mistral-code + qwen free pools. -contributor (trains by contract) is

@@ -34,7 +34,7 @@ combos are priority chains: try in order, hop on 429/error, free legs first,
 paid legs from the providers whose credit tiers are sanctioned
 (cerebras, sambanova, deepseek, openrouter, zen) after them. MUSEAPI
 2026-09-27 changed Meta: its contributor model now bills through the gateway
-as the `meta_api` provider (`meta/muse-spark-1.3-contributor`) and heads t1;
+as the `meta_api` provider (`meta-api/muse-spark-1.3-contributor`) and heads t1;
 the direct opencode `meta` provider is still how the plain `muse-spark` model
 answers. `meta_api` trains on prompts, so it is never a `*-clean` leg.
 

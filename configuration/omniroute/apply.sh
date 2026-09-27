@@ -154,8 +154,13 @@ for name, entry in providers.items():
     data = entry.get("provider_data")
     # One compact JSON string per provider: the exact argv value the CLI wants.
     data_json = json.dumps(data, separators=(",", ":")) if data else ""
+    # The api-keys.yml entry the value is read from: the provider's own name,
+    # unless key_name shares another provider's key (MUSEAPI step 4: meta_api
+    # reads the meta key). Asking api-keys.yml for a meta_api nobody has would
+    # print "no key in api-keys.yml" and never register the connection.
     # api-keys.yml keys are lower-cased when parsed above, so match that.
-    print("ROW\t%s\t%s\t%s" % (name.lower(), provider_id, data_json))
+    key_name = (entry.get("key_name") or name).lower()
+    print("ROW\t%s\t%s\t%s" % (key_name, provider_id, data_json))
 PY
 )" || { echo "apply.sh: cannot read $REGISTRY_FILE" >&2; exit 1; }
 PROVIDER_MAP=()

@@ -48,15 +48,33 @@ def load_key_map(path=None) -> dict:
     """api-keys.yml name -> litellm .env name, from catalog/ai-registry.json's
     `providers` section (tools/registry.py's provider_field_map()).
 
-    Keys keep the registry's spelling - api-keys.yml spells SambaNova with a
-    capital S/N and this lookup is case-sensitive. Value order is the order
-    lines are emitted into .env, so it follows the registry exactly. A
-    provider with no litellm_env (an OAuth/subscription bridge - `cc`,
-    `antigravity`) is skipped: it never had an api-keys.yml entry either.
+    The KEY is the name the value is read from in api-keys.yml, which is the
+    provider id except when the entry carries `key_name` (MUSEAPI step 4:
+    `meta_api` reuses the `meta` key). Keyed by provider id, `meta_api` would
+    look up a 'meta_api' nobody has and emit a second META_API_KEY= line —
+    a REPLACE_WITH_ placeholder that the env parser's last-line-wins rule puts
+    over the real key. Two entries that resolve to the same name and the same
+    env var collapse into that one line; the same name with two different env
+    vars is refused rather than silently dropping one key.
+
+    Registry order is kept, so the lines' order in .env is unchanged. Names
+    keep the registry's spelling - api-keys.yml spells SambaNova with a capital
+    S/N and this lookup is case-sensitive. A provider with no litellm_env
+    (an OAuth/subscription bridge - `cc`, `antigravity`) is skipped: it never
+    had an api-keys.yml entry either.
     """
     registry = load_registry_tool()
     doc = registry.load(path or DEFAULT_REGISTRY_PATH)
-    return registry.provider_field_map(doc["providers"], "litellm_env")
+    providers = doc["providers"]
+    key_map = {}
+    for pid, env in registry.provider_field_map(providers, "litellm_env").items():
+        src = (providers[pid].get("key_name") or pid)
+        if src in key_map and key_map[src] != env:
+            raise ValueError(
+                "api-keys.yml name %r would feed both %s and %s - give one of "
+                "them its own key entry" % (src, key_map[src], env))
+        key_map[src] = env
+    return key_map
 
 
 # api-keys.yml name -> litellm .env name.

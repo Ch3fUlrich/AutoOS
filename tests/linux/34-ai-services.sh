@@ -239,12 +239,20 @@ _prune_sandbox() {
     printf 'ok\n' >"$d/gw/api/health"
     printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
     : >"$d/calls.log"
+    : >"$d/providers.txt"
     cat >"$d/bin/omniroute" <<'SH'
 #!/usr/bin/env bash
 d="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ "${1:-} ${2:-}" == "combo list" ]]; then
     printf '%s\n' "$*" >>"$d/listed"
     cat "$d/list.txt"
+    exit 0
+fi
+# apply.sh reads the live connection list before registering anything (the
+# "already registered" branch). The store is providers.txt, in the real CLI's
+# shape: two-space indent, hex id, name.
+if [[ "${1:-} ${2:-}" == "providers list" ]]; then
+    cat "$d/providers.txt"
     exit 0
 fi
 printf '%s\n' "$*" >>"$d/calls.log"
@@ -380,6 +388,45 @@ if it "apply prune: a down gateway is never listed and nothing is pruned"; then
     [[ "$out" == *"Prune:"*"gateway down - the store is not read, nothing pruned"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
+fi
+
+# ─── MUSEAPI step 4: a provider that reads another's api-keys.yml key ───────
+# providers.meta_api has no key entry of its own — the registry says key_name:
+# meta, because the user's single Meta key serves both the direct opencode
+# provider and the Model API gateway connection. Two failures follow if apply
+# ignores that: it looks for a 'meta_api' nobody has and prints "no key in
+# api-keys.yml" (the connection is never registered), and a run against a store
+# that already holds meta-api must not add it a second time.
+if it "svc: apply registers meta_api from the shared 'meta' key, not a phantom 'meta_api'"; then
+    keys="$(mktemp)"
+    printf 'meta: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"  - meta-api: would register (key from meta)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"meta-api: no key in api-keys.yml"* ]] && { ok=0; echo "looked for a 'meta_api' key" >&2; }
+    if (( ok )); then pass; else fail "apply did not read the shared 'meta' key for meta-api"; fi
+fi
+
+if it "svc: apply registers meta-api once and reports it as already registered on the next run"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t2-worker
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    grep -qx 'providers add meta-api --credential-env AUTOOS_KEY_META --yes' "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add meta-api' "$d/calls.log")]" >&2; }
+    # The second run: the same store, now holding the connection. The call log
+    # is reset so "no add" below means this run added nothing, not the last one.
+    : >"$d/calls.log"
+    printf '  a1b2c3d4 meta-api\n' >"$d/providers.txt"
+    out="$(_prune_apply "$d")"
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "second run: $out" >&2; }
+    grep -q '^providers add meta-api' "$d/calls.log" && { ok=0; echo "a run re-added a live connection" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "meta-api registration is not idempotent"; fi
 fi
 
 # ─── apply.sh --drift: live combos vs combos.json ───────────────────────────

@@ -15,7 +15,7 @@
     },
     "providers": {
       "type": "object",
-      "description": "One entry per upstream provider (spec 3.1). Keyed by provider id (the api-keys.yml name, e.g. 'google_ai_studio'; 'antigravity' and 'cc' are OAuth/subscription bridges with no api-keys.yml entry).",
+      "description": "One entry per upstream provider (spec 3.1). Keyed by provider id (normally also its api-keys.yml name, e.g. 'google_ai_studio'; 'antigravity' and 'cc' are OAuth/subscription bridges with no api-keys.yml entry; a provider that reuses another's key says so with key_name).",
       "additionalProperties": { "$ref": "#/$defs/provider" }
     },
     "models": {
@@ -102,6 +102,11 @@
       "properties": {
         "id": { "type": "string" },
         "omniroute_id": { "type": ["string", "null"] },
+        "key_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Additive field, not in spec 3.1 (brief MUSEAPI, 2026-09-27): the api-keys.yml entry this provider's key is read from, when it is not an entry named after the provider id. meta_api uses the user's existing 'meta' key (one Meta credential, two endpoints: the direct opencode provider and the OpenAI-compatible Model API gateway), so asking api-keys.yml for 'meta_api' would find nothing and skip the connection. Consumers: apply.sh/apply.ps1 (registration), tools/mirror-litellm-env.py (litellm/.env), tests/helpers/check-provider-registry.py (the sharing rule). It must name another provider's api-keys.yml name and two registered providers must never claim one name."
+        },
         "litellm_env": { "type": ["string", "null"] },
         "litellm_prefix": { "type": ["string", "null"] },
         "model_prefix": {

@@ -1400,7 +1400,12 @@ class MetaApiProviderTests(unittest.TestCase):
         provider = self.reg["providers"]["meta_api"]
         self.assertEqual(provider["api_base"], "https://api.meta.ai/v1")
         self.assertEqual(provider["omniroute_id"], "meta-api")
-        self.assertEqual(provider["model_prefix"], "meta")
+        # Not "meta": that is another provider's registry key (the direct
+        # opencode-only record), and a combos leg's prefix is looked up by name
+        # first, so borrowing it gave the leg that record's (absent) LiteLLM
+        # transport. The gateway prefix is the connection id, as free_ai's is
+        # "free-ai".
+        self.assertEqual(provider["model_prefix"], "meta-api")
         self.assertEqual(provider["litellm_prefix"], "openai")
         self.assertEqual(provider["litellm_env"], "META_API_KEY")
         self.assertEqual(provider["tier"], "paid")
@@ -1425,8 +1430,10 @@ class MetaApiProviderTests(unittest.TestCase):
                                 "%s repeats its own name as key_name" % name)
 
     def test_gateway_ref_translates_through_the_model_prefix(self):
+        # The combos.json spelling is the connection apply registers, so a
+        # reader of combos.json can resolve the leg back to this provider.
         self.assertEqual(registry.gateway_ref(self.LEG, self.reg),
-                         "meta/muse-spark-1.3-contributor")
+                         "meta-api/muse-spark-1.3-contributor")
 
     def test_limits_are_the_published_contributor_ceilings(self):
         entry = self.reg["providers"]["meta_api"]["limits"]["muse-spark-1.3-contributor"]
