@@ -2562,6 +2562,7 @@ class IsolateContainmentTests(unittest.TestCase):
     # A worker that merely READS or prints text containing a marker - a brief
     # quoting a past 429, a lesson - then finishes normally must not exit 8.
 
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_marker_quoted_mid_run_is_not_a_provider_stop(self):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state,
