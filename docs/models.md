@@ -32,8 +32,11 @@ Free models are rarely autonomous-grade, so tiers map to **roles**, not just
 models — one smart driver + one fast looper + provider-of-last-resort. The
 combos are priority chains: try in order, hop on 429/error, free legs first,
 paid legs from the providers whose credit tiers are sanctioned
-(cerebras, sambanova, deepseek, openrouter, zen) after them. Meta bills only
-through the direct opencode `meta` provider, never through the gateway.
+(cerebras, sambanova, deepseek, openrouter, zen) after them. MUSEAPI
+2026-09-27 changed Meta: its contributor model now bills through the gateway
+as the `meta_api` provider (`meta-api/muse-spark-1.3-contributor`) and heads t1;
+the direct opencode `meta` provider is still how the plain `muse-spark` model
+answers. `meta_api` trains on prompts, so it is never a `*-clean` leg.
 
 <!-- AUTOOS-MANAGED-START models-doc -->
 _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3 tools/registry.py render models-doc --check` after a registry change; if it fails, run `python3 tools/registry.py render models-doc` and replace the text between the two `AUTOOS-MANAGED-START/END models-doc` markers below with its output._
@@ -50,17 +53,17 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
-| `spark-1.3-contributor` | cheap | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
-| `t1-orchestrator` | cheap | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → gemini `gemini-3.8-flash` |
+| `spark-1.3-contributor` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `t1-orchestrator` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → gemini `gemini-3.8-flash` |
 | `t1-orchestrator-clean` | cheap | 1M | ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
 | `t1-orchestrator-free-only` | free | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` |
-| `t1-orchestrator-paid` | cheap | 1,000,000 | (none) |
+| `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
 | `t2-worker-clean` | mid | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
-| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
 | `t3-driver-clean` | cheap | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t3-driver-free-only` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → free_ai `qwen7b` |
 | `t3-driver-paid` | cheap | 131,072 | (none) |
@@ -138,13 +141,17 @@ generated table above already shows it):
 A tier combo is a *role*; sometimes a caller pins one model. Each pinned model
 degrades along its own chain, cheapest leg first, exactly:
 
-- `spark-1.3-contributor`: **zen (client-bound) → openrouter paid**, and no
-  longer servable through the gateway. The Zen contributor leg answers only
-  the opencode client (403 for the gateway), and the OpenRouter paid fallback
-  is now off (DSMAX 2026-09-27). The combo is omitted from `combos.json`, and
-  `muse-spark-1.3-contributor` is available as the free Zen leg through the
-  opencode client only. When it last ran it was ack-proven 2026-09-22 incl. the
-  `#low` / `#medium` / `#high` effort variants.
+- `spark-1.3-contributor`: **meta_api direct paid → zen (client-bound) →
+  openrouter paid**, cheapest-first. MUSEAPI 2026-09-27 put the direct Meta
+  Model API leg in front: it is the one leg the gateway can address, so the
+  combo is back in `combos.json` and the route is servable again. The Zen
+  contributor leg still answers only the opencode client (403 for the gateway)
+  and the OpenRouter paid fallback stays off (DSMAX 2026-09-27). The effort
+  rungs render on the surfaces that carry a ladder — opencode `variants`, IDE
+  `effort_ladder` — while a gateway combo has no per-effort alias at all, and
+  the direct Meta ladder has no `max` rung (the vendor rejects it; OpenRouter
+  advertises `max` on its own twin). When it last ran it was ack-proven
+  2026-09-22 incl. the `#low` / `#medium` / `#high` effort variants.
 - `gemini-3.8-flash`: **gemini free (until throttled) → openrouter paid twin**.
   The head rides the Google AI Studio free pool; the Google-scoped OpenRouter
   twin (the bare spelling 400s — probe-falsified) is now off (DSMAX
@@ -385,9 +392,9 @@ The browser UI shows the same state without ever showing a key value:
   only bites hand-rolled curl probes.
 - **Zen paid legs return 402** ("requires an opencode API key"): top up the
   Zen balance / finish key setup in the Zen console. The free promo leg
-  (`muse-spark-1.3-contributor-free`) currently answers 500 at peak — the
-  priority chain hops past both to OpenRouter, which is why `t1-orchestrator` still
-  works today.
+  (`muse-spark-1.3-contributor-free`) currently answers 500 at peak and the
+  OpenRouter twin is off, so as of MUSEAPI 2026-09-27 `t1-orchestrator` works
+  because its head leg is `meta_api` — direct Meta, which answers.
 - **"All credentials for model gemini-3.7-flash are cooling down" inside
   opencode is a HAND-PICKED model, not a combo.** Corrected diagnosis
   2026-09-22 (the first pass wrongly called these synthetic self-tests — the

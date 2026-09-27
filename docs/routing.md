@@ -52,6 +52,10 @@ are never printed, only key names.
 Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--json` for machine-readable).
 It reads the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key from the ai-stack
 config dir. Heartbeats print `usage --since 1h --by provider,lane`.
+`--cost` adds estimated `cost_in`/`cost_out` (USD) per group, priced from the
+registry's per-token `price_in`/`price_out`; the JSON names its source and how
+many models it had no price for, so a 0 row reads as free or unknown. Off by
+default — `--json` readers get the same shape as before.
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
