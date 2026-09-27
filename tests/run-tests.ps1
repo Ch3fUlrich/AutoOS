@@ -1786,41 +1786,52 @@ function Start-AutoOSTestHttpServer {
     # inside a background job: the first version launched python via
     # Start-Process and never got a port back on the windows-latest CI
     # runner. No python, no HttpListener URL ACL, nothing to install.
-    # Returns @{ Job; Port }; the caller must Stop-AutoOSTestHttpServer it.
+    # Returns @{ Job; Port; StopFile }; the caller must Stop-AutoOSTestHttpServer it.
     param([Parameter(Mandatory)][string]$Directory)
     $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
-    $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
-        param($dir, $portFile)
+    # The stop signal for the job's accept loop (see Stop-AutoOSTestHttpServer):
+    # a path only, created by Stop, so a Start without a Stop leaves nothing.
+    $stopFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
+    $job = Start-Job -ArgumentList $Directory, $portFile, $stopFile -ScriptBlock {
+        param($dir, $portFile, $stopFile)
         $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
         $listener.Start()
         [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
-        while ($true) {
-            $client = $listener.AcceptTcpClient()
-            try {
-                $stream = $client.GetStream()
-                $reader = [IO.StreamReader]::new($stream)
-                $request = $reader.ReadLine()
-                while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
-                $status = '404 Not Found'; $body = [byte[]]::new(0)
-                if ($request -match '^GET\s+(\S+)') {
-                    $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
-                    $full = Join-Path $dir $path
-                    if ((Test-Path -LiteralPath $full -PathType Container)) { $full = Join-Path $full 'index.html' }
-                    if (Test-Path -LiteralPath $full -PathType Leaf) {
-                        $body = [IO.File]::ReadAllBytes($full); $status = '200 OK'
+        try {
+            # Poll, never block: a thread parked in AcceptTcpClient cannot be
+            # stopped promptly - Remove-Job -Force on it took exactly 120 s
+            # (measured 2026-09-27), which the Windows CI suite paid once per
+            # server lifetime. Pending() + a 50 ms sleep keeps request latency
+            # negligible while the loop notices the stop file at once.
+            while (-not (Test-Path -LiteralPath $stopFile)) {
+                if (-not $listener.Pending()) { Start-Sleep -Milliseconds 50; continue }
+                $client = $listener.AcceptTcpClient()
+                try {
+                    $stream = $client.GetStream()
+                    $reader = [IO.StreamReader]::new($stream)
+                    $request = $reader.ReadLine()
+                    while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                    $status = '404 Not Found'; $body = [byte[]]::new(0)
+                    if ($request -match '^GET\s+(\S+)') {
+                        $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
+                        $full = Join-Path $dir $path
+                        if ((Test-Path -LiteralPath $full -PathType Container)) { $full = Join-Path $full 'index.html' }
+                        if (Test-Path -LiteralPath $full -PathType Leaf) {
+                            $body = [IO.File]::ReadAllBytes($full); $status = '200 OK'
+                        }
                     }
+                    $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.0 $status`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length)
+                    if ($body.Length) { $stream.Write($body, 0, $body.Length) }
+                    $stream.Flush()
+                } catch {
+                    # A client that hangs up mid-request is not the server's problem.
+                    Write-Verbose "test http server: $($_.Exception.Message)"
+                } finally {
+                    $client.Close()
                 }
-                $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.0 $status`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
-                $stream.Write($head, 0, $head.Length)
-                if ($body.Length) { $stream.Write($body, 0, $body.Length) }
-                $stream.Flush()
-            } catch {
-                # A client that hangs up mid-request is not the server's problem.
-                Write-Verbose "test http server: $($_.Exception.Message)"
-            } finally {
-                $client.Close()
             }
-        }
+        } finally { $listener.Stop() }
     }
     $port = $null
     for ($i = 0; $i -lt 100; $i++) {
@@ -1836,12 +1847,48 @@ function Start-AutoOSTestHttpServer {
         Remove-Job $job -Force -ErrorAction SilentlyContinue
         throw "test http server did not report a port (job state $($job.State)) $why"
     }
-    @{ Job = $job; Port = $port }
+    @{ Job = $job; Port = $port; StopFile = $stopFile }
 }
 
 function Stop-AutoOSTestHttpServer {
+    # Signals the job's accept loop through its stop file, waits (bounded)
+    # for the loop to exit, then reaps the job: the loop polls Pending()
+    # and checks the file every 50 ms, so it is gone within a fraction of
+    # a second and Remove-Job never meets the blocked AcceptTcpClient that
+    # cost exactly 120 s per server before.
     param($Server)
-    if ($Server -and $Server.Job) { Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue }
+    if ($Server -and $Server.Job) {
+        if ($Server.StopFile) {
+            try { [IO.File]::WriteAllText($Server.StopFile, 'stop') } catch {}
+            for ($i = 0; $i -lt 100 -and $Server.Job.State -eq 'Running'; $i++) {
+                Start-Sleep -Milliseconds 100
+            }
+            Remove-Item -LiteralPath $Server.StopFile -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'test http server stops promptly instead of hanging the suite for 120 s (server stop)' {
+    # A job blocked in AcceptTcpClient cannot be stopped promptly:
+    # Remove-Job -Force alone took exactly 120 s per server (measured
+    # 2026-09-27 on Linux pwsh; the Windows CI suite paid ~120 s for each
+    # of its 10 server lifetimes, 1425 s in total). The server loop must
+    # stay stoppable, so stopping one must stay far below that hang.
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dir 'probe.txt'), "ok`n")
+    $srv = Start-AutoOSTestHttpServer -Directory $dir
+    try {
+        $code = (Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/probe.txt" -UseBasicParsing -TimeoutSec 5).StatusCode
+        Assert-Equal $code 200
+        $t = Measure-Command { Stop-AutoOSTestHttpServer $srv }
+        $srv = $null
+        Assert-True ($t.TotalSeconds -lt 30) ("stop took {0}s" -f [int]$t.TotalSeconds)
+    } finally {
+        if ($srv) { Stop-AutoOSTestHttpServer $srv }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
