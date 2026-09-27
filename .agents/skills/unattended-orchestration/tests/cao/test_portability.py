@@ -19,6 +19,29 @@ import pytest
 
 SKILL = Path(__file__).resolve().parents[2]
 
+
+def _repo_root(skill: Path) -> Path:
+    r"""The checkout this skill sits in.
+
+    Every repo-hygiene test below reads the index, so it needs the *root*, and
+    ``skill.parents[1]`` only names one while the skill is a direct child of it.
+    This repo installs skills at ``.agents/skills/<name>/`` — three levels down —
+    so that expression named ``.agents``: ``check-ignore`` then looked for run
+    state under it and failed, while ``ls-files`` quietly listed nothing. Ask
+    git, and keep the old guess for a copy that is not in a git repo at all.
+    """
+    found = subprocess.run(
+        ["git", "-C", str(skill), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    root = found.stdout.strip()
+    if found.returncode == 0 and root:
+        return Path(root).resolve()
+    return skill.parents[1]
+
+
+REPO = _repo_root(SKILL)
+
 #: A real user home: a drive-letter or WSL ``Users`` folder, or ``/home/<name>/``.
 #: A name starts with a word character, so placeholders such as ``C:\Users\<you>``
 #: and ``C:\Users\...`` do not match; ``you`` and ``Public`` are allowed by name.
@@ -86,7 +109,13 @@ def _run(repo, *args, env_path=None):
     import os
 
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(env_path or (repo / "unattended-orchestration"))
+    paths = [str(env_path or (repo / "unattended-orchestration"))]
+    # conftest.py redirects HOME to a temp dir for every test here, and a
+    # redirected HOME also hides this interpreter's user-site packages — where
+    # `pip install --user pytest` lands. Carry the parent's site dirs so the
+    # nested run tests the copied suite, not how pytest was installed on a host.
+    paths += [p for p in sys.path if "site-packages" in p or "dist-packages" in p]
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
     return subprocess.run(
         [sys.executable, *args],
         cwd=repo,
@@ -149,9 +178,18 @@ def test_the_scaffold_still_does_not_validate_in_a_foreign_repo(foreign_repo):
 # --------------------------------------------------------------------------
 
 
+def test_the_resolved_repo_root_is_really_a_repo_root():
+    """The hygiene tests below read the index and pass on an EMPTY one, so a
+    wrong root is silent: measured 2026-09-27, `.agents` (a subdirectory) was
+    named by `SKILL.parents[1]`, one check failed and three stopped checking
+    anything. This one fails loudly instead."""
+    assert (REPO / ".git").exists(), f"{REPO} is not a repository root"
+    assert REPO == SKILL or REPO in SKILL.parents, f"{SKILL} is not inside {REPO}"
+
+
 def test_no_windows_shaped_path_directory_is_tracked():
     r"""A tracked 'C:\Users\...' directory means a path leaked into the repo."""
-    repo = SKILL.parents[1]
+    repo = REPO
     listing = subprocess.run(
         ["git", "-C", str(repo), "ls-files"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -182,7 +220,7 @@ def test_run_state_is_not_tracked():
     """`--state-dir` defaults to output/cao, inside the repo. Its NDJSON holds
     verdicts, quota records and captured agent output; a `git add -A` after a
     run would commit all of it. Measured after this lane's first live run."""
-    repo = SKILL.parents[1]
+    repo = REPO
     tracked = subprocess.run(
         ["git", "-C", str(repo), "ls-files", "output/cao", ".cao-leases"],
         capture_output=True, text=True,
@@ -193,7 +231,7 @@ def test_run_state_is_not_tracked():
 def test_run_state_is_actually_ignored():
     """Untracked is not enough -- it has to be ignored, or the next add -A
     stages it. `git check-ignore` answers with the rule that matched."""
-    repo = SKILL.parents[1]
+    repo = REPO
     for path in ("output/cao/verify.ndjson", ".cao-leases/p1.json"):
         done = subprocess.run(
             ["git", "-C", str(repo), "check-ignore", "-q", path],
@@ -213,7 +251,7 @@ def test_no_tracked_blob_is_stored_with_crlf():
     474-line phantom diff. An agent seeing that is one `git commit -a` away from
     rewriting a file it never touched.
     """
-    repo = SKILL.parents[1]
+    repo = REPO
     names = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"],
                            capture_output=True).stdout.split(b"\0")
     text_suffixes = (".ps1", ".psm1", ".py", ".md", ".json", ".sh", ".yml", ".yaml")

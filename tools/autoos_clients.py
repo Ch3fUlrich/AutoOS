@@ -156,6 +156,175 @@ def signed_out(reason: str) -> bool:
     return re.search(r"sign.?in|log.?in|authenticat", reason, re.I) is not None
 
 
+# SPAWNFREE (S2) item 3: a mode the CLI does not offer is not an error the CLI
+# reports - qodercli 1.1.63 accepted `--permission-mode accept_edits`, ignored
+# it, and refused every tool call headless (62 runs, L1-backlog qoder lanes
+# 2026-09-27). So each client's declared modes are checked against the client's
+# own `--help` before a run, once per binary version.
+HELP_TIMEOUT = 15  # seconds; `--help` and `--version` are local, no network
+# Bump when parse_mode_choices's reading of a help block changes: an entry
+# written by the old parser must not keep refusing (or passing) a run.
+MODE_PARSER_VERSION = 1
+# An option line of a commander.js-style help block, and the `(choices: a, b, c)`
+# list that may wrap onto the continuation lines under it.
+_OPT_LINE_RE = re.compile(r"^\s+-{1,2}[A-Za-z0-9._-]+")
+_CHOICES_RE = re.compile(r"\(choices:\s*(.*?)\)", re.S)
+
+
+def parse_mode_choices(help_text: str) -> dict:
+    """{flag: [choices]} for every option in `help_text` that lists choices.
+
+    A commander.js help block wraps its description - and the `(choices: ...)`
+    list inside it - onto the lines below the option, so an option's text runs
+    until the next line that starts another option. A flag with no choices
+    list is not reported (it cannot be validated).
+    """
+    out = {}
+    lines = (help_text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        if not _OPT_LINE_RE.match(lines[i]):
+            i += 1
+            continue
+        block = [lines[i]]
+        j = i + 1
+        while j < len(lines) and not _OPT_LINE_RE.match(lines[j]):
+            block.append(lines[j])
+            j += 1
+        i = j
+        # The option spec is the first column (the description starts after a
+        # run of 2+ spaces); --thinking's spec never reaches into the prose.
+        spec = re.split(r"\s{2,}", block[0].strip())[0]
+        flags = re.findall(r"--[A-Za-z0-9._-]+", spec)
+        found = _CHOICES_RE.search(" ".join(ln.strip() for ln in block))
+        if not flags or not found:
+            continue
+        # Choices arrive bare (`choices: auto, plan`) or quoted
+        # (`choices: "acceptEdits", "plan"`), and commander ends a wrapped list
+        # with a period - all of that is decoration on the value.
+        choices = [c.strip().strip("\"'").strip().rstrip(".").strip("\"'").strip()
+                   for c in found.group(1).split(",")]
+        choices = [c for c in choices if c]
+        if choices:
+            out[flags[0]] = choices
+    return out
+
+
+def _exe(client: Client, env: dict):
+    return shutil.which(client.binary, path=env.get("PATH", os.defpath))
+
+
+def _binary_version(client: Client, exe: str, env: dict) -> str:
+    """The client's own `--version` line, or the binary's mtime+size when it has
+    no such flag: either is enough to say "the help I cached is for this
+    build". A client that changes its modes without changing either is a
+    vendor bug we cannot see coming."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                           env=dict(env), stdin=subprocess.DEVNULL, timeout=HELP_TIMEOUT)
+        lines = [ln.strip() for ln in (r.stdout + "\n" + r.stderr).splitlines() if ln.strip()]
+        if r.returncode == 0 and lines:
+            return lines[0][:120]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        st = os.stat(exe)
+        return "stat:%d:%d" % (int(st.st_mtime), st.st_size)
+    except OSError:
+        return "unknown"
+
+
+def _mode_cache_file(env: dict) -> str:
+    return os.path.join(state_dir(env), "agents", "client-modes.json")
+
+
+def _mode_cache(env: dict) -> dict:
+    try:
+        with io.open(_mode_cache_file(env), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_mode_cache(env: dict, data: dict) -> None:
+    path = _mode_cache_file(env)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp-%d" % os.getpid()
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def mode_choices(client: Client, env: dict | None = None) -> dict:
+    """The client's own `{flag: [choices]}`, from `--help` or the version cache.
+
+    {} when nothing can be known: no binary, a help block that lists no
+    choices, or a failing `--help`. A negative result is never cached, so a
+    transient failure costs one retry and not a permanently blind check.
+    """
+    env = os.environ if env is None else env
+    exe = _exe(client, env)
+    if not exe:
+        return {}
+    version = _binary_version(client, exe, env)
+    cache = _mode_cache(env)
+    entry = cache.get(client.binary)
+    if (isinstance(entry, dict) and entry.get("version") == version
+            and entry.get("parser") == MODE_PARSER_VERSION):
+        return entry.get("choices") or {}
+    try:
+        r = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                           env=dict(env), stdin=subprocess.DEVNULL, timeout=HELP_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    choices = parse_mode_choices(r.stdout + "\n" + r.stderr)
+    if choices:
+        _write_mode_cache(env, dict(cache, **{client.binary: {
+            "version": version, "parser": MODE_PARSER_VERSION, "choices": choices}}))
+    return choices
+
+
+def check_client_modes(client: Client, env: dict | None = None) -> tuple:
+    """(True, "") the modes this client offers; (False, why) a mode it does not;
+    (None, "") nothing to check or no way to know (never a refusal).
+
+    Runs the client's own `--help` at most once per binary version, so a spawn
+    pays one cached lookup instead of a subprocess each time.
+    """
+    if not client.modes:
+        return None, ""
+    env = os.environ if env is None else env
+    if not _exe(client, env):
+        return None, ""
+    choices = mode_choices(client, env)
+    if not choices:
+        return None, ""
+    problems = []
+    for level in sorted(client.modes):
+        argv = client.modes[level]
+        if len(argv) < 2:
+            continue
+        flag, value = argv[0], argv[1]
+        offered = choices.get(flag)
+        if offered and value not in offered:
+            problems.append("%s mode `%s %s` (this client offers %s for %s)"
+                            % (level, flag, value, ", ".join(offered), flag))
+    if not problems:
+        return True, ""
+    return False, ("%s: %s. The list came from `%s --help`; an unknown mode makes "
+                   "the CLI deny every tool call headless, so the run would only "
+                   "look like a refusal. Fix client.modes in tools/autoos_clients.py."
+                   % (client.binary, "; ".join(problems), client.binary))
+
+
 class DepthError(RuntimeError):
     pass
 

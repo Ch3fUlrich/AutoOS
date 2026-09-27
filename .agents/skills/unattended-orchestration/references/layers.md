@@ -36,16 +36,16 @@ an empty `stop-<key>` file stops that session's lane at its next decision point.
 blocked lanes on CPU would deadlock behind another project's compute pass. `-Cleanup` stops every
 merged session's process, removes its worktree and branch, and prunes its Serena project row.
 
-**The final suite is a lane, never the main checkout.** A `guardsOnly` session with `dependsOn`
-every other session cuts a worktree at the merged HEAD and runs the guards there; nothing else
-runs the full suite. Measured 2026-09-04: a suite started from the main checkout while five
+**The final suite is a lane, never the main checkout** (R-worker-03). A `guardsOnly` session
+with `dependsOn` every other session cuts a worktree at the merged HEAD and runs the guards
+there; nothing else runs the full suite. Measured 2026-09-04: a suite started from the main checkout while five
 merges fast-forwarded under it reported 18 red, of which 9 were artefacts of the moving tree.
 
 **The controller's only channel INTO a running session is a file.** There is no
 non-interactive `claude send`; the desktop session-messaging tools do not reach `--bg` sessions;
 `attach` needs a terminal. So every brief carries `{{inbox}}` — `<stateDir>/inbox/<key>.md` —
-and tells the session to read it at every decision point and before every long wait, act on it,
-and append what it did. Measured need (2026-09-05): a session polled a silent three-hour compute
+and tells the session to act on it and append what it did (the reading discipline is
+R-coord-08). Measured need (2026-09-05): a session polled a silent three-hour compute
 run every 25 minutes; the controller had diagnosed the cause in five, and could only reach the
 session by appending to the log file it happened to be polling and killing the process.
 
