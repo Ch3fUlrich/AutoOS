@@ -955,6 +955,39 @@ class ProviderLimitsFilterTests(unittest.TestCase):
         self.assertIn(("clean", "big"), legs)
         self.assertNotIn("clean/big", skipped)
 
+    def test_tpm_boundary_equal_keeps_the_leg(self):
+        """need * 1.3 == tpm keeps the leg (review R4FIX): the filter skips only
+        on strictly greater, so the boundary leg survives and one token over
+        drops it."""
+        reg = self.registry
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tpm"] = 1300
+        legs, skipped, _ = r.usable_legs(
+            reg["routes"]["r-groq"], self.card(),
+            {"need_tokens": 1000}, self.state(), reg, {})
+        self.assertIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", skipped)
+
+        legs, skipped, _ = r.usable_legs(
+            reg["routes"]["r-groq"], self.card(),
+            {"need_tokens": 1001}, self.state(), reg, {})
+        self.assertNotIn(("groq", "openai/gpt-oss-120b"), legs)
+        self.assertIn("groq/openai/gpt-oss-120b", skipped)
+
+    def test_a_route_dropped_by_tpm_is_input_required_naming_tpm(self):
+        """Review R4FIX: when the tpm filter drops every leg of a route, the
+        route comes back with a 'no usable leg' reason naming the tpm limit and
+        no_route reports input_required."""
+        reg = self.registry
+        reg["routes"]["r-groq"]["legs"] = ["groq/openai/gpt-oss-120b"]
+        survivors, removed = r.filter_routes(
+            self.card(), {"need_tokens": 9000}, self.state(), reg, {})
+        self.assertNotIn("r-groq", survivors)
+        self.assertIn("r-groq", removed)
+        joined = " ".join(removed["r-groq"])
+        self.assertIn("no usable leg", joined)
+        self.assertIn("tpm", joined)
+        self.assertEqual(r.no_route(removed)["state"], "input_required")
+
 
 class ScoreTests(unittest.TestCase):
     """Expected-cost scoring and theta picking (spec 5.3 steps 4-5, 5.4).

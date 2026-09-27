@@ -50,6 +50,11 @@ def mutated() -> dict:
     return copy.deepcopy(load_registry())
 
 
+# The allowed keys of a providers.<id>.limits.<model> entry, matching
+# catalog/ai-registry.schema.json $defs.provider_limits.
+ALLOWED_LIMIT_KEYS = {"rpm", "rpd", "tpm", "tpd", "source"}
+
+
 class RealRegistryTests(unittest.TestCase):
     """The committed registry passes the real checker (exit 0 through the CLI)."""
 
@@ -1014,23 +1019,62 @@ class ProviderLimitsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.reg = load_registry()
 
-    def test_groq_limits_carry_the_three_console_models(self):
+    def test_live_groq_limits_entries_are_shape_valid(self):
+        """Live shape only (review R4FIX): each groq limits entry carries only
+        the schema's allowed keys, every cap present is a non-negative int, and
+        the source is a non-empty string. The exact console numbers are pinned
+        by test_groq_limits_carry_the_console_numbers_inline against an inline
+        registry, so a legitimate re-measure edits one place instead of an
+        assertion over live data.
+        """
         limits = self.reg["providers"]["groq"]["limits"]
         self.assertEqual(
             sorted(limits),
             ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
-        for entry in limits.values():
-            self.assertEqual(entry["source"],
-                             "operator Groq console screenshot 2026-09-27")
-            for key in ("rpm", "rpd", "tpm", "tpd"):
-                self.assertIsInstance(entry[key], int, key)
-                self.assertGreaterEqual(entry[key], 0, key)
-        # the operator's measured console numbers (brief R4):
+        for model, entry in limits.items():
+            self.assertTrue(set(entry) <= ALLOWED_LIMIT_KEYS, (model, entry))
+            self.assertIsInstance(entry["source"], str, model)
+            self.assertTrue(entry["source"].strip(), model)
+            for field in ("rpm", "rpd", "tpm", "tpd"):
+                if field not in entry:
+                    continue
+                value = entry[field]
+                self.assertIsInstance(value, int, (model, field))
+                self.assertNotIsInstance(value, bool, (model, field))
+                self.assertGreaterEqual(value, 0, (model, field))
+
+    def test_groq_limits_carry_the_console_numbers_inline(self):
+        """The operator's measured Groq console numbers (brief R4), held as an
+        inline registry so the pin is over data, not over the live file."""
+        limits = {
+            "openai/gpt-oss-120b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "openai/gpt-oss-20b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "qwen/qwen3.8-27b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+        }
         for entry in limits.values():
             self.assertEqual(entry["rpm"], 30)
             self.assertEqual(entry["rpd"], 1000)
             self.assertEqual(entry["tpm"], 8000)
             self.assertEqual(entry["tpd"], 200000)
+            self.assertEqual(entry["source"],
+                             "operator Groq console screenshot 2026-09-27")
+
+    def test_unknown_limits_field_is_flagged_with_provider_model_and_key(self):
+        """Review R4FIX: a 'tmp' key in a limits entry (measured to pass before
+        the fix) must be a problem naming the provider, the model and the key."""
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tmp"] = 1
+        problems = [p for p in registry.check_registry(reg) if "tmp" in p]
+        self.assertTrue(problems, registry.check_registry(reg))
+        joined = " ".join(problems)
+        self.assertIn("groq", joined)
+        self.assertIn("openai/gpt-oss-120b", joined)
 
     def test_every_limits_key_resolves_as_a_groq_leg(self):
         for key in self.reg["providers"]["groq"]["limits"]:

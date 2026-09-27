@@ -1885,6 +1885,13 @@ def _check_leg_rules(registry) -> list:
     return problems
 
 
+# The allowed keys of a providers.<id>.limits.<model> entry, exactly the
+# properties of catalog/ai-registry.schema.json's $defs.provider_limits
+# (rpm/rpd/tpm/tpd + the D20 source tag). Kept as a module constant next to
+# _check_provider_limits rather than read from the schema at check time.
+_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "source")
+
+
 def _check_provider_limits(registry) -> list:
     """rule 10 - every provider limits key resolves and values are non-negative
     ints (brief R4, 2026-09-27).
@@ -1896,6 +1903,11 @@ def _check_provider_limits(registry) -> list:
     tpm/rpm/rpd/tpd values are each optional, but when present must be
     non-negative ints; the resolver reads only tpm today (a request-size
     filter), the rest are data only.
+
+    Review R4FIX (2026-09-27): a limits entry may carry only the keys of the
+    schema's provider_limits def -- an unknown key (measured: a 'tmp' key
+    passed this check) is a malformed entry and is reported naming the
+    provider, the model and the key.
     """
     problems = []
     for provider_id, provider in sorted(_section(registry, "providers").items()):
@@ -1915,6 +1927,11 @@ def _check_provider_limits(registry) -> list:
             if not isinstance(entry, dict):
                 problems.append("limits: %s is not an object" % label)
                 continue
+            for field in sorted(entry):
+                if field not in _LIMITS_ENTRY_KEYS:
+                    problems.append(
+                        "limits: %s.%s unknown key %r (allowed: %s)"
+                        % (label, field, field, ", ".join(_LIMITS_ENTRY_KEYS)))
             for field in ("rpm", "rpd", "tpm", "tpd"):
                 if field not in entry:
                     continue
