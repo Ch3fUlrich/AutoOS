@@ -732,23 +732,26 @@ def _walk_wrapper_options(
     ``(index_of_command, options_seen, problem)``.
 
     ``index_of_command`` is None when no wrapped command is statically
-    derivable (a stop such as env -S or flock -c, or options ran off the
-    end). ``options_seen`` holds a normalized name for every option met
+    derivable (a stop such as env -S, flock -c or chrt -p, or options ran off
+    the end). ``options_seen`` holds a normalized name for every option met
     before the command -- the short char for a short option, the canonical
     long name for a long one (so ``-S``, ``--split-string`` and ``-vS`` all
     surface) -- and is what the split-string, flock-command, chrt/taskset
     pid-mode and watch-exec-form predicates read instead of re-walking the
-    options with their own rules. ``problem`` is
-    set for an unknown/ambiguous long option so decide() denies rather than
-    guessing which token is the command.
+    options with their own rules. ``problem`` is set for an unknown/ambiguous
+    long option so decide() denies rather than guessing which token is the
+    command.
 
     Handles short clusters, attached (``-ux``) and detached (``-u x``)
     values, unique-prefix long options with ``=value`` or a next-token
     value, ``--``, env's bare ``-`` and NAME=VALUE assignments, and the
     positional a wrapper takes before its command (flock's lockfile, chrt's
-    priority, taskset's mask) -- which ``--`` does not reset, so the
-    lockfile stays the token right after it even when that token looks like
-    an option."""
+    priority, taskset's mask). ``--`` ends option parsing but not that
+    positional region, so the token after it is read as the wrapper's own
+    argument even when it starts with ``-`` (``flock -- -c rm -rf /`` puts
+    ``-c`` in the lockfile slot and ``rm`` in the command slot) -- the
+    reading that keeps a command region in view whichever token ``--`` landed
+    before."""
     i, n = 1, len(cur)
     problem: str | None = None
     options: list[str] = []
@@ -818,9 +821,10 @@ def _walk_wrapper_options(
     if saw_dashdash:
         # `--` ends option parsing, not the positional region, so the
         # wrapper's own argument is still the next token even when it starts
-        # with '-' (flock -- -c rm -rf / locks on a file named -c and runs
-        # rm). A wrapper whose positional was already consumed before the
-        # `--` hands this token over as the command instead.
+        # with '-' (flock -- -c rm -rf / puts -c in the lockfile slot and rm
+        # in the command slot). A wrapper whose positional was already
+        # consumed before the `--` hands this token over as the command
+        # instead.
         while i < n and positionals < spec.positionals_before_command:
             positionals += 1
             i += 1
