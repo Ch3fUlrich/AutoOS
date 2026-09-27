@@ -69,6 +69,15 @@ CLIENTS = {c.name: c for c in (
            modes={"read": ["--permission-mode", "dont_ask"], "edit": ["--permission-mode", "accept_edits"]}),
 )}
 
+# AGYFIX item 2 (K3 CLI audit addendum 2026-09-27 08:1xZ): agy with no --model
+# runs its own default Gemini, whose quota is out until ~2026-10-01 (429 after
+# ~157 s, exit 3). claude-opus-4-6-thinking measured PONG in 8 s, so the
+# spawner supplies it when the caller gives no model. clients.agy.default_model
+# would be the home for this, but the clients schema (catalog/ai-registry
+# .schema.json $defs.client, additionalProperties false) has no such slot; a
+# constant is the brief's documented fallback rather than widening the schema.
+AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
+
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
                   model: str | None = None, joinable: str | None = None) -> list:
@@ -88,7 +97,10 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     elif client.name == "qoder":
         return ["qodercli", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
     elif client.name == "agy":
-        return ["agy", "-p"] + ([] if not model else ["--model", model]) + [task]
+        # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
+        # "--model" as the -p prompt when -p comes first, so the model goes
+        # BEFORE -p. Working form measured: `agy --model <m> -p <task>`.
+        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p", task]
     elif client.name == "gemini":
         # Headless gemini exits 55 in a folder it does not trust (live
         # 2026-09-25); --skip-trust trusts the spawn cwd for this session only.

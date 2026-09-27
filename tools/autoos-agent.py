@@ -68,9 +68,9 @@ Usage:
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
-opencode/big-pickle) through OPENCODE_CONFIG_CONTENT: no gateway, no key, no
-spend - for exercising the tier chain and the permission fences. Free promo
-models may train on prompts, so --free refuses --clean.
+opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
+gateway, no key, no spend - for exercising the tier chain and the permission
+fences. Free promo models may train on prompts, so --free refuses --clean.
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -84,7 +84,8 @@ branch reflog (commit-then-reset) or moved side refs - or a tracked file outside
 before - the shas and paths are printed, nothing is reverted, the track record carries
 failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
-output while the client exited 0 (PROVIDER-STOP; the track record carries failure class
+output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
+item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
 deliverable is its diff), so nothing is lost); the child's
 exit code; 2 bad arguments, card or route refused;
@@ -133,7 +134,7 @@ from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
 GATEWAY = "http://127.0.0.1:20128"
-DEFAULT_FREE_MODEL = "opencode/big-pickle"
+DEFAULT_FREE_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # run_client re-emits a child's output as it arrives and keeps this much of it
 # so cmd_run can spot a headless refusal that still exited 0 (bug 2).
 TAIL_LIMIT = 64 * 1024
@@ -1662,16 +1663,21 @@ def cmd_run(args, cfg: dict) -> int:
     child_rc = rc  # the WIP message names the client's own rc, not a verdict override
     if refusal is not None:
         print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
-    # A provider stop is a failure even though the client exited 0: it was cut
-    # off mid-task (WIPfix, 2026-09-26). Only rc 0 and 6 upgrade to 8; a LEAK
-    # (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+    # A provider stop is a failure even though the client often exited 0: it
+    # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
+    # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+    # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
+    # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
+    # them - the provider_stop() tail check still gates the upgrade, and other
+    # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
+    # reach here with a provider-stop line.
     # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
     # provider-stopped exits 8 with failure_class "provider" (agy measured:
     # jetski refusal + AGY_ERROR 429, R-gateway-12).
     # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
     # a promo client whose tail is a provider stop does not get a false probe.
     stop = provider_stop(client_tail)
-    if stop is not None and rc in (0, 6):
+    if stop is not None and rc in (0, 3, 6):
         print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
         rc = 8
     if rc == 0 and client.promo:
