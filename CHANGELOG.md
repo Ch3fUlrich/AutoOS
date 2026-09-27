@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — review follow-ups: symlink-safe backups, counted backup failures, honest dry-run, one backup stamp, catalog uniqueness, non-vacuous harness test, real mktemp (rv, 2026-09-27)
+
+- **`lib/agent_harness.py`**, **`lib/linux/install.sh`**, **`setup.sh`**, **`configuration/herdr-sessions/install.sh`**, **`templates/rescue-bootstrap.sh`**, **`tests/run-tests.sh`**, **`tests/test_agent_harness.py`**, **`tests/test_catalog_uniqueness.py`**, **`tests/linux/{01-test-harness,18-mcp-wiring,20-playwright-lazy-proxy,22-herdr-sessions,32-answer-file-templates}.sh`**: the agent-harness backup helper now refuses to write through a symlink; a post-install backup the operator declines is recorded and counted in the run summary instead of silently lost; a `herdr-sessions` dry run that fails its own dry run is reported rather than swallowed; the backup stamp in `herdr-sessions`/`rescue-bootstrap` uses the canonical `%Y%m%d-%H%M%S`; the catalog is linted for a duplicate `provider`+`package`; the filtered-harness self-test now proves a real test ran instead of accepting an empty `passed 0`; and the test HTTP server reserves its port file with a real `mktemp`, never `mktemp -u`.
+
 ### Changed — `tests/run-tests.sh` refuses an unfiltered local run (FULLGUARD, 2026-09-27)
 
 - **`tests/run-tests.sh`**, **`.github/workflows/ci.yml`**, **`tests/linux/01-test-harness.sh`**, **`AGENTS.md`**, **`docs/`**: an unfiltered local run now exits 2 and names `--filter` / `AUTOOS_FULL_SUITE=1`; CI sets the opt-in so its one full run is unchanged (the full suite's shellcheck once OOM-killed a 16 GB host, R-host-08).
