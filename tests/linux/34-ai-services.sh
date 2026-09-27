@@ -308,15 +308,15 @@ fi
 # current combo.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only t2-worker my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete t1-orchestrator-free-only --yes" ]] \
+    [[ "$deletes" == "combo delete deepseek-v4.1-flash --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -324,12 +324,12 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -341,13 +341,13 @@ fi
 # "t2-worker-paid") is never deleted - and a dry run never even names it.
 if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto t2-worker-paid t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" auto t2-worker-paid deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
     [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi

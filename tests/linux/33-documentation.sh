@@ -220,8 +220,8 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
-gone = {"t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean",
-        "t1-orchestrator-free-only", "deepseek-v4.1-flash"}
+# t1-orchestrator(-free-only) are served again by the free gemini leg (T1FREE).
+gone = {"spark-1.3-contributor", "t1-orchestrator-clean", "deepseek-v4.1-flash"}
 print(",".join(sorted(g for g in gone if g in by or g not in omitted)))
 PY
 )"
