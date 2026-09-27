@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — Antigravity Hub sets up chrome-sandbox itself via sudo (agysb)
+
+- **`lib/linux/install.sh`**: `antigravity_sandbox_note` is now
+  `antigravity_sandbox_setup` (operator decision 2026-09-27: this one step may
+  run sudo). When the kernel needs the SUID helper it re-checks
+  `chrome-sandbox` (regular file, no symlink, 1 hard link), skips an already
+  root-owned 4755 helper, prints the would-run line under `--dry-run`, and
+  otherwise runs `sudo -n chown root:root` + `sudo -n chmod 4755` with
+  `setup.sh --yes` (plain `sudo`, so it may prompt, on an interactive TTY
+  without `--yes`); a missing/failed sudo prints the two commands for the
+  operator and never fails the install. NEVER `--no-sandbox`.
+- **TOCTOU fix**: each privileged step re-checks inside the one root process
+  (`find -P` on a still-regular single-link file, chmod only on a file root
+  owns), so a symlink swapped in after the check can no longer escalate;
+  anything else falls back to the printed commands.
+
+
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)
 
