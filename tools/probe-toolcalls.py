@@ -48,18 +48,18 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from registry import resolve_leg, unavailable_now  # noqa: E402 - tools/ is on sys.path above
 from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     DEFAULT_GATEWAY,
     DEFAULT_OVERLAY,
     DEFAULT_REGISTRY,
     RETRY_DELAYS_S,  # re-exported: tests read it on this module
+    _skip_reason,  # re-exported: tests read the shared leg selection here
     gateway_up,
+    legs_to_probe,  # shared with probe-recall/probe-effort (policy, free-only)
     load_agent_module as _load_agent_module,
     load_overlay,
     now_iso as _now_iso,
@@ -92,61 +92,12 @@ _sleep = time.sleep
 
 
 # ---------------------------------------------------------------------------
-# legs_to_probe: which legs exist, and which of them to skip.
-#
-# Not tools/probe_common.py's: that one also refuses every leg whose provider
-# tier is not "free" (spec section 10, D18) and reads a plain `available:
-# false`, while this probe lists any route leg and lets a passed
-# `unavailable_until` back in (registry.unavailable_now). Changing which legs
-# this probe walks is a routing decision, not this file's to make on its own.
+# legs_to_probe / _skip_reason: the shared leg selection of
+# tools/probe_common.py (policy.leg_rules deny, free legs only per D18,
+# unavailable_now self-heal). This probe keeps its own make_post / 400 body
+# classification below: probe_common.make_post returns a bare 'HTTP 400' and
+# would lose the 'tools unsupported' verdict.
 # ---------------------------------------------------------------------------
-
-def _skip_reason(leg, routes, registry):
-    """None when `leg` should be probed; else the reason it is skipped."""
-    for route in routes.values():
-        if leg in (route.get("unavailable_legs") or {}):
-            return "unavailable_legs: %s" % leg
-    try:
-        provider_id, model_id = resolve_leg(leg, registry)
-    except ValueError as exc:
-        return "unresolvable: %s" % exc
-    provider = registry.get("providers", {}).get(provider_id) or {}
-    if unavailable_now(provider, datetime.now(timezone.utc)):
-        until = provider.get("unavailable_until")
-        if until is not None:
-            return "provider %s: unavailable until %s" % (provider_id, until)
-        return "provider %s: available false" % provider_id
-    bound = (registry.get("models", {}).get(model_id) or {}).get("client_bound")
-    if bound:
-        # The gateway 403s a client-bound leg (e.g. a Zen free leg): it can
-        # only be probed through that client, never through the gateway.
-        return "client_bound: probe through %s" % bound
-    return None
-
-
-def legs_to_probe(registry, only_legs=(), only_routes=()):
-    """``[(leg, skip_reason_or_None), ...]``: every distinct leg, registry order.
-
-    Every leg named in any ``routes.*.legs``, in the order routes and then
-    legs appear in the registry, deduplicated to first sight. ``only_legs`` /
-    ``only_routes`` (non-empty) narrow which legs/routes are considered at
-    all; a leg outside both stays unlisted rather than skipped.
-    """
-    routes = registry.get("routes") or {}
-    only_legs = set(only_legs)
-    only_routes = set(only_routes)
-    order = []
-    seen = set()
-    for route_id, route in routes.items():
-        if only_routes and route_id not in only_routes:
-            continue
-        for leg in route.get("legs") or []:
-            if only_legs and leg not in only_legs:
-                continue
-            if leg not in seen:
-                seen.add(leg)
-                order.append(leg)
-    return [(leg, _skip_reason(leg, routes, registry)) for leg in order]
 
 
 # ---------------------------------------------------------------------------
