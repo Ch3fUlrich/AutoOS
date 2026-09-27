@@ -1355,3 +1355,181 @@ if it "graphify_mcp_symlink leaves user-made symlink to different target alone";
     else fail "rc=$rc link_target=$link_target (user symlink should be left alone)"; fi
 fi
 
+
+# ─── keys and skills source reach the writer that actually runs ───
+# These drive setup_opencode_config (the postInstall path), not
+# _opencode_merge_config on its own: the harness merge and the skills-source
+# lookup live in the loop around it, and a candidate file the inline reader
+# cannot parse is a key that silently never arrives — which reads on the
+# machine exactly like a machine with no keys.
+#
+# Dummy values only: a test never touches a real key file, and an inherited
+# real key would pass the assertion for the wrong reason, so the key env vars
+# are unset in every subshell below.
+
+# <scratch home> — runs the real writer with no skills source and no keys file.
+oh_opencode_run() {
+    local home="$1" root="$2"
+    ( SYS_HOME="$home" AUTOOS_ROOT="$root" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      setup_opencode_config >/dev/null 2>&1 )
+}
+
+if it "opencode: api-keys.yml (the repo keys file, not agent-skills) is parsed"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/configuration"
+    printf 'openrouter: DUMMY-KEY-FOR-TESTS\n' >"$tmp/repo/configuration/api-keys.yml"
+    oh_opencode_run "$tmp/home" "$tmp/repo"
+    out="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print('yes' if 'openrouter' in d.get('provider', {}) else 'no')
+" "$tmp/home/.config/opencode/config.json" 2>/dev/null || echo unreadable)"
+    rm -rf "$tmp"
+    if [[ "$out" == "yes" ]]; then pass
+    else fail "the openrouter provider is missing (config says: $out) — api-keys.yml was never read"; fi
+    fi
+fi
+
+if it "opencode: an api-keys.yml REPLACE placeholder is never treated as a key"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/configuration"
+    printf 'openrouter: REPLACE_WITH_YOUR_KEY\n' >"$tmp/repo/configuration/api-keys.yml"
+    oh_opencode_run "$tmp/home" "$tmp/repo"
+    out="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print('yes' if 'openrouter' in d.get('provider', {}) else 'no')
+" "$tmp/home/.config/opencode/config.json" 2>/dev/null || echo unreadable)"
+    rm -rf "$tmp"
+    if [[ "$out" == "no" ]]; then pass
+    else fail "a placeholder key was written into the config as if it were real"; fi
+    fi
+fi
+
+if it "opencode: the agent harness gets this checkout's .agents/skills, not agent-skills"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/.agents/skills/x"
+    printf -- '---\nname: x\ndescription: x\n---\n' >"$tmp/repo/.agents/skills/x/SKILL.md"
+    src_flag="$tmp/skills-source"; : >"$src_flag"
+    ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      src_flag="$src_flag"
+      python3() {
+          if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+              local prev="" a
+              for a in "$@"; do
+                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
+                  prev="$a"
+              done
+              return 0
+          fi
+          command python3 "$@"
+      }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
+    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
+    rm -rf "$tmp"
+    if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
+    elif [[ "$got" == */.agents/skills ]]; then pass
+    else fail "harness got [$got], expected the checkout's .agents/skills"; fi
+    fi
+fi
+
+if it "opencode: no agent-skills path is invented when there is no skills source"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    src_flag="$tmp/skills-source"; : >"$src_flag"
+    ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      src_flag="$src_flag"
+      python3() {
+          if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+              local prev="" a
+              for a in "$@"; do
+                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
+                  prev="$a"
+              done
+              return 0
+          fi
+          command python3 "$@"
+      }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
+    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
+    rm -rf "$tmp"
+    if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
+    elif [[ -z "$got" ]]; then pass
+    else fail "harness was handed a skills source that does not exist: [$got]"; fi
+    fi
+fi
+
+if it "graphify_mcp_symlink repoints a link whose agent-skills clone is gone"; then
+    # The realistic migration case: the user deleted the retired clone, which
+    # leaves ~/.local/bin/graphify-mcp dangling. Resolving the link is not
+    # possible and not needed — the target still names where it came from, so
+    # the link must be repointed instead of being mistaken for the user's own.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin" "$tmp/repo/infra/mcp-servers/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/repo/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/repo/infra/mcp-servers/bin/graphify-mcp"
+    ln -sfn "$tmp/Documents/code/agent-skills/infra/mcp-servers/bin/graphify-mcp" \
+        "$tmp/.local/bin/graphify-mcp"
+    out="$(
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0 graphify_mcp_symlink 2>&1
+    )"
+    rc=$?
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == */repo/infra/mcp-servers/bin/graphify-mcp ]]; then pass
+    else fail "dangling clone link not repointed (rc=$rc got=$got out=$(tail -n 2 <<<"$out"))"; fi
+fi
+
+if it "graphify_mcp_symlink announces the verdict a real run then acts on"; then
+    # A dry run that reads the link differently from the live branch reports
+    # "left alone" for a link the next run repoints, or the reverse. Both
+    # branches therefore have to reach the same verdict for every shape, and
+    # the dry run has to touch nothing.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/bin" "$tmp/repo/infra/mcp-servers/bin" "$tmp/other"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/repo/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$tmp/repo/infra/mcp-servers/bin/graphify-mcp"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/other/graphify-mcp"
+    chmod +x "$tmp/other/graphify-mcp"
+    problems=""
+    for shape in missing ownfile ownlink clonedlink rightlink; do
+        rm -f "$tmp/.local/bin/graphify-mcp"
+        case "$shape" in
+            missing) want="link" ;;
+            ownfile) printf '#!/bin/sh\nexit 0\n' >"$tmp/.local/bin/graphify-mcp"; want="alone" ;;
+            ownlink) ln -sfn "$tmp/other/graphify-mcp" "$tmp/.local/bin/graphify-mcp"; want="alone" ;;
+            clonedlink) ln -sfn "$tmp/Documents/code/agent-skills/bin/graphify-mcp" "$tmp/.local/bin/graphify-mcp"; want="repoint" ;;
+            rightlink) ln -sfn "$tmp/repo/infra/mcp-servers/bin/graphify-mcp" "$tmp/.local/bin/graphify-mcp"; want="already" ;;
+        esac
+        before="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+        dry="$(SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=1 graphify_mcp_symlink 2>&1)"
+        after_dry="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+        live="$(SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0 graphify_mcp_symlink 2>&1)"
+        after_live="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+        [[ "$before" == "$after_dry" ]] || problems+="[$shape: the dry run touched the link] "
+        [[ "$dry" == *"$want"* ]] || problems+="[$shape: the dry run does not say \"$want\" — $(tail -n 1 <<<"$dry")] "
+        [[ "$live" == *"$want"* ]] || problems+="[$shape: the real run does not say \"$want\" — $(tail -n 1 <<<"$live")] "
+        case "$shape" in
+            ownfile)
+                [[ -f "$tmp/.local/bin/graphify-mcp" && ! -L "$tmp/.local/bin/graphify-mcp" ]] || problems+="[the user's file was replaced] " ;;
+            ownlink)
+                [[ "$after_live" == "$tmp/other/graphify-mcp" ]] || problems+="[the user's link was repointed] " ;;
+            *)
+                [[ "$after_live" == "$tmp/repo/infra/mcp-servers/bin/graphify-mcp" ]] || problems+="[$shape did not end on the repo target] " ;;
+        esac
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi

@@ -75,8 +75,8 @@ profile can switch model at run time (`enable_switch_llm_tool`).
   the configure step.
 - **`agent-canvas` has no headless mode.** It has no `--prompt`, `--model` or
   session flags, so it can't be driven as a CLI worker from a script. For
-  unattended runs, use the orchestration skills in `agent-skills`, and use the
-  canvas when a person is watching.
+  unattended runs, use the orchestration skills in this repo's `.agents/skills`,
+  and use the canvas when a person is watching.
 - Muse Spark and DeepSeek are paid per token. The `-free` profiles and Ollama
   cost nothing.
 

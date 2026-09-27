@@ -2523,25 +2523,17 @@ route_detected_clis_to_gateway() {
     # install, so without this step they would never point at the gateway).
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
-    # (same file-first pattern as the openhands writer below; never printed).
-    # Without keys the claude step warns and the qwen step is skipped.
+    # (same resolution as the openhands and opencode writers — one chain, one
+    # parser, tools/autoos_keys.py; never printed). Without keys the claude
+    # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-        _keys_yml="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/configuration/api-keys.yml}"
-        _file_key="$(python3 - "$_keys_yml" 2>/dev/null <<'PY'
-import sys
-try:
-    found = ""
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        for line in fh:
-            t = line.strip()
-            if t.startswith("omniroute:") and "REPLACE" not in t:
-                found = t.split(":", 1)[1].strip().strip("\"'")
-                break
-    print(found)
-except Exception:
-    print("")
-PY
-)"
+        _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
+        _file_key=""
+        if [[ -n "$_keys_file" ]]; then
+            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/autoos_keys.py" \
+                "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
+        fi
+        unset _keys_file
         if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
             export OMNIROUTE_API_KEY="$_file_key"
         fi
@@ -4071,11 +4063,17 @@ autoos_skills_source() {
     return 0
 }
 
-# autoos_api_keys_conf: prints the path to the API keys file, in priority order:
+# autoos_api_keys_conf: the ONE answer to "which file holds this machine's API
+# keys", printed as a path, in priority order:
 # 1. ~/.config/autoos/api_keys.conf (user config, create nothing - just check)
-# 2. $AUTOOS_ROOT/configuration/api-keys.yml (repo's git-ignored key file)
+# 2. the repo's git-ignored keys file, configuration/api-keys.yml
+#    (AUTOOS_KEYS_FILE overrides this entry)
 # 3. Legacy ~/Documents/Code/agent-skills/secrets/api_keys.conf (fallback)
-# Returns 0 and prints path if found, 1 if none exist.
+# Returns 0 and prints the path if one exists, 1 if none does — and nothing is
+# ever invented, so a caller that wants "no keys" gets an empty string rather
+# than a path to a file that does not exist. Whichever file wins, its content is
+# parsed by tools/autoos_keys.py, which reads both the `name=value` and the
+# `name: value` shape.
 autoos_api_keys_conf() {
     local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     # 1. User config (~/.config/autoos/api_keys.conf) - create nothing
@@ -4083,9 +4081,13 @@ autoos_api_keys_conf() {
         printf '%s\n' "$SYS_HOME/.config/autoos/api_keys.conf"
         return 0
     fi
-    # 2. Repo's configuration/api-keys.yml (git-ignored, single source of truth)
-    if [[ -f "$repo_root/configuration/api-keys.yml" ]]; then
-        printf '%s\n' "$repo_root/configuration/api-keys.yml"
+    # 2. The repo's git-ignored keys file — configuration/api-keys.yml, what
+    # the browser page writes and tools/mirror-litellm-env.py reads.
+    # AUTOOS_KEYS_FILE replaces that entry (the suite points it at a stub for a
+    # hermetic keyless run), exactly as the gateway writers always did.
+    local keys_yml="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
+    if [[ -f "$keys_yml" ]]; then
+        printf '%s\n' "$keys_yml"
         return 0
     fi
     # 3. Legacy agent-skills clone
@@ -4098,72 +4100,71 @@ autoos_api_keys_conf() {
     return 1
 }
 
-# graphify_mcp_symlink: ensures ~/.local/bin/graphify-mcp points to this repo's
-# infra/mcp-servers/bin/graphify-mcp. Only acts when:
-# - link is missing: creates it
-# - link points into an agent-skills path (old clone): repoints to repo
-# - link is a user-made regular file or symlink to different target: leaves alone with hint
+# graphify_mcp_symlink: point ~/.local/bin/graphify-mcp at this checkout's
+# infra/mcp-servers/bin/graphify-mcp.
+#
+# Three shapes mean "AutoOS or the retired agent-skills clone put this here" and
+# are acted on: no link (create one), a link that already lands on the target
+# (skip), and a link into an agent-skills path (repoint it — including one left
+# dangling when the user deleted the clone, which is the common migration
+# case). Anything else is the user's own file or link: reported as left alone and
+# never replaced. The dry run decides from the same verdict, so it can never
+# announce something the real run will not do.
 graphify_mcp_symlink() {
     local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     local target="$repo_root/infra/mcp-servers/bin/graphify-mcp"
     local link="$SYS_HOME/.local/bin/graphify-mcp"
 
-    # Ensure target exists
-    if [[ ! -f "$target" || ! -x "$target" ]]; then
-        ui_muted "graphify-mcp target not found at $target - skipping symlink"
+    if [[ ! -x "$target" ]]; then
+        ui_muted "graphify-mcp is not in this checkout ($target) - nothing to link"
         return 0
+    fi
+
+    local current="" verdict="create"
+    if [[ -L "$link" ]]; then
+        current="$(readlink "$link")" || current=""
+        # A relative link resolves against its own directory. The clone test
+        # below is a substring match, so making the path absolute is enough —
+        # resolving it through `cd` would fail on a dangling link and hand the
+        # clone's link to the "the user manages this" branch.
+        [[ -z "$current" || "$current" == /* ]] || current="$(dirname "$link")/$current"
+        if [[ "$current" == "$target" ]]; then
+            verdict="already"
+        elif [[ "$current" == */agent-skills/* ]]; then
+            verdict="repoint"
+        else
+            verdict="alone"
+        fi
+    elif [[ -e "$link" ]]; then
+        verdict="alone"
     fi
 
     if (( AUTOOS_DRY_RUN )); then
-        if [[ -L "$link" ]]; then
-            local current="$(readlink "$link")"
-            if [[ "$current" == "$target" ]]; then
-                ui_muted "graphify-mcp already linked correctly"
-            elif [[ "$current" == */agent-skills/* ]]; then
-                ui_muted "would repoint graphify-mcp from agent-skills clone to $target"
-            else
-                ui_muted "would leave graphify-mcp alone (user-managed: $current)"
-            fi
-        elif [[ -e "$link" ]]; then
-            ui_muted "would leave graphify-mcp alone (user-managed regular file)"
-        else
-            ui_muted "would create graphify-mcp symlink: $link -> $target"
-        fi
+        case "$verdict" in
+            create)  ui_muted "would link graphify-mcp: $link -> $target" ;;
+            repoint) ui_muted "would repoint graphify-mcp from the clone ($current) to $target" ;;
+            already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+            alone)   ui_muted "would leave graphify-mcp alone (yours: $link)" ;;
+        esac
         return 0
     fi
 
-    mkdir -p "$(dirname "$link")"
-
-    if [[ -L "$link" ]]; then
-        local current="$(readlink "$link")"
-        # Resolve relative paths
-        [[ "$current" == /* ]] || current="$(dirname "$link")/$current"
-        # Normalize path
-        current="$(cd "$(dirname "$current")" 2>/dev/null && pwd -P)/$(basename "$current")" 2>/dev/null || current="$current"
-
-        if [[ "$current" == "$target" ]]; then
-            ui_muted "graphify-mcp already linked correctly"
-        elif [[ "$current" == */agent-skills/* ]]; then
-            # Repoint from agent-skills clone to repo
+    case "$verdict" in
+        create|repoint)
+            mkdir -p "$(dirname "$link")"
             if ln -sfn "$target" "$link"; then
-                ui_ok "repointed graphify-mcp from agent-skills clone to $target"
+                if [[ "$verdict" == "create" ]]; then
+                    ui_ok "linked graphify-mcp: $link -> $target"
+                else
+                    ui_ok "repointed graphify-mcp from the clone: $link -> $target"
+                fi
             else
-                ui_warn "could not repoint graphify-mcp"
+                ui_warn "could not link graphify-mcp - $link left as it is"
             fi
-        else
-            ui_muted "left graphify-mcp alone (user-managed symlink to $current)"
-        fi
-    elif [[ -e "$link" ]]; then
-        # Regular file (user-managed)
-        ui_muted "left graphify-mcp alone (user-managed regular file at $link)"
-    else
-        # Missing - create it
-        if ln -s "$target" "$link"; then
-            ui_ok "linked graphify-mcp: $link -> $target"
-        else
-            ui_warn "could not create graphify-mcp symlink"
-        fi
-    fi
+            ;;
+        already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
+        alone)   ui_muted "left graphify-mcp alone (yours: $link)" ;;
+    esac
     return 0
 }
 
@@ -4233,7 +4234,10 @@ setup_opencode_config() {
         if has_cmd python3; then
             local harness_out harness_rc skills_source
             skills_source="$(autoos_skills_source)"
-            [[ -n "$skills_source" ]] || skills_source="$SYS_HOME/Documents/Code/agent-skills/skills"
+            # An empty source is passed through and the harness reports
+            # "skills: source missing". Naming the retired agent-skills clone
+            # here would invent a path that does not exist and read as a
+            # machine whose skills are simply absent.
             harness_rc=0
             harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
@@ -4306,6 +4310,13 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location('autoos_registry', _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# The keys-file parse is one module too: api_keys.conf writes `name=value`,
+# configuration/api-keys.yml writes `name: value`, and a reader that knows only
+# one of them reports a configured machine as an unconfigured one.
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools', 'autoos_keys.py')
+_key_spec = _ilu.spec_from_file_location('autoos_keys', _KEYS_TOOL)
+_autoos_keys = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_autoos_keys)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m['id']: m for m in REPO_MODELS}
 # MCP package specs live in catalog/agent-harness.json, never inline.
@@ -4373,22 +4384,17 @@ if os.path.isfile(config_path):
 _before = json.dumps(data) if os.path.isfile(config_path) else None
 
 def _read_secrets_into(path, secrets):
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip('\"\''))
-    except Exception:
-        pass
+    # Parsing is tools/autoos_keys.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _autoos_keys.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 secrets = {}
-# Only the real conf. api_keys.conf.example is never read: its placeholder
-# keys are truthy and would be written into the config as if real (401s).
-if os.path.isfile(secrets_path):
-    _read_secrets_into(secrets_path, secrets)
+# Only a real file: the .example templates' placeholder keys are truthy and
+# read_keys drops them, so a machine that never configured anything stays
+# keyless rather than writing a 401 into the config.
+_read_secrets_into(secrets_path, secrets)
 
 providers = data.get('provider', {})
 _ollama = REPO_BY_ID['ollama-qwen2.5-coder']['direct']
@@ -4776,6 +4782,12 @@ _REG_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_
 _spec = _ilu.spec_from_file_location("autoos_registry", _REG_TOOL)
 _registry = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_registry)
+# And the keys parse is tools/autoos_keys.py's: the resolved file may be
+# api_keys.conf (`name=value`) or configuration/api-keys.yml (`name: value`).
+_KEYS_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), "tools", "autoos_keys.py")
+_key_spec = _ilu.spec_from_file_location("autoos_keys", _KEYS_TOOL)
+_autoos_keys = _ilu.module_from_spec(_key_spec)
+_key_spec.loader.exec_module(_autoos_keys)
 REPO_MODELS = _registry.legacy_models(_REG_DOC)
 REPO_BY_ID = {m["id"]: m for m in REPO_MODELS}
 # resolve_ollama_base_url's answer; empty keeps the catalog default. Applied to
@@ -4792,16 +4804,11 @@ if _ol["base_url"].endswith("/v1"):
     _ol["base_url"] = _ol["base_url"][:-3]
 
 def _read_secrets_file(path, secrets):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    # First occurrence of a key wins.
-                    secrets.setdefault(k.strip().lower(), v.strip().strip("\"'"))
-    except Exception:
-        pass
+    # Parsing is tools/autoos_keys.py's; only the case-insensitive lookup is
+    # this writer's own convention.
+    for _k, _v in _autoos_keys.read_keys(path).items():
+        # First occurrence of a key wins.
+        secrets.setdefault(_k.lower(), _v)
 
 
 def _profile_for(mid, key, name=None):
@@ -4909,21 +4916,12 @@ llm = agent_settings.setdefault("llm", {})
 # with thinking params Ollama rejects outright.
 _default_reasoning = False
 # OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
-# writer below reads). AUTOOS_KEYS_FILE overrides the fallback keys file
-# (the suite points it at a stub for a hermetic keyless run).
-_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-if not _gw_key:
-    # Fall back to the repo's single source of truth for keys.
-    _keys_yml = os.environ.get("AUTOOS_KEYS_FILE") or os.path.join(os.path.dirname(os.path.dirname(models_file)), "configuration", "api-keys.yml")
-    try:
-        with open(_keys_yml, "r", encoding="utf-8") as _kf:
-            for _line in _kf:
-                _t = _line.strip()
-                if _t.startswith("omniroute:") and "REPLACE" not in _t:
-                    _gw_key = _t.split(":", 1)[1].strip().strip("\"'")
-                    break
-    except Exception:
-        pass
+# writer below reads), else the keys file autoos_api_keys_conf resolved —
+# AUTOOS_KEYS_FILE overrides it and the suite points that at a stub for a
+# hermetic keyless run. No second reader of that file lives here: an inline
+# parse is how a `.conf`-only reader once ended up handed a `.yml` and
+# reported a configured machine as an unconfigured one.
+_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
 if _gw_key:
     # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default

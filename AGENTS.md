@@ -220,8 +220,9 @@ Do not report work as done because the code looks right. Run it.
 ## 8. Agent skills (`.agents/skills/`)
 
 Reusable workflows live in `.agents/skills/<name>/SKILL.md` — the skill file
-owns its workflow; this section only routes. One home per fact (§1 of
-`agent-skills` applies here too): never restate a skill's content in docs.
+owns its workflow; this section only routes. One home per fact
+(`coding-principles` principle 1 applies here too): never restate a skill's
+content in docs.
 
 | Skill | Load when |
 |---|---|
@@ -267,5 +268,4 @@ Measured 2026-09-27 (`logs/handoff-sessions/20260925/status/L1-backlog.spike-c5-
 
 Provenance: subtree from `agent-skills` (`git log -- .agents/skills`);
 `qa-swarm`, `review-triage`, `babysit-prs` are native rewrites (unlicensed
-upstreams — see `agent-skills/THIRD_PARTY.md`); sync ledger at
-`.agents/SYNC.md`.
+upstreams — see the sync ledger at `.agents/SYNC.md`).
