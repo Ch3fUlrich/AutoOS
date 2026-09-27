@@ -273,6 +273,9 @@ def classify_ladder(outcomes):
     (the smallest failed: the caller writes only a detail). no_verdict is
     True when nothing at all was measured - every trial a credential or
     transport status - and the caller keeps whatever the overlay had.
+    open_above is the size where the leading run hit an unmeasured size
+    (None when it ended on a measured failure or ran through): see
+    apply_verdict().
     """
     detail = {}
     for outcome in outcomes:
@@ -281,12 +284,18 @@ def classify_ladder(outcomes):
     no_verdict = bool(outcomes) and all(
         all(r is None for r in o["recalls"]) for o in outcomes)
     tokens = None
+    open_above = None
     for outcome in outcomes:
         measured = [r for r in outcome["recalls"] if r is not None]
-        if not measured or min(measured) < RECALL_PASS:
+        if not measured:
+            # Stopped by a non-measurement: nothing is known from here up.
+            open_above = outcome["size"]
+            break
+        if min(measured) < RECALL_PASS:
             break
         tokens = outcome["size"]
-    return {"tokens": tokens, "detail": detail, "no_verdict": no_verdict}
+    return {"tokens": tokens, "detail": detail, "no_verdict": no_verdict,
+            "open_above": open_above}
 
 
 def probe_model(leg, sizes, post, trials, max_tokens=2048):
@@ -338,6 +347,32 @@ def record_verdict(overlay, model_id, tokens, detail, at):
         measured["tokens"] = tokens
     entry["context_usable"] = measured
     return overlay
+
+
+def apply_verdict(overlay, model_id, verdict, at, statuses=()):
+    """Merge a classify_ladder() verdict; True when context_usable was written.
+
+    Nothing is written when nothing was measured, nor when the ladder stopped
+    at an unmeasured size (``open_above``) while the overlay already holds a
+    larger proven value: a 429 at 128k this run says nothing against a 128k
+    that passed before, and a smaller number must not overwrite it.
+    """
+    if verdict["no_verdict"]:
+        record_no_verdict(overlay, model_id,
+                          "no verdict: only non-200 statuses (%s): keeping the previous value"
+                          % ", ".join(statuses), at)
+        return False
+    previous = (overlay.get("models", {}).get(model_id, {})
+                .get("context_usable", {}).get("tokens"))
+    if (verdict.get("open_above") is not None and isinstance(previous, int)
+            and previous > (verdict["tokens"] or 0)):
+        record_no_verdict(overlay, model_id,
+                          "ladder stopped at unmeasured size %d (passed up to %s): keeping "
+                          "the larger previous value %d"
+                          % (verdict["open_above"], verdict["tokens"], previous), at)
+        return False
+    record_verdict(overlay, model_id, verdict["tokens"], verdict["detail"], at)
+    return True
 
 
 def record_no_verdict(overlay, model_id, detail, at):
@@ -500,14 +535,11 @@ def main(argv=None) -> int:
                 total_completion += request["completion_tokens"]
         verdict = classify_ladder(outcomes)
         at = _now_iso()
-        if verdict["no_verdict"]:
-            statuses = sorted({str(status) for o in outcomes for status in o["statuses"]})
-            detail = ("no verdict: only non-200 statuses (%s): keeping the previous value"
-                      % ", ".join(statuses))
-            record_no_verdict(overlay, model_id, detail, at)
+        statuses = sorted({str(status) for o in outcomes for status in o["statuses"]})
+        if not apply_verdict(overlay, model_id, verdict, at, statuses):
+            detail = overlay["models"][model_id]["context_usable_last_error"]["detail"]
             print("%s\tno-verdict\t-\t%s" % (leg, detail))
         else:
-            record_verdict(overlay, model_id, verdict["tokens"], verdict["detail"], at)
             if verdict["tokens"] is None:
                 print("%s\tverdict\t-\tsmallest size failed; registry default kept" % leg)
             else:

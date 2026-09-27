@@ -530,6 +530,52 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(entry["detail"], {"4000": 0.4})
         self.assertEqual(entry["source"], "probe")
 
+    # Final review 2026-09-27: a run where 32k passed but 128k got only
+    # non-200s (a 429 outlasting the retries) overwrote a proven 128k with
+    # 32k. A ladder that stops at an UNMEASURED size proves nothing about
+    # the sizes above it, so a larger earlier value survives.
+    def _outcomes(self, *pairs):
+        return [{"size": size, "recalls": list(recalls), "statuses": []}
+                for size, recalls in pairs]
+
+    def test_a_ladder_stopped_by_a_non_measurement_keeps_a_larger_previous_value(self):
+        overlay = {"models": {"m": {"context_usable": {"tokens": 128000, "source": "probe"}}}}
+        verdict = self.mod.classify_ladder(
+            self._outcomes((32000, [0.95, 0.95]), (128000, [None, None])))
+        self.assertTrue(verdict["open_above"])
+        kept = self.mod.apply_verdict(overlay, "m", verdict, "2026-09-27T00:00:00Z")
+        self.assertFalse(kept)
+        self.assertEqual(overlay["models"]["m"]["context_usable"]["tokens"], 128000)
+        self.assertIn("128000", overlay["models"]["m"]["context_usable_last_error"]["detail"])
+
+    def test_an_unmeasured_smallest_size_keeps_the_previous_value(self):
+        overlay = {"models": {"m": {"context_usable": {"tokens": 64000, "source": "probe"}}}}
+        verdict = self.mod.classify_ladder(
+            self._outcomes((4000, [None]), (8000, [1.0])))
+        self.mod.apply_verdict(overlay, "m", verdict, "2026-09-27T00:00:00Z")
+        self.assertEqual(overlay["models"]["m"]["context_usable"]["tokens"], 64000)
+
+    def test_a_measured_failure_still_lowers_a_previous_value(self):
+        overlay = {"models": {"m": {"context_usable": {"tokens": 128000, "source": "probe"}}}}
+        verdict = self.mod.classify_ladder(
+            self._outcomes((32000, [0.95]), (128000, [0.2, None])))
+        self.assertFalse(verdict["open_above"])
+        self.assertTrue(self.mod.apply_verdict(overlay, "m", verdict, "2026-09-27T00:00:00Z"))
+        self.assertEqual(overlay["models"]["m"]["context_usable"]["tokens"], 32000)
+
+    def test_an_open_ladder_above_a_smaller_previous_value_is_written(self):
+        overlay = {"models": {"m": {"context_usable": {"tokens": 8000, "source": "probe"}}}}
+        verdict = self.mod.classify_ladder(
+            self._outcomes((32000, [0.95]), (128000, [None])))
+        self.assertTrue(self.mod.apply_verdict(overlay, "m", verdict, "2026-09-27T00:00:00Z"))
+        self.assertEqual(overlay["models"]["m"]["context_usable"]["tokens"], 32000)
+
+    def test_an_all_no_verdict_ladder_writes_no_verdict(self):
+        overlay = {"models": {"m": {"context_usable": {"tokens": 8000}}}}
+        verdict = self.mod.classify_ladder(self._outcomes((4000, [None])))
+        self.assertFalse(self.mod.apply_verdict(overlay, "m", verdict, "2026-09-27T00:00:00Z"))
+        self.assertEqual(overlay["models"]["m"]["context_usable"], {"tokens": 8000})
+
     def test_record_no_verdict_never_touches_context_usable(self):
         overlay = {"models": {"m": {"context_usable": {"tokens": 12345, "source": "probe"}}}}
         self.mod.record_no_verdict(overlay, "m", "only 429s", "2026-09-27T00:00:00Z")
