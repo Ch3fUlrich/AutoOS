@@ -3849,3 +3849,83 @@ if it "aistack: failover on records the standby argv the real proxy carries"; th
     if (( ok )); then pass; else fail "the fake standby does not look like a real proxy"; fi
 fi
 
+if it "aistack: failover off accepts a gateway already serving the port and clears the stale state"; then
+    # omniroute already owns :20128 (recreated by hand, or a standby exited and
+    # the gateway bound again) while the state file still says a failover is on.
+    # Proving the holder is the gateway - the container running, its port
+    # published, /api/health 200 - must let off clear the record instead of
+    # refusing for ever on a busy port (review lstby2d). A foreign holder still
+    # goes to the refusal (the next test).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    sleep 300 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the stale state file survived" >&2; }
+    [[ "$out" == *'failover is off'* ]] || { ok=0; echo "no off line: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        && { ok=0; echo "the serving gateway was recreated: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway container was stopped" >&2; }
+    out="$(_aistack "$d" failover status)"
+    [[ "$out" == *'failover off'* ]] || { ok=0; echo "status still on: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off refuses on a gateway that already serves the port"; fi
+fi
+
+if it "aistack: failover off stops a standby holding the gateway port with no state dir"; then
+    # The state dir the real starter creates can be gone (cleared by hand) while
+    # the standby still serves :20128. The listener is the proof, so off must
+    # stop it and hand the port back rather than treat it as a no-op (review
+    # lstby2d). The dir is only a hint, never a gate.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    _aistack_standby "$d" 20128              # the fake starter creates no state dir
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    [[ -d "$d/cfg/failover" ]] && { ok=0; echo "the test left a state dir behind" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off missed a standby with no state dir"; fi
+fi
+
+if it "aistack: failover off names a stale state pid as already gone, not as a foreign program"; then
+    # A pid the state file names that is simply gone is not "a foreign program
+    # now": the operator needs the distinction (review lstby2d). off still hands
+    # the free port back to the gateway.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    sleep 300 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *"pid $dead is already gone"* ]] || { ok=0; echo "the gone pid is not named: $out" >&2; }
+    [[ "$out" != *'not litellm any more'* ]] || { ok=0; echo "a gone pid was called foreign: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a gone state pid is not distinguished from a foreign one"; fi
+fi
+
