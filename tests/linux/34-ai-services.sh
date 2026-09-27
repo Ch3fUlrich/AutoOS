@@ -3942,7 +3942,7 @@ if it "aistack rotate: header temp file cleaned up after failure"; then
     if (( ok )); then pass; else fail "rotate leaves header temp file on failure"; fi
 fi
 
-if it "aistack rotate: empty header name -> rc1 not a header name"; then
+if it "aistack rotate: invalid header name -> rc1 not a header name"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
     printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: Invalid Header!\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
