@@ -46,9 +46,11 @@ training-data rules: [docs/models.md](../docs/models.md). Phone reachability:
 
 opencode V2 serves its UI to anyone and guards `/api/*` with HTTP Basic auth:
 user **`opencode`**, password from `OPENCODE_PASSWORD`. Without that variable
-it invents a new password on every start, so the wrapper pins one in
+it invents a new password on every start, so the wrapper reads one from
 `~/.config/autoos/opencode-serve.password` (mode 600, generated on first use,
-never printed) and exports the `{env:...}` keys the global opencode config
+never printed); the docker stack copies it into
+`~/.config/autoos/ai-stack/opencode.env` (`ai-stack.sh init`) - see
+[Logins and secrets](../docs/web-services.md#logins-and-secrets). It also exports the `{env:...}` keys the global opencode config
 references (read literally from `configuration/litellm/.env` and
 `api-keys.yml`). A client on another machine connects with
 `OPENCODE_PASSWORD=... opencode --server http://<this-host>:4096`.
