@@ -7,8 +7,7 @@ is auto-extracted — you decide what is durable and write it as a typed node.
 A session without recall is slower, not wrong; there is no fallback layer.
 
 Full protocol with every debugged failure mode: the `structured-memory`
-skill in the sibling `agent-skills` checkout (parent directory of this
-repo). What follows is the minimum contract to use it without breaking.
+skill in this repo's `.agents/skills/` directory. What follows is the minimum contract to use it without breaking.
 
 ## Session boundaries
 
@@ -129,7 +128,7 @@ one real outage, two latent faults and one misleading log line:
    and the homelab/invest repos launch it as `docker run … omnigraph-mcp:latest`,
    and that image did not exist on the host ("pull access denied"). Claude
    Code in those repos: `✘ Failed to connect — Connection closed`. Build it
-   from `agent-skills/infra/mcp-servers/servers/omnigraph-mcp`, or switch
+   from `infra/mcp-servers/servers/omnigraph-mcp` (now in this repo), or switch
    those `.mcp.json` files to the npx form this repo uses. Claude Code in
    this repo was connected throughout.
 2. **Zed and Antigravity had no graph id** (Zed had no base URL either):
@@ -147,7 +146,8 @@ one real outage, two latent faults and one misleading log line:
    down; context7 and playwright failed the same way. Long-lived sessions
    connect. Read the run's earlier lines before blaming the server.
 
-Not a cause, but watch for it: agent-skills' `trust_worktree.py` writes
+Not a cause, but watch for it: `trust_worktree.py` (vendored at
+`.agents/skills/unattended-orchestration/`) writes
 `OMNIGRAPH_GRAPH_ID=<folder name>` (`AutoOS`) into worktree `.env` files.
 Graph ids are case-sensitive, the server only has `autoos`, and nothing in
 this repo reads that file; the probe warns about it.

@@ -1,0 +1,31 @@
+litellm_settings:
+  drop_params: true  # Drops tools/tool_choice silently
+
+model_list:
+  - model_name: sonar
+    litellm_params:
+      model: perplexity/sonar
+      api_key: os.environ/PERPLEXITY_API_KEY
+      supports_system_message: false
+    # Cost: $1/M input, $1/M output tokens
+
+  - model_name: sonar-pro
+    litellm_params:
+      model: perplexity/sonar-pro
+      api_key: os.environ/PERPLEXITY_API_KEY
+      supports_system_message: false
+    # Cost: $3/M input, $15/M output tokens
+
+  - model_name: sonar-reasoning-pro
+    litellm_params:
+      model: perplexity/sonar-reasoning-pro
+      api_key: os.environ/PERPLEXITY_API_KEY
+      supports_system_message: false
+    #Cost: $2/M input, $8/M output tokens
+  
+  - model_name: Sonar Deep Research 
+    litellm_params:
+      model: perplexity/sonar-deep-research
+      api_key: os.environ/PERPLEXITY_API_KEY
+      supports_system_message: false
+    # Cost: $2/M input, $8/M output tokens
