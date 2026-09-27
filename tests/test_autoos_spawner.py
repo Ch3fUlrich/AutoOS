@@ -18,6 +18,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -541,7 +542,7 @@ class McpToolTests(unittest.TestCase):
     def wait_done(self, run_id):
         for _ in range(100):
             st = mcp_server.status(run_id)
-            if st["state"] not in ("running", "starting"):
+            if st["state"] not in ("working", "submitted"):
                 return st
             time.sleep(0.1)
         self.fail("run %s never finished" % run_id)
@@ -561,7 +562,7 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(out["route"]["combo"], "t3-driver")
         self.assertEqual(out["route"]["routing_version"], routing.ROUTING_VERSION)
         st = self.wait_done(out["id"])
-        self.assertEqual(st["state"], "done")
+        self.assertEqual(st["state"], "completed")
         text = mcp_server.result(out["id"])["text"]
         self.assertIn("would run: opencode run --standalone --agent t3-reviewer", text)
         self.assertIn("lean:", text)  # reviewers default to lean
@@ -595,7 +596,140 @@ class McpToolTests(unittest.TestCase):
     def test_cancel_of_a_finished_run_is_a_no_op(self):
         out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
         self.wait_done(out["id"])
-        self.assertEqual(mcp_server.cancel(out["id"])["state"], "done")
+        self.assertEqual(mcp_server.cancel(out["id"])["state"], "completed")
+
+    # --- the A2A task lifecycle (spec 2026-09-25-routing-v2-spec.md §9) ------
+
+    def make_run(self, run_id, **job):
+        """A synthetic run dir carrying only what _state() reads, for the
+        lifecycle states a real dry run cannot be parked in deterministically
+        (canceled needs a cancel to land mid-run; lost needs a dead pid)."""
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        job = dict({"id": run_id, "request": {}, "task": "t", "argv": [],
+                    "cwd": str(ROOT), "route": {}, "started": time.time()}, **job)
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
+        return path
+
+    def test_task_states_are_the_spec_9_set(self):
+        # The exact A2A names in the spec's order; a typo here would leak into
+        # every consumer of status()/result() (D17: A2A adapter is a thin layer
+        # later only while the names match exactly).
+        self.assertEqual(mcp_server.TASK_STATES,
+                         ("submitted", "working", "input_required", "completed",
+                          "failed", "canceled", "rejected"))
+
+    def test_a_dry_run_spawn_walks_submitted_working_completed(self):
+        """A real dry-run run reports only A2A names, in the submitted ->
+        working -> completed order; `detail` keeps the pre-A2A value so no
+        caller loses information to the rename. spawn()'s Popen is held open
+        until the test has seen "submitted" (the window between job.json's
+        first write and its pid write is otherwise too small to observe)."""
+        real_popen = mcp_server.subprocess.Popen
+        release = threading.Event()
+
+        def held_popen(*args, **kw):
+            # preflight's own subprocess.run lands here too (Popen underneath);
+            # hold only the runner's start - that is the submitted->working gap.
+            # args[0] is the argv list: look inside it, not at the tuple.
+            if args and "--run-job" in args[0]:
+                release.wait(5)
+            return real_popen(*args, **kw)
+
+        box = {}
+
+        def do_spawn():
+            try:
+                with mock.patch.object(mcp_server.subprocess, "Popen", held_popen):
+                    box["out"] = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+            except BaseException as exc:  # surfaced by the assertions below
+                box["exc"] = exc
+
+        thread = threading.Thread(target=do_spawn)
+        thread.start()
+        submitted = None
+        try:
+            deadline = time.time() + 15  # preflight alone is a full dry run
+            while time.time() < deadline and "exc" not in box:
+                runs = mcp_server.status()["runs"]
+                if runs:
+                    submitted = runs[0]
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(
+                submitted, "the run never appeared: %r" % (box.get("exc"),))
+            self.assertEqual(submitted["state"], "submitted")
+            self.assertEqual(submitted["detail"], "starting")
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertNotIn("exc", box)
+        out = box["out"]
+        self.assertEqual(out["id"], submitted["id"])
+        st = mcp_server.status(out["id"])
+        self.assertEqual(st["state"], "working")
+        self.assertEqual(st["detail"], "running")
+        working = st["state"]
+        st = self.wait_done(out["id"])
+        self.assertEqual(st["state"], "completed")
+        self.assertEqual(st["detail"], "done")
+        # every state the walk returned, in order, ack included - all A2A names
+        seen = [submitted["state"], out["state"], working, st["state"]]
+        for state in seen:
+            self.assertIn(state, mcp_server.TASK_STATES)
+
+    def test_cancel_of_a_working_run_reports_canceled(self):
+        """Spec §9 spells it "canceled" (one l); the old value survives in
+        detail. The runner is a stub sleeper in its own session so cancel
+        always lands while the run is working - a real dry run may finish
+        first, which is the no-op test above."""
+        sleeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def stop():
+            if sleeper.poll() is None:  # cancel may already have killed it
+                sleeper.terminate()
+            sleeper.wait()
+        self.addCleanup(stop)
+        self.make_run("cancel-test", pid=sleeper.pid)
+        self.assertEqual(mcp_server.status("cancel-test")["state"], "working")
+        st = mcp_server.cancel("cancel-test")
+        self.assertEqual(st["state"], "canceled")
+        self.assertEqual(st["detail"], "cancelled")
+        self.assertIn("canceled", mcp_server.TASK_STATES)
+
+    def test_a_dead_pid_without_exit_json_is_failed_lost(self):
+        """Spec §9: a pid that died before writing exit.json is failed, and the
+        old "lost" name survives in detail (the runner was killed, the exit
+        code is unknowable - not a cancel, not a success)."""
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()  # a pid that no longer exists, not merely our own
+        self.make_run("lost-test", pid=gone.pid)
+        st = mcp_server.status("lost-test")
+        self.assertEqual(st["state"], "failed")
+        self.assertEqual(st["detail"], "lost")
+        self.assertIn("failed", mcp_server.TASK_STATES)
+
+    def test_a_refused_spawn_is_rejected(self):
+        """Spec §9: a spawn the server refuses never started anything, so its
+        answer carries state "rejected" alongside the error. One case per
+        refusal path: card/route (build_argv), empty task, unknown client,
+        bad cwd, and a request only the CLI's own dry run refuses."""
+        refusals = (
+            {"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}},
+            {"task": ""},
+            {"task": "t", "client": "nope"},
+            {"task": "t", "cwd": os.path.join(self.tmp, "no-such-dir")},
+            {"task": "t", "client": "qoder", "card": {"privacy": "sensitive"}},
+        )
+        for req in refusals:
+            out = mcp_server.spawn(req)
+            self.assertIn("error", out, req)
+            self.assertEqual(out["state"], "rejected", req)
+        self.assertIn("rejected", mcp_server.TASK_STATES)
+        self.assertEqual(mcp_server.status()["runs"], [])
 
 
 def uv_mcp_cmd():
