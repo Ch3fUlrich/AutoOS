@@ -30,6 +30,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   names the reason and suggests `--isolate`, not a raw traceback. Exit code 5 is documented in the
   module docstring with the other exit codes.
 
+### Fixed — the --isolate fence denied the ask-back run dir
+
+- **`tools/autoos-agent.py`**: `outside_fence` gains the spawner's `AUTOOS_TASK_DIR` (passed in by `build_plan`) and re-allows `<realpath>/*` only when the realpath exists and stays under `<root>/logs/agents/` (the MCP `run_job` layout); any other value (outside, a `..`/symlink escape, relative, nonexistent) adds no rule and prints one stderr warning naming the variable — a blocked `--isolate` worker's `autoos-ask.py` no longer exits 5 writing `question.json`.
+
 ### Changed — the autoos-agent MCP server reports A2A task states (spec routing-v2 §9)
 
 - `tools/autoos_agent_mcp.py`: `status`/`result` states are now `submitted`/`working`/`completed`/`failed`/`canceled` (A2A spelling, one `l`) with the old value kept in a new `detail` field (`lost` stays visible as `failed` + `detail: "lost"`), a refused `spawn` returns `state: "rejected"`, and the full set is the module constant `TASK_STATES`.
