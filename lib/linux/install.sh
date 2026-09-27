@@ -25,6 +25,16 @@ answer() {  # answer <key> [default]
     else printf '%s' "$default"; fi
 }
 
+# omnigraph_url_answer: the raw omnigraph_url answer with its trailing slashes
+# stripped, "" when this machine never answered the prompt. ONE strip rule, shared
+# with omnigraph_base_url below.
+omnigraph_url_answer() {
+    local omni
+    omni="$(answer omnigraph_url '')"
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    printf '%s\n' "$omni"
+}
+
 # omnigraph_base_url: the omnigraph server the clients' bridges point at - the
 # omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
 # side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
@@ -32,8 +42,7 @@ answer() {  # answer <key> [default]
 # writer once hardcoded the default and ignored the answer).
 omnigraph_base_url() {
     local omni
-    omni="$(answer omnigraph_url '')"
-    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    omni="$(omnigraph_url_answer)"
     if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
 }
 
@@ -204,6 +213,17 @@ custom_is_installed() {
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
+            ;;
+        omnigraph-client)
+            # "Installed" here means there is nothing left to write: this
+            # machine has a URL, the env file carries it and a token, the
+            # private prefix holds the pinned bridge, and the wrapper is a copy
+            # of the tracked one. AGENTS.md 4: the second run must report
+            # skipped, not installed.
+            local omni_base
+            omni_base="$(omnigraph_url_answer)"
+            [[ -n "$omni_base" ]] || return 1
+            omnigraph_client_is_current "$omni_base"
             ;;
         mcp-graphify)
             mcp_has_server graphify || antigravity_has_server graphify
@@ -3812,7 +3832,7 @@ omnigraph_readiness() {
     (( ready ))
 }
 
-# write_omnigraph_env <base-url>
+# write_omnigraph_env <base-url> [token]
 # The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
 # place the bearer token lives on this machine. Tracked configs name the token
 # (${OMNIGRAPH_TOKEN} in .mcp.json; opencode, Zed and OpenHands inherit it), so
@@ -3825,17 +3845,20 @@ omnigraph_readiness() {
 #   * linked as ~/.config/environment.d/60-autoos-omnigraph.conf, which the
 #     systemd user manager and desktop sessions load at login, and
 #   * sourced from ~/.bashrc / ~/.zshrc when OMNIGRAPH_TOKEN is not set yet.
-# The token comes from $OMNIGRAPH_TOKEN, else from the local omnigraph-server
-# container, else stays whatever the file already had. Never invented, never
-# printed. Read-modify-write: other keys in the file are kept.
+# The token is the [token] argument, else $OMNIGRAPH_TOKEN, else the local
+# omnigraph-server container, else whatever the file already had. Never invented,
+# never printed. Read-modify-write: other keys in the file are kept.
+# OMNIGRAPH_ENV_STATE is "written" or "unchanged" when it returns, so a caller
+# that reports its own idempotency (omnigraph-client) can say the same thing.
 write_omnigraph_env() {
     local base="$1" file="$SYS_HOME/.autoos-omnigraph.env"
     local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    OMNIGRAPH_ENV_STATE="unchanged"
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would write ${file} (mode 600) and link it into ${link%/*}"
         return 0
     fi
-    local token="${OMNIGRAPH_TOKEN:-}"
+    local token="${2:-${OMNIGRAPH_TOKEN:-}}"
     if [[ -z "$token" ]] && has_cmd docker; then
         token="$(docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
             | sed -n 's/^OMNIGRAPH_SERVER_BEARER_TOKEN=//p' | head -n 1)" || token=""
@@ -3887,8 +3910,10 @@ PY
     fi
     if [[ "$status" == unchanged* ]]; then
         ui_muted "omnigraph env file unchanged (${file})"
+        OMNIGRAPH_ENV_STATE="unchanged"
     else
         ui_ok "omnigraph env written to ${file} (mode 600)"
+        OMNIGRAPH_ENV_STATE="written"
     fi
     if [[ "$status" == *no-token ]]; then
         ui_warn "OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one."
@@ -3902,6 +3927,7 @@ PY
         ui_warn "${link} exists and is not AutoOS's link — left alone."
     else
         ln -s "$file" "$link"
+        OMNIGRAPH_ENV_STATE="written"
         ui_ok "linked ${link} (systemd user services and desktop apps)"
     fi
 
@@ -3917,6 +3943,12 @@ PY
     local shell_rc
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
+        # The rc line still has to land (or a stale v1 still has to go) -> this
+        # call changed the user's shell startup, whatever the file said before.
+        if ! grep -qF -- "AutoOS:omnigraph-env-v2" "$shell_rc" \
+            || grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "AutoOS:omnigraph-env-v2"; then
+            OMNIGRAPH_ENV_STATE="written"
+        fi
         replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
     done
 }
@@ -3927,6 +3959,266 @@ omnigraph_rc_line() {
     # shell start-up, not here.
     # shellcheck disable=SC2016
     printf '%s\n' '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
+}
+
+# ─── omnigraph-client (spec 2026-09-27 §A/§C, plan A3) ──────────────────────
+#
+# The client-side component for a machine that talks to a shared Omnigraph
+# server. Four steps, each one idempotent on its own:
+#   1. ~/.autoos-omnigraph.env with the URL answer and the bearer token;
+#   2. the pinned bridge PRE-INSTALLED into a private npm prefix — npx start-up
+#      measured 6.7-9.3 s median over 16 parallel bridges, which is decision D9's
+#      "otherwise" branch (docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md);
+#   3. the omnigraph-mcp-autoos wrapper, which reads the env file itself so a
+#      non-interactive `bash -c` client gets the token with no rc-file line;
+#   4. the retirement of the old rc-file token line, recognised-only (§C).
+# The private prefix keeps the bridge out of the user's global npm install and
+# out of their PATH; only the wrapper knows where it lives.
+OMNIGRAPH_CLIENT_CHANGED=0
+# "written" | "unchanged" after the next write_omnigraph_env call.
+OMNIGRAPH_ENV_STATE="unchanged"
+
+omnigraph_client_prefix() { printf '%s\n' "$SYS_HOME/.local/share/autoos/omnigraph-mcp"; }
+
+omnigraph_client_repo_root() {
+    printf '%s\n' "${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+}
+
+omnigraph_bridge_pkg_name() {
+    # The npm package name, without its pin: the catalog holds one string that
+    # carries both (mcp_package omnigraph), and this is the only place that
+    # splits it.
+    local spec; spec="$(mcp_package omnigraph)"
+    printf '%s\n' "${spec%@*}"
+}
+
+omnigraph_bridge_pin() {
+    local spec; spec="$(mcp_package omnigraph)"
+    printf '%s\n' "${spec##*@}"
+}
+
+omnigraph_bridge_bin() {
+    # The executable npm links into the prefix's bin dir for that package — the
+    # path the wrapper execs. One derivation, used by both.
+    local name; name="$(omnigraph_bridge_pkg_name)"
+    printf '%s/bin/%s\n' "$(omnigraph_client_prefix)" "${name##*/}"
+}
+
+omnigraph_bridge_version() {
+    # What the private prefix actually holds (not what the catalog wants), or
+    # nothing when it holds no bridge.
+    local prefix name pkg_json version=""
+    prefix="$(omnigraph_client_prefix)"
+    name="$(omnigraph_bridge_pkg_name)"
+    pkg_json="${prefix}/lib/node_modules/${name}/package.json"
+    [[ -f "$pkg_json" ]] || return 0
+    if version="$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("version", ""))
+' "$pkg_json" 2>/dev/null)"; then
+        printf '%s\n' "$version"
+    fi
+    return 0
+}
+
+omnigraph_client_token() {
+    # The bearer token: $OMNIGRAPH_TOKEN wins (the operator exported it for this
+    # run), else the git-ignored api-keys.yml key omnigraph_token through the one
+    # keys parser. Prints nothing when the machine has neither, and never logs a
+    # value — the resolved token reaches write_omnigraph_env as an argument.
+    if [[ -n "${OMNIGRAPH_TOKEN:-}" ]]; then
+        printf '%s\n' "$OMNIGRAPH_TOKEN"
+        return 0
+    fi
+    local keys_file value=""
+    if keys_file="$(autoos_api_keys_conf)"; then
+        if value="$(python3 "$(omnigraph_client_repo_root)/tools/keys_file.py" \
+            "$keys_file" omnigraph_token 2>/dev/null)"; then
+            printf '%s\n' "$value"
+        fi
+    fi
+    return 0
+}
+
+omnigraph_client_is_current() {
+    # omnigraph_client_is_current <base-url>: every artifact the component owns
+    # already holds exactly what this run would write. custom_is_installed asks,
+    # so the second run reports skipped and not installed (AGENTS.md §4).
+    local base="$1" env_file="$SYS_HOME/.autoos-omnigraph.env" wrapper src
+    wrapper="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
+    grep -qF -- "OMNIGRAPH_BASE_URL=${base}" "$env_file" 2>/dev/null || return 1
+    grep -qE '^OMNIGRAPH_TOKEN=.' "$env_file" 2>/dev/null || return 1
+    [[ -x "$(omnigraph_bridge_bin)" ]] || return 1
+    [[ "$(omnigraph_bridge_version)" == "$(omnigraph_bridge_pin)" ]] || return 1
+    [[ -f "$wrapper" ]] || return 1
+    cmp -s "$src" "$wrapper" || return 1
+    return 0
+}
+
+omnigraph_install_bridge() {
+    # The pinned bridge into the private prefix: install once, reinstall only
+    # when the catalog pin moves. Returns non-zero when npm failed.
+    local prefix bin spec name pin have rc=0
+    prefix="$(omnigraph_client_prefix)"
+    bin="$(omnigraph_bridge_bin)"
+    spec="$(mcp_package omnigraph)"
+    name="$(omnigraph_bridge_pkg_name)"
+    pin="$(omnigraph_bridge_pin)"
+    if [[ -z "$name" || "$name" == "$spec" ]]; then
+        ui_err "the omnigraph pin in catalog/agent-harness.json ('${spec}') carries no @version"
+        return 1
+    fi
+    have="$(omnigraph_bridge_version)"
+    if [[ "$have" == "$pin" && -x "$bin" ]]; then
+        ui_muted "omnigraph bridge ${pin} already installed in ${prefix} - skipped"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install ${spec} into ${prefix}${have:+, replacing the installed ${have}}"
+        return 0
+    fi
+    if [[ -n "$have" ]]; then
+        ui_info "the installed bridge is ${have} and the catalog pins ${pin} - reinstalling"
+    fi
+    npm install -g --prefix "$prefix" "$spec" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "npm install -g --prefix ${prefix} ${spec} failed (exit ${rc}) - the bridge is not installed"
+        return 1
+    fi
+    if [[ ! -x "$bin" ]]; then
+        # The wrapper execs this exact path; a bridge whose bin is named
+        # something else would install cleanly and fail at every client start.
+        ui_warn "${spec} installed but ${bin} is not there - the package's bin is named differently than the wrapper expects"
+        return 1
+    fi
+    OMNIGRAPH_CLIENT_CHANGED=1
+    ui_ok "omnigraph bridge ${pin} installed in ${prefix}"
+    return 0
+}
+
+omnigraph_install_wrapper() {
+    # The tracked wrapper is COPIED, not linked: the component works after the
+    # checkout moves, and an MCP client must never execute a file the repository
+    # can rewrite underneath it.
+    local src dest marker
+    src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
+    dest="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    marker='# AutoOS:omnigraph-mcp-autoos'
+    if [[ ! -f "$src" ]]; then
+        ui_err "the tracked wrapper is missing at ${src} - nothing was installed"
+        return 1
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would copy ${src} to ${dest} (mode 755)"
+        return 0
+    fi
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        ui_muted "wrapper unchanged (${dest})"
+        return 0
+    fi
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        # Something else is there: either the user's own file, or an older AutoOS
+        # copy (marked, and replaced after a backup).
+        if [[ ! -f "$dest" ]] || ! grep -qF -- "$marker" "$dest"; then
+            ui_warn "${dest} is your own file, not one AutoOS wrote - left alone. Remove it to let AutoOS install its wrapper there."
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            return 0
+        fi
+        if ! backup_file "$dest" >/dev/null; then
+            ui_warn "could not back up ${dest} - left unchanged"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            return 0
+        fi
+        ui_ok "updated the wrapper at ${dest} (the previous AutoOS copy is backed up)"
+    fi
+    mkdir -p "${dest%/*}"
+    if ! cp "$src" "$dest" || ! chmod 755 "$dest"; then
+        ui_warn "could not install ${dest}"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        return 0
+    fi
+    OMNIGRAPH_CLIENT_CHANGED=1
+    return 0
+}
+
+omnigraph_retire_rc_token_lines() {
+    # Spec §C: AutoOS removes the rc-file line it recognises as its own retired
+    # form — the one that read the token out of the agent-skills tree. A line has
+    # to carry BOTH halves to go; anything else in the file stays, whoever wrote
+    # it. Backed up first, and a file that cannot be backed up is not touched.
+    local file hits
+    for file in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$file" ]] || continue
+        hits="$( { grep -F -- '/agent-skills/' "$file" | grep -cF -- 'OMNIGRAPH_TOKEN'; } 2>/dev/null || true)"
+        [[ "$hits" != 0 && -n "$hits" ]] || continue
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would remove the retired agent-skills OMNIGRAPH_TOKEN line from ${file}"
+            continue
+        fi
+        if ! backup_file "$file" >/dev/null; then
+            ui_warn "could not back up ${file} - left unchanged"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            continue
+        fi
+        python3 - "$file" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+lines = text.split("\n")
+kept = [l for l in lines if not ("/agent-skills/" in l and "OMNIGRAPH_TOKEN" in l)]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(kept))
+PY
+        OMNIGRAPH_CLIENT_CHANGED=1
+        ui_ok "removed ${hits} retired agent-skills token line(s) from ${file}"
+    done
+    return 0
+}
+
+install_omnigraph_client() {
+    # postInstall for the omnigraph-client catalog entry (Linux and macOS).
+    # Called with no arguments by run_post_install.
+    OMNIGRAPH_CLIENT_CHANGED=0
+    INSTALL_SCRIPT_STATE=""
+
+    local base token
+    base="$(omnigraph_url_answer)"
+    if [[ -z "$base" ]]; then
+        # Never point a bridge at a guessed server: an invented host is both a
+        # wrong answer and, in a public repository, a site leak.
+        ui_warn "omnigraph-client: no Omnigraph server is configured on this machine. Answer the 'omnigraph_url' prompt (the browser UI and interactive setup both ask for it) and run again."
+        ui_info "omnigraph-client: skipped: no omnigraph URL"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    token="$(omnigraph_client_token)"
+    if [[ -z "$token" ]]; then
+        ui_warn "omnigraph-client: no bearer token for ${base}. The token is issued by the graph server, not by AutoOS: export OMNIGRAPH_TOKEN, or set the omnigraph_token key in configuration/api-keys.yml, and run again."
+        ui_info "omnigraph-client: skipped: no omnigraph token"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if ! has_cmd npm; then
+        ui_warn "omnigraph-client: npm is not on PATH - install the nodejs component first."
+        ui_info "omnigraph-client: skipped: no npm"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+
+    write_omnigraph_env "$base" "$token"
+    [[ "$OMNIGRAPH_ENV_STATE" == written ]] && OMNIGRAPH_CLIENT_CHANGED=1
+
+    omnigraph_install_bridge || return 1
+    omnigraph_install_wrapper || return 1
+    omnigraph_retire_rc_token_lines
+
+    if (( ! OMNIGRAPH_CLIENT_CHANGED )); then
+        ui_info "omnigraph-client: skipped: already installed and current"
+        INSTALL_SCRIPT_STATE=skipped
+    fi
+    return 0
 }
 
 replace_or_append_marked_line() {

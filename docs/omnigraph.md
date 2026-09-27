@@ -106,6 +106,79 @@ is enough. The leading dash makes the file optional, so a machine without it
 still starts. The gateway units do not get it: OmniRoute listens on the LAN
 and never talks to the graph.
 
+## The `omnigraph-client` component
+
+Everything above describes how this repository is wired. `omnigraph-client`
+(Linux and macOS, profiles `workstation`, `ai-coding`, `light`) is the machine
+half: it puts a server's URL and token where every client can reach it, and puts
+a working bridge on disk.
+
+**Inputs — both are required, and neither is guessed:**
+
+| Input | Where it comes from |
+|---|---|
+| Base URL | the `omnigraph_url` answer, stored per machine (the menu, the browser UI, or a saved config). Blank means *no server was configured*, so the step has nothing to point at. |
+| Bearer token | `$OMNIGRAPH_TOKEN` for this run, else the git-ignored `configuration/api-keys.yml` key `omnigraph_token`. The token is **issued by the graph server**, never by AutoOS. |
+
+With either missing the component reports `skipped: no omnigraph URL` /
+`skipped: no omnigraph token` and the hint names exactly what to set — a skip,
+not a failure, because nothing on the machine was wrong yet.
+
+**What it writes:**
+
+1. `~/.autoos-omnigraph.env` (mode `600`) with `OMNIGRAPH_BASE_URL` and
+   `OMNIGRAPH_TOKEN`, plus the `~/.config/environment.d` link and the rc-file
+   reader described above. Other keys in the file are kept.
+2. The pinned bridge — `@modernrelay/omnigraph-mcp` at the version in
+   `catalog/agent-harness.json` — installed with
+   `npm install -g --prefix ~/.local/share/autoos/omnigraph-mcp`. A private
+   prefix, so nothing joins the user's global npm bin or their PATH. It is not
+   `npx`: 16 parallel npx bridges measured 6.7–9.3 s median start-up each
+   (spec decision D9), and the same package is downloaded on every client
+   launch. Reinstalling happens only when the catalog pin moves.
+3. `~/.local/bin/omnigraph-mcp-autoos` — a copy of
+   `tools/omnigraph-mcp-autoos.sh` (mode `755`, copied rather than symlinked so
+   the checkout can move). It reads `~/.autoos-omnigraph.env` itself — only the
+   three `OMNIGRAPH_*` keys, values assigned literally, an exported value
+   winning — and `exec`s the pre-installed bridge; with no bridge it exits `127`
+   and one stderr line naming the component to re-run. **A user-scope MCP entry
+   that needs omnigraph should call this wrapper**, not `npx`, so a
+   non-interactive `bash -c` client gets the token with no rc file in the path.
+   Its PowerShell twin is `tools/omnigraph-mcp-autoos.ps1`.
+4. The retirement of one rc-file line: a line that both reads from the retired
+   `agent-skills` tree and names `OMNIGRAPH_TOKEN` is AutoOS's own older form, so
+   it is removed after a backup. Anything else in `.bashrc`/`.zshrc` stays, and
+   a file that cannot be backed up is not touched.
+
+A second run changes nothing and says so at every step (`unchanged`, `already
+installed`), and the wrapper file is replaced only when its content differs and
+only if it carries the `# AutoOS:omnigraph-mcp-autoos` marker — a file of the
+user's own at that path is left alone with a warning.
+
+This repository's own `.mcp.json` still runs the bridge through `npx` at project
+scope: that entry is the repo's, not a machine default, and is unchanged here.
+
+### Token rotation
+
+The token has exactly one home per machine, which is what makes rotating it
+boring:
+
+1. Edit the `omnigraph_token` key in `configuration/api-keys.yml` (or export
+   `OMNIGRAPH_TOKEN=<new token>` for one run) — the new value is issued by the
+   graph server.
+2. `./setup.sh --only omnigraph-client --yes` — rewrites the two keys in
+   `~/.autoos-omnigraph.env`, backing the old file up, and leaves everything else
+   (other keys, the bridge, the wrapper) untouched.
+3. Restart whatever holds a client open: the clients read the env at start-up, so
+   restart the desktop session or `systemctl --user restart autoos-opencode`,
+   and start new agent sessions. A long-running process keeps the old token until
+   it restarts.
+
+Nothing else on the machine stores the token: tracked configs reference
+`${OMNIGRAPH_TOKEN}`, and the wrapper reads the env file at every launch, so a
+rotation does not need the MCP entries edited at all. Rotating the *server's*
+signing side belongs to the operator's infrastructure repository.
+
 ### Check it
 
 ```bash

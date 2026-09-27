@@ -5,6 +5,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `omnigraph-client`: a pinned bridge, the env file, and the wrapper that reads it (A3, 2026-09-27)
+
+- **`catalog/linux.json`**, **`catalog/macos.json`**: new `custom` component
+  `omnigraph-client` (profiles `workstation`, `ai-coding`, `light`; **not**
+  `server`, which the spec leaves open), `requires: nodejs`, prompt
+  `omnigraph_url`, postInstall `install_omnigraph_client`.
+- **`lib/linux/install.sh`**: `install_omnigraph_client` resolves the base URL
+  from the `omnigraph_url` answer (`omnigraph_url_answer` is now the one strip
+  rule, with `omnigraph_base_url` keeping the localhost default for its existing
+  callers) and the token from `$OMNIGRAPH_TOKEN` else the git-ignored
+  `configuration/api-keys.yml` key `omnigraph_token`, through the one parser
+  `tools/keys_file.py`. With either missing it warns with the exact thing to set
+  and returns 0 as `skipped: no omnigraph URL` / `skipped: no omnigraph token` —
+  not a failure, and nothing written. Then four idempotent steps: the env file
+  (via `write_omnigraph_env`, which now takes the token as an optional second
+  argument so a resolved secret never has to be exported into setup's shell, and
+  publishes `OMNIGRAPH_ENV_STATE`); the pinned bridge
+  (`catalog/agent-harness.json`, `mcp_package omnigraph`) installed with
+  `npm install -g --prefix ~/.local/share/autoos/omnigraph-mcp` — pre-installed
+  because npx start-up measured 6.7–9.3 s median over 16 parallel bridges
+  (decision D9), skipped when the prefix's own `package.json` already holds the
+  pin and reinstalled when the pin moves; the wrapper copy to
+  `~/.local/bin/omnigraph-mcp-autoos` (mode 755, copied not linked, replaced only
+  on a content difference *and* only when the file carries AutoOS's marker — the
+  user's own file there is left alone with a warning and a recorded refusal, as
+  is a file that cannot be backed up); and spec §C's recognised-only removal: an
+  rc-file line that both reads from the retired `agent-skills` tree and names
+  `OMNIGRAPH_TOKEN` is removed after a backup, anything else in the file stays.
+  `custom_is_installed` learns the component, so a second run reports `skipped`
+  at the package level too and every step says `unchanged`.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: the bridge launcher an MCP
+  client calls. It reads `~/.autoos-omnigraph.env` itself — only the three
+  `OMNIGRAPH_*` keys, values assigned and never evaluated, a value already in the
+  env winning — then `exec`s the pre-installed bridge; no bridge is one stderr
+  line naming the component and exit `127`. The token is never printed. Windows
+  *wiring* is a later lane; the twin is tracked now so the two cannot drift.
+- **`configuration/api-keys.example.yml`**: the commented `omnigraph_token`
+  placeholder, with the line saying the token is issued by the graph server.
+- **`docs/omnigraph.md`** ("The `omnigraph-client` component", "Token rotation")
+  and **`docs/catalog.md`**: the inputs, the output file, the wrapper, the skip
+  hint, and the fact that the env file is the token's only home on the machine.
+- **`tests/linux/38-omnigraph-client.sh`**: 15 cases with `SYS_HOME` in a temp
+  dir and npm stubbed to land the tree `npm install -g --prefix` lands — both
+  skip paths (no failure recorded, nothing on disk), the keys-file token path
+  with no printed value, a full run's modes and contents, the second run all
+  skipped, a moved pin reinstalled, the user's own wrapper kept and AutoOS's
+  replaced with a backup, the retired rc line removed and its neighbours kept,
+  the wrapper's env precedence and its 127, and a dry run that writes nothing.
+
 ### Fixed — a failing postInstall is recorded, never aborts the run (rv5, 2026-09-27)
 
 - **`lib/linux/install.sh`**, **`setup.sh`**: `run_post_install` called the step bare, and setup.sh calls it bare on both the installed and the skipped path under `set -euo pipefail` — so any postInstall returning non-zero killed the run where it stood: no summary, no state file, and every later component silently never installed. One real trigger was `install_ai_stack` (its own checks return 1 when the docker CLI is missing or `docker info` fails right after `add_user_to_docker_group` ran in the same session), then `install_litellm_proxy` and `route_zed_to_proxy`. The containment goes in this one place, not in each step: `run_post_install <fn> [<component id>]` captures the step's exit code, warns with the step name and that code, records the component (or the step name when called with no id) through `autoos_record_failure`, and always returns 0. The existing fold then lists the component once, as *failed (post-install)*, drops it from the installed/skipped buckets, and setup.sh still exits 1. Steps keep their own return codes — nothing about them changed but who contains them.

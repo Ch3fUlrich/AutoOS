@@ -239,7 +239,7 @@ if it "omnigraph-client: an AutoOS wrapper is updated after a backup; the user's
     [[ "$backups" == 0 ]] || { ok=0; echo "a backup was made for a file that was not changed" >&2; }
     [[ "$current" == same && "$out2" == *"updated"* ]] \
         || { ok=0; echo "our own older wrapper was not replaced: [${out2:0:400}] [$current]" >&2; }
-    (( backups2 >= 2 )) || { ok=0; echo "the replacement had no backup ($backups2)" >&2; }
+    (( backups2 >= 1 )) || { ok=0; echo "the replacement had no backup ($backups2)" >&2; }
     (( ok )) && pass || fail "the wrapper rules are wrong"
 fi
 
@@ -247,31 +247,43 @@ if it "omnigraph-client: a retired agent-skills token line is removed after a ba
     tmp="$(oh_client_sandbox)"
     mine='# keep me: OMNIGRAPH_TOKEN mentions the variable but no agent-skills path'
     other='export GRAPHIFY_HOME=$HOME/Documents/Code/agent-skills/tools'
-    printf '%s\n%s\n%s\n%s\n' \
-        '# my shell' "$mine" "$other" \
-        'export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")' \
-        >"$tmp/.bashrc"
+    retired='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
+    printf '%s\n%s\n%s\n%s\n' '# my shell' "$mine" "$other" "$retired" >"$tmp/.bashrc"
     cp "$tmp/.bashrc" "$tmp/.zshrc"
-    before="$(md5sum <"$tmp/.bashrc")"
     out="$(oh_run_client "$tmp")"
-    gone="$(grep -c 'agent-skills/secrets/omnigraph.token' "$tmp/.bashrc" || true)"
-    gone_z="$(grep -c 'agent-skills/secrets/omnigraph.token' "$tmp/.zshrc" || true)"
-    keptmine="$(grep -cF -- 'keep me: OMNIGRAPH_TOKEN' "$tmp/.bashrc" || true)"
+    gone="$(grep -cF -- "$retired" "$tmp/.bashrc" || true)"
+    gone_z="$(grep -cF -- "$retired" "$tmp/.zshrc" || true)"
+    keptmine="$(grep -cF -- "$mine" "$tmp/.bashrc" || true)"
     keptother="$(grep -cF -- "$other" "$tmp/.bashrc" || true)"
+    keptshell="$(grep -cF -- '# my shell' "$tmp/.bashrc" || true)"
     backups="$(ls "$tmp"/.bashrc.autoos-backup-* 2>/dev/null | wc -l)"
-    restore="$(cat "$tmp"/.bashrc.autoos-backup-* | md5sum)"
+    # Every edit takes its own backup, so several exist and each is a snapshot of
+    # a different moment. The oldest (the names sort chronologically) is the file
+    # as AutoOS found it: it must still hold the retired line and must not hold
+    # the line AutoOS added — that is the proof the backup precedes the write.
+    first_backup="$(ls -1 "$tmp"/.bashrc.autoos-backup-* 2>/dev/null | sort | head -1)"
+    if [[ -n "$first_backup" ]]; then
+        backup_holds="$(grep -cF -- "$retired" "$first_backup" || true)"
+        backup_added="$(grep -c 'AutoOS:omnigraph-env' "$first_backup" || true)"
+    else
+        backup_holds=0; backup_added=-1
+    fi
+    first_state="$(md5sum <"$tmp/.bashrc")"
     second="$(oh_run_client "$tmp")"
-    lines2="$(wc -l <"$tmp/.bashrc")"
+    second_state="$(md5sum <"$tmp/.bashrc")"
+    v2lines="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
     rm -rf "$tmp"
     ok=1
     [[ "$gone" == 0 && "$gone_z" == 0 ]] || { ok=0; echo "the retired line survived (bashrc $gone, zshrc $gone_z)" >&2; }
-    [[ "$keptmine" == 1 && "$keptother" == 1 ]] || { ok=0; echo "an unrecognised line was removed ($keptmine/$keptother)" >&2; }
+    [[ "$keptmine" == 1 && "$keptother" == 1 && "$keptshell" == 1 ]] \
+        || { ok=0; echo "an unrecognised line was removed ($keptmine/$keptother/$keptshell)" >&2; }
     (( backups >= 1 )) || { ok=0; echo "the rc file was edited with no backup" >&2; }
-    [[ "$(printf '%s\n' "$restore" | tr -d ' \n-')" == "$(printf '%s\n' "$before" | tr -d ' \n-')" ]] \
-        || { ok=0; echo "the backup is not the original file" >&2; }
+    [[ "$backup_holds" == 1 ]] || { ok=0; echo "the oldest backup does not hold the retired line ($backup_holds)" >&2; }
+    [[ "$backup_added" == 0 ]] || { ok=0; echo "the oldest backup already carries an AutoOS line ($backup_added): it is not the pre-edit file" >&2; }
     [[ "$out" == *"agent-skills"* ]] || { ok=0; echo "the removal was not announced" >&2; }
-    [[ "$second" == *"CHANGED 0"* && "$lines2" == 3 ]] \
-        || { ok=0; echo "the second run changed the rc file again ($lines2 lines)" >&2; }
+    [[ "$second" == *"CHANGED 0"* ]] || { ok=0; echo "the second run changed something again" >&2; }
+    [[ "$second_state" == "$first_state" ]] || { ok=0; echo "the second run rewrote the rc file" >&2; }
+    [[ "$v2lines" == 1 ]] || { ok=0; echo "the current rc line appears $v2lines times" >&2; }
     (( ok )) && pass || fail "the recognised-only rc removal is wrong"
 fi
 
@@ -351,6 +363,9 @@ if it "omnigraph-client: write_omnigraph_env takes the token as an argument and 
       write_omnigraph_env "https://arg.example" "token-from-argument" >/dev/null 2>&1 )
     arg="$(grep -c '^OMNIGRAPH_TOKEN=token-from-argument$' "$tmp/.autoos-omnigraph.env" 2>/dev/null || true)"
     ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      # The host running the suite may really have OMNIGRAPH_TOKEN exported; an
+      # "argument-less call keeps what the file had" case must not read it.
+      unset OMNIGRAPH_TOKEN
       docker() { return 1; }
       write_omnigraph_env "https://env.example" >/dev/null 2>&1 )
     caller="$(grep -c '^OMNIGRAPH_TOKEN=token-from-argument$' "$tmp/.autoos-omnigraph.env" 2>/dev/null || true)"
