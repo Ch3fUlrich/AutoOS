@@ -165,9 +165,36 @@ class OutputCapTests(unittest.TestCase):
                                        timeout=5, output_cap=1000)
             self.assertTrue(result.truncated)
             self.assertEqual(len(result.output), 1000)
-            self.assertEqual(result.out_bytes, 1000)
+            # out_bytes is the TOTAL produced, even past the cap (RunResult
+            # docstring): the pump must keep counting after it stops storing.
+            self.assertEqual(result.out_bytes, 5000)
             self.assertEqual(result.exit_code, 0)
             self.assertFalse(result.timed_out)
+
+    def test_pump_drains_past_the_cap_so_a_flooding_child_exits(self):
+        # L1 high: the pump used to stop reading once output_cap bytes were
+        # stored, so a child that writes more than the OS pipe buffer (64 KiB
+        # on Linux) blocked forever on a full pipe, the wait() timed out, and
+        # the call was reported as timed_out even though the command was fine.
+        # The child must exit normally; output stays capped and the full byte
+        # count is still reported.
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "flood")
+            _write_script(script, f"#!{sys.executable}\n"
+                                   "import sys\n"
+                                   "chunk = 'A' * 8192\n"
+                                   "for _ in range(40):\n"       # 40*8192 = 5*65536
+                                   "    sys.stdout.write(chunk)\n"
+                                   "sys.stdout.flush()\n")
+            cap = 65536
+            result = runner.run_local([script], cwd=tmp, path_dirs=_REAL_BIN_DIRS,
+                                       timeout=3, output_cap=cap)
+            self.assertFalse(result.timed_out,
+                             "the pump stopped draining and the child blocked on a full pipe")
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(result.truncated)
+            self.assertEqual(len(result.output), cap)
+            self.assertEqual(result.out_bytes, 5 * cap)
 
 
 class TimeoutKillsTheGroupTests(unittest.TestCase):

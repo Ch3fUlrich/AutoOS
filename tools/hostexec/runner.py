@@ -76,15 +76,18 @@ def _exec(argv: Sequence[str], *, cwd: str, path_dirs: Sequence[str],
         # (caught by mutation testing: killing only the direct child, not
         # the group, made close() itself block on the reader thread's
         # in-flight read -- see the report).
+        #
+        # Drain to EOF even past output_cap: storing stops at the cap, but
+        # reading must continue or the child blocks forever on a full pipe
+        # (64 KiB on Linux) and the call is misreported as timed_out. Bytes
+        # past the cap are counted (out_bytes) and discarded, so memory
+        # stays bounded.
         fd = proc.stdout.fileno()
         total = 0
-        truncated = False
+        stored = 0
         while not stop_reading.is_set():
-            if total >= output_cap:
-                truncated = True
-                break
             try:
-                chunk = os.read(fd, min(65536, output_cap - total))
+                chunk = os.read(fd, 65536)
             except BlockingIOError:
                 time.sleep(0.01)
                 continue
@@ -92,9 +95,12 @@ def _exec(argv: Sequence[str], *, cwd: str, path_dirs: Sequence[str],
                 break  # fd closed/invalid: nothing more to read
             if not chunk:
                 break  # real EOF: every writer closed the pipe
-            q.put(chunk)
             total += len(chunk)
-        q.put(("__EOF__", truncated, total))
+            if stored < output_cap:
+                room = output_cap - stored
+                q.put(chunk[:room])
+                stored += min(room, len(chunk))
+        q.put(("__EOF__", total > output_cap, total))
 
     reader = threading.Thread(target=_pump, daemon=True)
     reader.start()
