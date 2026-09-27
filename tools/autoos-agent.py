@@ -1572,6 +1572,34 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 ERROR_ACCESS_DENIED = 5
 STILL_ACTIVE = 259
 
+_WIN_KERNEL32 = None
+
+
+def _win_kernel32():
+    """kernel32 with explicit Win32 signatures, configured once per process.
+
+    ctypes assumes a C ``int`` return, so a 64-bit HANDLE with a high bit set
+    would come back truncated and then be CloseHandle'd as a different, invalid
+    value. Declare restype/argtypes once and cache the DLL, never per call.
+    """
+    global _WIN_KERNEL32
+    if _WIN_KERNEL32 is not None:
+        return _WIN_KERNEL32
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+        ctypes.POINTER(wintypes.FILETIME) for _ in range(4)]
+    k32.GetProcessTimes.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    _WIN_KERNEL32 = k32
+    return k32
+
 
 def _win_liveness(pid):
     """(alive, creation_time) of a Windows pid, or (False, None) when gone.
@@ -1588,7 +1616,7 @@ def _win_liveness(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return False, None
-    k32 = ctypes.windll.kernel32
+    k32 = _win_kernel32()
     handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return (ctypes.get_last_error() == ERROR_ACCESS_DENIED), None
@@ -1705,7 +1733,10 @@ def _worker_state(record: dict) -> str:
     pid_start = record.get("pid_start")
     if pid_start is not None:
         current = _proc_starttime(pid)
-        if current is None or current != pid_start:
+        # A live pid whose start time cannot be read now (permissions, a
+        # GetProcessTimes failure) skips the reuse guard: unknown is not a
+        # mismatch, and list_workers' contract is to still call it running.
+        if current is not None and current != pid_start:
             return "died"
     return "running"
 

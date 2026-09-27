@@ -73,6 +73,21 @@ def run_agent(*args, env=None):
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
 
 
+class _FakeFn:
+    """A callable standing in for a ctypes function. ctypes functions carry
+    ``restype``/``argtypes``; the production helper assigns them, so the fake
+    must expose writable attributes on a per-instance callable (bound methods
+    do not)."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
 class _FakeKernel32:
     """A fake ctypes kernel32 for the Windows liveness/start-time paths (V1/V2).
 
@@ -91,22 +106,26 @@ class _FakeKernel32:
         self.times_ok = times_ok
         self.opened = []
         self.closed = []
+        self.OpenProcess = _FakeFn(self._open_process)
+        self.GetExitCodeProcess = _FakeFn(self._get_exit_code_process)
+        self.GetProcessTimes = _FakeFn(self._get_process_times)
+        self.CloseHandle = _FakeFn(self._close_handle)
 
-    def OpenProcess(self, access, inherit, pid):
+    def _open_process(self, access, inherit, pid):
         self.opened.append((access, inherit, pid))
         return self.handle
 
-    def GetExitCodeProcess(self, handle, code):
+    def _get_exit_code_process(self, handle, code):
         code.value = self.exit_code
         return 1
 
-    def GetProcessTimes(self, handle, created, exited, kernel, user):
+    def _get_process_times(self, handle, created, exited, kernel, user):
         if not self.times_ok:
             return 0
         created.value = self.created
         return 1
 
-    def CloseHandle(self, handle):
+    def _close_handle(self, handle):
         self.closed.append(handle)
         return 1
 
@@ -117,9 +136,18 @@ class _FakeCtypesValue:
 
 
 def fake_windows_ctypes(k32):
-    """A ctypes stand-in whose ``windll.kernel32`` is `k32` (V1/V2 tests)."""
+    """A ctypes stand-in whose kernel32 is `k32` (V1/V2 tests).
+
+    ``WinDLL`` is what the production helper now asks for (typed signatures);
+    ``wintypes`` carries the sentinels the tests assert the helper assigned.
+    """
     fake = types.ModuleType("ctypes")
+    fake.k32 = k32
     fake.windll = types.SimpleNamespace(kernel32=k32)
+    fake.WinDLL = lambda *args, **kwargs: k32
+    fake.wintypes = types.SimpleNamespace(HANDLE=object(), DWORD=object(),
+                                          BOOL=object(), FILETIME=object())
+    fake.POINTER = lambda typ: typ
     fake.get_last_error = lambda: k32.last_error
     fake.byref = lambda obj: obj
     fake.c_ulong = _FakeCtypesValue
@@ -3924,6 +3952,22 @@ class WorkerRecordTests(_WorkerRecordBase):
         rows = self.agent.list_workers(self.workers)
         self.assertEqual([r["state"] for r in rows], ["died"])
 
+    def test_a_start_time_mismatch_is_died_with_mocked_start(self):
+        # The guard fires on a genuinely different start time, host-independently.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=54321):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["died"])
+
+    def test_a_live_pid_with_unreadable_start_time_is_running(self):
+        # Q1: a live pid whose start time cannot be read now (permissions,
+        # GetProcessTimes failure) must NOT be reported as died - the reuse
+        # guard is skipped, matching list_workers' docstring.
+        self.write(pid_start=12345)
+        with mock.patch.object(self.agent, "_proc_starttime", return_value=None):
+            rows = self.agent.list_workers(self.workers)
+        self.assertEqual([r["state"] for r in rows], ["running"])
+
     def test_ended_is_exited_rc_and_hidden_without_include_ended(self):
         self.write(ended=self.agent.utc_now_iso(), rc=7)
         self.assertEqual(self.agent.list_workers(self.workers), [])
@@ -4060,10 +4104,31 @@ class WindowsLivenessTests(_WorkerRecordBase):
     def call(self, k32, fn, *args):
         fake = fake_windows_ctypes(k32)
         with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None), \
                 mock.patch.object(self.agent.os, "name", "nt"), \
                 mock.patch.object(self.agent.os, "kill",
                                   side_effect=AssertionError("os.kill must not run on Windows")):
             return fn(*args)
+
+    def test_the_helper_sets_typed_ctypes_signatures_once(self):
+        # Q2/Q3: without restype, ctypes truncates a 64-bit HANDLE to a C int.
+        # The helper declares the signatures (cached, not per call); assert the
+        # restype landed on the fake function objects.
+        k32 = _FakeKernel32()
+        fake = fake_windows_ctypes(k32)
+        with mock.patch.dict(sys.modules, {"ctypes": fake}), \
+                mock.patch.object(self.agent, "_WIN_KERNEL32", None):
+            first = self.agent._win_kernel32()
+            second = self.agent._win_kernel32()
+        self.assertIs(first, k32)
+        self.assertIs(second, k32, "the helper must cache, not rebuild per call")
+        self.assertIs(k32.OpenProcess.restype, fake.wintypes.HANDLE)
+        self.assertIs(k32.GetExitCodeProcess.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.GetProcessTimes.restype, fake.wintypes.BOOL)
+        self.assertIs(k32.CloseHandle.restype, fake.wintypes.BOOL)
+        self.assertIsNotNone(k32.OpenProcess.argtypes)
+        self.assertEqual(len(k32.OpenProcess.argtypes), 3)
+        self.assertEqual(len(k32.GetProcessTimes.argtypes), 5)
 
     def test_a_live_windows_pid_is_alive_and_never_os_kill(self):
         k32 = _FakeKernel32(handle=7, exit_code=259)
