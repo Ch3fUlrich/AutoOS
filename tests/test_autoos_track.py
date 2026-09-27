@@ -166,6 +166,7 @@ class SuccessEstimateTests(unittest.TestCase):
 
 
 class SpawnerRecordTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "chmod mode bits; POSIX only")
     def test_the_record_step_never_raises_when_the_log_dir_is_unwritable(self):
         cli = load_agent()
         with tempfile.TemporaryDirectory() as tmp:
