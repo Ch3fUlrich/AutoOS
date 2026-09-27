@@ -7341,6 +7341,82 @@ Test-Case 'secrets: REPLACE_WITH_ reads not configured' {
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'secrets: no configured key -> every row reports false, nothing throws' {
+    # Get-AutoOSConfiguredIds returns a HashSet. Returned through the pipeline
+    # PowerShell unrolls it: an empty set arrived at the caller as $null and
+    # $have.Contains($id) threw "null-valued expression" on every row.
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: REPLACE_WITH_GROQ_KEY`nmistral: REPLACE_WITH_MISTRAL_KEY`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            Assert-True ($status.Count -gt 0) 'provider status returned no rows at all'
+            $on = @($status | Where-Object { $_.configured })
+            Assert-Equal $on.Count 0 'a row reported configured with no real key in the file'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: exactly one configured key -> exactly one configured row' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            [System.IO.File]::WriteAllText($keysFile, "meta: 'fake_meta_value'`n", [System.Text.Encoding]::UTF8)
+            $on = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on.Count 1 "expected one configured row, got: $(@($on | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on[0].id 'meta' 'the wrong key reported configured'
+            # The discriminating case: a one-element HashSet unrolled to a bare
+            # string makes .Contains a SUBSTRING test, so 'omniroute' answers
+            # true for a file that only holds omniroute_management.
+            [System.IO.File]::WriteAllText($keysFile, "omniroute_management: 'fake_management_token'`n", [System.Text.Encoding]::UTF8)
+            $on2 = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on2.Count 1 "expected one configured row, got: $(@($on2 | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on2[0].id 'omniroute_management' 'a substring of a configured key reported configured'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: only a column-0 key counts; a nested line is read and written as data' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "some_block:`n  groq: nested_value`nmistral: real_value`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            $groq = @($status | Where-Object { $_.id -eq 'groq' })
+            $mistral = @($status | Where-Object { $_.id -eq 'mistral' })
+            Assert-True ($groq.Count -eq 1 -and -not $groq[0].configured) 'an indented groq line read as a configured key'
+            Assert-True ($mistral.Count -eq 1 -and $mistral[0].configured) 'a column-0 mistral line did not read as configured'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_COL0TEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200 "POST groq got $($result.Code): $(@($result.Payload) | ConvertTo-Json -Compress)"
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-Equal $after ($original + "groq: 'gsk_COL0TEST'`n") 'the nested groq line was rewritten, or the new key did not land at column 0'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'secrets: payload JSON never contains the value' {
     $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
     try {

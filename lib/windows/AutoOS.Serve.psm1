@@ -718,18 +718,18 @@ function Get-AutoOSConfiguredIds {
     #>
     param([string]$RepoRoot)
     $file = Get-AutoOSKeysFilePath -RepoRoot $RepoRoot
-    if (-not (Test-Path $file)) { return [System.Collections.Generic.HashSet[string]]::new() }
+    if (-not (Test-Path $file)) { return ,([System.Collections.Generic.HashSet[string]]::new()) }
     $have = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($line in (Get-Content $file -Encoding utf8)) {
-        $t = $line.Trim()
-        if ($t -eq '' -or $t.StartsWith('#') -or -not $t.Contains(':')) { continue }
-        $key = ($t -split ':', 2)[0].Trim()
-        $val = ($t -split ':', 2)[1].Trim().Trim(@('"', "'")).Trim()
+        if ($line.Length -eq 0 -or $line[0] -eq ' ' -or $line[0] -eq "`t") { continue }
+        if ($line.StartsWith('#') -or -not $line.Contains(':')) { continue }
+        $key = ($line -split ':', 2)[0].Trim()
+        $val = ($line -split ':', 2)[1].Trim().Trim(@('"', "'")).Trim()
         if ($val -and -not $val.ToUpperInvariant().StartsWith('REPLACE_WITH_')) {
             [void]$have.Add($key)
         }
     }
-    $have
+    return ,$have   # unary comma: PowerShell otherwise unrolls the set (empty -> $null; one element -> a string whose .Contains is a substring test)
 }
 
 function Split-AutoOSTrailingComment {
@@ -858,8 +858,8 @@ function Set-AutoOSKeyValue {
     $unchanged = $false
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $core = $lines[$i].Text
-        $stripped = $core.Trim()
-        if ($stripped -eq '' -or $stripped.StartsWith('#') -or -not $core.Contains(':')) { continue }
+        if ($core.Length -eq 0 -or $core[0] -eq ' ' -or $core[0] -eq "`t") { continue }
+        if ($core.StartsWith('#') -or -not $core.Contains(':')) { continue }
         $colonIdx = $core.IndexOf(':')
         $head = $core.Substring(0, $colonIdx)
         $after = $core.Substring($colonIdx + 1)
@@ -990,7 +990,7 @@ function Get-AutoOSSecretPostResult {
         return @{ Code = 400; Payload = @{ error = 'unknown key id'; allowed = @($script:SecretKeys.Keys) } }
     }
 
-    if (-not $Body.PSObject.Properties.Name -contains 'value') {
+    if (-not ($Body.PSObject.Properties.Name -contains 'value')) {
         return @{ Code = 400; Payload = @{ error = 'value must be a string' } }
     }
     $value = $Body.value
