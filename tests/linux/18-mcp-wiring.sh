@@ -2041,6 +2041,15 @@ gfy_register_run() {
             case "${1:-} ${2:-}" in
                 "tool list") printf 'No tools installed\n' ;;
                 "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
+                "tool install")
+                    # Real uv writes the tool's executable and links it into its own
+                    # bin dir; the registration below is only allowed to name it once
+                    # that file is there.
+                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
+                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
+                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
             esac
             return 0
         }
@@ -2083,7 +2092,13 @@ if it "graphify registers once: the second run says skipped and already configur
             case "${1:-} ${2:-}" in
                 "tool list") printf 'No tools installed\n' ;;
                 "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-                "tool install") printf '%s' "${*: -1}" | sed -e 's/.*==//' >"$state" ;;
+                "tool install")
+                    printf '%s' "${*: -1}" | sed -e 's/.*==//' >"$state"
+                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
+                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
+                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
             esac
             return 0
         }
@@ -2313,4 +2328,321 @@ if it "homelab: lib/ never names the retired tree's path or an agent-skills vers
     bad=""
     grep -n 'Documents/[Cc]ode/agent-skills/mcp' lib/linux/install.sh >/dev/null 2>&1 && bad="a hardcoded clone path"
     if [[ -z "$bad" ]]; then pass; else fail "$bad"; fi
+fi
+
+# ─── A4 review fix: register graphify only over an installed tool ────────────
+# install_mcp_graphify registered Claude Code and Antigravity whatever
+# install_graphify_tool answered, so a machine with no uv, an outage during
+# `uv tool install`, or the user's own file in the tool bin path got a
+# `graphify-mcp` entry for a command that does not exist — and because
+# register_mcp_server leaves a name it already sees alone, every later run
+# reported "already registered" over the broken entry instead of repairing it.
+# Two things follow: nothing registers until the pinned tool resolves, and an
+# entry AutoOS recognises as its own previous form is replaced, once.
+#
+# gfy_claude <log> <cfg> <claude args...>: the claude CLI's user-scope MCP
+# commands against a real JSON file the way the CLI keeps one — `mcp add` refuses
+# a name that already exists, `mcp remove` refuses a name that does not, `mcp
+# list` prints the "name: command - status" lines mcp_has_server parses. The stub
+# is this faithful because the repair is only proven by an add that fails when the
+# stale entry is still in the way.
+gfy_claude() {
+    local log="$1" cfg="$2"; shift 2
+    printf 'claude %s\n' "$*" >>"$log"
+    case "${1:-} ${2:-}" in
+        "mcp list")
+            python3 - "$cfg" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for name, entry in (data.get("mcpServers") or {}).items():
+    command = entry.get("command", "") if isinstance(entry, dict) else ""
+    print("%s: %s - \u2713" % (name, command))
+PY
+            return 0 ;;
+        "mcp add")
+            local name="${5:-}"
+            [[ "${6:-}" == "--" ]] || return 2
+            python3 - "$cfg" "$name" "${@:7}" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+argv = sys.argv[3:]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    data = {}
+servers = data.setdefault("mcpServers", {})
+if name in servers:
+    print("MCP server %s already exists in user scope." % name, file=sys.stderr)
+    sys.exit(1)
+servers[name] = {"type": "stdio", "command": argv[0], "args": list(argv[1:]), "env": {}}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+            return $? ;;
+        "mcp remove")
+            python3 - "$cfg" "${3:-}" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(1)
+if name not in (data.get("mcpServers") or {}):
+    print("No MCP server found in user scope: %s" % name, file=sys.stderr)
+    sys.exit(1)
+data["mcpServers"].pop(name)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+            return $? ;;
+    esac
+    return 0
+}
+
+# gfy_wire_run <tmp> <verdict> [dry]: install_mcp_graphify against a fake uv and a
+# fake claude that owns $tmp/.claude.json. <verdict> is what `uv tool install` does:
+#   ok    writes the tool into uv's own bin dir and its link at
+#         ~/.local/bin/graphify-mcp, and records the version it was given (so a
+#         second run reads the pin back and skips, as the real tool does)
+#   fail  exits 1 with nothing written — the network outage, or uv refusing
+# Anything the caller wants in place before the run (the user's own file at the
+# bin path, a seeded user-scope entry) is set up by the caller. The claude log is
+# never truncated here, so a caller can count the calls across two runs.
+gfy_wire_run() {
+    local tmp="$1" verdict="$2" dry="${3:-0}"
+    local log="$tmp/claude.log" cfg="$tmp/.claude.json" state="$tmp/uv.version"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
+        unset CLAUDE_CONFIG_DIR
+        uv() {
+            case "${1:-} ${2:-}" in
+                "tool list")
+                    if [[ -s "$state" ]]; then
+                        printf '%s v%s\n- graphify\n- graphify-mcp\n' \
+                            "$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')" "$(cat "$state")"
+                    else
+                        printf 'No tools installed\n'
+                    fi ;;
+                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
+                "tool install")
+                    if [[ "$verdict" == fail ]]; then
+                        printf 'error: failed to fetch the package index\n' >&2
+                        return 1
+                    fi
+                    printf '%s' "${*: -1}" | sed -e 's/.*==//' >"$state"
+                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
+                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
+                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
+                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
+            esac
+            return 0
+        }
+        claude() { gfy_claude "$log" "$cfg" "$@"; }
+        install_mcp_graphify 2>&1
+        printf 'RC=%s\n' "$?"
+    )
+}
+
+# gfy_wire_entry <tmp>: the graphify block of the fake config, "command|args json".
+gfy_wire_entry() {
+    python3 - "$1" <<'PY' 2>/dev/null || echo missing
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    entry = (json.load(fh).get("mcpServers") or {}).get("graphify")
+print("%s | %s" % (entry["command"], json.dumps(entry.get("args", []))))
+PY
+}
+
+if it "graphify registers neither client when the pinned tool install failed"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" fail)"
+    problems=""
+    [[ "$out" == *RC=1* ]] || problems+="[the step reported success: $(tail -n 1 <<<"$out")] "
+    grep -q 'mcp add' "$log" && problems+="[registered a command with no binary: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ "$out" == *"not registered"* ]] || problems+="[nothing named the refusal: $out] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[touched the user claude config] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registers neither client when the tool bin path is the user's own"; then
+    # The blocked link: AutoOS never replaces the file at ~/.local/bin/graphify-mcp,
+    # so it never gets a graphify-mcp to point the clients at either.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownfile
+    log="$tmp/claude.log"; : >"$log"
+    before="$(cat "$tmp/.local/bin/graphify-mcp")"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=1* ]] || problems+="[the step reported success: $(tail -n 1 <<<"$out")] "
+    grep -q 'mcp add' "$log" && problems+="[registered over the user's file: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing said the file is left alone: $out] "
+    [[ "$(cat "$tmp/.local/bin/graphify-mcp")" == "$before" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+        || problems+="[the user's file was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registers both clients once the pinned tool resolves"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[a good install reported failure: $out] "
+    grep -qxF 'claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json' "$log" \
+        || problems+="[claude got: $(tr '\n' '|' <"$log")] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the user-scope entry: $(gfy_wire_entry "$tmp/.claude.json")] "
+    got="$(python3 -c "
+import json, sys
+e = json.load(open(sys.argv[1], encoding='utf-8'))['mcpServers']['graphify']
+print(e['command'], '|', json.dumps(e['args']))
+" "$tmp/.gemini/config/mcp_config.json" 2>/dev/null || echo unreadable)"
+    [[ "$got" == 'graphify-mcp | ["${workspaceFolder}/graphify-out/graph.json"]' ]] \
+        || problems+="[antigravity spec: $got] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs the uv run --with entry AutoOS wrote before"; then
+    # The upgrade path: every machine an older AutoOS wired has this entry, and
+    # register_mcp_server would keep reporting it "already registered" forever, so
+    # the pinned tool would never reach the client that actually runs it.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"uv","args":["--quiet","run","--with","graphifyy[mcp]==0.0.1-old","python","-m","graphify.serve","graphify-out/graph.json"]},"serena":{"command":"uvx"}}'
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the repair reported failure: $(tail -n 1 <<<"$out")] "
+    grep -qxF 'claude mcp remove graphify --scope user' "$log" \
+        || problems+="[the stale entry was never removed: $(tr '\n' '|' <"$log")] "
+    [[ "$(grep -n 'mcp remove' "$log" | cut -d: -f1)" -lt \
+       "$(grep -n 'mcp add --scope user graphify' "$log" | cut -d: -f1)" ]] \
+        || problems+="[added before removing the stale entry: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
+        || problems+="[the user config was rewritten with no backup] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the entry after the repair: $(gfy_wire_entry "$tmp/.claude.json")] "
+    kept="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print(','.join(sorted(d.get('mcpServers', {})) + ['firstTimeRun' if 'firstTimeRun' in d else 'LOST']))
+" "$tmp/.claude.json" 2>/dev/null || echo unreadable)"
+    [[ "$kept" == "graphify,serena,firstTimeRun" ]] \
+        || problems+="[the config lost or kept the wrong keys: $kept] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs its own graphify-mcp entry that no longer resolves"; then
+    # A checkout moved or was deleted, leaving an absolute graphify-mcp path that
+    # answers to nothing. The bare pinned-tool form is what the installer writes now.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"/home/u/old-checkout/infra/mcp-servers/bin/graphify-mcp","args":["graphify-out/graph.json"]}}'
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the repair reported failure: $(tail -n 1 <<<"$out")] "
+    grep -qxF 'claude mcp remove graphify --scope user' "$log" \
+        || problems+="[the dead entry was never removed: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
+        || problems+="[the user config was rewritten with no backup] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the entry after the repair: $(gfy_wire_entry "$tmp/.claude.json")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify leaves a user-defined graphify entry alone" ; then
+    # Same name, nothing AutoOS wrote: a docker server, or the old uv run shape with
+    # an env block of the user's. Removing either deletes a working server.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"docker","args":["run","-i","--rm","my-graphify:latest"],"env":{"TOKEN":"DUMMY-SECRET-FOR-TESTS"}},"serena":{"command":"uvx"}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    grep -q 'mcp remove' "$log" && problems+="[removed the user's entry: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[a backup of a file it never changed] "
+    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the config was rewritten] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing said it was left alone: $out] "
+    [[ "$out" != *DUMMY-SECRET-FOR-TESTS* ]] || problems+="[printed the entry args, which may hold a token] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs once: the second run registers nothing new"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    first="$(gfy_wire_run "$tmp" ok)"
+    calls_first="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
+    second="$(gfy_wire_run "$tmp" ok)"
+    calls="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
+    backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
+    problems=""
+    [[ "$first" == *RC=0* && "$second" == *RC=0* ]] \
+        || problems+="[a run reported failure: ${first##*RC=} | ${second##*RC=}] "
+    [[ "$second" == *"skipped"* ]] || problems+="[the second run did not say skipped: $second] "
+    [[ "$second" != *"installed"* ]] || problems+="[the second run said installed: $second] "
+    [[ "$calls" == "$calls_first" ]] \
+        || problems+="[the second run wrote a client config again: $(tr '\n' '|' <"$log")] "
+    [[ "$backups" == "0" ]] || problems+="[$backups backups on a config AutoOS itself wrote] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify dry run announces the tool form without installing or writing"; then
+    # The plan a user reads must be the run they get: a dry run has no installed
+    # binary yet, so it announces rather than refusing, and touches no config.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" ok 1)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the dry run reported failure: $(tail -n 1 <<<"$out")] "
+    [[ "$out" == *"would run: claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json"* ]] \
+        || problems+="[the claude plan is missing: $out] "
+    [[ "$out" == *"would merge 'graphify' into Antigravity"* ]] \
+        || problems+="[the Antigravity plan is missing: $out] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[the dry run wrote a client config: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[the dry run wrote the user config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[the dry run wrote the Antigravity config] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the dry run installed the tool] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registration runs on the gate that decides it"; then
+    # The gate lives in install_mcp_graphify, not in a helper nothing calls.
+    if awk '/^install_mcp_graphify\(\)/,/^}/' lib/linux/install.sh |
+            grep -q "install_graphify_tool"; then pass
+    else fail "install_mcp_graphify no longer gates registration on install_graphify_tool"; fi
 fi

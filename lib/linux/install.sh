@@ -3380,8 +3380,29 @@ PY
 
 install_mcp_graphify() {
     ui_info "Setting up Graphify MCP server (Claude Code + Antigravity)"
-    local rc=0
-    install_graphify_tool || rc=1
+    local pkg rc=0
+    pkg="$(mcp_package graphify)"
+
+    # The tool first, the clients only over what it actually put on disk. Registering
+    # whatever install_graphify_tool answered is the defect this closes: a client
+    # config entry is a promise the client holds at every session start, and with no
+    # uv, an outage during `uv tool install`, or the user's own file in uv's tool bin
+    # dir the entry named a command that does not exist — and because
+    # register_mcp_server leaves a name it already sees alone, every later run read
+    # "already registered" over the broken entry instead of repairing it.
+    if ! install_graphify_tool; then
+        ui_warn "graphify MCP servers were not registered - the pinned tool is not installed. Fix the reason above, then run this step again."
+        return 1
+    fi
+    # A successful `uv tool install` is the one that wrote its executable here. When
+    # it did not (a tool bin dir pointed somewhere else by the environment), registering
+    # would re-open exactly the hole above, so the path is checked, not assumed.
+    if (( ! AUTOOS_DRY_RUN )) && ! graphify_mcp_resolves; then
+        ui_warn "graphify MCP servers were not registered - $(graphify_mcp_bin_path) is not there after the install, so uv's tool bin dir differs; the clients would only get a command they cannot start."
+        return 1
+    fi
+
+    replace_stale_graphify_mcp_entry "$pkg" || rc=1
 
     # Which command to register: the installed `graphify-mcp`, not a `uv run --with`
     # line. `uv tool install` drops its executables in uv's own bin dir, which on
@@ -3397,10 +3418,128 @@ install_mcp_graphify() {
         graphify-mcp graphify-out/graph.json
 
     # Antigravity expands ${workspaceFolder} itself; a single-quoted string keeps it
-    # out of this shell's way.
+    # out of this shell's way. Its writer overwrites a differing spec, so this side
+    # repairs its own stale entry without help.
     register_antigravity_mcp_server graphify \
         '{"command": "graphify-mcp", "args": ["${workspaceFolder}/graphify-out/graph.json"]}'
     return $rc
+}
+
+# graphify_user_entry <config file> <package> <bin path>: classifies the user-scope
+# 'graphify' entry of a Claude Code user config - none | tool | stale-tool | uv-run |
+# wrapper | other. tool is the entry this installer writes now and the tool resolves;
+# stale-tool is that same bare `graphify-mcp` command with nothing behind it (the
+# entry a run before this fix wrote when the install failed); uv-run is the on-demand
+# `uv --quiet run --with <package> python -m graphify.serve …` line AutoOS wrote
+# before the pinned tool existed (any version or extras of the catalog's distribution
+# name); wrapper is a path ending in the retired docker wrapper's component shape,
+# matched as components the way every other AutoOS-leftover recognition matches, so a
+# sibling directory with that name in it is not mistaken for it. Anything else - a
+# different shape, an env block, another argument list - is `other`: the user's own
+# server, never touched. The file is read, never written, and nothing from it is
+# echoed: an entry's args can carry a token.
+graphify_user_entry() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, os, posixpath, sys
+
+GRAPH = "graphify-out/graph.json"
+UV_RUN = ["--quiet", "run", "--with", None, "python", "-m", "graphify.serve", GRAPH]
+path, package, binpath = sys.argv[1], sys.argv[2], sys.argv[3]
+name = package.split("[", 1)[0].split("=", 1)[0]
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("graphify")
+except (OSError, ValueError, AttributeError):
+    entry = None
+
+kind = "other"
+if entry is None:
+    kind = "none"
+elif (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env"}
+        and entry.get("type", "stdio") == "stdio" and not entry.get("env")
+        and isinstance(entry.get("command"), str)
+        and isinstance(entry.get("args", []), list)
+        and all(isinstance(a, str) for a in entry.get("args", []))):
+    command, args = entry["command"], entry["args"]
+    if command == "graphify-mcp" and args == [GRAPH]:
+        import os
+        kind = "tool" if (os.access(binpath, os.X_OK) and not os.path.isdir(binpath)) else "stale-tool"
+    elif (command == "uv" and len(args) == len(UV_RUN)
+            and args[:3] == UV_RUN[:3] and args[4:] == UV_RUN[4:]
+            and args[3].split("[", 1)[0].split("=", 1)[0] == name):
+        kind = "uv-run"
+    elif posixpath.basename(command) == "graphify-mcp" and args == [GRAPH]:
+        parts = posixpath.normpath(command).split("/")
+        if parts[-4:] == ["infra", "mcp-servers", "bin", "graphify-mcp"]:
+            kind = "wrapper"
+print(kind)
+PY
+}
+
+# replace_stale_graphify_mcp_entry <package>: hand Claude Code's user-scope 'graphify'
+# entry back to the shape the pinned tool needs, but only an entry this installer can
+# recognise as its own previous form (uv-run, wrapper) or one it broke (stale-tool).
+# A config the user wrote under that name is left exactly as it is - deleting a working
+# server they installed by hand is not a migration. Removal goes through `claude mcp
+# remove`, never a hand-edited JSON: the CLI owns the file's format and everything else
+# in it, so the config keeps its shape and its session data. No copy, no write, so the
+# file is backed up first and a failed backup means no change. The re-add is
+# register_mcp_server's own job right after this, which is what makes the repair
+# idempotent: the name is free, the add lands, and a second run finds `tool`.
+replace_stale_graphify_mcp_entry() {
+    local package="$1" cfg entry kind backup bin
+    cfg="$(claude_user_config_file)"
+    bin="$(graphify_mcp_bin_path)"
+
+    # The claude CLI reads $HOME; the home this run configures is $SYS_HOME. When the
+    # resolver names a file outside it, the run is not pointed at that config — the
+    # same rule remove_stale_homelab_mcp_entry applies. A CLAUDE_CONFIG_DIR the user
+    # set is explicit intent and honoured.
+    if [[ -z "${CLAUDE_CONFIG_DIR:-}" && "$cfg" != "${SYS_HOME%/}/.claude.json" &&
+          "$cfg" != "${SYS_HOME%/}/.claude/.config.json" ]]; then
+        ui_muted "the user-scope claude config (${cfg}) is not in this run's home (${SYS_HOME}) - nothing repaired (skipped)"
+        return 0
+    fi
+
+    kind="$(graphify_user_entry "$cfg" "$package" "$bin" 2>/dev/null)" || kind="none"
+
+    case "$kind" in
+        none)
+            return 0
+            ;;
+        tool)
+            ui_muted "MCP server 'graphify' already points at the pinned tool - skipped."
+            return 0
+            ;;
+        other)
+            ui_warn "MCP server 'graphify' has a custom user-scope entry - left alone. To let AutoOS wire the pinned tool, remove it first: claude mcp remove graphify --scope user"
+            return 0
+            ;;
+    esac
+
+    if ! has_cmd claude; then
+        ui_warn "the stale '${kind//-/ }' 'graphify' entry was left in ${cfg} - claude is not on PATH to replace it (claude mcp remove graphify --scope user)"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would back up ${cfg} and run: claude mcp remove graphify --scope user, then claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json (replacing the ${kind//-/ } entry)"
+        return 0
+    fi
+
+    backup=""
+    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
+        ui_warn "could not back up ${cfg} - the '${kind//-/ }' 'graphify' entry was left unchanged"
+        return 1
+    fi
+
+    ui_muted "run: claude mcp remove graphify --scope user"
+    if ! claude mcp remove graphify --scope user; then
+        ui_warn "could not remove the '${kind//-/ }' 'graphify' entry - left unchanged${backup:+ (config backup: ${backup})}"
+        return 1
+    fi
+    ui_ok "removed the '${kind//-/ }' user-scope 'graphify' entry that predates the pinned tool - re-registered below${backup:+ (config backup: ${backup})}"
+    return 0
 }
 
 # ─── Playwright MCP: the lazy proxy ─────────────────────────────────────────
@@ -3553,7 +3692,7 @@ remove_stale_homelab_mcp_entry() {
 # token. The file is read, never written.
 playwright_user_entry() {
     python3 - "$1" "$2" "$3" <<'PY'
-import json, posixpath, sys
+import json, os, posixpath, sys
 
 DOCKER = ["run", "-i", "--rm", "--init", "--network", "host", "mcr.microsoft.com/playwright/mcp:latest"]
 path, proxy, package = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -4357,10 +4496,29 @@ autoos_api_keys_conf() {
 # something the real run will not do.
 GRAPHIFY_LINK_STATE="free"
 
+# graphify_mcp_bin_path: the one place that names the path `uv tool install` writes
+# its graphify executable to (uv's tool bin dir, the directory uv itself lives in —
+# measured, see install_mcp_graphify). Both the check that clears the path and the
+# gate that registers the clients ask about this same file, so they cannot drift.
+graphify_mcp_bin_path() {
+    printf '%s/.local/bin/graphify-mcp\n' "$SYS_HOME"
+}
+
+# graphify_mcp_resolves: is there an executable behind that path? The answer a client
+# gets at session start, checked on disk instead of through PATH: a non-interactive
+# shell here may not carry ~/.local/bin even when the client's does, and vice versa,
+# so only the file itself is evidence.
+graphify_mcp_resolves() {
+    local bin
+    bin="$(graphify_mcp_bin_path)"
+    [[ -x "$bin" && ! -d "$bin" ]]
+}
+
 graphify_mcp_link_prepare() {
     local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     local wrapper="$repo_root/infra/mcp-servers/bin/graphify-mcp"
-    local link="$SYS_HOME/.local/bin/graphify-mcp"
+    local link
+    link="$(graphify_mcp_bin_path)"
     local current="" state="free" reason=""
 
     if [[ -L "$link" ]]; then
@@ -4448,8 +4606,10 @@ install_graphify_tool() {
 
     graphify_mcp_link_prepare
     if [[ "$GRAPHIFY_LINK_STATE" == blocked ]]; then
+        # Non-zero, not a silent pass: there is no installed graphify-mcp for the
+        # clients to start, so install_mcp_graphify must not register one anyway.
         ui_warn "the pinned graphify tool was not attempted: $SYS_HOME/.local/bin/graphify-mcp is yours to move"
-        return 0
+        return 1
     fi
     if ! has_cmd uv; then
         ui_warn "uv is not on PATH - cannot install the pinned graphify tool. Install the uv component first, then re-run."
