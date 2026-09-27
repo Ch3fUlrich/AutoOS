@@ -1,14 +1,14 @@
 # Testing
 
 ```bash
-bash tests/run-tests.sh                 # Linux / macOS
-bash tests/run-tests.sh --wsl           # same suite, forced through WSL2 from Windows
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh  # Linux / macOS (full run, opt in)
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh --wsl   # same suite, forced through WSL2 from Windows
 bash tests/run-tests.sh --filter state  # only matching test names
 ```
 
 `--wsl` re-runs the suite through `wslpath`, which does not exist in Git Bash.
 From Git Bash, start WSL yourself:
-`wsl bash -lc "cd /mnt/c/<path-to-checkout> && bash tests/run-tests.sh"`.
+`wsl bash -lc "cd /mnt/c/<path-to-checkout> && AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh"`.
 
 `--filter` / `-Filter` is a substring match on **test names** (`it` /
 `Test-Case`), not on group names. A filter that matches nothing still prints a
