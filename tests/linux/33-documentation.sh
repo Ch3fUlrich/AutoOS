@@ -221,7 +221,7 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
     # t1-orchestrator-clean since DSMAX 2026-09-27 (OpenRouter off),
     # deepseek-v4.1-flash since deepseek 402 2026-09-27T16:4xZ.
     # spark-1.3-contributor is NOW SERVABLE via meta_api (MUSEAPI 2026-09-27).
-    omitted="$(python3 - <<'PY'
+    omitted="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 by = {c["name"]: c["models"] for c in d["combos"]}

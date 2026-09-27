@@ -1344,10 +1344,14 @@ fi
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
 # alone freed nothing and t3-driver/t4-rag still never fit).
+# Re-pinned 2026-09-27 (PROVPIN): the held AutoOS profiles must be ids the
+# spec still ranks. omniroute-spark-1.3-contributor is omitted now, so it went
+# through the retired-delete pass instead of the cap eviction this test is
+# about; the two free-only litellm tiers are the spec's last two ranks.
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker-free-only omniroute-spark-1.3-contributor
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/t3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker-free-only litellm-t3-driver-free-only
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -1359,7 +1363,8 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
     [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t3-driver-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
