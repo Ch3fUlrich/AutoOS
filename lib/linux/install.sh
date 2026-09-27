@@ -3492,11 +3492,14 @@ register_playwright_lazy_proxy() {
         fi
     elif [[ "$kind" == none ]]; then
         ui_warn "could not register 'playwright'"
+        return 1
     elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
         ui_warn "could not add the lazy proxy - put back the previous ${kind/-/ } entry (config backup: ${backup})"
+        return 1
     else
         printf -v restore '%q ' "${old[@]}"      # quoted: a checkout path may hold a space
         ui_err "could not add the lazy proxy and could not put back the previous ${kind/-/ } entry - restore it with: claude mcp add --scope user playwright -- ${restore}(config backup: ${backup})"
+        return 1
     fi
     return 0
 }
@@ -3509,8 +3512,12 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        register_playwright_lazy_proxy "$playwright_pkg" \
-            || autoos_record_failure mcp-playwright
+        register_playwright_lazy_proxy "$playwright_pkg"
+        local rc=$?
+        if (( rc != 0 )); then
+            autoos_record_failure mcp-playwright
+            return $rc
+        fi
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
