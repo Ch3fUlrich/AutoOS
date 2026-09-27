@@ -1814,9 +1814,15 @@ cmd_verify() {
 # Semaphore template that PULLS the password from the coding VM's opencode.env.
 # AutoOS holds NO Semaphore API token and sends NO secret - it only POSTs the
 # webhook bound to that one template.
+#
+# Keys (configuration/api-keys.yml):
+#   semaphore_edge_webhook_url    - the webhook URL (http(s)://...)
+#   semaphore_edge_webhook_header - the header NAME only (e.g. X-AutoOS-Token)
+#   semaphore_edge_webhook_token  - the header VALUE (secret)
+# The header line written to the temp file is "<name>: <token>".
 cmd_opencode_rotate() {
-    local state_file edge_webhook_url edge_webhook_header oc_pw current_hash new_hash
-    local header_file http_code curl_rc
+    local state_file edge_webhook_url edge_webhook_header edge_webhook_token oc_pw current_hash new_hash
+    local header_file http_code
 
     # Step 1: Regenerate opencode.env from api-keys.yml (cmd_init does this via
     # opencode_password_sync). We run the full init to ensure all derived files
@@ -1832,16 +1838,27 @@ cmd_opencode_rotate() {
     # Step 3: Read the edge webhook configuration from api-keys.yml
     edge_webhook_url="$(keys_value semaphore_edge_webhook_url)"
     edge_webhook_header="$(keys_value semaphore_edge_webhook_header)"
+    edge_webhook_token="$(keys_value semaphore_edge_webhook_token)"
 
-    # If either is missing/empty/REPLACE_WITH_, skip the webhook (rc 0)
-    if [[ -z "$edge_webhook_url" || -z "$edge_webhook_header" ]]; then
-        echo "  = edge: webhook not configured (semaphore_edge_webhook_url/_header in $KEYS_FILE) - skipped"
+    # If any of the three is missing/empty/REPLACE_WITH_, skip the webhook (rc 0)
+    if [[ -z "$edge_webhook_url" || -z "$edge_webhook_header" || -z "$edge_webhook_token" ]]; then
+        local missing=""
+        [[ -z "$edge_webhook_url" ]] && missing="${missing}semaphore_edge_webhook_url "
+        [[ -z "$edge_webhook_header" ]] && missing="${missing}semaphore_edge_webhook_header "
+        [[ -z "$edge_webhook_token" ]] && missing="${missing}semaphore_edge_webhook_token "
+        echo "  = edge: webhook not configured (${missing% } in $KEYS_FILE) - skipped"
         return 0
     fi
 
     # Validate URL format (must be http(s)://... with no whitespace)
     if [[ ! "$edge_webhook_url" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "  ! edge: semaphore_edge_webhook_url is not an http(s) URL"
+        return 1
+    fi
+
+    # Validate header name (must match ^[A-Za-z0-9-]+$)
+    if [[ ! "$edge_webhook_header" =~ ^[A-Za-z0-9-]+$ ]]; then
+        echo "  ! edge: semaphore_edge_webhook_header is not a header name"
         return 1
     fi
 
@@ -1857,8 +1874,8 @@ cmd_opencode_rotate() {
     oc_pw="$(env_value "$CONFIG_DIR/opencode.env" OPENCODE_PASSWORD)"
     [[ -n "$oc_pw" ]] || { echo "  ! edge: no OPENCODE_PASSWORD in $CONFIG_DIR/opencode.env"; return 1; }
 
-    # Idempotence: compute hash of (url + header + password)
-    new_hash="$(printf '%s%s%s' "$edge_webhook_url" "$edge_webhook_header" "$oc_pw" | sha256sum | cut -d' ' -f1)"
+    # Idempotence: compute hash of (url + \n + header_name + \n + token + \n + password)
+    new_hash="$(printf '%s\n%s\n%s\n%s' "$edge_webhook_url" "$edge_webhook_header" "$edge_webhook_token" "$oc_pw" | sha256sum | cut -d' ' -f1)"
 
     # State file location (can be overridden for tests)
     state_file="${AUTOOS_EDGE_STATE:-$CONFIG_DIR/edge-webhook.state}"
@@ -1873,11 +1890,9 @@ cmd_opencode_rotate() {
     fi
 
     # POST the webhook
-    # Create a temp file for the header (0600, never on argv)
+    # Create a temp file for the header (mktemp makes it 0600, never on argv)
     header_file="$(mktemp "${CONFIG_DIR}/.edge-webhook-header-XXXXXX")"
-    trap 'rm -f -- "$header_file"' EXIT INT TERM
-    printf '%s\n' "$edge_webhook_header" >"$header_file"
-    chmod 600 "$header_file"
+    printf '%s: %s\n' "$edge_webhook_header" "$edge_webhook_token" >"$header_file"
 
     # POST via $CURL (tests fake this)
     # -q: no .curlrc, -s: silent, -X POST, -m 15: timeout, --noproxy '*': no proxy,
@@ -1885,12 +1900,12 @@ cmd_opencode_rotate() {
     http_code="$("$CURL" -q -s -X POST -m 15 --noproxy '*' --max-redirs 0 \
         -H @"$header_file" -H 'Content-Type: application/json' \
         -d '{}' -o /dev/null -w '%{http_code}' "$edge_webhook_url" 2>/dev/null || true)"
-    curl_rc=$?
-    rm -f -- "$header_file"
-    trap - EXIT INT TERM
 
-    # Evaluate response
-    if [[ $curl_rc -ne 0 || "$http_code" == "000" ]]; then
+    # Clean up the temp header file immediately (also on error paths)
+    rm -f -- "$header_file"
+
+    # Evaluate response: curl exits 0 with || true; unreachable = empty or 000
+    if [[ -z "$http_code" || "$http_code" == "000" ]]; then
         echo "  ! edge: webhook unreachable"
         return 1
     fi
@@ -1899,7 +1914,7 @@ cmd_opencode_rotate() {
         return 1
     fi
     if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-        echo "  + edge: webhook accepted (HTTP $http_code) - the Semaphore template now refreshes the edge secret"
+        echo "  + edge: webhook accepted (HTTP $http_code) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"
         # Write state file (0600)
         mkdir -p "$(dirname "$state_file")" && chmod 700 "$(dirname "$state_file")" || return 1
         printf '%s\n' "$new_hash" >"$state_file"

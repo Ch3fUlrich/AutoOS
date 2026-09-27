@@ -323,15 +323,15 @@ fi
 # current combo.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only t2-worker my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete t1-orchestrator-free-only --yes" ]] \
+    [[ "$deletes" == "combo delete deepseek-v4.1-flash --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -339,12 +339,12 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -356,13 +356,13 @@ fi
 # "t2-worker-paid") is never deleted - and a dry run never even names it.
 if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto t2-worker-paid t1-orchestrator-free-only my-own-combo
+    _prune_list "$d" auto t2-worker-paid deepseek-v4.1-flash my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
     [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
@@ -1344,10 +1344,14 @@ fi
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
 # alone freed nothing and t3-driver/t4-rag still never fit).
+# Re-pinned 2026-09-27 (PROVPIN): the held AutoOS profiles must be ids the
+# spec still ranks. omniroute-spark-1.3-contributor is omitted now, so it went
+# through the retired-delete pass instead of the cap eviction this test is
+# about; the two free-only litellm tiers are the spec's last two ranks.
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker-free-only omniroute-spark-1.3-contributor
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/t3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker-free-only litellm-t3-driver-free-only
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -1359,7 +1363,8 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
     [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t3-driver-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
@@ -3693,7 +3698,7 @@ fi
 if it "aistack rotate: webhook not configured -> skipped rc0, no POST"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    # api-keys.yml has no semaphore_edge_webhook_url/_header
+    # api-keys.yml has no semaphore_edge_webhook_url/_header/_token
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
@@ -3706,7 +3711,7 @@ fi
 if it "aistack rotate: REPLACE_WITH_ placeholder = not configured"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: REPLACE_WITH_URL\nsemaphore_edge_webhook_header: REPLACE_WITH_HEADER\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: REPLACE_WITH_URL\nsemaphore_edge_webhook_header: REPLACE_WITH_HEADER\nsemaphore_edge_webhook_token: REPLACE_WITH_TOKEN\n' >>"$d/repo/api-keys.yml"
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
@@ -3719,7 +3724,7 @@ fi
 if it "aistack rotate: non-http URL -> rc1 without echoing it"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: not-a-url\nsemaphore_edge_webhook_header: X-Test: value\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: not-a-url\nsemaphore_edge_webhook_header: X-Test\nsemaphore_edge_webhook_token: value\n' >>"$d/repo/api-keys.yml"
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
     ok=1
     (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
@@ -3733,7 +3738,7 @@ fi
 if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx line, state 0600"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     # Set the webhook URL so fake_curl knows to intercept
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
@@ -3741,16 +3746,20 @@ if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx li
     unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    [[ "$out" == *"webhook accepted (HTTP 200)"* ]] || { ok=0; echo "no success message: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message: $out" >&2; }
     [[ -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file not created: $(ls -la "$d/cfg/")" >&2; }
     [[ "$(stat -c %a "$d/cfg/edge-webhook.state")" == 600 ]] || { ok=0; echo "state not 0600: $(stat -c %a "$d/cfg/edge-webhook.state")" >&2; }
     # Verify the call was made
     [[ -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "no call logged: $(cat "$d/edge-webhook-call.log" 2>/dev/null || echo missing)" >&2; }
     # Verify the call used -H @file (header not in argv)
+    # curl.log has the argv, edge-webhook-call.log has the header file content
+    curl_log="$(cat "$d/curl.log" 2>/dev/null || echo "")"
+    [[ "$curl_log" != *"mysecret"* ]] || { ok=0; echo "header value in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"pinned-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
+    # Verify the header file content equals "X-AutoOS-Token: mysecret" in edge-webhook-call.log
     call_log="$(cat "$d/edge-webhook-call.log")"
-    [[ "$call_log" != *"mysecret"* ]] || { ok=0; echo "header value in call log: $call_log" >&2; }
-    [[ "$call_log" != *"pinned-pass"* ]] || { ok=0; echo "password in call log: $call_log" >&2; }
-    [[ "$call_log" != *"X-Secret"* ]] || { ok=0; echo "header name in call log: $call_log" >&2; }
+    [[ "$call_log" == *"X-AutoOS-Token: mysecret"* ]] || { ok=0; echo "header file content not recorded correctly: $call_log" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "rotate happy path failed"; fi
 fi
@@ -3758,7 +3767,7 @@ fi
 if it "aistack rotate: second run -> skipped, no POST"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run
@@ -3779,7 +3788,7 @@ fi
 if it "aistack rotate: password changed in api-keys.yml -> POST again"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\nopencode_password: "first-pass"\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "first-pass"\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run with first-pass
@@ -3791,7 +3800,7 @@ if it "aistack rotate: password changed in api-keys.yml -> POST again"; then
     unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    [[ "$out" == *"webhook accepted (HTTP 200)"* ]] || { ok=0; echo "no success message on changed password: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on changed password: $out" >&2; }
     # Call log should have two entries
     call_count="$(grep -c '^url=' "$d/edge-webhook-call.log" 2>/dev/null || echo 0)"
     [[ "$call_count" == 2 ]] || { ok=0; echo "call count=$call_count (expected 2): $(cat "$d/edge-webhook-call.log")" >&2; }
@@ -3802,7 +3811,7 @@ fi
 if it "aistack rotate: --force re-POSTs"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
     # First run
@@ -3812,7 +3821,7 @@ if it "aistack rotate: --force re-POSTs"; then
     unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
     ok=1
     (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
-    [[ "$out" == *"webhook accepted (HTTP 200)"* ]] || { ok=0; echo "no success message on --force: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on --force: $out" >&2; }
     # Call log should have two entries
     call_count="$(grep -c '^url=' "$d/edge-webhook-call.log" 2>/dev/null || echo 0)"
     [[ "$call_count" == 2 ]] || { ok=0; echo "call count=$call_count (expected 2): $(cat "$d/edge-webhook-call.log")" >&2; }
@@ -3823,7 +3832,7 @@ fi
 if it "aistack rotate: 302 -> rc1 'redirected', state not written"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=302
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
@@ -3839,7 +3848,7 @@ fi
 if it "aistack rotate: 500 -> rc1"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=500
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
@@ -3855,7 +3864,7 @@ fi
 if it "aistack rotate: 000 -> 'unreachable'"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=000
     out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
@@ -3871,7 +3880,7 @@ fi
 if it "aistack rotate: fake curl's recorded argv contains neither the header value nor the password (header via -H @file)"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\nopencode_password: "pinned-pass"\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "pinned-pass"\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
     out="$(_aistack "$d" opencode-rotate)"
@@ -3882,12 +3891,15 @@ if it "aistack rotate: fake curl's recorded argv contains neither the header val
     curl_log="$(cat "$d/curl.log" 2>/dev/null || echo "")"
     [[ "$curl_log" != *"mysecret"* ]] || { ok=0; echo "header value in curl argv: $curl_log" >&2; }
     [[ "$curl_log" != *"pinned-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
-    [[ "$curl_log" != *"X-Secret"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
     # Check that no output line (script's stdout/stderr) contains url/header/password
     [[ "$out" != *"http://edge.example"* ]] || { ok=0; echo "URL in output: $out" >&2; }
     [[ "$out" != *"mysecret"* ]] || { ok=0; echo "header value in output: $out" >&2; }
     [[ "$out" != *"pinned-pass"* ]] || { ok=0; echo "password in output: $out" >&2; }
-    [[ "$out" != *"X-Secret"* ]] || { ok=0; echo "header name in output: $out" >&2; }
+    [[ "$out" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in output: $out" >&2; }
+    # Check that the recorded call log (not argv) has the header file content
+    call_log="$(cat "$d/edge-webhook-call.log" 2>/dev/null || echo "")"
+    [[ "$call_log" == *"X-AutoOS-Token: mysecret"* ]] || { ok=0; echo "header file content not in call log: $call_log" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "secrets leaked in curl argv or output"; fi
 fi
@@ -3895,7 +3907,7 @@ fi
 if it "aistack rotate: --dry-run -> no POST, no state"; then
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-Secret: mysecret\n' >>"$d/repo/api-keys.yml"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
     export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
     export AISTACK_FAKE_WEBHOOK_CODE=200
     out="$(_aistack "$d" --dry-run opencode-rotate)" && rc=0 || rc=$?
@@ -3907,5 +3919,50 @@ if it "aistack rotate: --dry-run -> no POST, no state"; then
     [[ ! -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file was written in dry-run" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "rotate --dry-run made a POST or wrote state"; fi
+fi
+
+if it "aistack rotate: header temp file cleaned up after success"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
+    export AISTACK_FAKE_WEBHOOK_CODE=200
+    out="$(_aistack "$d" opencode-rotate)"
+    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    ok=1
+    # Check that no .edge-webhook-header-* files remain in CONFIG_DIR
+    header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"
+    [[ "$header_files" == 0 ]] || { ok=0; echo "header temp files remain: $(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate leaves header temp file on success"; fi
+fi
+
+if it "aistack rotate: header temp file cleaned up after failure"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    export AISTACK_EDGE_WEBHOOK_URL="http://edge.example/refresh"
+    export AISTACK_FAKE_WEBHOOK_CODE=500
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    unset AISTACK_EDGE_WEBHOOK_URL AISTACK_FAKE_WEBHOOK_CODE
+    ok=1
+    # Even on failure, the header temp file should be cleaned up
+    header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"
+    [[ "$header_files" == 0 ]] || { ok=0; echo "header temp files remain on failure: $(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate leaves header temp file on failure"; fi
+fi
+
+if it "aistack rotate: empty header name -> rc1 not a header name"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: Invalid Header!\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"not a header name"* ]] || { ok=0; echo "no error message: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made: $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate rejects invalid header name"; fi
 fi
 

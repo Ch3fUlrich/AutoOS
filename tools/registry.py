@@ -1145,9 +1145,14 @@ def litellm_block_text(config_text: str, tier: str) -> str:
 
 def litellm_diff(rendered: dict, config_text: str) -> list:
     """Return the tiers (sorted) where a fresh render_litellm_blocks() output
-    differs, byte for byte, from `config_text`'s own current managed block.
-    Empty means every rendered tier matches exactly - the spec 3.2 phase-1
-    gate for configuration/litellm/config.yaml (task A4b)."""
+    differs, byte for byte, from `config_text`'s own current managed block, plus
+    any managed block `config_text` carries that the render no longer produces
+    (a stale tier: every leg died or the route was removed). Empty means every
+    rendered tier matches exactly AND no dead group is left behind - the spec
+    3.2 phase-1 gate for configuration/litellm/config.yaml (task A4b). Walking
+    only `rendered` was one-directional: a stale block stayed in the file, still
+    served by LiteLLM, with this gate green (PROV review), which is exactly the
+    drift tools/sync-router-tiers.py now prunes on rewrite."""
     problems = []
     for tier in sorted(rendered):
         try:
@@ -1157,7 +1162,15 @@ def litellm_diff(rendered: dict, config_text: str) -> list:
             continue
         if rendered[tier] != current:
             problems.append(tier)
-    return problems
+    sync = _load_sync_router_tiers()
+    try:
+        blocks = sync.locate_blocks(config_text.splitlines())
+    except sync.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    for tier in blocks:
+        if tier not in rendered and tier not in problems:
+            problems.append(tier)
+    return sorted(set(problems))
 
 
 # ===========================================================================
@@ -1702,11 +1715,11 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
     """True when either of spec 3.1's two operator-facing unavailability
     flags marks `leg` down: routes.<id>.unavailable_legs[leg].available is
     false, or the leg's own provider carries providers.<id>.available:
-    false (today only cxa - openrouter's own blanket flag was lifted
-    2026-09-26; per the 16:4xZ revision OpenRouter is BYOK with no shared
-    credit, and its still-dead legs stay
-    flagged individually via their own unavailable_legs entry instead - see
-    providers.openrouter's $comment). Both flags are registry-only signals the
+    false. Both flags are live today: cxa was switched off in 2026-09-26,
+    and DSMAX (operator 2026-09-27T15:05:54Z) switched openrouter off at the
+    provider level too (a re-probe hit 401 'insufficient credits' even for
+    BYOK), on top of its per-leg unavailable_legs entries - see
+    providers.openrouter's $comment. Both flags are registry-only signals the
     OmniRoute gateway itself never consults (mapping doc's "PRIV2" note) -
     this render surfaces them for a human reader, it does not change what a
     caller is served."""
@@ -1981,15 +1994,43 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 # ===========================================================================
 
 
+def _canonical_leg_spelling(leg: str, registry: dict) -> str:
+    """The leg re-spelled with its provider's canonical `omniroute_id` prefix
+    (the gateway's spelling), or the raw string when it does not resolve.
+    resolve_leg() accepts EITHER the providers key or any provider's
+    omniroute_id, so policy.leg_rules written against one spelling must still
+    gate a leg written with the other (PROV finding 3: a leg written
+    `cheapinference/glm-4.5-air` previously slipped past `cheaperinference/*`)."""
+    if not isinstance(leg, str):
+        return leg
+    try:
+        provider_id, model_id = resolve_leg(leg, registry)
+    except ValueError:
+        return leg
+    provider = _section(registry, "providers").get(provider_id)
+    omni = provider.get("omniroute_id") if isinstance(provider, dict) else None
+    return "%s/%s" % (omni or provider_id, model_id)
+
+
 def leg_rule_for(leg: str, registry: dict):
     """The first policy.leg_rules entry whose fnmatch `match` pattern matches
     `leg`, or None when no rule matches (no match = allowed). The single
-    matcher: _check_leg_rules() and the renders (OR1) both call it."""
+    matcher: _check_leg_rules() and the renders (OR1) both call it.
+
+    Both valid spellings of a leg are tested - the raw string and its canonical
+    `omniroute_id` re-spelling (PROV finding 3) - so a rule matches whichever
+    spelling the leg was written with. Rule order still decides first match."""
     rules = _section(registry, "policy").get("leg_rules")
+    candidates = [leg]
+    canonical = _canonical_leg_spelling(leg, registry)
+    if canonical not in candidates:
+        candidates.append(canonical)
     for rule in rules if isinstance(rules, list) else []:
-        if (isinstance(rule, dict) and isinstance(rule.get("match"), str)
-                and fnmatch.fnmatchcase(leg, rule["match"])):
-            return rule
+        if not (isinstance(rule, dict) and isinstance(rule.get("match"), str)):
+            continue
+        for candidate in candidates:
+            if fnmatch.fnmatchcase(candidate, rule["match"]):
+                return rule
     return None
 
 

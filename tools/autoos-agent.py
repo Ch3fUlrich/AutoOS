@@ -28,8 +28,9 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed unless
---allow-training. A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
+sensitive 1M leg is off, so --allow-training is accepted for
+compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
 resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
 subcommand uses): `state` input_required refuses with exit 2 and the plan's
@@ -556,7 +557,9 @@ def sensitive_combo_refusal(combo: str, registry: dict):
 def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
     """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
     explicit --model replaced the card's combo must still land on private-safe
-    legs only (--allow-training keeps its documented, logged escape)."""
+    legs only (--allow-training keeps its compatibility escape, which now only
+    waives that explicit-override check - it no longer unlocks a trainable leg,
+    since 2026-09-27)."""
     route = resolve_route_unchecked(args, cfg, client, exclude_routes)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
@@ -646,11 +649,21 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     else:
         agent = client.name
         level = "ask" if not args.auto else ("read" if route["review"] else "edit")
+        if client.name == "qoder" and level != "read":
+            # qoder writes with bypass_permissions (no other headless write mode
+            # exists) - only inside a private clone, where the leak check applies.
+            # Not only "edit": --no-auto ("ask") ran with no flag and no sandbox
+            # (review of 6622d29). qodercli has no path fence of its own, so the
+            # containment prompt + leak check are the controls; writes outside
+            # the parent checkout (e.g. $HOME) are not detected.
+            args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
         if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
+        if client.name == "qoder":
+            model = model or clients.QODER_DEFAULT_MODEL
         model = model or (route["combo"] if client.gateway else "(client default)")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.isolate:
@@ -1118,15 +1131,17 @@ def _porcelain_path_is_logs(p: str) -> bool:
 
 
 def _filtered_parent_status(root: str) -> dict:
-    """{path-part: XY} of `git status --porcelain --untracked-files=no`, logs/ excluded.
+    """{path-part: XY} of `git status --porcelain --untracked-files=all`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
     so logs/ paths are the spawner's own, never a worker's leak. Only entries
     where EVERY path is under logs/ drop; a rename with one side outside
     (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
     """
+    # Untracked files count too: a worker with write rights (qoder
+    # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
-                        "--untracked-files=no"], capture_output=True, text=True)
+                        "--untracked-files=all"], capture_output=True, text=True)
     out = {}
     if r.returncode != 0:
         return out
@@ -2096,9 +2111,6 @@ def cmd_run(args, cfg: dict) -> int:
     route = plan["route"]
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
-    if route["reason"].endswith("allow-training"):
-        print("autoos-agent: --allow-training: sensitive work goes to %s, whose leg trains on "
-              "prompts (logged)." % route["combo"], file=sys.stderr)
     uses_key = client.gateway and not args.free
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
@@ -2340,7 +2352,7 @@ def main(argv=None) -> int:
                      help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
                           "and run now instead of refusing with exit 2")
     run.add_argument("--allow-training", action="store_true",
-                     help="let privacy=sensitive,ctx=1m use t1-orchestrator-clean, whose leg trains on prompts (logged)")
+                     help="accepted for compatibility; since 2026-09-27 the only 1M leg is off, so this no longer unlocks a route")
     run.add_argument("--client", choices=sorted(clients.CLIENTS), default=None,
                      help="agent CLI to spawn (default: the first client that declares the "
                           "capabilities the task needs, opencode when it needs none)")

@@ -375,16 +375,20 @@ This single command performs three steps atomically:
    restart the opencode service with the new password, using all the same
    guards (bind address, public URL, native unit conflicts) as a normal `up`.
 
-3. **POST the edge webhook** — if `semaphore_edge_webhook_url` and
-   `semaphore_edge_webhook_header` are configured in `api-keys.yml`, POSTs a
-   webhook to the edge's Semaphore template. The template then PULLS the new
-   password from the coding VM's `opencode.env`. AutoOS holds **no Semaphore
-   API token** and sends **no secret** — it only triggers the template refresh.
+3. **POST the edge webhook** — if `semaphore_edge_webhook_url`,
+   `semaphore_edge_webhook_header` and `semaphore_edge_webhook_token` are
+   configured in `api-keys.yml`, POSTs a webhook to the edge's Semaphore
+   template. The template then PULLS the new password from the coding VM's
+   `opencode.env`. AutoOS holds **no Semaphore API token** and sends **no
+   secret** — it only triggers the template refresh. The header sent is
+   `<name>: <token>` where `name` is `semaphore_edge_webhook_header` and
+   `token` is `semaphore_edge_webhook_token`.
 
 The command is idempotent: a second run with the same password skips the webhook
 (unless `--force` is given). The webhook is sent with the header via a 0600 temp
 file (`-H @file`), never on the command line, and the password never appears in
-output or logs. Use `--dry-run` to preview without making changes.
+output or logs. The temp file is removed immediately after the request (also on
+error paths). Use `--dry-run` to preview without making changes.
 
 ### opencode in the container
 

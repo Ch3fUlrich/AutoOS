@@ -115,9 +115,18 @@ for name, prov in (("omniroute", omni), ("litellm", lit)):
     key = (prov.get("options") or {}).get("apiKey", "")
     if not (key.startswith("{env:") and key.endswith("}")):
         problems.append(name + "-key-not-placeholder")
-for m in ("t1-orchestrator", "t1-orchestrator-clean", "t2-worker", "t3-driver-clean", "auto/smart"):
+for m in ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker", "t3-driver-clean", "auto/smart"):
     if m not in (omni.get("models") or {}):
         problems.append("missing:" + m)
+# The full surface comes from catalog/ide-models.json (rendered from the
+# registry), never a pinned list here: an omitted route must disappear from
+# the config, and nothing may linger in it (PROVPIN re-pin, PROV bab8d70).
+want = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))
+surface = {m["id"] for m in want["models"]
+           if "opencode" in ((m.get("surfaces") or {}).get("omniroute") or [])}
+if surface != set((omni.get("models") or {}).keys()):
+    problems.append("models:want=%s got=%s" % (",".join(sorted(surface)),
+                                               ",".join(sorted((omni.get("models") or {}).keys()))))
 if "t2-worker" not in (lit.get("models") or {}):
     problems.append("missing:lit-t2-worker")
 if "deepseek" in p:
