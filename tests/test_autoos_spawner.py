@@ -4406,6 +4406,35 @@ class FreeModelFallthroughTests(unittest.TestCase):
         self.assertEqual(rc, 8, out + err)
         self.assertEqual(calls["n"], 1, "the refused re-plan never starts a client")
 
+    # SPAWNFIX (S2 fix of SPAWNFREE) item 1: `--free` without `--isolate` is the
+    # documented usage (unattended-orchestration.md:71), but the fall-through's
+    # WIP-preserve block read plan["sandbox"]["path"] unguarded, so the first
+    # provider stop of a keyless non-isolated run died on TypeError instead of
+    # moving to the next free model.
+    def test_a_free_fallthrough_without_a_sandbox_re_runs_the_next_free_model(self):
+        rc, out, err, calls, sandboxes = self._run(stops=1, isolate=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the stopped attempt plus one re-run")
+        self.assertEqual(calls["free_models"], [FREE_MODELS[1], FREE_MODELS[0]], out + err)
+        self.assertEqual(sandboxes, [], "nothing was cloned")
+        self.assertNotIn("WIP-COMMITTED", out + err,
+                         "no sandbox, so there is no checkout to commit into")
+        self.assertIn("falling through to", out + err)
+
+    def test_a_free_run_without_a_sandbox_exits_8_when_the_chain_is_spent(self):
+        # the rc is the FINAL attempt's, not the crash's.
+        rc, out, err, calls, _ = self._run(stops=9, isolate=False)
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH, out + err)
+        self.assertNotIn("TypeError", out + err)
+
+    def test_a_free_run_without_a_sandbox_and_without_a_chain_exits_8(self):
+        rc, out, err, calls, _ = self._run(
+            stops=9, isolate=False, free_model="opencode/only-free-model",
+            policy={"free_client_models": {"opencode": []}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+
 
 QODERCLI_1_1_63_HELP = """Usage: qodercli [options] [command] [query...]
 

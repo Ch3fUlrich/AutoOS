@@ -2501,13 +2501,18 @@ def cmd_run(args, cfg: dict) -> int:
                 # Preserve this stopped attempt before leaving its checkout: the
                 # re-run shares the sandbox (and its branch), so the WIP commit is
                 # what the final `take it:` and the track record see.
-                sb = plan["sandbox"]
-                changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                         capture_output=True, text=True).stdout.strip()
-                if changed and not plan["route"].get("review"):
-                    wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
-                    if wip_sha:
-                        print("WIP-COMMITTED: %s" % wip_sha)
+                # SPAWNFIX (S2) item 1: a run without --isolate has no checkout to
+                # preserve (its cwd is the caller's own tree, which we never
+                # commit into) — the guard is the same one the route branch above
+                # and the post-loop summary below use. It still falls through.
+                if plan["sandbox"]:
+                    sb = plan["sandbox"]
+                    changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
+                                             capture_output=True, text=True).stdout.strip()
+                    if changed and not plan["route"].get("review"):
+                        wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
+                        if wip_sha:
+                            print("WIP-COMMITTED: %s" % wip_sha)
                 # REVFIX: each provider-stopped attempt is its own observation,
                 # not just the final plan's. Without this the dead route looked
                 # healthy (no fail record), so the resolver kept handing it the
