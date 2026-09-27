@@ -1173,5 +1173,80 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
         self.assertFalse(registry._leg_is_unavailable("clean/big", route2, reg))
 
 
+class OmittedRoutesListTests(unittest.TestCase):
+    """OR1e: render_omniroute names the routes it omits - every route with no
+    gateway-servable leg (both well-intentioned `legs: []` routes and routes
+    whose every leg is dropped). apply.sh prunes exactly this list plus
+    "retired", so a combo the registry stopped serving leaves the live store
+    instead of being created forever and never removed."""
+
+    def test_omitted_is_exactly_the_routes_with_no_servable_leg(self):
+        reg = real_registry()
+        rendered = registry.render_omniroute(reg)
+        self.assertEqual(
+            rendered["omitted"],
+            sorted(route_id for route_id, route in reg["routes"].items()
+                   if not registry.gateway_legs(route, reg)))
+
+    def test_omitted_and_combos_partition_every_route(self):
+        rendered = registry.render_omniroute(real_registry())
+        names = [c["name"] for c in rendered["combos"]]
+        self.assertEqual(sorted(names + rendered["omitted"]),
+                         sorted(real_registry()["routes"]))
+
+    def test_omitted_is_disjoint_from_retired(self):
+        rendered = registry.render_omniroute(real_registry())
+        self.assertEqual(set(rendered["omitted"]) & set(rendered["retired"]), set())
+
+    def test_omitted_is_sorted(self):
+        rendered = registry.render_omniroute(real_registry())
+        self.assertEqual(rendered["omitted"], sorted(rendered["omitted"]))
+
+    def test_omitted_matches_todays_combos_file(self):
+        rendered = registry.render_omniroute(real_registry())
+        self.assertEqual(rendered["omitted"], real_combos()["omitted"])
+
+    def test_legless_route_is_omitted_not_just_absent(self):
+        reg = {
+            "providers": {},
+            "models": {},
+            "routes": {"auto": {"id": "auto", "strategy": "priority", "legs": []}},
+        }
+        rendered = registry.render_omniroute(reg)
+        self.assertEqual(rendered["combos"], [])
+        self.assertEqual(rendered["omitted"], ["auto"])
+
+    def test_all_dead_route_has_no_combo_but_is_omitted(self):
+        # Every leg dropped by gateway_legs: no combo, but the id must still be
+        # named so apply.sh can prune a live combo the registry abandoned.
+        reg = {
+            "providers": {"dead": {"id": "dead", "available": False}},
+            "models": {"m": {"id": "m"}},
+            "routes": {
+                "dead-route": {
+                    "id": "dead-route",
+                    "strategy": "priority",
+                    "legs": ["dead/m"],
+                    "surfaces": {"omniroute": {"context_declared": "8k"}},
+                },
+            },
+        }
+        rendered = registry.render_omniroute(reg)
+        self.assertEqual(rendered["combos"], [])
+        self.assertEqual(rendered["omitted"], ["dead-route"])
+
+    def test_diff_ignores_the_omitted_order(self):
+        rendered = registry.render_omniroute(real_registry())
+        current = dict(real_combos())
+        current["omitted"] = list(reversed(current["omitted"]))
+        self.assertEqual(registry.omniroute_diff(rendered, current), [])
+
+    def test_diff_reports_a_changed_omitted_list(self):
+        rendered = registry.render_omniroute(real_registry())
+        current = json.loads(json.dumps(real_combos()))
+        current["omitted"] = current["omitted"][:-1]
+        self.assertIn("omitted", registry.omniroute_diff(rendered, current))
+
+
 if __name__ == "__main__":
     unittest.main()

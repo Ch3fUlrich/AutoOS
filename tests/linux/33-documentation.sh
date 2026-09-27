@@ -211,8 +211,9 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
         grep -qE 'failureThreshold.?[:=].?2|BREAKER_THRESHOLD=2' "$f" \
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
-    # The free promo leg must stay FIRST in tier1/spark: free when it works,
-    # fast-skipped by the breaker when it does not (operator 2026-09-23).
+    # The tier-1/spark head must be the same servable leg in both combos: the
+    # registry dropped every dead leg upstream, so the render's first entry is
+    # what apply creates (OR1e; the old free promo leg is no longer servable).
     head_leg="$(python3 - <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
@@ -220,7 +221,7 @@ by = {c["name"]: c["models"] for c in d["combos"]}
 print(",".join(by[n][0] for n in ("t1-orchestrator", "spark-1.3-contributor")))
 PY
 )"
-    assert_eq "$head_leg" "opencode-zen/muse-spark-1.3-contributor-free,opencode-zen/muse-spark-1.3-contributor-free"
+    assert_eq "$head_leg" "openrouter/meta/muse-spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor"
     if (( ok )); then pass; else fail "the resilience settings are not applied"; fi
 fi
 
@@ -444,22 +445,25 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
 
-# Regression lock for today's registry (2026-09-26): openrouter (every leg
-# individually flagged, docs/plans/2026-09-25-routing-v2-plan.md's "OpenRouter
-# is not to be trusted" decision) and cerebras (402/401 credit exhaustion, L0
-# 2026-09-26T11:44Z) are, right now, all-unavailable across every route that
-# lists them - proves the real catalog/ai-registry.json actually reaches
-# apply.sh's live plan, not just the synthetic fixture above.
+# Regression lock for today's registry (2026-09-27): cerebras (402/401 credit
+# exhaustion, L0 2026-09-26T11:44Z) and groq (L0 2026-09-27) are, right now,
+# all-unavailable across every route that lists them - proves the real
+# catalog/ai-registry.json actually reaches apply.sh's live plan, not just the
+# synthetic fixture above. openrouter and antigravity each still carry a live
+# leg (openrouter's own unavailable flags were lifted), so they are offered
+# and only skipped for the missing key.
 if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     ok=1
     [[ "$out" == *"  - cerebras: all legs unavailable (skipped)"* ]] \
         || { ok=0; echo "cerebras was not flagged: $out" >&2; }
-    [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "openrouter was not flagged: $out" >&2; }
-    # antigravity carries no unavailable_legs entry anywhere today - a
-    # provider with a live leg must still be offered normally.
+    [[ "$out" == *"  - groq: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "groq was not flagged: $out" >&2; }
+    # A provider with a live leg must still be offered normally, even with no
+    # key: openrouter and antigravity satisfy that today.
+    [[ "$out" == *"  - openrouter: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "openrouter (has a live leg today) was wrongly all-unavailable-skipped: $out" >&2; }
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi

@@ -858,17 +858,26 @@ def render_omniroute(registry: dict) -> dict:
     gateway 403s are all dropped from the combo's `models`. A route whose every
     leg is dropped therefore renders no combo at all, the same shape a
     `legs: []` route already has.
+
+    Every such route is also named in "omitted": the routes that render no combo.
+    It is the exact complement of the rendered combos (`route ids == combos`
+    names + omitted ids), so apply.sh can prune a live combo the registry
+    stopped serving instead of creating it forever and never removing it
+    (OR1e). It is disjoint from "retired" by construction - `retired` is a
+    fixed hand-maintained list of dead ids no route uses any more.
     """
     routes = registry.get("routes")
     routes = routes if isinstance(routes, dict) else {}
 
     combos = []
+    omitted = []
     for route_id in sorted(routes):
         route = routes[route_id]
         if not isinstance(route, dict):
             continue
         legs = gateway_legs(route, registry)
         if not legs:
+            omitted.append(route_id)
             continue
         surfaces = route.get("surfaces")
         omniroute_surface = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
@@ -886,6 +895,7 @@ def render_omniroute(registry: dict) -> dict:
     return {
         "$comment": OMNIROUTE_GENERATED_COMMENT,
         "retired": list(OMNIROUTE_RETIRED_IDS),
+        "omitted": omitted,
         "combos": combos,
     }
 
@@ -903,13 +913,13 @@ def _canonical_omniroute(doc) -> dict:
 
     - drop "$comment" entirely (see OMNIROUTE_GENERATED_COMMENT's comment above -
       a documented exception, not only its generated-marker line);
-    - treat "combos" and "retired" as unordered: apply.sh (`for c in
+    - treat "combos", "retired" and "omitted" as unordered: apply.sh (`for c in
       data.get("combos", [])`, `current = {c["name"] for c in ...}`) and apply.ps1
       (`foreach ($combo in $combos)`, retired filtered by `-cnotcontains`) both
-      look combos up by name and retired ids up by membership, never by array
-      position (read both scripts, 2026-09-26) - so array order is not semantic
-      data here, unlike the ordered `models` list inside each combo (a fallback
-      priority order, which this function leaves untouched).
+      look combos up by name and retired/omitted ids up by membership, never by
+      array position (read both scripts, 2026-09-26) - so array order is not
+      semantic data here, unlike the ordered `models` list inside each combo (a
+      fallback priority order, which this function leaves untouched).
     """
     if not isinstance(doc, dict):
         return {}
@@ -923,17 +933,18 @@ def _canonical_omniroute(doc) -> dict:
             key=lambda c: (c["name"] if isinstance(c, dict) and "name" in c
                            else "~" + json.dumps(c, sort_keys=True)),
         )
-    retired = out.get("retired")
-    if isinstance(retired, list):
-        out["retired"] = sorted(retired, key=str)
+    for key in ("retired", "omitted"):
+        ids = out.get(key)
+        if isinstance(ids, list):
+            out[key] = sorted(ids, key=str)
     return out
 
 
 def omniroute_diff(rendered: dict, current: dict) -> list:
     """Return the keys where a fresh render_omniroute() output and today's parsed
-    combos.json differ, ignoring $comment and the order of "combos"/"retired"
-    (see _canonical_omniroute). Empty means semantically equal - the spec 3.2
-    phase-1 gate."""
+    combos.json differ, ignoring $comment and the order of
+    "combos"/"retired"/"omitted" (see _canonical_omniroute). Empty means
+    semantically equal - the spec 3.2 phase-1 gate."""
     a = _canonical_omniroute(rendered)
     b = _canonical_omniroute(current)
 
