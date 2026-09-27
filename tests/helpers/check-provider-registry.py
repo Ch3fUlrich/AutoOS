@@ -41,19 +41,23 @@ def load_module(relative_path: str, name: str):
 
 
 def expected_by_omni(providers: dict):
-    """(prefix, api_base, env_key, seen) keyed by OmniRoute provider id."""
+    """(prefix, api_base, env_key, seen) keyed by provider name and OmniRoute id.
+
+    Both are valid leg prefixes (tools/registry.py's resolve_leg accepts
+    either), so provider_maps_from_dict() keys both; this mirrors it."""
     prefix, api_base, env_key, seen = {}, {}, {}, {}
     for name, entry in providers.items():
         omni = entry.get("omniroute_id")
         if not omni:
             continue
         seen[omni] = name
-        if entry.get("litellm_prefix"):
-            prefix[omni] = entry["litellm_prefix"]
-        if entry.get("api_base"):
-            api_base[omni] = entry["api_base"]
-        if entry.get("litellm_env"):
-            env_key[omni] = entry["litellm_env"]
+        for key in dict.fromkeys((name, omni)):
+            if entry.get("litellm_prefix"):
+                prefix[key] = entry["litellm_prefix"]
+            if entry.get("api_base"):
+                api_base[key] = entry["api_base"]
+            if entry.get("litellm_env"):
+                env_key[key] = entry["litellm_env"]
     return prefix, api_base, env_key, seen
 
 

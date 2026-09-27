@@ -98,11 +98,20 @@ def provider_maps_from_dict(providers: dict):
     instead of the legacy catalog, without copying this logic or
     diverging from it.
 
-    The OmniRoute provider id is the key because it is the first segment of a
-    combos.json / registry `routes.<id>.legs` model ref; an entry with no
-    omniroute_id (meta, the client key) has no refs and is skipped, as is any
-    non-dict entry (defensive - the caller's source is otherwise trusted to
-    already be well-formed).
+    A leg's prefix is the first segment of a registry `routes.<id>.legs` model
+    ref, and tools/registry.py's resolve_leg() accepts EITHER the providers key
+    OR any provider's omniroute_id there. The two coincide for most providers
+    (groq, samba) but differ where the live gateway spells one differently
+    (zen -> opencode-zen, google_ai_studio -> gemini, free_ai -> free-ai), so
+    BOTH spellings key the same transport here: a leg must resolve to the same
+    litellm_prefix/api_base/env whether it is written with the providers key or
+    the omniroute_id. Without that, a leg spelled with the providers key
+    (free_ai/qwen7b) falls through to LiteLLM's own <provider> handling and
+    silently loses its litellm_prefix/api_base (D 2026-09-27 renamed
+    free_ai's omniroute_id to free-ai, exposing exactly this). An entry with
+    no omniroute_id (meta, the client key) has no refs and is skipped, as is
+    any non-dict entry (defensive - the caller's source is otherwise trusted
+    to already be well-formed).
 
     Only ids whose LiteLLM transport differs from the OmniRoute id appear in
     the prefix map: OmniRoute's <provider>/<model> is already LiteLLM's shape,
@@ -111,18 +120,22 @@ def provider_maps_from_dict(providers: dict):
     names the conventional env vars; Leg falls back to <PROVIDER>_API_KEY.
     """
     prefix, api_base, env_key = {}, {}, {}
-    for entry in providers.values():
+    for name, entry in providers.items():
         if not isinstance(entry, dict):
             continue
         omni = entry.get("omniroute_id")
         if not omni:
             continue
-        if entry.get("litellm_prefix"):
-            prefix[omni] = entry["litellm_prefix"]
-        if entry.get("api_base"):
-            api_base[omni] = entry["api_base"]
-        if entry.get("litellm_env"):
-            env_key[omni] = entry["litellm_env"]
+        # Both valid leg spellings key the same transport (see the docstring);
+        # dict.fromkeys dedupes when the providers key already equals the
+        # omniroute_id, keeping the two-map shape unchanged for those.
+        for key in dict.fromkeys((name, omni)):
+            if entry.get("litellm_prefix"):
+                prefix[key] = entry["litellm_prefix"]
+            if entry.get("api_base"):
+                api_base[key] = entry["api_base"]
+            if entry.get("litellm_env"):
+                env_key[key] = entry["litellm_env"]
     return prefix, api_base, env_key
 
 

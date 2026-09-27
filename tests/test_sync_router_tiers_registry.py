@@ -71,9 +71,14 @@ class ProviderMapsReadTheRegistryTests(unittest.TestCase):
     def test_reads_a_registry_fixture_with_no_old_catalog_anywhere(self):
         sync = _load_module()
         prefix, api_base, env_key = sync.provider_maps(self.registry_path)
-        self.assertEqual(prefix, {"opencode-zen": "openai"})
-        self.assertEqual(api_base, {"opencode-zen": "https://opencode-zen.example/v1"})
-        self.assertEqual(env_key, {"groq": "GROQ_API_KEY", "opencode-zen": "OPENCODE_ZEN_API_KEY"})
+        # Both valid leg spellings key the transport: the providers key ("zen")
+        # and the omniroute_id ("opencode-zen") - resolve_leg accepts either,
+        # so provider_maps_from_dict mirrors that (free_ai/free-ai, D 2026-09-27).
+        self.assertEqual(prefix, {"zen": "openai", "opencode-zen": "openai"})
+        self.assertEqual(api_base, {"zen": "https://opencode-zen.example/v1",
+                                    "opencode-zen": "https://opencode-zen.example/v1"})
+        self.assertEqual(env_key, {"groq": "GROQ_API_KEY", "zen": "OPENCODE_ZEN_API_KEY",
+                                   "opencode-zen": "OPENCODE_ZEN_API_KEY"})
 
     def test_default_source_is_the_registry_not_the_old_catalog(self):
         sync = _load_module()

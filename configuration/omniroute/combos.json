@@ -206,13 +206,27 @@
     "tier3-credit"
   ],
   "omitted": [
-    "cheaperinference/glm-5.2",
-    "cheaperinference/kimi-k3",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "t1-orchestrator-free-only"
   ],
   "combos": [
+    {
+      "name": "cheaperinference/glm-5.2",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cheaperinference/glm-5.2"
+      ]
+    },
+    {
+      "name": "cheaperinference/kimi-k3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cheaperinference/kimi-k3"
+      ]
+    },
     {
       "name": "t1-orchestrator",
       "strategy": "priority",
@@ -244,6 +258,7 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
+        "cheaperinference/kimi-k3",
         "openrouter/deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-flash"
       ]
@@ -265,7 +280,7 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-medium",
-        "free_ai/qwen7b"
+        "free-ai/qwen7b"
       ]
     },
     {
@@ -283,7 +298,10 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
+        "cheaperinference/glm-5.2",
         "deepseek/deepseek-flash",
+        "cheaperinference/kimi-k3",
+        "cheaperinference/minimax-m2.7",
         "mistral/mistral-small-latest"
       ]
     },
@@ -301,7 +319,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "free_ai/qwen7b"
+        "free-ai/qwen7b"
       ]
     },
     {
@@ -326,6 +344,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "deepseek/deepseek-flash",
         "openrouter/deepseek/deepseek-v4.1-flash"
       ]
     },

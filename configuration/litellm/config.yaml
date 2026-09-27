@@ -90,6 +90,11 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker
     litellm_params:
+      model: openai/kimi-k3
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker
@@ -157,8 +162,23 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
+      model: openai/glm-5.2
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openai/kimi-k3
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openai/minimax-m2.7
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-small-latest
@@ -224,6 +244,10 @@ model_list:
   # AUTOOS-MANAGED-START deepseek-v4.1-flash
   - model_name: deepseek-v4.1-flash
     litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
       model: openrouter/deepseek/deepseek-v4.1-flash
       api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END deepseek-v4.1-flash
@@ -234,6 +258,23 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   # AUTOOS-MANAGED-END gemini-3.8-flash
+
+  # ── cheaperinference pinned single-model aliases ───────────────────────────
+  # AUTOOS-MANAGED-START cheaperinference/glm-5.2
+  - model_name: cheaperinference/glm-5.2
+    litellm_params:
+      model: openai/glm-5.2
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  # AUTOOS-MANAGED-END cheaperinference/glm-5.2
+
+  # AUTOOS-MANAGED-START cheaperinference/kimi-k3
+  - model_name: cheaperinference/kimi-k3
+    litellm_params:
+      model: openai/kimi-k3
+      api_base: https://api.cheaperinference.com/v1
+      api_key: os.environ/CHEAPINFERENCE_API_KEY
+  # AUTOOS-MANAGED-END cheaperinference/kimi-k3
 
 router_settings:
   # simple-shuffle: deterministic and DB-less. `usage-based-routing-v2` tracks
