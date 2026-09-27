@@ -2481,6 +2481,26 @@ if it "aistack: verify retries a combo that answers 502/503 while the gateway wa
     if (( ok )); then pass; else fail "combo warm-up retry"; fi
 fi
 
+# Final review 2026-09-27: "008" passed a digits-only guard and then
+# $(( wait_s * 2 )) died on "value too great for base", killing verify.
+if it "aistack: verify reads AUTOOS_VERIFY_RETRY_SLEEP as decimal, junk falls back to 10"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '#!/usr/bin/env bash\necho "$*" >>"%s/sleep.log"\n' "$d" >"$d/bin/sleep"; chmod +x "$d/bin/sleep"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key cold-combo 503
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=008 \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify)" && rc=0 || rc=$?
+    grep -q '^verify: ' <<<"$out" || { ok=0; echo "008: verify died before its summary (rc=$rc)" >&2; }
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "8 16 " ]] || { ok=0; echo "008: sleeps were '$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)', not '8 16'" >&2; }
+    rm -f "$d/sleep.log" "$d"/curl-count-*
+    _aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=abc \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify >/dev/null || true
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "10 20 " ]] || { ok=0; echo "abc: sleeps not '10 20'" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_VERIFY_RETRY_SLEEP parsing"; fi
+fi
+
 if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"

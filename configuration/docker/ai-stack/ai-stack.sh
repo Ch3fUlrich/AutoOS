@@ -1202,7 +1202,8 @@ verify_combos() {
         # 502/503 right after `up` is the gateway warming up (both combos answered
         # on re-probe, 2026-09-27): two retries, 10 s then 20 s. Nothing else is retried.
         wait_s="${AUTOOS_VERIFY_RETRY_SLEEP:-10}"
-        [[ "$wait_s" =~ ^[0-9]{1,3}$ ]] || wait_s=10
+        # Decimal even with a leading zero: bash reads "008" as bad octal and aborts.
+        if [[ "$wait_s" =~ ^[0-9]{1,3}$ ]]; then wait_s=$(( 10#$wait_s )); else wait_s=10; fi
         for attempt in 1 2 3; do
             code="$(verify_code -m 60 --noproxy '*' -X POST -H 'Content-Type: application/json' -H @- -d "$body" "$url" \
                 <<<"Authorization: Bearer $key")"
