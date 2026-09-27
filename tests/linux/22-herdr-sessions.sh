@@ -160,6 +160,39 @@ if it "herdr-sessions: two drifted re-runs in the same second keep two distinct 
     if [[ "$n" == 2 && "$one" -ge 1 ]]; then pass; else fail "backups=$n, backups holding the first edit=$one (a same-second backup overwrote the earlier one)"; fi
 fi
 
+# Review follow-up: the backup stamp here (and in templates/rescue-bootstrap.sh)
+# was %Y%m%d%H%M%S, while every other backup site in the repository
+# (lib/linux/install.sh backup_path, the agent harness) writes %Y%m%d-%H%M%S.
+# Two spellings of one name made the documented <file>.autoos-backup-<stamp>
+# shape un-greppable. Pin the canonical format: the stub date answers ONLY the
+# hyphenated shape, and a legacy-formatted call must leave no backup behind.
+if it "herdr-sessions: a drifted unit's backup carries the canonical hyphenated stamp"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$stub/date" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    '+%Y%m%d-%H%M%S') echo '20260926120000' ;;
+    *) echo 'legacy-no-hyphen' ;;
+esac
+STUB
+    chmod +x "$stub/date"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1; }
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    run_hs
+    echo "# drifted" >> "$unit"
+    run_hs
+    canon="$unit.autoos-backup-20260926120000"
+    legacy="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name '*autoos-backup-legacy-no-hyphen*' | wc -l | tr -d ' ')"
+    found=0; [[ -f "$canon" ]] && found=1
+    rm -rf "$tmp"
+    if [[ "$found" == 1 && "$legacy" == 0 ]]; then
+        pass
+    else
+        fail "backup not at the canonical hyphenated stamp (found=$found, legacy-stamped=$legacy)"
+    fi
+fi
+
 if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
     tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
     cat > "$tmp/site.conf" <<EOF

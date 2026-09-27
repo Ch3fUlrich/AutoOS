@@ -166,7 +166,7 @@ render_unit() {
 # had two separate implementations and only one had the loop).
 unique_backup_path() {
     local target="$1" backup base n=0
-    backup="$target.autoos-backup-$(date +%Y%m%d%H%M%S)"
+    backup="$target.autoos-backup-$(date +%Y%m%d-%H%M%S)"
     base="$backup"
     while [ -e "$backup" ] || [ -L "$backup" ]; do
         n=$((n + 1)); backup="$base-$n"
