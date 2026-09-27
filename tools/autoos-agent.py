@@ -45,8 +45,12 @@ session), qwen / gemini / codex through `omniroute run <target>` on the card's
 combo, agy and qoder on their own account login (no gateway; qoder is a promo
 and takes privacy=public work only).
 
---lean (opencode, claude): no serena/playwright/context7 for research and
-review agents - about 0.7 GB less per agent (LEAN_DROP).
+--lean: no serena/playwright/context7 for research and review agents - about
+0.7 GB less per agent (LEAN_DROP). Implemented for the clients that can honour
+it: opencode (config overlay) and claude / qoder (--strict-mcp-config,
+LEAN_CLIENTS). Another client cannot drop its servers: on a read-only run --lean
+is a note and the run goes ahead (the servers cost memory, not safety); on a
+writer run it still refuses (rc 2), because there the tool surface is the point.
 
 Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
@@ -171,6 +175,17 @@ _TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # (516 MB with graphify off too).
 # The graph lookups stay: research and review agents navigate with them.
 LEAN_DROP = ("serena", "playwright", "context7")
+# Clients whose OWN argv accepts --strict-mcp-config (verified against each CLI's
+# --help on 2026-09-27: qodercli 1.1.63 and claude both document "Only use MCP
+# servers from --mcp-config"). The flag is not universal: qwen / gemini / codex
+# run behind `omniroute run <target>`, where it would land in omniroute's own
+# argument list and be rejected.
+MCP_STRICT_CLIENTS = ("claude", "qoder")
+# The clients --lean is actually implemented for: opencode through a config
+# overlay, these two through --strict-mcp-config. SPAWNFREE (S2) item 4: for any
+# other client --lean is a note on a read-only run and a refusal on a writer one,
+# not a blanket error.
+LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 
 # --isolate containment (ISOfix, measured 2026-09-26): a worker given absolute
 # parent paths edited and committed there; outside_fence only fenced opencode's
@@ -351,6 +366,27 @@ def free_slot_refusal(plan: dict, policy: dict | None) -> str | None:
             "started - retry later, run without --free, or raise the cap if the "
             "provider says it serves more at once."
             % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap))
+
+
+def lean_decision(client_name: str, route: dict) -> tuple:
+    """(note, refusal) for `--lean` on `client_name` given a planned `route`.
+
+    SPAWNFREE (S2) item 4: --lean on a client that cannot drop its MCP servers
+    used to be a flat refusal, which killed the role=review qoder runs the skill
+    briefs lean (inbox 2026-09-27T17:42:09Z,
+    work/L2-general/review-edgesecret-brief.out). A read-only run pays those
+    servers in RAM only, so note it and continue; on a writer run the servers'
+    write-capable tool surface is the documented reason --lean is asked for, so
+    a client that cannot provide it still refuses. Both are None when the client
+    is in LEAN_CLIENTS, where --lean is honoured outright."""
+    if client_name in LEAN_CLIENTS:
+        return None, None
+    if route.get("review"):
+        return "%s cannot drop its MCP servers" % client_name, None
+    return None, ("--lean cannot be honoured for %s: it would still start its MCP "
+                  "servers, and a writer run is where that tool surface is exactly "
+                  "what --lean asks to remove (%s can drop them)." % (
+                      client_name, " and ".join(LEAN_CLIENTS)))
 
 
 def lean_overlay(cfg: dict) -> dict:
@@ -803,7 +839,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
-        if args.lean and "--strict-mcp-config" not in cmd:  # claude only: no MCP servers
+        if args.lean and client.name in MCP_STRICT_CLIENTS \
+                and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         if client.name == "qoder":
             model = model or clients.QODER_DEFAULT_MODEL
@@ -2246,9 +2283,6 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--clean is for --tier; with a card say privacy=sensitive.")
     if args.free and client.name != "opencode":
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
-    if args.lean and client.name not in ("opencode", "claude"):
-        return refuse("--lean is implemented for opencode and claude; %s would still start "
-                      "its MCP servers." % client.name)
     if args.joinable and client.name != "claude":
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     try:
@@ -2262,6 +2296,13 @@ def cmd_run(args, cfg: dict) -> int:
     route = plan["route"]
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
+    # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
+    # honoured *and* the run needs what it asks for (lean_decision).
+    lean_note = None
+    if args.lean:
+        lean_note, lean_refusal = lean_decision(client.name, route)
+        if lean_refusal is not None:
+            return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
@@ -2270,7 +2311,10 @@ def cmd_run(args, cfg: dict) -> int:
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
     if args.lean:
-        print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
+        if lean_note:
+            print("note: %s; this run is read-only, so its servers cost memory, not safety" % lean_note)
+        else:
+            print("lean: no %s" % (", ".join(LEAN_DROP) if client.name == "opencode" else "MCP servers"))
     if plan["sandbox"] and client.name != "opencode":
         print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
               "opencode-only, but every client gets the containment prompt line and the "

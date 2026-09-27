@@ -717,6 +717,75 @@ class LeanTests(unittest.TestCase):
     def test_lean_is_refused_where_it_cannot_be_applied(self):
         self.assertEqual(plan_of("--client", "qwen", "--lean", "t").returncode, 2)
 
+    # SPAWNFREE (S2) item 4: role=review qoder runs are briefed --lean, and the
+    # blunt refusal (rc 2, "qoder would still start its MCP servers") killed them
+    # (inbox 2026-09-27T17:42:09Z, work/L2-general/review-edgesecret-brief.out).
+    # qodercli 1.1.63 does take --strict-mcp-config (its own --help, read
+    # 2026-09-27), so qoder is a client --lean is implemented for. A client that
+    # cannot drop its servers - qwen, gemini, codex, agy - gets a note and runs
+    # when the route is read-only, because there the servers cost memory, not
+    # safety; a writer run still refuses, because --lean there is also asking for
+    # that tool surface back.
+
+    def test_lean_qoder_drops_its_servers_in_the_client_argv(self):
+        r = plan_of("--client", "qoder", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qodercli --strict-mcp-config -p", r.stdout)
+        self.assertIn("lean: no MCP servers", r.stdout)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+
+    def test_lean_never_lands_in_the_omniroute_wrapper_argv(self):
+        # qwen runs as `omniroute run qwen -- ...`: claude's flag belongs to the
+        # client behind the --, and `omniroute --strict-mcp-config run ...` is an
+        # unknown option that would kill the run. --lean must not inject it there.
+        r = plan_of("--client", "qwen", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("omniroute run qwen", r.stdout)
+        self.assertNotIn("strict-mcp-config", r.stdout)
+
+    def test_lean_on_a_read_only_review_run_notes_and_continues(self):
+        r = plan_of("--client", "qwen", "--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qwen cannot drop its MCP servers", r.stdout)
+        self.assertIn("read-only", r.stdout)
+
+    def test_lean_on_tier_3_notes_and_continues(self):
+        r = plan_of("--client", "qwen", "--lean", "--tier", "3", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("qwen cannot drop its MCP servers", r.stdout)
+
+    def test_the_decision_follows_route_review_not_the_card_dialect(self):
+        # A v2 card (kind=review,paths=...) reaches the same branch through
+        # route["review"]; its CLI case is host-dependent (need_tokens measured
+        # from the real tree), so the shape is asserted on the helper.
+        agent = load_agent()
+        note, refusal = agent.lean_decision("qwen", {"review": True, "kind": "review"})
+        self.assertIsNone(refusal)
+        self.assertIn("qwen cannot drop its MCP servers", note)
+        note, refusal = agent.lean_decision("qwen", {"review": False, "kind": "implement"})
+        self.assertIsNone(note)
+        self.assertIn("writer", refusal)
+        for client in agent.LEAN_CLIENTS:
+            self.assertEqual(agent.lean_decision(client, {"review": False}), (None, None))
+
+    def test_lean_on_a_writer_run_still_refuses(self):
+        # Only cards the planner accepts reach the decision; a v2 kind=implement
+        # without paths dies earlier ("card paths is empty"), which is not this
+        # test's business (the helper case above covers the v2 shape).
+        for card in (["--card", "role=implement"], ["--tier", "2"]):
+            with self.subTest(card=card):
+                r = plan_of("--client", "qwen", "--lean", *card, "t")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("writer", r.stderr)
+
+    def test_a_client_that_can_drop_its_servers_gets_no_note(self):
+        r = plan_of("--lean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+        r = plan_of("--client", "claude", "--lean", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("cannot drop its MCP servers", r.stdout)
+
 
 class PromoProbeTests(unittest.TestCase):
     def test_probe_is_stale_after_seven_days(self):
