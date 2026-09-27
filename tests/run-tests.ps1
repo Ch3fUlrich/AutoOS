@@ -7123,11 +7123,168 @@ Test-Case 'provider status reads keys but never exposes them' {
         ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
         $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
         $json = $status | ConvertTo-Json
-        Assert-True ($status.Count -eq 14) "expected 14 provider entries, got $($status.Count)"
+        Assert-True ($status.Count -eq 18) "expected 18 secret entries, got $($status.Count)"
         $groq = $status | Where-Object { $_.id -eq 'groq' }
         $ds = $status | Where-Object { $_.id -eq 'deepseek' }
         Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
         Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: set new key creates the file' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = Join-Path $scratch 'configuration\api-keys.yml'
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE123' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            Assert-True $result.Payload.ok 'payload not ok'
+            Assert-True $result.Payload.configured 'payload not configured'
+            Assert-True (Test-Path $env:AUTOOS_KEYS_FILE) 'keys file was not created'
+            $content = Get-Content $env:AUTOOS_KEYS_FILE -Raw -Encoding utf8
+            Assert-True ($content -match "groq: 'gsk_NEWVALUE123'") 'key not written correctly'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: replace keeps other lines + comment byte-identical and makes one backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "groq: 'gsk_OLDVALUE' # my comment`r`nmistral: 'old_mistral'`r`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllBytes($keysFile)
+            $afterText = [System.Text.Encoding]::UTF8.GetString($after)
+            if ($afterText.Length -gt 0 -and $afterText[0] -eq [char]0xFEFF) { $afterText = $afterText.Substring(1) }
+            Assert-True ($afterText -match "groq: 'gsk_NEWVALUE' # my comment`r`n") 'groq line not rebuilt correctly'
+            Assert-True ($afterText -match "mistral: 'old_mistral'`r`n") 'other lines changed'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 1 "expected 1 backup, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: same value twice -> unchanged no second backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SAMEVALUE'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_SAMEVALUE' }
+            $r1 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r1.Code 200
+            Assert-True $r1.Payload.unchanged 'first call should be unchanged'
+            $r2 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r2.Code 200
+            Assert-True $r2.Payload.unchanged 'second call should be unchanged'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 0 "expected 0 backups, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: 400 cases incl. quotes' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $bad = @(
+            @{ id = 'unknown_key'; value = 'x' },
+            @{ id = 'groq'; value = 123 },
+            @{ id = 'groq'; value = '' },
+            @{ id = 'groq'; value = ('x' * 4097) },
+            @{ id = 'groq'; value = "has`nnewline" },
+            @{ id = 'groq'; value = ' leading' },
+            @{ id = 'groq'; value = 'trailing ' },
+            @{ id = 'groq'; value = 'REPLACE_WITH_KEY' },
+            @{ id = 'groq'; value = "has'quote" },
+            @{ id = 'groq'; value = 'has"quote' }
+        )
+        foreach ($case in $bad) {
+            $body = [pscustomobject]$case
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-True ($result.Code -eq 400) "expected 400 for $($case.id)=$($case.value), got $($result.Code)"
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: non-loopback -> 403 and file untouched' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        $prevRemote = $env:AUTOOS_SERVE_REMOTE_SECRETS
+        Remove-Item Env:\AUTOOS_SERVE_REMOTE_SECRETS -ErrorAction SilentlyContinue
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_VALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $false
+            Assert-Equal $result.Code 403
+            Assert-True ($result.Payload.error -match 'loopback') 'wrong error message'
+            Assert-True (-not (Test-Path $keysFile)) 'file was created despite non-loopback'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+            if ($null -ne $prevRemote) { $env:AUTOOS_SERVE_REMOTE_SECRETS = $prevRemote }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: REPLACE_WITH_ reads not configured' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        @(
+            'groq: REPLACE_WITH_GROQ_KEY',
+            'mistral: real_value'
+        ) | Out-File $keysFile -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $mistral = $status | Where-Object { $_.id -eq 'mistral' }
+        Assert-True (-not $groq.configured) 'REPLACE_WITH_ should read as not configured'
+        Assert-True $mistral.configured 'real value should read as configured'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: payload JSON never contains the value' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SUPERSECRETXYZ'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $payload = Get-AutoOSSecretsPayload -RepoRoot $scratch -ClientIsLoopback $true
+            $json = $payload | ConvertTo-Json -Depth 10
+            Assert-True ($json -notmatch 'SUPERSECRET') 'a secret value leaked into the GET payload'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
     } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
