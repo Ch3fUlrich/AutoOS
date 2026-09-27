@@ -68,9 +68,10 @@ class ChatRetryTest(unittest.TestCase):
         ]
         with mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=side_effects):
             status, detail = self.mod._chat("http://x", "m", "k", 5)
-        # final status should be 503 and snippet from last error
+        # final status should be 503; only the HTTP status reaches the detail,
+        # never the provider error body (TOOLFIX item 2: it can carry org ids).
         self.assertEqual(status, 503)
-        self.assertIn("resource pressure", detail)
+        self.assertEqual(detail, "HTTP 503")
         # urlopen called expected number of times
         # all attempts consumed
         # sleep called len(RETRY_DELAYS_S) times
@@ -91,7 +92,9 @@ class ChatRetryTest(unittest.TestCase):
         with mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
             status, detail = self.mod._chat("http://x", "m", "k", 5)
         self.assertEqual(status, "ERR")
-        self.assertIn("refused", detail)
+        # TOOLFIX item 2: the transport branch returns only the exception type,
+        # never str(exc) (which can carry a host/org id).
+        self.assertEqual(detail, "transport error: OSError")
         self.assertEqual(len(self.sleep_calls), 0)
 
     def test_success_first_try(self):
@@ -106,6 +109,20 @@ class ChatRetryTest(unittest.TestCase):
 
     def test_classify_503_is_state(self):
         self.assertEqual(self.mod.classify(503), "state")
+
+    def test_provider_error_body_never_appears_in_the_result(self):
+        # TOOLFIX item 2: a provider error body can carry org/project ids and
+        # hosts; only the HTTP status reaches the result, never the body.
+        secret_body = (b'{"error":{"message":"org-SECRET123 for project xyz '
+                       b'at host internal.example"}}')
+        side = urllib.error.HTTPError("http://x", 401, "no creds", {},
+                                      io.BytesIO(secret_body))
+        with mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=side):
+            status, detail = self.mod._chat("http://x", "m", "k", 5)
+        self.assertEqual(status, 401)
+        self.assertEqual(detail, "HTTP 401")
+        self.assertNotIn("org-SECRET123", detail)
+        self.assertNotIn("internal.example", detail)
 
 
 if __name__ == "__main__":

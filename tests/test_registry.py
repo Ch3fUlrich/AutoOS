@@ -50,6 +50,11 @@ def mutated() -> dict:
     return copy.deepcopy(load_registry())
 
 
+# The allowed keys of a providers.<id>.limits.<model> entry, matching
+# catalog/ai-registry.schema.json $defs.provider_limits.
+ALLOWED_LIMIT_KEYS = {"rpm", "rpd", "tpm", "tpd", "source"}
+
+
 class RealRegistryTests(unittest.TestCase):
     """The committed registry passes the real checker (exit 0 through the CLI)."""
 
@@ -167,11 +172,12 @@ class RuleThreePrivacyTests(unittest.TestCase):
         # behaviour): the gateway does not consult unavailable_legs/
         # available:false, so rule 3 must not either. Use t2-worker-clean
         # (not exempt, unlike t1-orchestrator-clean) and its
-        # unavailable_legs-flagged openrouter leg.
+        # openrouter leg, flagged here (OR2 2026-09-27 un-gated it in the real
+        # data - the BYOK allowlist - so the test sets its own precondition).
         reg = mutated()
         reg["providers"]["openrouter"]["trains_on_prompts"] = True
-        self.assertIn("openrouter/deepseek/deepseek-v4.1-flash",
-                      reg["routes"]["t2-worker-clean"]["unavailable_legs"])
+        reg["routes"]["t2-worker-clean"].setdefault("unavailable_legs", {})[
+            "openrouter/deepseek/deepseek-v4.1-flash"] = {"available": False}
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("privacy: t2-worker-clean" in p
@@ -788,6 +794,62 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(load_registry()), [])
 
 
+class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
+    """Rule 8: an entry with ``unavailable_until`` must also carry ``available:
+    false``. Without the flag the resolver's re-probe note cannot fire after
+    the until expires (FUP 2026-09-27, measured on ``clients.agy``)."""
+
+    def test_committed_registry_passes_rule_8(self):
+        # agy now has both available: false and unavailable_until.
+        self.assertFalse(
+            any("entry with unavailable_until but no available: false"
+                in p for p in registry.check_registry(load_registry())),
+            "committed registry must not violate rule 8")
+
+    def test_missing_available_on_client_is_flagged(self):
+        reg = mutated()
+        del reg["clients"]["agy"]["available"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_a_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: providers.openrouter"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        leg = reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+            "opencode-zen/deepseek-v4.1-flash"]
+        del leg["available"]
+        leg["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: "
+                "routes.t2-worker-clean.unavailable_legs.opencode-zen/deepseek-v4.1-flash"
+                in p for p in problems),
+            problems)
+
+    def test_available_true_with_unavailable_until_is_flagged_too(self):
+        # Explicit available: true is still not available: false, and the
+        # resolver needs the flag to emit the re-probe note.
+        reg = mutated()
+        del reg["clients"]["agy"]["available"]
+        reg["clients"]["agy"]["available"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+
 class OpenRouterByokLegTests(unittest.TestCase):
     """L0 2026-09-27: openrouter/openai/gpt-oss-120b BYOK leg on t2-worker."""
 
@@ -829,6 +891,233 @@ class OpenRouterByokLegTests(unittest.TestCase):
         entry = self.unavailable_legs.get("openrouter/openai/gpt-oss-120b")
         self.assertIn("$comment", entry)
         self.assertIn("L0 2026-09-27T03:39Z", entry["$comment"])
+
+
+class LegRulesTests(unittest.TestCase):
+    """leg_rules policy gates (briefs/common.md Claude budget rules, encoded as
+    policy.leg_rules: ordered list of {"id", "match" (fnmatch), "allow" (bool),
+    "reason", "source"}; first match wins; no match = allowed.
+
+    A denied leg that routes.<id>.unavailable_legs already gates (available:false)
+    passes the check — the operator has already acknowledged it. A denied leg
+    that is still serving (not flagged in unavailable_legs) is an error naming
+    the rule that denied it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_denied_serving_leg_fails_check_naming_the_rule(self):
+        """A leg matching a deny rule with no unavailable_legs gate is flagged."""
+        reg = mutated()
+        # groq/qwen/qwen3.8-27b resolves (provider groq, model qwen/qwen3.8-27b)
+        # and would be denied by groq/* rule
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_denied_leg_gated_via_unavailable_legs_passes(self):
+        """A leg matching a deny rule that is already in unavailable_legs is not
+        flagged — the operator has already acknowledged it."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
+            "groq/qwen/qwen3.8-27b"] = {"available": False}
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            problems)
+
+    def test_allowed_leg_passes_after_deny_rule(self):
+        """First-match-wins: an allow rule placed before a deny rule exempts."""
+        reg = mutated()
+        # deepseek/deepseek-flash resolves and should be allowed by an early
+        # allow rule before the *deepseek* deny
+        reg["routes"]["t2-worker"]["legs"].append("deepseek/deepseek-flash")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "deepseek/deepseek-flash" in p for p in problems),
+            problems)
+
+    def test_leg_with_no_matching_rule_is_allowed(self):
+        """No match in any leg_rule = allowed (not flagged)."""
+        reg = mutated()
+        # mistral/leg exists and is not matched by any leg_rule
+        reg["routes"]["t2-worker"]["legs"].append("mistral/mistral-small-latest")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "mistral/mistral-small-latest" in p for p in problems),
+            problems)
+
+    def test_rule_order_pins_the_budget_decisions(self):
+        """The committed rules decide each measured case (first match wins)."""
+        cases = {
+            "groq/openai/gpt-oss-120b": False,          # deny-groq before allow-gpt-oss
+            "samba/gpt-oss-120b": True,
+            # operator 2026-09-27T07:3xZ: zen allowed as opencode-client-bound (was denied);
+            # the zen rule still sits before the deepseek deny, so zen deepseek is allowed
+            "opencode-zen/deepseek-v4.1-flash": True,
+            "opencode-zen/muse-spark-1.3-contributor-free": True,
+            "openrouter/deepseek/deepseek-v4.1-flash": True,
+            "openrouter/meta/muse-spark-1.3-contributor-xhigh": True,
+            "openrouter/openai/gpt-oss-120b": True,
+            "openrouter/google/gemini-3.8-flash": False,
+            "deepseek/deepseek-flash": True,
+            "cheaperinference/deepseek-v4-flash": False,
+            "cc/claude-opus-4-6": True,                  # subscription seat
+            "antigravity/claude-opus-4-6-thinking": True,  # agy sign-in
+            "cheaperinference/claude-sonnet-5": False,
+            "cheaperinference/gpt-5.5": False,
+            "mistral/mistral-small-latest": True,        # no rule matches
+        }
+        got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
+        self.assertEqual(got, cases)
+
+    def test_available_true_entry_does_not_gate_a_denied_leg(self):
+        """Only available:false gates (the renders' _leg_is_unavailable)."""
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
+            "groq/qwen/qwen3.8-27b"] = {"available": True}
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("groq/qwen/qwen3.8-27b" in p for p in problems), problems)
+
+    def test_problem_names_rule_id_and_reason(self):
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        rule = registry.leg_rule_for("groq/qwen/qwen3.8-27b", reg)
+        hits = [p for p in registry.check_registry(reg) if "groq/qwen/qwen3.8-27b" in p]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn(rule["id"], hits[0])
+        self.assertIn(rule["reason"], hits[0])
+
+    def test_non_string_leg_is_left_to_rule_one(self):
+        # review-or2: a null leg must not crash the whole check in rule 9.
+        reg = mutated()
+        reg["routes"]["t2-worker"]["legs"].append(None)
+        problems = registry.check_registry(reg)
+        self.assertFalse(any(p.startswith("leg_rules") and "None" in p for p in problems))
+
+    def test_real_registry_passes_leg_rules_check(self):
+        """The committed registry must itself pass check (any denied serving
+        leg must be gated via unavailable_legs)."""
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class ProviderLimitsTests(unittest.TestCase):
+    """providers.<id>.limits: per-model free-tier rate caps as data (brief R4,
+    2026-09-27). Keyed by the provider's own model spelling (the part of the
+    leg after '<provider>/'); validated against resolve_leg so an unknown model
+    spelling is caught here, not at route time. Values are non-negative ints;
+    rpm/rpd/tpm/tpd are each optional, source is required (D20).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_live_groq_limits_entries_are_shape_valid(self):
+        """Live shape only (review R4FIX): each groq limits entry carries only
+        the schema's allowed keys, every cap present is a non-negative int, and
+        the source is a non-empty string. The exact console numbers are pinned
+        by test_groq_limits_carry_the_console_numbers_inline against an inline
+        registry, so a legitimate re-measure edits one place instead of an
+        assertion over live data.
+        """
+        limits = self.reg["providers"]["groq"]["limits"]
+        self.assertEqual(
+            sorted(limits),
+            ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+        for model, entry in limits.items():
+            self.assertTrue(set(entry) <= ALLOWED_LIMIT_KEYS, (model, entry))
+            self.assertIsInstance(entry["source"], str, model)
+            self.assertTrue(entry["source"].strip(), model)
+            for field in ("rpm", "rpd", "tpm", "tpd"):
+                if field not in entry:
+                    continue
+                value = entry[field]
+                self.assertIsInstance(value, int, (model, field))
+                self.assertNotIsInstance(value, bool, (model, field))
+                self.assertGreaterEqual(value, 0, (model, field))
+
+    def test_groq_limits_carry_the_console_numbers_inline(self):
+        """The operator's measured Groq console numbers (brief R4), held as an
+        inline registry so the pin is over data, not over the live file."""
+        limits = {
+            "openai/gpt-oss-120b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "openai/gpt-oss-20b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "qwen/qwen3.8-27b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+        }
+        for entry in limits.values():
+            self.assertEqual(entry["rpm"], 30)
+            self.assertEqual(entry["rpd"], 1000)
+            self.assertEqual(entry["tpm"], 8000)
+            self.assertEqual(entry["tpd"], 200000)
+            self.assertEqual(entry["source"],
+                             "operator Groq console screenshot 2026-09-27")
+
+    def test_unknown_limits_field_is_flagged_with_provider_model_and_key(self):
+        """Review R4FIX: a 'tmp' key in a limits entry (measured to pass before
+        the fix) must be a problem naming the provider, the model and the key."""
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tmp"] = 1
+        problems = [p for p in registry.check_registry(reg) if "tmp" in p]
+        self.assertTrue(problems, registry.check_registry(reg))
+        joined = " ".join(problems)
+        self.assertIn("groq", joined)
+        self.assertIn("openai/gpt-oss-120b", joined)
+
+    def test_every_limits_key_resolves_as_a_groq_leg(self):
+        for key in self.reg["providers"]["groq"]["limits"]:
+            provider_id, model_id = registry.resolve_leg("groq/" + key, self.reg)
+            self.assertEqual(provider_id, "groq")
+            self.assertEqual(model_id, key)
+
+    def test_unknown_limits_key_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["ghost-model"] = {
+            "tpm": 8000, "source": "test"}
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "ghost-model" in p for p in problems),
+            problems)
+
+    def test_a_negative_limit_value_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tpm"] = -1
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "tpm" in p
+                and "openai/gpt-oss-120b" in p for p in problems),
+            problems)
+
+    def test_real_registry_passes_limits_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class CheaperinferenceDisabledTests(unittest.TestCase):
+    """Operator 2026-09-27T10:12Z (via L0): no cheaperinference top-up - treat
+    it like SambaNova (R2): it has no free model, so the whole provider is
+    unavailable and no gateway declaration carries any of its legs."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cheapinference"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cheaperinference_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cheaperinference/")],
+                             "route %s still serves a cheaperinference leg" % rid)
 
 
 if __name__ == "__main__":

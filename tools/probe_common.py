@@ -31,7 +31,12 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from registry import resolve_leg  # noqa: E402 - tools/ is on sys.path above
+from registry import (  # noqa: E402 - tools/ is on sys.path above
+    leg_denied,
+    leg_rule_for,
+    resolve_leg,
+    unavailable_now,
+)
 
 DEFAULT_REGISTRY = os.path.join(ROOT, "catalog", "ai-registry.json")
 DEFAULT_OVERLAY = os.path.join(ROOT, "logs", "routing", "measured.json")
@@ -58,6 +63,13 @@ RETRY_STATUSES = (429, 503)
 
 def _skip_reason(leg, routes, registry):
     """None when `leg` should be probed; else the reason it is skipped."""
+    # Checked first (TOOLFIX item 1, spec D18: decided by the routing owner
+    # 2026-09-27): a leg policy.leg_rules denies is never probed, even when it
+    # is otherwise free and available. The rule id is named so a --dry-run line
+    # says which policy gate stopped it.
+    if leg_denied(leg, registry):
+        rule = leg_rule_for(leg, registry) or {}
+        return "policy: denied by %s" % rule.get("id", "(unnamed)")
     for route in routes.values():
         if leg in (route.get("unavailable_legs") or {}):
             return "unavailable_legs: %s" % leg
@@ -70,7 +82,10 @@ def _skip_reason(leg, routes, registry):
         # Free legs only (spec section 10, D18): a probe never spends paid or
         # subscription quota. A named such leg is a refusal, not a skip.
         return "tier: %s" % provider.get("tier")
-    if provider.get("available") is False:
+    if unavailable_now(provider, datetime.now(timezone.utc)):
+        until = provider.get("unavailable_until")
+        if until is not None:
+            return "provider %s: unavailable until %s" % (provider_id, until)
         return "provider %s: available false" % provider_id
     bound = (registry.get("models", {}).get(model_id) or {}).get("client_bound")
     if bound:

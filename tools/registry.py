@@ -42,7 +42,15 @@ Three subcommands:
     7. every ``unavailable_until`` value (clients/providers/unavailable_legs,
        brief UNTIL 2026-09-26) parses as an ISO-8601 UTC timestamp -- the
        resolver reads it via unavailable_now(), the renders never do (they
-       stay time-independent so the CI drift gates do not move with the date).
+       stay time-independent so the CI drift gates do not move with the date);
+    8. an entry with ``unavailable_until`` MUST ALSO carry ``available:
+       false`` -- the resolver reads ``available`` to decide whether to
+       emit a re-probe note after the until passes (FUP 2026-09-27,
+       measured on ``clients.agy`` which had ``unavailable_until`` without
+       ``available: false`` and silently lost the re-probe on expiry);
+    9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
+       rules, first match wins, no match = allowed; leg_rule_for()); a denied
+       leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -75,7 +83,10 @@ opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
 documents the mapping; task A5f made the committed file byte-exact, so the old
-$comment exception no longer applies to it). To update the committed file after
+$comment exception no longer applies to it). Each entry now carries an
+optional `effort_ladder` list (derived from the first leg's model-registry
+entry, with "none" omitted) that tools/sync-ide-models.py uses to emit
+opencode V2 variants. To update the committed file after
 a registry change: `python3 tools/registry.py render ide
 --out catalog/ide-models.json`; with no flag the render goes to stdout; --out PATH
 writes it elsewhere; --check compares a fresh render against --ide-models
@@ -125,6 +136,7 @@ derived from this file's own location.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import importlib.util
 import ipaddress
 import json
@@ -696,6 +708,44 @@ def _check_until_values(registry) -> list:
 
 
 # ===========================================================================
+# rule 8 - unavailable_until entries must also carry available: false
+# ===========================================================================
+
+
+def _check_unavailable_until_pairs_available(registry) -> list:
+    """Every dict that has ``unavailable_until`` MUST also have ``available:
+    false``.
+
+    The resolver's ``_client_reason`` uses the ``available`` flag to detect
+    when a self-healed ``unavailable_until`` has passed (``available`` is
+    False but the until is past -> emit a re-probe note). Without the flag
+    the entry silently switches back to available with no note, which is
+    wrong for own-account clients (FUP 2026-09-27, measured on
+    ``clients.agy``).
+
+    This rule recursively walks the whole registry so it catches the
+    pattern everywhere, not just on the three named surfaces.
+    """
+    problems = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if "unavailable_until" in node and node.get("available") is not False:
+                problems.append("entry with unavailable_until but no available: false: %s" % path)
+            for key, value in node.items():
+                if key in COMMENT_KEYS:
+                    continue
+                child = "%s.%s" % (path, key) if path else key
+                walk(value, child)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(registry, "")
+    return problems
+
+
+# ===========================================================================
 # rule 6 - schema-required keys
 # ===========================================================================
 
@@ -796,28 +846,42 @@ def render_omniroute(registry: dict) -> dict:
     catalog/ai-registry.json document (spec 3.2 phase 1). Pure: no I/O, no clock,
     no randomness - the same registry always renders the same dict.
 
-    A route becomes a combo iff it has at least one leg (`legs` non-empty): the
-    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid) and
-    the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
+    A route becomes a combo iff it has at least one servable leg. The
+    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid)
+    and the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
     (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
-    combos.json counterpart at all - mapping doc section 4.
+    combos.json counterpart at all - mapping doc section 4. They are served by
+    another router on purpose, not orphaned, so they are never named as omitted.
 
-    Legs an operator has since flagged unavailable (routes.<id>.unavailable_legs;
-    providers.openrouter.available: false) stay in `legs` unchanged - today's
-    committed combos.json already lists those same dead legs (the operator chose
-    to flag them in the registry rather than remove them, 2026-09-25/26), so no
-    special case is needed for the render to match.
+    Only gateway-servable legs are rendered - see gateway_legs(): a leg the
+    registry marks unavailable (routes.<id>.unavailable_legs or its provider's
+    available: false), a leg policy.leg_rules denies, and a client_bound leg the
+    gateway 403s are all dropped from the combo's `models`.
+
+    "omitted" names the ORPHANED routes, and only those: a route whose `legs`
+    is non-empty but whose every leg was dropped by gateway_legs(), so it once
+    promised a gateway leg and can serve none now. It is the routes that render
+    no combo while still declaring legs, so apply.sh/apply.ps1 can prune a live
+    combo the registry stopped serving instead of leaving it in the store
+    forever (OR1e). A route with `legs: []` is deliberately legless - the
+    *-paid and auto* routes - and is in neither `combos` nor `omitted` (OR1g).
+    `omitted` is disjoint from "retired" by construction - `retired` is a
+    fixed hand-maintained list of dead ids no route uses any more.
     """
     routes = registry.get("routes")
     routes = routes if isinstance(routes, dict) else {}
 
     combos = []
+    omitted = []
     for route_id in sorted(routes):
         route = routes[route_id]
         if not isinstance(route, dict):
             continue
-        legs = route.get("legs") or []
+        declared_legs = route.get("legs")
+        legs = gateway_legs(route, registry)
         if not legs:
+            if declared_legs:
+                omitted.append(route_id)
             continue
         surfaces = route.get("surfaces")
         omniroute_surface = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
@@ -835,6 +899,7 @@ def render_omniroute(registry: dict) -> dict:
     return {
         "$comment": OMNIROUTE_GENERATED_COMMENT,
         "retired": list(OMNIROUTE_RETIRED_IDS),
+        "omitted": omitted,
         "combos": combos,
     }
 
@@ -852,13 +917,13 @@ def _canonical_omniroute(doc) -> dict:
 
     - drop "$comment" entirely (see OMNIROUTE_GENERATED_COMMENT's comment above -
       a documented exception, not only its generated-marker line);
-    - treat "combos" and "retired" as unordered: apply.sh (`for c in
+    - treat "combos", "retired" and "omitted" as unordered: apply.sh (`for c in
       data.get("combos", [])`, `current = {c["name"] for c in ...}`) and apply.ps1
       (`foreach ($combo in $combos)`, retired filtered by `-cnotcontains`) both
-      look combos up by name and retired ids up by membership, never by array
-      position (read both scripts, 2026-09-26) - so array order is not semantic
-      data here, unlike the ordered `models` list inside each combo (a fallback
-      priority order, which this function leaves untouched).
+      look combos up by name and retired/omitted ids up by membership, never by
+      array position (read both scripts, 2026-09-26) - so array order is not
+      semantic data here, unlike the ordered `models` list inside each combo (a
+      fallback priority order, which this function leaves untouched).
     """
     if not isinstance(doc, dict):
         return {}
@@ -872,17 +937,18 @@ def _canonical_omniroute(doc) -> dict:
             key=lambda c: (c["name"] if isinstance(c, dict) and "name" in c
                            else "~" + json.dumps(c, sort_keys=True)),
         )
-    retired = out.get("retired")
-    if isinstance(retired, list):
-        out["retired"] = sorted(retired, key=str)
+    for key in ("retired", "omitted"):
+        ids = out.get(key)
+        if isinstance(ids, list):
+            out[key] = sorted(ids, key=str)
     return out
 
 
 def omniroute_diff(rendered: dict, current: dict) -> list:
     """Return the keys where a fresh render_omniroute() output and today's parsed
-    combos.json differ, ignoring $comment and the order of "combos"/"retired"
-    (see _canonical_omniroute). Empty means semantically equal - the spec 3.2
-    phase-1 gate."""
+    combos.json differ, ignoring $comment and the order of
+    "combos"/"retired"/"omitted" (see _canonical_omniroute). Empty means
+    semantically equal - the spec 3.2 phase-1 gate."""
     a = _canonical_omniroute(rendered)
     b = _canonical_omniroute(current)
 
@@ -991,8 +1057,19 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
         raise ValueError("registry has no routes.<id> for tier(s): %s" % ", ".join(missing_routes))
 
     refs_by_tier = {}
+    servable = servable_route_ids(registry)
     for tier in tiers:
-        legs = routes[tier].get("legs") or []
+        declared_legs = routes[tier].get("legs") or []
+        legs = gateway_legs(routes[tier], registry)
+        if declared_legs and tier not in servable:
+            # An empty model list in a managed block is not a valid config: a
+            # synced tier with no gateway-servable leg (unavailable, denied or
+            # client-bound) is a hard error naming the tier/route, unlike
+            # render_omniroute's all-dead route, which simply gets no combo.
+            raise ValueError(
+                "routes.%s has legs but no gateway-servable leg "
+                "(unavailable, policy-denied, or client-bound): %s"
+                % (tier, ", ".join(str(leg) for leg in declared_legs)))
         refs_by_tier[tier] = [
             leg for leg in legs
             if isinstance(leg, str) and leg.split("/", 1)[0] not in sync.GATEWAY_ONLY
@@ -1137,6 +1214,10 @@ def render_ide(registry: dict) -> dict:
     standalone surfaces.openhands entry, which is not this render's concern);
     `surfaces` is rebuilt as {gateway: clients} for every such gateway present.
 
+    Each entry's `effort_ladder` is derived from the first leg's model-registry
+    entry (via resolve_leg), filtered to omit "none". Routes with empty legs or a
+    leg whose model has no effort_ladder get no effort_ladder field.
+
     Raises ValueError, naming every offending id at once, when `registry["routes"]`
     and IDE_MODEL_ORDER disagree on which ids exist (a route added/removed without
     updating that constant - see its own comment above), or when a listed route has
@@ -1155,10 +1236,18 @@ def render_ide(registry: dict) -> dict:
             "unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
 
     models = []
+    servable = servable_route_ids(registry)
     for route_id in IDE_MODEL_ORDER:
         route = routes[route_id]
         if not isinstance(route, dict):
             raise ValueError("routes.%s is not an object" % route_id)
+        if (route.get("legs") or []) and route_id not in servable:
+            # OR1d: a route that declares legs but can serve none through
+            # either gateway is offered by no declaration - the same rule
+            # render_omniroute() applies to combos.json. A deliberately
+            # legless route (legs: []) is NOT dropped: it never promised a
+            # gateway leg.
+            continue
         surfaces = route.get("surfaces")
         surfaces = surfaces if isinstance(surfaces, dict) else {}
         gateways = {
@@ -1179,6 +1268,29 @@ def render_ide(registry: dict) -> dict:
         effort = canonical.get("effort_default")
         if effort is not None:
             model["reasoning_effort"] = effort
+        # effort_ladder from the first leg's model definition:
+        legs = route.get("legs") or []
+        if legs:
+            try:
+                _pid, mid = resolve_leg(legs[0], registry)
+            except ValueError:
+                raise ValueError(
+                    "routes.%s: first leg %r cannot be resolved"
+                    % (route_id, legs[0]))
+            model_entry = _section(registry, "models").get(mid)
+            if isinstance(model_entry, dict):
+                ladder = model_entry.get("effort_ladder")
+                if isinstance(ladder, list):
+                    # A non-string rung is a data error - raise immediately.
+                    for rung in ladder:
+                        if not isinstance(rung, str):
+                            raise ValueError(
+                                "routes.%s: non-string rung %r in model %s effort_ladder"
+                                % (route_id, rung, mid))
+                    # Omit "none" so opencode gets only meaningful levels
+                    filtered = [e for e in ladder if e != "none"]
+                    if filtered:
+                        model["effort_ladder"] = filtered
         model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
         models.append(model)
 
@@ -1383,10 +1495,15 @@ def render_openhands(registry: dict) -> dict:
             "missing: %s; unexpected: %s" % (", ".join(missing) or "none", ", ".join(extra) or "none"))
 
     tiers = []
+    servable = servable_route_ids(registry)
     for tier_id in OPENHANDS_TIER_ORDER:
         target = wanted[tier_id]
         if target is None:
             route_id = OPENHANDS_DIRECT_PROFILE_IDS[tier_id]
+            if (routes[route_id].get("legs") or []) and route_id not in servable:
+                # OR1d: same "declared legs, none servable -> no declaration"
+                # rule as render_ide(); a legs: [] route is kept.
+                continue
             profile = routes[route_id]["surfaces"]["openhands"]["direct_profile"]
             tier = {"id": tier_id, "gateway": profile.get("gateway")}
             if "model" in profile:
@@ -1400,6 +1517,10 @@ def render_openhands(registry: dict) -> dict:
             continue
 
         gw, route_id = target
+        if (routes[route_id].get("legs") or []) and route_id not in servable:
+            # OR1d: a route that declares legs but has no gateway-servable leg
+            # gets no tier here either.
+            continue
         profile = routes[route_id]["surfaces"][gw]["openhands_profile"]
         tier = {"id": tier_id}
         if gw == "litellm":
@@ -1571,6 +1692,76 @@ def _leg_is_unavailable(leg: str, route: dict, registry: dict) -> bool:
         return False
     provider = _section(registry, "providers").get(provider_id)
     return isinstance(provider, dict) and provider.get("available") is False
+
+
+def gateway_legs(route: dict, registry: dict) -> list:
+    """routes.<id>.legs in order, minus every leg a gateway cannot serve:
+
+      - _leg_is_unavailable(leg, route, registry): the route-level
+        unavailable_legs[leg].available or the leg's provider available is
+        false (the immutable flags - a bare unavailable_until never gates,
+        see _leg_is_unavailable);
+      - leg_denied(leg, registry): policy.leg_rules' first matching rule has
+        allow false;
+      - the resolved model carries client_bound: the leg only answers inside
+        its own client (opencode-zen's muse-spark-1.3-contributor-free), so a
+        gateway request 403s.
+
+    Pure and time-independent: the same (route, registry) always returns the
+    same list, no clock. A leg that resolve_leg cannot resolve is kept, not
+    dropped - rule 1 already reports it loudly, and a render must not hide a
+    malformed leg behind a silent filter.
+
+    render_omniroute() renders only this list: a route with no gateway-servable
+    leg gets no combo at all (a combo that serves nothing is worse than an
+    absent one), the same shape a `legs: []` route already has.
+    render_litellm_blocks() renders only this list too, but a synced tier with
+    no servable leg is a hard ValueError - an empty model list in config.yaml
+    is not a valid block."""
+    legs = route.get("legs") or []
+    out = []
+    for leg in legs:
+        if not isinstance(leg, str):
+            out.append(leg)
+            continue
+        if _leg_is_unavailable(leg, route, registry) or leg_denied(leg, registry):
+            continue
+        try:
+            _, model_id = resolve_leg(leg, registry)
+        except ValueError:
+            out.append(leg)
+            continue
+        model = _section(registry, "models").get(model_id)
+        if isinstance(model, dict) and model.get("client_bound"):
+            continue
+        out.append(leg)
+    return out
+
+
+def servable_route_ids(registry: dict) -> set:
+    """The route ids with at least one gateway-servable leg: exactly
+    `routes.<id>` where gateway_legs() is non-empty.
+
+    OR1d (ONE-ROUTER step 1d): "a route whose gateway_legs is empty is offered
+    by no declaration". render_omniroute() and render_litellm_blocks() already
+    enforce this from gateway_legs() directly; render_ide() and
+    render_openhands() use this set to apply the SAME rule to their own
+    declarations (catalog/ide-models.json, configuration/openhands/
+    tier-profiles.json).
+
+    Membership is deliberately gateway-servability, not "has any legs": a
+    route that declares no legs at all (the LiteLLM-only *-paid and the
+    dynamic auto* routes) is NOT a member either. The renders keep such a
+    route's declaration on purpose - it never promised a gateway leg - so the
+    filter they apply is "declared legs AND not servable", never this alone.
+
+    Pure and time-independent, like gateway_legs(): see its own contract."""
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+    return {
+        route_id for route_id, route in routes.items()
+        if isinstance(route, dict) and gateway_legs(route, registry)
+    }
 
 
 def _leg_cell_text(leg: str, route: dict, registry: dict) -> str:
@@ -1757,6 +1948,117 @@ def models_doc_diff(rendered_block: str, current_block: str) -> list:
 
 
 # ===========================================================================
+# rule 9 - leg_rules policy gates (briefs/common.md Claude budget)
+# ===========================================================================
+
+
+def leg_rule_for(leg: str, registry: dict):
+    """The first policy.leg_rules entry whose fnmatch `match` pattern matches
+    `leg`, or None when no rule matches (no match = allowed). The single
+    matcher: _check_leg_rules() and the renders (OR1) both call it."""
+    rules = _section(registry, "policy").get("leg_rules")
+    for rule in rules if isinstance(rules, list) else []:
+        if (isinstance(rule, dict) and isinstance(rule.get("match"), str)
+                and fnmatch.fnmatchcase(leg, rule["match"])):
+            return rule
+    return None
+
+
+def leg_denied(leg: str, registry: dict) -> bool:
+    """Whether policy.leg_rules denies `leg` (first matching rule has allow false)."""
+    rule = leg_rule_for(leg, registry)
+    return rule is not None and rule.get("allow") is not True
+
+
+def _check_leg_rules(registry) -> list:
+    """rule 9 - every serving route leg is allowed by policy.leg_rules.
+
+    The rules encode the operator's budget and gateway-fitness decisions
+    (briefs/common.md 'Claude budget'; L0 ONE-ROUTER 2026-09-27 measured the
+    live gateway serving legs they forbid). A denied leg passes only while it
+    is gated the same way the renders read gating - _leg_is_unavailable():
+    routes.<id>.unavailable_legs[leg].available false, or its provider's
+    available false. An entry with available true (or only a past
+    unavailable_until) does not gate it: the check stays clock-free."""
+    problems = []
+    for route_id, route in sorted(_section(registry, "routes").items()):
+        if not isinstance(route, dict):
+            continue
+        for leg in dict.fromkeys(route.get("legs") or []):
+            if not isinstance(leg, str):
+                continue  # rule 1 reports it as unresolved
+            rule = leg_rule_for(leg, registry)
+            if rule is None or rule.get("allow") is True:
+                continue
+            if _leg_is_unavailable(leg, route, registry):
+                continue
+            problems.append("leg_rules: routes.%s leg %s denied by %s (%s) - gate it in "
+                            "routes.%s.unavailable_legs or change the rule"
+                            % (route_id, leg, rule.get("id", "(unnamed)"),
+                               rule.get("reason", ""), route_id))
+    return problems
+
+
+# The allowed keys of a providers.<id>.limits.<model> entry, exactly the
+# properties of catalog/ai-registry.schema.json's $defs.provider_limits
+# (rpm/rpd/tpm/tpd + the D20 source tag). Kept as a module constant next to
+# _check_provider_limits rather than read from the schema at check time.
+_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "source")
+
+
+def _check_provider_limits(registry) -> list:
+    """rule 10 - every provider limits key resolves and values are non-negative
+    ints (brief R4, 2026-09-27).
+
+    providers.<id>.limits is keyed by the provider's own model spelling (the
+    part of a leg after its '<provider>/' prefix). Reusing resolve_leg -- the
+    same one-leg rule the validator and the resolver share -- means an unknown
+    model spelling fails closed here exactly as it would at route time. The
+    tpm/rpm/rpd/tpd values are each optional, but when present must be
+    non-negative ints; the resolver reads only tpm today (a request-size
+    filter), the rest are data only.
+
+    Review R4FIX (2026-09-27): a limits entry may carry only the keys of the
+    schema's provider_limits def -- an unknown key (measured: a 'tmp' key
+    passed this check) is a malformed entry and is reported naming the
+    provider, the model and the key.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        limits = provider.get("limits")
+        if not isinstance(limits, dict):
+            continue
+        for key, entry in sorted(limits.items()):
+            label = "providers.%s.limits.%s" % (provider_id, key)
+            try:
+                resolve_leg(provider_id + "/" + key, registry)
+            except ValueError:
+                problems.append(
+                    "limits: %s key %r does not resolve to a %s model"
+                    % (label, key, provider_id))
+            if not isinstance(entry, dict):
+                problems.append("limits: %s is not an object" % label)
+                continue
+            for field in sorted(entry):
+                if field not in _LIMITS_ENTRY_KEYS:
+                    problems.append(
+                        "limits: %s.%s unknown key %r (allowed: %s)"
+                        % (label, field, field, ", ".join(_LIMITS_ENTRY_KEYS)))
+            for field in ("rpm", "rpd", "tpm", "tpd"):
+                if field not in entry:
+                    continue
+                value = entry[field]
+                if not isinstance(value, int) or isinstance(value, bool) \
+                        or value < 0:
+                    problems.append(
+                        "limits: %s.%s must be a non-negative int (got %r)"
+                        % (label, field, value))
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -1771,6 +2073,9 @@ def check_registry(registry) -> list:
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))
     problems.extend(_check_until_values(registry))
+    problems.extend(_check_unavailable_until_pairs_available(registry))
+    problems.extend(_check_leg_rules(registry))
+    problems.extend(_check_provider_limits(registry))
     return problems
 
 

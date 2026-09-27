@@ -2021,7 +2021,7 @@ if it "litellm fallback config is internally consistent"; then
 import re, io
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
-need = {"t1-orchestrator", "t1-orchestrator-paid", "t1-orchestrator-free-only", "t2-worker", "t2-worker-paid", "t2-worker-free-only", "t3-driver", "t3-driver-paid", "t3-driver-free-only"}
+need = {"t1-orchestrator", "t1-orchestrator-paid", "t2-worker", "t2-worker-paid", "t2-worker-free-only", "t3-driver", "t3-driver-paid"}
 fb = text.split("fallbacks:", 1)[1]
 refs = set(re.findall(r"[- ](\S+):\s*\[([^\]]*)\]", fb))
 problems = sorted(list(need - groups))
@@ -2077,8 +2077,8 @@ known_drops = {"antigravity/gemini-3.7-flash-medium",
                "antigravity/claude-opus-4-6-thinking"}
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 problems = []
-for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
-             "t3-driver-free-only"):
+free_only = sorted(n for n in combos if n.endswith("-free-only"))
+for tier in free_only:
     want = [litellm_model(r) for r in combos[tier] if r not in known_drops]
     got = []
     cur = None
@@ -2100,8 +2100,7 @@ for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
     if set(unmirrored) - known_drops:
         problems.append(tier + "-unpinned-drop")
 fb = text.split("fallbacks:", 1)[1]
-for tier in ("t1-orchestrator-free-only", "t2-worker-free-only",
-             "t3-driver-free-only"):
+for tier in free_only:
     if re.search(r"(?m)^\s*-\s*" + tier + r"\s*:", fb):
         problems.append(tier + "-in-fallbacks")
 print(" ".join(problems))
@@ -2132,7 +2131,7 @@ print("%s|%s|%s|%s|%s|%s" % (
 PY
 )"
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,cheaperinference/glm-5.2,cheaperinference/kimi-k3,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,samba/MiniMax-M3,samba/gpt-oss-120b,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t1-orchestrator-free-only,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t3-driver-free-only,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|auto,auto/cheap,auto/smart,deepseek-v4.1-flash,gemini-3.8-flash,opus-4-6,spark-1.3-contributor,t1-orchestrator,t1-orchestrator-clean,t2-orchestrator,t2-worker,t2-worker-clean,t2-worker-free-only,t3-driver,t3-driver-clean,t4-rag|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then

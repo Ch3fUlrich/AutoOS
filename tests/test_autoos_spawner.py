@@ -291,9 +291,36 @@ class ClientCommandTests(unittest.TestCase):
         self.assertEqual(plan_of("--client", "qwen", "--joinable", "t").returncode, 2)
 
     def test_agy_uses_its_own_login(self):
+        # AGYFIX item 1 (measured 2026-09-27, K3 audit): agy 1.2.12 reads
+        # "--model" as the -p prompt when -p comes first, so the model must
+        # go BEFORE -p. Item 2: with no caller model it gets the measured
+        # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
+        # own default Gemini whose quota is out until ~2026-10-01.
         r = plan_of("--client", "agy", "t")
-        self.assertIn("would run: agy -p t", r.stdout)
+        self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
+
+    def test_agy_puts_an_explicit_model_before_the_print_prompt(self):
+        # AGYFIX item 1: working form measured in the K3 audit is
+        # `agy --model <m> -p <task>`; `agy -p --model <m> <task>` makes agy
+        # take "--model" as the prompt and ignore the task.
+        cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit",
+                                    "claude-sonnet-4-6")
+        self.assertEqual(cmd, ["agy", "--model", "claude-sonnet-4-6", "-p", "task"])
+
+    def test_agy_default_model_is_the_measured_working_one(self):
+        # AGYFIX item 2 (K3 audit addendum 08:1xZ): agy with no --model runs
+        # its default Gemini -> 157 s then rc 3 quota. The spawner supplies
+        # claude-opus-4-6-thinking as data when the caller gives none.
+        self.assertEqual(clients.AGY_DEFAULT_MODEL, "claude-opus-4-6-thinking")
+        cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit", None)
+        self.assertEqual(cmd, ["agy", "--model", "claude-opus-4-6-thinking", "-p", "task"])
+
+    def test_free_default_is_the_operators_muse_spark_leg(self):
+        # AGYFIX item 4 (operator 2026-09-26): the free default is Zen Muse
+        # Spark 1.3 through the opencode client, measured 200 there.
+        self.assertEqual(load_agent().DEFAULT_FREE_MODEL,
+                         "opencode/muse-spark-1.3-contributor-free")
 
     def test_qoder_is_refused_for_sensitive_work(self):
         r = plan_of("--client", "qoder", "--card", "privacy=sensitive", "t")
@@ -509,7 +536,10 @@ class SignInProbeTests(unittest.TestCase):
         d, env = self.stub(self.SIGNED_IN)
         r = run_agent("run", "--client", "agy", "t", env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.calls(d), ["models", "-p t"])
+        # AGYFIX item 1+2 (measured 2026-09-27): the working form is
+        # `agy --model <m> -p <task>`, and with no caller model the spawner
+        # supplies claude-opus-4-6-thinking rather than agy's default Gemini.
+        self.assertEqual(self.calls(d), ["models", "--model claude-opus-4-6-thinking -p t"])
 
     def test_mcp_list_clients_carries_usability(self):
         d, env = self.stub(self.SIGNED_OUT)
@@ -1701,6 +1731,105 @@ class SandboxUniquenessTests(unittest.TestCase):
                             os.path.basename(second["sandbox"]["path"]).rsplit("-", 1)[1])
 
 
+class SessionTagTests(unittest.TestCase):
+    """OR3: every spawned opencode gateway request carries a lane tag in the
+    `x-omniroute-session-id` header so OmniRoute call_logs.session_tag can
+    attribute the call to a lane/session."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def test_fallback_tag_is_a_valid_header_value_for_any_worktree_name(self):
+        # review-or3: the ROOT basename was used verbatim - a worktree name with
+        # spaces or 120+ chars would emit an illegal header / an over-long tag.
+        with mock.patch.object(self.cli, "ROOT", "/x/My Lane \u00e9 " + "w" * 150):
+            tag = self.cli.session_tag("Some Title!", env={})
+        self.assertRegex(tag, self.cli.SESSION_TAG_RE)
+
+    def test_fallback_tag_keeps_a_plain_worktree_name(self):
+        with mock.patch.object(self.cli, "ROOT", "/x/L1-routing-OR3"):
+            self.assertEqual(self.cli.session_tag("OR3", env={}), "L1-routing-OR3/or3")
+
+    def _args(self, **overrides):
+        ns = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            title=None)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def _cfg(self, providers):
+        providers.setdefault("omniroute", {"models": {"t2-worker": {}}})
+        return {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+                "providers": providers}
+
+    def _overlay(self, plan):
+        return json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}"))
+
+    def test_omniroute_model_carries_the_session_header_from_title(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.cli.build_plan(self._args(title="Fix The Router!"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(
+            prov["headers"]["x-omniroute-session-id"],
+            "%s/fix-the-router" % os.path.basename(self.cli.ROOT))
+
+    def test_autoos_session_tag_overrides_the_default(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
+            plan = self.cli.build_plan(self._args(title="ignored"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"], "lane/one.two_3-x")
+
+    def test_an_invalid_tag_falls_back_with_one_warning(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "bad tag with spaces!!"}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"],
+                         "%s/t" % os.path.basename(self.cli.ROOT))
+        warns = [l for l in err.getvalue().splitlines()
+                 if "AUTOOS_SESSION_TAG" in l]
+        self.assertEqual(len(warns), 1, err.getvalue())
+
+    def test_a_non_omniroute_model_gets_no_header(self):
+        cfg = self._cfg({"other": {"models": {"m": {}}}})
+        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        plan = self.cli.build_plan(self._args(title="T"), cfg)
+        self.assertNotIn("providers", self._overlay(plan))
+
+    def test_an_existing_overlay_provider_block_keeps_its_other_keys(self):
+        # A pre-existing providers.omniroute block in the overlay (e.g. from a
+        # future overlay helper) must be merged into, never replaced.
+        cfg = self._cfg({})
+        with mock.patch.object(self.cli, "lean_overlay",
+                               lambda c: {"providers": {"omniroute": {
+                                   "settings": {"baseURL": "http://x/v1"}}}}):
+            plan = self.cli.build_plan(self._args(title="T", lean=True), cfg)
+        prov = self._overlay(plan)["providers"]["omniroute"]
+        self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"],
+                         "%s/t" % os.path.basename(self.cli.ROOT))
+
+    def test_the_plan_output_prints_the_session_tag(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("session-tag: %s/my-tag" % os.path.basename(self.cli.ROOT),
+                      r.stdout)
+
+    def test_a_non_opencode_client_prints_no_session_tag(self):
+        r = run_agent("run", "--dry-run", "--client", "gemini", "--tier", "2",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("session-tag:", r.stdout)
+
+
 class HeadlessRefusalTests(unittest.TestCase):
     """Measured 2026-09-25 (run 20260925-215048-85ba11): agy auto-denied a tool
     headless mode cannot prompt for, printed a refusal and still exited 0. A
@@ -2279,6 +2408,63 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(data["state"], "input_required")
 
 
+    # --- record_probe after provider_stop (FUP 2026-09-27) -----------------
+
+    def test_promo_client_with_provider_stop_skips_record_probe(self):
+        """A promo client (qoder) whose tail contains a provider-stop marker
+        must NOT record a probe: the record_probe call happens AFTER the
+        provider-stop upgrade, so rc=8 never reaches rc==0."""
+        # Set up overlay/track paths (like isolate()) but keep the real
+        # clients module so qoder is available.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # Build a minimal fake plan so cmd_run does not need the real
+        # route-resolution machinery.
+        fake_plan = {
+            "agent": "t2-worker",
+            "client": "qoder",
+            "model": "qoder-model",
+            "cmd": ["qodercli", "do the thing"],
+            "env": {},
+            "route": {"combo": "qoder-model", "reason": "test",
+                      "privacy": "public", "review": False, "tier": 2,
+                      "card": None},
+            "depth": (1, 3),
+            "free": False,
+            "sandbox": None,
+            "cwd": os.getcwd(),
+        }
+        ns = argparse.Namespace(
+            client="qoder", task="do the thing",
+            free=False, dry_run=False, card=None,
+            clean=False, tier=2, joinable=False,
+            lean=False, isolate=False, auto=False,
+            title=None, model=None, free_model=None,
+            max_depth=None, plan=None, allow_training=False,
+        )
+        with mock.patch.object(self.agent, "build_plan", return_value=fake_plan):
+            with mock.patch.object(self.agent, "run_client") as mock_run:
+                mock_run.return_value = self.agent.ClientExit(
+                    0, tail="working...\n"
+                    "Error: your personal credits have been exhausted\n")
+                with mock.patch.object(
+                        self.agent.clients, "record_probe") as mock_record:
+                    with mock.patch.object(
+                            self.agent.clients, "signin_state",
+                            return_value=(None, "")):
+                        with mock.patch(
+                                "shutil.which",
+                                return_value="/usr/bin/qodercli"):
+                            out, err = io.StringIO(), io.StringIO()
+                            with contextlib.redirect_stdout(out), \
+                                    contextlib.redirect_stderr(err):
+                                rc = self.agent.cmd_run(ns, {})
+        self.assertEqual(rc, 8, "provider stop must upgrade rc to 8")
+        mock_record.assert_not_called()
+
+
 class RunCardV2Tests(unittest.TestCase):
     """`run --card` v2 routes through the resolver (RUNV2, spec 6.1 "run takes
     card v2"). No network, no real clients: MEASURED_OVERLAY_PATH/TRACK_RECORD
@@ -2369,6 +2555,17 @@ class RunCardV2Tests(unittest.TestCase):
         self.assertEqual(self.agent._tier_for_route("t3-driver-clean"), 3)
 
     # --- input_required / deferred / --no-defer -----------------------------
+
+    # FUP (2026-09-27): refuse empty or whitespace-only task before any
+    # clone or client start (measured: $(cat missing-file) produced '' and
+    # a worker chatted twice before the route planner caught it).
+
+    def test_empty_task_is_refused_with_exit_2(self):
+        for task in ("", "   ", "\t\n"):
+            with self.subTest(task=repr(task)):
+                rc, out, err = self.run_cmd_run(task=task)
+                self.assertEqual(rc, 2, "task=%r: rc=%d err=%s" % (task, rc, err))
+                self.assertIn("empty", err)
 
     def test_input_required_state_refuses_with_exit_2_and_the_plans_reason(self):
         fake = {"route": None, "state": "input_required",
@@ -2497,7 +2694,8 @@ class ModelOverridePrivacyTests(unittest.TestCase):
 
     def test_sensitive_card_with_free_is_refused(self):
         # close-priv 2026-09-26: --free swapped a sensitive card's -clean combo
-        # for the promo model (opencode/big-pickle, may train on prompts).
+        # for the promo model (now opencode/muse-spark-1.3-contributor-free,
+        # may train on prompts).
         for card in ("privacy=sensitive", "kind=review,paths=tools/registry.py,privacy=sensitive"):
             with mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}), \
                     mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: {
@@ -2506,7 +2704,7 @@ class ModelOverridePrivacyTests(unittest.TestCase):
                 rc, out, err = self.run_cmd(card=card, free=True)
             self.assertEqual(rc, 2, card + out + err)
             self.assertIn("privacy", err)
-            self.assertNotIn("big-pickle", out)
+            self.assertNotIn("muse-spark", out)
 
     def test_public_card_with_any_model_is_not_checked(self):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
@@ -2857,6 +3055,13 @@ elif mode == "sandbox-write-marker-mid-run":
         fh.write("work\\n")
 elif mode == "provider-stop-only":
     print("Error: Rate limit exceeded. Please try again later.")
+elif mode == "agy-quota-rc3":
+    # AGYFIX item 3 (K3 audit addendum 08:1xZ, measured 2026-09-27): agy
+    # without --model ran its default Gemini, printed exactly this line and
+    # exited 3 after ~157 s. It is a provider stop, so the spawner must
+    # report PROVIDER-STOP (exit 8), not the client's own rc 3.
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached')
+    sys.exit(3)
 elif mode == "parent-leak-provider-stop":
     # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
     with open(os.path.join(root, "tracked.txt"), "a") as fh:
@@ -3244,17 +3449,27 @@ class IsolateContainmentTests(unittest.TestCase):
         # The four shapes real clients print when the provider stops them
         # (brief WIPfix3): opencode rate limit and capacity, agy AGY_ERROR
         # 429 JSON, agy quota line. Each must match.
+        # FUP (2026-09-27): qoder CLI credits-exhausted marker added.
         agent = self.agent
         cases = [
             "Error: Rate limit exceeded. Please try again later.",
             "Error: Chat admission capacity is temporarily unavailable. Retry shortly.",
             'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
             "error: Individual quota reached. Please upgrade your plan.",
+            "error: your personal credits have been exhausted",
         ]
         for line in cases:
             with self.subTest(line=line):
                 self.assertEqual(agent.provider_stop("working\n" + line + "\n"),
                                  line)
+
+    def test_provider_stop_matches_no_active_credentials(self):
+        # TOOLFIX item 3 (measured 2026-09-27): an opencode run that printed
+        # "Error: No active credentials for provider: sambanova." as its error
+        # line then exited 1 instead of 8 -- it is a provider stop.
+        agent = self.agent
+        line = "Error: No active credentials for provider: sambanova."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"), line)
 
     def test_provider_stop_ignores_a_marker_in_code_or_prose(self):
         # WIPfix3: the WIPfix2 false positive and its neighbours - a marker
@@ -3298,6 +3513,17 @@ class IsolateContainmentTests(unittest.TestCase):
         # initial commit and no WIP line was printed.
         self.assertNotIn("WIP-COMMITTED", out)
         self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_an_agy_quota_stop_that_exits_3_is_still_a_provider_stop(self):
+        # AGYFIX item 3 (K3 audit addendum 08:1xZ): agy without --model exits
+        # rc 3 with "AGY_ERROR ... RESOURCE_EXHAUSTED ... quota reached" as
+        # its last line. A provider stop outranks the client's own code, so
+        # the run must exit 8, not 3 - unattended recovery keys on the 8.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "agy-quota-rc3")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("PROVIDER-STOP", err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_parent_leak_wins_over_a_provider_stop(self):
@@ -3466,6 +3692,77 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertNotIn("logs/x", files)
                 self.assertNotIn("logs", files.split())
                 self.assertIn("worker-new.txt", files)
+
+
+class OutsideFenceTaskDirTests(unittest.TestCase):
+    """FENCE (L1-backlog 2026-09-27T04:49Z): the MCP run_job exports
+    AUTOOS_TASK_DIR=<root>/logs/agents/<run id>, and a blocked worker's
+    tools/autoos-ask.py writes question.json there. Under --isolate the
+    worker's project is its sandbox clone, so the run dir is an
+    external_directory the fence denied and ask-back exited 5. The fence
+    re-allows exactly that one dir (its realpath must stay under
+    <root>/logs/agents/); any other value only warns, never refuses."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # outside_fence measures the run dir against the spawner's own ROOT.
+        self.agent.ROOT = self.root
+        self.agents = os.path.join(self.root, "logs", "agents")
+
+    def fence(self, task_dir):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rules = self.agent.outside_fence("/x/data", task_dir)
+        return rules, err.getvalue()
+
+    def todays_rules(self):
+        home = os.path.expanduser("~")
+        allow = [os.path.join(home, ".local", "share", "opencode", "tool-output", "*"),
+                 os.path.join(home, ".local", "share", "opencode", "shell", "*", "*"),
+                 "/tmp/opencode/*",
+                 os.path.join("/x/data", "opencode", "*")]
+        return ([{"action": "external_directory", "resource": "*", "effect": "deny"}] +
+                [{"action": "external_directory", "resource": p, "effect": "allow"}
+                 for p in allow])
+
+    def test_an_unset_task_dir_keeps_todays_rules_exactly(self):
+        rules, err = self.fence(None)
+        self.assertEqual(rules, self.todays_rules())
+        self.assertEqual(err, "")
+
+    def test_a_run_dir_under_logs_agents_is_allowed(self):
+        run_dir = os.path.join(self.agents, "20260927-063221-abcdef")
+        os.makedirs(run_dir)
+        rules, err = self.fence(run_dir)
+        self.assertEqual(rules[0], {"action": "external_directory", "resource": "*",
+                                    "effect": "deny"})  # deny-all still first
+        self.assertEqual(rules, self.todays_rules() + [
+            {"action": "external_directory",
+             "resource": os.path.join(os.path.realpath(run_dir), "*"),
+             "effect": "allow"}])
+        self.assertEqual(err, "")
+
+    def test_a_task_dir_outside_logs_agents_adds_no_rule_and_warns(self):
+        os.makedirs(os.path.join(self.root, "etc"))  # the escape target exists
+        for task_dir in ("/tmp/x", os.path.join(self.agents, "..", "..", "etc")):
+            with self.subTest(task_dir=task_dir):
+                rules, err = self.fence(task_dir)
+                self.assertEqual(rules, self.todays_rules())
+                lines = err.strip().splitlines()
+                self.assertEqual(len(lines), 1, err)  # ONE warning line
+                self.assertIn("AUTOOS_TASK_DIR", lines[0])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs privilege on Windows")
+    def test_a_symlink_under_logs_agents_escaping_it_adds_no_rule_and_warns(self):
+        os.makedirs(os.path.join(self.root, "elsewhere"))
+        os.makedirs(self.agents)
+        link = os.path.join(self.agents, "20260927-063221-link")
+        os.symlink(os.path.join(self.root, "elsewhere"), link)
+        rules, err = self.fence(link)
+        self.assertEqual(rules, self.todays_rules())
+        self.assertIn("AUTOOS_TASK_DIR", err)
 
 
 if __name__ == "__main__":

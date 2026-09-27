@@ -27,6 +27,7 @@ every L1 session needs before touching a brief.
 | [`references/main-orchestrator.md`](references/main-orchestrator.md) | L1 standing orders: navigate, spawn/brief L2, cross-family review, off-peak timing, machine checks, token discipline, evidence rules |
 | [`references/l3-routing.md`](references/l3-routing.md) | Choosing an L3 leaf model (cost/time/urgency/privacy) and the leaf gate |
 | [`references/lanes.md`](references/lanes.md) | Lanes, sessions, `resources`, `dependsOn`, per-session model choice |
+| [`references/state-file.md`](references/state-file.md) | The status/state file template an orchestrator rewrites every wave and hands off from |
 | [`references/recovery.md`](references/recovery.md) | Classifying a stopped turn (auth/limit/transient/stalled/…) and recovering it |
 | [`references/layers.md`](references/layers.md) | Orchestrator → session → subagent layers, the controller's inbox channel, successor briefs |
 | [`references/runner-setup.md`](references/runner-setup.md) | Adopting the runner in a new repo, its config fields, its CLI flags |
@@ -84,11 +85,14 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-spawn-15: Verify the worktree a resumed subagent's report names; it may be the parent's, not its own. (why: a resumed subagent committed there; source: B3c-2a report 2026-09-26 07:4xZ)
 - R-spawn-16: A cancelled run's process can survive SIGTERM; verify its pid is gone, then SIGKILL. (why: a cancelled qodercli ran 115s more; source: run 20260926-074714-2b01d2)
 - R-spawn-17: If a worktree subagent's commit is refused by the classifier, commit its diff yourself. (why: shared .git triggers Modify Shared Resources; source: RUNV2 report 2026-09-26T11:5xZ)
-- R-spawn-18: Start a background worker via run_in_background, never `nohup … &`. (why: the nohup worker died silently with its shell; source: work/L1-routing/review-a4c-qd.out)
+- R-spawn-18: Start a background worker via run_in_background, never `nohup … &`/setsid. (why: the nohup worker died silently with its shell; source: work/L1-routing/review-a4c-qd.out)
 - R-spawn-19: Merge main into your branch and push before dispatching lanes; a lane cut from newer main fails the empty-diff setup check. (why: A5c stopped at setup; source: 88cc475, aee6857)
 - R-spawn-20: Check a resumed WIP commit against the current brief before building on it. (why: a WIP drifted out of scope; source: 5a90ef4, A5a report)
 - R-spawn-21: Gate an --isolate worker on the parent branch too: it can commit there via absolute paths while the spawner says NO-OP. (why: isolation leaked; source: 8f72409, work/L1-routing/Q1doc.out)
 - R-spawn-22: Pass brief inputs to an --isolate worker inline or by absolute read-only path; its clone has no git-ignored logs/. (why: relative logs/ paths were empty; source: work/L1-routing/Q1doc.out)
+- R-spawn-23: Route a fix that must turn red tests green to opencode, never qoder. (why: headless qoder cannot run tests; came back worse; source: L1-backlog-c3 lane-c3-fix.out)
+- R-spawn-24: Use Muse (t1-orchestrator) for research and review only, never to implement. (why: 1h45m reading git history, zero edits; source: work/L1-routing/OR1-muse-noop.out)
+- R-spawn-25: A relaunched session never stops, deletes or moves its predecessor's leftovers; list or re-dispatch them. (why: classifier blocks stalled a session; source: inbox/L1-routing.md 09:23:33Z)
 
 ### review
 
@@ -96,16 +100,18 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-review-02: Treat a cheap/free reviewer's "no findings" as unproven; self-review often finds real defects. (why: measured across five lanes' DONE notes; source: 20260924/done, 20260925/done)
 - R-review-03: Never let a reviewer share the writer's model family; pair across families. (why: same-family reviewers repeat the writer's blind spots; source: cao/dispatch.py, review_degraded tag)
 - R-review-04: Inline run-log files into a qoder/agy task; under --isolate it cannot read outside its clone. (why: qoder asked for access, then NO-OP; source: work/L1-routing/review-c2.out, 2026-09-26)
-- R-review-05: Start every review run with `--card role=review`, or a clean sandbox exits 5 (NO-OP). (why: a full 8-finding review exited 5; source: work/L1-routing/review-a3.out, 2026-09-26)
+- R-review-05: Pin a review's model (`--model omniroute/t1-orchestrator`); its clean-sandbox exit 5 is expected. (why: --card role=review routes to t3-driver; source: work/L1-routing/review-r234c4.out)
 - R-review-06: A qoder reviewer reads only inside its cwd, no Bash: copy inputs into the worktree logs/. (why: it could not read RUN/; source: work/L1-routing/review-a8-qd.out)
 - R-review-07: A review must open with the files it read; a bare "none / ship" is unproven. (why: qoder returned 4 lines, no reads; source: work/L1-routing/review-a5a.out)
-- R-review-08: Never accept a t3-driver review: it checked the diff against constants copied from the diff. (why: tautological ship; source: work/L1-routing/review-a8.out)
+- R-review-08: Never accept a t3-driver review: it restates the intent as findings and ships. (why: tautological ship, 4 times; source: work/L1-routing/review-a8.out, review-r234c4.out)
+- R-review-09: Gate a generated-config lane with its consumer: the real reader must accept it, and refuse a bogus value. (why: worker invented a shape, tested its own; source: f85f8a4 vs A6afix)
+- R-review-10: When a brief says 'reuse X', diff every other symbol the worker switched too. (why: a swapped make_post killed a verdict, tests green; source: TOOLFIX 943fa32 -> 0d93997)
 
 ### tests
 
 - R-tests-01: Run `-Validate` then `-DryRun` before any unattended run. (why: a mis-named lane once failed hours into a night; source: tests/Runner.Smoke.Tests.ps1)
 - R-tests-02: Never run a full suite in the main checkout while lanes merge; use a guardsOnly lane. (why: a moving tree makes reds that are not real; source: measured 2026-09-04: 18 red, 9 artefacts)
-- R-tests-03: A green exit code is not proof tests ran; check the reported test count too. (why: a script with no unittest.main() exits 0, runs none; source: work/L1-routing/B3a.out)
+- R-tests-03: Gate on `set -o pipefail` and the 'N passed' line, never `pytest … | tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out, l1/routing 0ed626a)
 - R-tests-04: Filter tests to the touched area while working; run both full suites once per phase. (why: keeps iteration fast without skipping the gate; source: 2026-09-25 plan, lane working rules)
 - R-tests-05: Run the full pwsh suite in the background; a 600s foreground call times out on its ~11 min run. (why: measured across a relaunch's wave-2 runs; source: L1-backlog, 2026-09-26T07:06:25Z)
 - R-tests-06: Copy a Pester -Filter from `grep -n ^Describe/Test tests/run-tests.ps1`, not a guessed prefix. (why: a guessed filter matched no test; source: L1-backlog 2026-09-26T07:06:25Z)
@@ -125,6 +131,7 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-tests-20: Keep --filter words specific; a broad word (clean, free) also runs the shellcheck of run-tests.sh. (why: it was OOM-killed at MemoryMax; source: inbox/L1-routing.md 2026-09-26T18:31:19Z)
 - R-tests-21: A local red CI lacks may be host state, not a flake; test host-state guards with a fake SYS_HOME. (why: CI runners have no installed units; source: main 6220a04, l1/backlog 67ba6c1)
 - R-tests-22: Under bash >= 5.2 `${v/pat/repl}` expands & in repl; split-and-concatenate, or shopt -u patsub_replacement. (why: path &-injection survived a sed rewrite; source: 784a108)
+- R-tests-23: Run tests only after `git add` resolves every conflict; an unresolved merge skews ls-files counts. (why: 8 red that were not real; source: l1/routing merge OR2 2026-09-27T07:0xZ)
 
 ### gateway
 
@@ -142,6 +149,9 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-gateway-12: A 429 with retryable:true but a multi-day reset is not soon-retryable; mark the leg unavailable till reset. (why: agy quota read retryable, reset in 5d; source: 2026-09-26T07:47:05Z)
 - R-gateway-13: Size a request to its leg's per-minute token cap, not only its window. (why: groq gpt-oss-120b 413'd a review on TPM; source: work/L1-routing/review-l1own.out)
 - R-gateway-14: qoder as a non-review worker denies every Bash call; use it to write or review, never to run tests. (why: 6 denials incl. tests; source: inbox/L1-routing.md 2026-09-26T16:49:00Z)
+- R-gateway-15: Never mix Groq and DeepSeek legs in a multi-turn combo. (why: Groq 400s reasoning_details, DeepSeek needs reasoning_text; source: L1-backlog-k1 logs/lane-k1.out)
+- R-gateway-16: Prove a provider's credit with a worker-sized request or its balance, not 'reply PONG'. (why: PONG passed, worker turns failed 2 min later; source: work/L1-routing/OR1a.r2.out)
+- R-gateway-17: Manage the docker OmniRoute via apply.sh's omni wrapper (manage key); a bare host CLI call 401s. (why: the wrapper read every live combo; source: apply.sh --drift 2026-09-27T08:4xZ)
 
 ### cost
 
@@ -160,10 +170,14 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-brief-03: Write agent-to-agent text as fixed fields: <what> <sha|path|number> <verdict>; evidence by pointer, no prose. (why: the reader has the brief; source: common.md, operator 2026-09-26)
 - R-brief-04: Name this skill in every brief; report a failure as a lesson line to the skill's owner. (why: keeps agents on the same rules; source: briefs/common.md, operator 2026-09-26T13:43:33Z)
 - R-brief-05: Brief a render as 'derive every cell from registry fields'; equality with today's file is the test only. (why: a subagent copied the file into code; source: 6a61052 rejected, d1763a8)
+- R-brief-06: Brief a data lane 'render --check only, edit the file minimally'; never --out, never flip a guard test. (why: --out erased 461 hand-kept lines; source: work/L1-routing/BYOK.out, 821617e)
+- R-brief-07: Brief implementers with file:line anchors and 'do not read git history; edit within 10 calls'. (why: unanchored workers read history, never edit; source: work/L1-routing/OR1-muse-noop.out)
+- R-brief-08: Run research on t1-orchestrator; forbid printing whole bundles; confidence=guess is no evidence. (why: no-shell run guessed, bundles ate context; source: work/L1-routing/C5spike-t2.out)
 
 ### level
 
 - R-level-01: A session with no level in its prompt takes it from its name; background sessions never AskUserQuestion. (why: it blocked L1-main 50 min; source: inbox/L1-routing.md 2026-09-26)
+- R-level-02: The L2 owning a topic researches, summarizes and answers it; L0 only routes. (why: operator levels direction 2026-09-27; source: briefs/common.md 'Operator direction')
 
 ### heartbeat
 
@@ -194,12 +208,14 @@ tools, `tools/autoos*.py` or the resolver, this file points to the tool instead 
 - R-handoff-01: Cap an orchestrator's context per spec section 8.3; rewrite its state file every wave. (why: makes a handoff possible at any moment; source: default, spec D16 -- unmeasured)
 - R-handoff-02: Delegate reading DONE notes, plans and drafts to a subagent; don't read them all yourself. (why: a 200k orchestrator hit its 150k cap in 7 min; source: inbox/L1-main.md 19:21Z)
 - R-handoff-03: Write a successor's brief from the predecessor's DONE note, never from the plan alone. (why: eight re-cuts converged on the same shape; source: references/layers.md history, 2026-09-05)
-- R-handoff-04: At the cap, run l1_handoff.py --state/--out, append `handoff <name>` to the inbox, stop. (why: lets the parent relaunch you from that file; source: briefs/common.md, Always)
+- R-handoff-04: At the policy cap (`autoos-agent.py context`): rewrite state, run l1_handoff.py, append `handoff <name>`, stop. (why: lets the parent relaunch you; source: briefs/common.md, Always)
 - R-handoff-05: A handoff is done only once the parent inbox has its line; parents watch handoff mtimes. (why: a handoff with no line sat idle 1.5 h; source: inbox/L1-routing.md 21:45Z)
 - R-handoff-06: Only L0 asks the operator: `question:` to inbox/L0.md, or inbox/L1-main.md if refused. (why: classifier refused L1-backlog's L0 appends; source: inbox/L1-routing.md 2026-09-26)
 - R-handoff-07: A parent measures a child via `autoos-agent.py heartbeat --transcript --cap`, relaunching past its exit 4. (why: two sessions ran past cap unhandled; source: test_autoos_heartbeat.py)
 - R-handoff-08: One writer per run file: briefs/<n> by the parent, status/<n> by n, inbox/<n> append-only (n replies `→ done: …`). (why: no write conflicts; source: briefs/common.md Communication)
 - R-handoff-09: Answer `ping <text>` in your inbox with `pong <text>` in your status at your next decision point. (why: parents probe liveness cheaply; source: briefs/common.md Communication)
+- R-handoff-10: Keep the state file in references/state-file.md's template; offload tool output at half cap. (why: a successor resumes from it alone; source: spec section 8.3, status/L1-backlog.md)
+- R-handoff-11: Relaunched: read the handoff, recreate the heartbeat cron, re-measure every live-state line. (why: snapshots go stale in minutes; source: status/L1-routing.handoff.md 2026-09-27)
 
 ### host
 

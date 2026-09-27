@@ -211,8 +211,9 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
         grep -qE 'failureThreshold.?[:=].?2|BREAKER_THRESHOLD=2' "$f" \
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
-    # The free promo leg must stay FIRST in tier1/spark: free when it works,
-    # fast-skipped by the breaker when it does not (operator 2026-09-23).
+    # The tier-1/spark head must be the same servable leg in both combos: the
+    # registry dropped every dead leg upstream, so the render's first entry is
+    # what apply creates (OR1e; the old free promo leg is no longer servable).
     head_leg="$(python3 - <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
@@ -220,7 +221,7 @@ by = {c["name"]: c["models"] for c in d["combos"]}
 print(",".join(by[n][0] for n in ("t1-orchestrator", "spark-1.3-contributor")))
 PY
 )"
-    assert_eq "$head_leg" "opencode-zen/muse-spark-1.3-contributor-free,opencode-zen/muse-spark-1.3-contributor-free"
+    assert_eq "$head_leg" "openrouter/meta/muse-spark-1.3-contributor,openrouter/meta/muse-spark-1.3-contributor"
     if (( ok )); then pass; else fail "the resilience settings are not applied"; fi
 fi
 
@@ -253,7 +254,7 @@ import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
 names = [c["name"] for c in d["combos"]]
 problems = []
-if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t1-orchestrator-free-only", "t2-worker", "cheaperinference/kimi-k3", "cheaperinference/glm-5.2", "samba/gpt-oss-120b", "samba/MiniMax-M3", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t3-driver-free-only", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
+if names != ["t1-orchestrator", "spark-1.3-contributor", "t1-orchestrator-clean", "t2-worker", "t2-worker-clean", "t2-worker-free-only", "t2-orchestrator", "t3-driver", "t3-driver-clean", "t4-rag", "gemini-3.8-flash", "deepseek-v4.1-flash", "opus-4-6"]:
     problems.append("names")
 # "retired" is the one home of the ids a rename left behind: apply prunes
 # them from the store, so a retired id must never also be a current combo.
@@ -308,7 +309,7 @@ for n in ("t2-worker-clean", "t3-driver-clean"):
         problems.append(n + "-trains:" + ",".join(bad))
 # *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
 paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
-for n in ("t1-orchestrator-free-only", "t2-worker-free-only", "t3-driver-free-only"):
+for n in (n for n in names if n.endswith("-free-only")):
     bad = [m for m in by[n] if paid.search(m)]
     if bad:
         problems.append(n + "-paid:" + ",".join(bad))
@@ -364,11 +365,11 @@ fi
 # registered, "already registered" would also shadow the real key forever.
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
-    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
-    assert_contains "$out" "groq: no key in api-keys.yml, skipped"
+    assert_contains "$out" "gemini: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
     else fail "the real mistral key was not planned"; fi
 fi
@@ -444,22 +445,25 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
 
-# Regression lock for today's registry (2026-09-26): openrouter (every leg
-# individually flagged, docs/plans/2026-09-25-routing-v2-plan.md's "OpenRouter
-# is not to be trusted" decision) and cerebras (402/401 credit exhaustion, L0
-# 2026-09-26T11:44Z) are, right now, all-unavailable across every route that
-# lists them - proves the real catalog/ai-registry.json actually reaches
-# apply.sh's live plan, not just the synthetic fixture above.
+# Regression lock for today's registry (2026-09-27): cerebras (402/401 credit
+# exhaustion, L0 2026-09-26T11:44Z) and groq (L0 2026-09-27) are, right now,
+# all-unavailable across every route that lists them - proves the real
+# catalog/ai-registry.json actually reaches apply.sh's live plan, not just the
+# synthetic fixture above. openrouter and antigravity each still carry a live
+# leg (openrouter's own unavailable flags were lifted), so they are offered
+# and only skipped for the missing key.
 if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     ok=1
     [[ "$out" == *"  - cerebras: all legs unavailable (skipped)"* ]] \
         || { ok=0; echo "cerebras was not flagged: $out" >&2; }
-    [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "openrouter was not flagged: $out" >&2; }
-    # antigravity carries no unavailable_legs entry anywhere today - a
-    # provider with a live leg must still be offered normally.
+    [[ "$out" == *"  - groq: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "groq was not flagged: $out" >&2; }
+    # A provider with a live leg must still be offered normally, even with no
+    # key: openrouter and antigravity satisfy that today.
+    [[ "$out" == *"  - openrouter: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "openrouter (has a live leg today) was wrongly all-unavailable-skipped: $out" >&2; }
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
@@ -710,10 +714,9 @@ oc = json.loads(text)
 m = oc["providers"]["omniroute"]["models"]
 problems = []
 for name, ctx in (("t1-orchestrator", 1000000), ("t1-orchestrator-clean", 1000000),
-                  ("t1-orchestrator-free-only", 1000000),
                   ("t2-worker", 131072), ("t3-driver", 131072),
                   ("t2-worker-clean", 131072), ("t3-driver-clean", 131072),
-                  ("t2-worker-free-only", 131072), ("t3-driver-free-only", 131072),
+                  ("t2-worker-free-only", 131072),
                   ("gemini-3.8-flash", 131072), ("deepseek-v4.1-flash", 131072),
                   ("spark-1.3-contributor", 1000000)):
     if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:

@@ -156,12 +156,12 @@ fi
 # above became machine-dependent.
 if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
     keys="$(mktemp)"
-    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     ok=1
-    [[ "$out" == *"groq: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "groq: $out" >&2; }
+    [[ "$out" == *"gemini: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "gemini: $out" >&2; }
     [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
     [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
@@ -248,15 +248,65 @@ if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
     if (( ok )); then pass; else fail "the prune dry run is not a dry run"; fi
 fi
 
-if it "apply prune: a second run finds no retired combos and deletes nothing"; then
+if it "apply prune: a second run finds no retired or omitted combos and deletes nothing"; then
     d="$(_prune_sandbox)"
     _prune_list "$d" t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
-    [[ "$out" == *"  = no retired combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  = no retired or omitted combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
+fi
+
+# OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
+# declared legs but has no servable one left. A live combo with such an id is a
+# managed orphan, so apply prunes it - but never a user-made combo, and never a
+# current combo.
+if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t3-driver-free-only t2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete t3-driver-free-only --yes" ]] \
+        || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
+fi
+
+if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" t3-driver-free-only my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omitted prune dry run is not a dry run"; fi
+fi
+
+# OR1g: a deliberately legless route (*-paid, auto*) is in neither "retired" nor
+# "omitted", so a live combo a user or OmniRoute itself named "auto" (or
+# "t2-worker-paid") is never deleted - and a dry run never even names it.
+if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" auto t2-worker-paid t3-driver-free-only my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
+    [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
+    [[ "$out" == *"  - t3-driver-free-only: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
 
 # A down gateway must not be listed: the real CLI then falls back to reading
@@ -272,6 +322,211 @@ if it "apply prune: a down gateway is never listed and nothing is pruned"; then
     [[ "$out" == *"Prune:"*"gateway down - the store is not read, nothing pruned"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
+fi
+
+# ─── apply.sh --drift: live combos vs combos.json ───────────────────────────
+# Nothing today says whether the live combos equal the file (OR1b). --drift
+# reads `omniroute --output json combo list` ({"combos":[{"name","models":[
+# {"kind":"model","providerId","model"}...]}],...} — a leg ref reconstructs as
+# providerId/model, the same spelling combos.json uses) and compares name +
+# ordered models per combo, ignoring retired ids. The sandbox reuses the prune
+# stand-ins: a stub omniroute on PATH answers the list from drift.json, plus a
+# loopback stand-in gateway for /api/health. Nothing reaches the live gateway.
+_drift_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: no provider step runs under --drift anyway\n' >"$d/keys.yml"
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+for a in "$@"; do
+    if [[ "$a" == list ]]; then
+        # -e, not -s: the unreadable-store case writes the marker with `: >`.
+        if [[ -e "$d/drift.fail" ]]; then
+            echo "Error: connect ECONNREFUSED" >&2
+            exit 1
+        fi
+        printf 'Loaded env from somewhere\n'   # banner the JSON reader must skip
+        cat "$d/drift.json"
+        exit 0
+    fi
+done
+echo "unexpected call: $*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    : >"$d/calls.log"
+    printf '%s\n' "$d"
+}
+# _drift_json <dir> [swap] [split] - render the live list from combos.json
+# itself; "swap" reverses one combo's legs so the orders differ. The default
+# step shape is the live one (measured 2026-09-27T08:4xZ, omniroute 3.8.51 in
+# docker): "model" carries the full ref, providerId repeats its first segment.
+# "split" is the upstream-source shape (model without the provider segment).
+_drift_json() {
+    local d="$1" swap="${2:-}" split="${3:-}"
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" "$split" >"$d/drift.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+combos = []
+for c in data.get("combos", []):
+    models = []
+    for ref in c["models"]:
+        provider, _, model = ref.partition("/")
+        models.append({"kind": "model", "providerId": provider,
+                       "model": model if sys.argv[3] else ref})
+    combos.append({"name": c["name"], "strategy": c.get("strategy", "priority"),
+                   "models": models})
+if sys.argv[2] and combos:
+    for c in combos:
+        if len(c["models"]) > 1:
+            c["models"].reverse()
+            break
+print(json.dumps({"combos": combos, "active": None, "error": None}))
+PY
+}
+# _drift_apply <dir> - apply.sh --drift against the two stand-ins.
+_drift_apply() {
+    local d="$1" pid port
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --drift 2>&1
+    local rc=$?
+    kill "$pid" 2>/dev/null
+    return "$rc"
+}
+
+if it "apply drift: live combos equal combos.json -> exit 0, no difference lines"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *drift:* || "$out" == *"missing "* || "$out" == *"extra "* ]] \
+        && { ok=0; echo "differences on an in-sync store: $out" >&2; }
+    # --drift is read-only: it never creates, deletes, patches or registers.
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift reported drift on an in-sync store"; fi
+fi
+
+if it "apply drift: the upstream split step shape (model without provider) is in sync too"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" "" split
+    out="$(_drift_apply "$d")"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"in sync"* ]]; then pass; else fail "rc=$rc: $out"; fi
+fi
+
+if it "apply drift: one combo's leg order differs -> exit 1 and names it"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" swap
+    out="$(_drift_apply "$d")"; rc=$?
+    # The first multi-leg combo in combos.json is the one _drift_json swapped.
+    want="$(python3 -c 'import json
+for c in json.load(open("configuration/omniroute/combos.json"))["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"]); break')"
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"drift $want: live=["*" file=["* ]] || { ok=0; echo "no drift line for $want: $out" >&2; }
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not name the reordered combo"; fi
+fi
+
+if it "apply drift: an unreadable live store -> exit 3 with a one-line reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    : >"$d/drift.fail"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -le 3 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *drift* && "$out" == *unreadable* || "$out" == *"could not"* || "$out" == *"failed"* ]] \
+        || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not exit 3 on an unreadable store"; fi
+fi
+
+# The other half of the comparison: a file combo the store lacks is "missing",
+# a store combo the file does not know is "extra", and a store combo whose name
+# is a retired id is ignored (it is not a combo the file forgot; the file
+# itself consigned it). A user-made combo is never a difference.
+if it "apply drift: reports missing and extra, and ignores a retired live combo"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    missing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combos"][0]["name"])' "$doc")"
+    retired="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["retired"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$missing" "$retired" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"] = [c for c in live["combos"] if c["name"] != sys.argv[3]]
+live["combos"].append({"name": "user-made-combo", "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+live["combos"].append({"name": sys.argv[4], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "y"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"missing $missing"* ]] || { ok=0; echo "no missing line: $out" >&2; }
+    [[ "$out" == *"extra user-made-combo"* ]] || { ok=0; echo "no extra line: $out" >&2; }
+    [[ "$out" == *"$retired"* ]] && { ok=0; echo "named the retired live combo: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift missed missing/extra or touched a retired id"; fi
+fi
+
+# OR1e: a live combo whose id the registry lists in "omitted" is a managed
+# orphan the render dropped (no servable leg). It is still an "extra" (the file
+# does not carry it as a combo), but the reason is named so the operator knows
+# a prune will remove it rather than thinking it is a user-made combo.
+if it "apply drift: an omitted live combo is reported as extra with the omitted reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    omitted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["omitted"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$omitted" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"].append({"name": sys.argv[3], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"extra $omitted (omitted: no servable leg)"* ]] || { ok=0; echo "no labeled extra line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not label the omitted live combo"; fi
+fi
+
+# OR1e: the CLI can answer a management call with a bare JSON list. The old
+# isinstance(...) or live_doc.get(...) form short-circuited the guard but then
+# called .get() on the list, so --drift died with a traceback and exit 1
+# instead of the one-line "unreadable" reason and exit 3.
+if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
+    d="$(_drift_sandbox)"
+    printf '[]' >"$d/drift.json"
+    out="$(_drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    grep -qi 'traceback' <<<"$out" && { ok=0; echo "crashed: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -eq 1 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *unreadable* ]] || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift crashed on a JSON list instead of exiting 3"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
@@ -850,12 +1105,13 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     [[ "$first" == *"app settings seeded with omniroute-t1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
     # Spec order = configuration/openhands/tier-profiles.json: the three
     # hierarchy tiers (t1 -> t2 -> t3) fill the fake's cap of 3; the red-by-
-    # design t1-orchestrator-free-only is last and never takes a slot.
+    # design the last tier (litellm-t2-worker-free-only) is last and never
+    # takes a slot.
     for _t in omniroute-t1-orchestrator omniroute-t2-worker omniroute-t3-driver; do
         [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
     done
     [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before t2-orchestrator" >&2; }
-    [[ "$first" == *"app profile omniroute-t1-orchestrator-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
+    [[ "$first" == *"app profile litellm-t2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
     grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" \
@@ -1007,8 +1263,8 @@ fi
 # alone freed nothing and t3-driver/t4-rag still never fit).
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" omniroute-t1-orchestrator-free-only omniroute-spark-1.3-contributor
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "omniroute-spark-1.3-contributor": {"model": "openai/spark-1.3-contributor"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker-free-only omniroute-spark-1.3-contributor
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -1020,7 +1276,7 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
     [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"omniroute-t1-orchestrator-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
@@ -1031,8 +1287,8 @@ fi
 # room for a higher tier. A prefix-named profile nobody recorded never does.
 if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "omniroute-t1-orchestrator-free-only": {"model": "openai/t1-orchestrator-free-only"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker omniroute-t1-orchestrator-free-only
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-t2-worker litellm-t2-worker-free-only
     _fake_app "$d" "$d/seed.json"
     out="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -2350,7 +2606,6 @@ STUB
         'http://127.0.0.1:20128/v1/models key - 200' \
         'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-free-only 200' \
-        'http://127.0.0.1:20128/v1/chat/completions key t3-driver-free-only 200' \
         'http://127.0.0.1:20128/v1/chat/completions key t2-worker-clean 200' \
         'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
 }
@@ -2380,11 +2635,11 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 13 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 12 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo t2-worker-free-only' 'combo t3-driver-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
+                'combo t2-worker-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -2443,9 +2698,9 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" verify)" && rc=0 || rc=$?
     (( rc == 0 )) || { ok=0; echo "key set: exit $rc, not 0" >&2; }
-    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 3 ]] || { ok=0; echo "key set: not three chat requests" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 2 ]] || { ok=0; echo "key set: not two chat requests" >&2; }
     # The stub compared the header it read from stdin: the key did arrive.
-    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 3 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
+    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 2 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
@@ -2454,7 +2709,7 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
     (( rc == 1 )) || { ok=0; echo "wrong key: exit $rc, not 1" >&2; }
-    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 3 ]] || { ok=0; echo "wrong key: not three FAIL lines" >&2; }
+    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 2 ]] || { ok=0; echo "wrong key: not two FAIL lines" >&2; }
     [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the wrong key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' <<<"$out" || true)" == 0 ]] || { ok=0; echo "the wrong key is in the output" >&2; }
     rm -rf "$d"

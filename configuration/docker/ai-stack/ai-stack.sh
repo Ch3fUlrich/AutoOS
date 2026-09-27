@@ -1190,7 +1190,7 @@ verify_combos() {
     if [[ "$key" == *$'\n'* || "$key" == *$'\r'* ]]; then
         v_fail "keyed combos" "AUTOOS_OMNIROUTE_KEY holds a line break"; return 0
     fi
-    read -ra combos <<<"${AUTOOS_VERIFY_COMBOS:-t2-worker-free-only t3-driver-free-only t2-worker-clean}"
+    read -ra combos <<<"${AUTOOS_VERIFY_COMBOS:-t2-worker-free-only t2-worker-clean}"
     if (( ${#combos[@]} == 0 )); then v_skip "keyed combos" "AUTOOS_VERIFY_COMBOS lists no combo"; return 0; fi
     url="http://127.0.0.1:$(service_port omniroute)/v1/chat/completions"
     for c in "${combos[@]}"; do

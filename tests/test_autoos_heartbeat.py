@@ -284,7 +284,7 @@ class HeartbeatCliTests(unittest.TestCase):
         self.assertIn("pause: none", proc.stdout)
         self.assertNotIn("unpushed:", proc.stdout)
         self.assertNotIn("dirty:", proc.stdout)
-        self.assertIn("context: 1000/400000 0%", proc.stdout)
+        self.assertIn("context: 1000/600000 0%", proc.stdout)
 
     def test_json_has_the_same_facts(self):
         proc = self.run_heartbeat("--json")
