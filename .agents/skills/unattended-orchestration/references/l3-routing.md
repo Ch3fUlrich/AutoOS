@@ -3,9 +3,9 @@
 **Status: PROPOSED (2026-09-18), awaiting the operator's approval.**
 - Until then, L1/L2 apply it **by hand** when they pick an L3.
 - The code change it describes (a scorer that generates `cao.routing` ladders) is not built yet.
-- The operator's fixed rules come first and are not re-weighed by any score: routing order
-  R-gateway-01 and cross-family review R-review-03 in [`../SKILL.md`](../SKILL.md) (the
-  2026-09-18 "DeepSeek first" order was superseded on 2026-09-25).
+- The operator's fixed rules come first and are not re-weighed by any score: the resolver's leg
+  order (`python3 tools/autoos-agent.py route --explain`, R-coord-03) and the cross-family review
+  rule R-orch-13 (the 2026-09-18 "DeepSeek first" order was superseded on 2026-09-25).
 
 Evidence: three research passes on 2026-09-18:
 - the OpenRouter models API, 445 entries, measured;

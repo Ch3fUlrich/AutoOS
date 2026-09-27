@@ -49,6 +49,10 @@ autoos.config.json.tmp
 .serena/
 graphify-out/
 .playwright-mcp/
+# CAO run state: verdicts, quota records, captured agent output, phase leases.
+# Untracked is not enough — the next `git add -A` after a run sweeps it in.
+output/cao/
+.cao-leases/
 .claude/settings.local.json
 .claude/lane-mcp.local.json
 # Installer-created junctions into .agents/skills (one per skill, guarded by
