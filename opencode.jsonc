@@ -299,12 +299,17 @@
         "deepseek-v4.1-flash": {
           "modelID": "deepseek-v4.1-flash",
           "name": "deepseek-v4.1-flash — paid cheapest-first",
-          "limit": { "context": 131072, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "max", "settings": { "reasoningEffort": "max" } }
-          ]
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "cheaperinference/kimi-k3": {
+          "modelID": "cheaperinference/kimi-k3",
+          "name": "cheaperinference kimi-k3 (S1-S2 credit)",
+          "limit": { "context": 131072, "output": 32768 }
+        },
+        "cheaperinference/glm-5.2": {
+          "modelID": "cheaperinference/glm-5.2",
+          "name": "cheaperinference glm-5.2 (S0-S1 credit)",
+          "limit": { "context": 131072, "output": 16384 }
         },
         "auto/smart": {
           "modelID": "auto/smart",
