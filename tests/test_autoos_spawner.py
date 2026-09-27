@@ -18,6 +18,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -541,7 +542,7 @@ class McpToolTests(unittest.TestCase):
     def wait_done(self, run_id):
         for _ in range(100):
             st = mcp_server.status(run_id)
-            if st["state"] not in ("running", "starting"):
+            if st["state"] not in ("working", "submitted"):
                 return st
             time.sleep(0.1)
         self.fail("run %s never finished" % run_id)
@@ -561,7 +562,7 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(out["route"]["combo"], "t3-driver")
         self.assertEqual(out["route"]["routing_version"], routing.ROUTING_VERSION)
         st = self.wait_done(out["id"])
-        self.assertEqual(st["state"], "done")
+        self.assertEqual(st["state"], "completed")
         text = mcp_server.result(out["id"])["text"]
         self.assertIn("would run: opencode run --standalone --agent t3-reviewer", text)
         self.assertIn("lean:", text)  # reviewers default to lean
@@ -595,7 +596,447 @@ class McpToolTests(unittest.TestCase):
     def test_cancel_of_a_finished_run_is_a_no_op(self):
         out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
         self.wait_done(out["id"])
-        self.assertEqual(mcp_server.cancel(out["id"])["state"], "done")
+        self.assertEqual(mcp_server.cancel(out["id"])["state"], "completed")
+
+    # --- the A2A task lifecycle (spec 2026-09-25-routing-v2-spec.md §9) ------
+
+    def make_run(self, run_id, **job):
+        """A synthetic run dir carrying only what _state() reads, for the
+        lifecycle states a real dry run cannot be parked in deterministically
+        (canceled needs a cancel to land mid-run; lost needs a dead pid)."""
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        job = dict({"id": run_id, "request": {}, "task": "t", "argv": [],
+                    "cwd": str(ROOT), "route": {}, "started": time.time()}, **job)
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
+        return path
+
+    def test_task_states_are_the_spec_9_set(self):
+        # The exact A2A names in the spec's order; a typo here would leak into
+        # every consumer of status()/result() (D17: A2A adapter is a thin layer
+        # later only while the names match exactly).
+        self.assertEqual(mcp_server.TASK_STATES,
+                         ("submitted", "working", "input_required", "completed",
+                          "failed", "canceled", "rejected"))
+
+    def test_a_dry_run_spawn_walks_submitted_working_completed(self):
+        """A real dry-run run reports only A2A names, in the submitted ->
+        working -> completed order; `detail` keeps the pre-A2A value so no
+        caller loses information to the rename. spawn()'s Popen is held open
+        until the test has seen "submitted" (the window between job.json's
+        first write and its pid write is otherwise too small to observe)."""
+        real_popen = mcp_server.subprocess.Popen
+        release = threading.Event()
+
+        def held_popen(*args, **kw):
+            # preflight's own subprocess.run lands here too (Popen underneath);
+            # hold only the runner's start - that is the submitted->working gap.
+            # args[0] is the argv list: look inside it, not at the tuple.
+            if args and "--run-job" in args[0]:
+                release.wait(5)
+            return real_popen(*args, **kw)
+
+        box = {}
+
+        def do_spawn():
+            try:
+                with mock.patch.object(mcp_server.subprocess, "Popen", held_popen):
+                    box["out"] = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+            except BaseException as exc:  # surfaced by the assertions below
+                box["exc"] = exc
+
+        thread = threading.Thread(target=do_spawn)
+        thread.start()
+        submitted = None
+        try:
+            deadline = time.time() + 15  # preflight alone is a full dry run
+            while time.time() < deadline and "exc" not in box:
+                runs = mcp_server.status()["runs"]
+                if runs:
+                    submitted = runs[0]
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(
+                submitted, "the run never appeared: %r" % (box.get("exc"),))
+            self.assertEqual(submitted["state"], "submitted")
+            self.assertEqual(submitted["detail"], "starting")
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertNotIn("exc", box)
+        out = box["out"]
+        self.assertEqual(out["id"], submitted["id"])
+        st = mcp_server.status(out["id"])
+        self.assertEqual(st["state"], "working")
+        self.assertEqual(st["detail"], "running")
+        working = st["state"]
+        st = self.wait_done(out["id"])
+        self.assertEqual(st["state"], "completed")
+        self.assertEqual(st["detail"], "done")
+        # every state the walk returned, in order, ack included - all A2A names
+        seen = [submitted["state"], out["state"], working, st["state"]]
+        for state in seen:
+            self.assertIn(state, mcp_server.TASK_STATES)
+
+    def test_cancel_of_a_working_run_reports_canceled(self):
+        """Spec §9 spells it "canceled" (one l); the old value survives in
+        detail. The runner is a stub sleeper in its own session so cancel
+        always lands while the run is working - a real dry run may finish
+        first, which is the no-op test above."""
+        sleeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def stop():
+            if sleeper.poll() is None:  # cancel may already have killed it
+                sleeper.terminate()
+            sleeper.wait()
+        self.addCleanup(stop)
+        self.make_run("cancel-test", pid=sleeper.pid)
+        self.assertEqual(mcp_server.status("cancel-test")["state"], "working")
+        st = mcp_server.cancel("cancel-test")
+        self.assertEqual(st["state"], "canceled")
+        self.assertEqual(st["detail"], "cancelled")
+        self.assertIn("canceled", mcp_server.TASK_STATES)
+
+    def test_a_dead_pid_without_exit_json_is_failed_lost(self):
+        """Spec §9: a pid that died before writing exit.json is failed, and the
+        old "lost" name survives in detail (the runner was killed, the exit
+        code is unknowable - not a cancel, not a success)."""
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()  # a pid that no longer exists, not merely our own
+        self.make_run("lost-test", pid=gone.pid)
+        st = mcp_server.status("lost-test")
+        self.assertEqual(st["state"], "failed")
+        self.assertEqual(st["detail"], "lost")
+        self.assertIn("failed", mcp_server.TASK_STATES)
+
+    def make_sleeper(self):
+        """A live process standing in for a working runner, in its own session
+        so the test never leaks it (the same trick the cancel test uses)."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def stop():
+            if proc.poll() is None:  # cancel may already have killed it
+                proc.terminate()
+            proc.wait()
+        self.addCleanup(stop)
+        return proc
+
+    def make_asking_run(self, run_id, text="ship or revert?"):
+        """A synthetic working run whose worker has just asked a question -
+        the file tools/autoos-ask.py writes, exactly as it writes it."""
+        path = self.make_run(run_id, pid=self.make_sleeper().pid)
+        mcp_server._write_json(os.path.join(path, "question.json"),
+                               {"text": text, "asked": "2026-09-27T00:00:00Z"})
+        return path
+
+    def test_a_pending_question_flips_a_working_run_to_input_required(self):
+        """Spec §9 ask-back: question.json with no answer.json yet is the whole
+        input_required signal; `detail` stays "running" and the dict carries
+        the question text the orchestrator has to answer."""
+        path = self.make_asking_run("ask-test")
+        st = mcp_server.status("ask-test")
+        self.assertEqual(st["state"], "input_required")
+        self.assertEqual(st["detail"], "running")
+        self.assertEqual(st["question"], "ship or revert?")
+        # answered -> working again while the helper consumes the answer
+        mcp_server._write_json(os.path.join(path, "answer.json"),
+                               {"text": "ship", "answered": "2026-09-27T00:00:01Z"})
+        st = mcp_server.status("ask-test")
+        self.assertEqual(st["state"], "working")
+        self.assertNotIn("question", st)
+        # consumed (or withdrawn on timeout) -> working again
+        for name in ("answer.json", "question.json"):
+            os.remove(os.path.join(path, name))
+        self.assertEqual(mcp_server.status("ask-test")["state"], "working")
+
+    def test_respond_writes_answer_json_and_reports_the_new_state(self):
+        path = self.make_asking_run("respond-test")
+        out = mcp_server.respond("respond-test", "ship it")
+        self.assertNotIn("error", out)
+        self.assertEqual(out["state"], "working")  # answered -> no longer asking
+        answer = mcp_server._read_json(os.path.join(path, "answer.json"))
+        self.assertEqual(answer["text"], "ship it")
+        self.assertTrue(answer["answered"].endswith("Z"))
+        # after the helper has consumed both files the run is simply working
+        for name in ("answer.json", "question.json"):
+            os.remove(os.path.join(path, name))
+        self.assertEqual(mcp_server.status("respond-test")["state"], "working")
+
+    def test_respond_refuses_a_run_that_is_not_asking(self):
+        """Only an input_required run can be answered: a working run with no
+        question, a finished run, and an unknown id all come back as errors,
+        and none of them writes answer.json."""
+        path = self.make_run("silent-test", pid=self.make_sleeper().pid)
+        out = mcp_server.respond("silent-test", "ship it")
+        self.assertIn("error", out)
+        self.assertIn("input_required", out["error"])
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+        mcp_server._write_exit(path, {"rc": 0, "ended": time.time()})
+        out = mcp_server.respond("silent-test", "ship it")
+        self.assertIn("error", out)
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+        self.assertIn("error", mcp_server.respond("nope", "ship it"))
+
+    def test_respond_refuses_empty_text(self):
+        path = self.make_asking_run("empty-text-test")
+        for text in ("", "   "):
+            self.assertIn("error", mcp_server.respond("empty-text-test", text))
+        self.assertIsNone(mcp_server._read_json(os.path.join(path, "answer.json")))
+
+    def test_cancel_of_an_input_required_run_reports_canceled(self):
+        """A run parked in input_required is blocked, so an operator stop is
+        the only way out: cancel must reach it, not report nothing-to-cancel."""
+        self.make_asking_run("cancel-ask-test")
+        self.assertEqual(mcp_server.status("cancel-ask-test")["state"], "input_required")
+        st = mcp_server.cancel("cancel-ask-test")
+        self.assertEqual(st["state"], "canceled")
+        self.assertEqual(st["detail"], "cancelled")
+
+    def test_run_job_exports_the_task_dir_to_the_child(self):
+        """run_job passes AUTOOS_TASK_DIR=<run dir> so a blocked worker's brief
+        can point tools/autoos-ask.py at this run; autoos-agent.py forwards
+        os.environ to the client, so the worker itself sees it."""
+        path = self.make_run("env-test", argv=["--version"])
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"], box["env"] = argv, kw.get("env")
+            return 0
+
+        with mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            self.assertEqual(mcp_server.run_job(path), 0)
+        self.assertEqual(box["argv"], [sys.executable, mcp_server.AGENT, "--version"])
+        self.assertEqual(box["env"], dict(os.environ, AUTOOS_TASK_DIR=path))
+
+    def test_a_refused_spawn_is_rejected(self):
+        """Spec §9: a spawn the server refuses never started anything, so its
+        answer carries state "rejected" alongside the error. One case per
+        refusal path: card/route (build_argv), empty task, unknown client,
+        bad cwd, and a request only the CLI's own dry run refuses."""
+        refusals = (
+            {"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}},
+            {"task": ""},
+            {"task": "t", "client": "nope"},
+            {"task": "t", "cwd": os.path.join(self.tmp, "no-such-dir")},
+            {"task": "t", "client": "qoder", "card": {"privacy": "sensitive"}},
+        )
+        for req in refusals:
+            out = mcp_server.spawn(req)
+            self.assertIn("error", out, req)
+            self.assertEqual(out["state"], "rejected", req)
+        self.assertIn("rejected", mcp_server.TASK_STATES)
+        self.assertEqual(mcp_server.status()["runs"], [])
+
+
+class AskHelperTests(unittest.TestCase):
+    """tools/autoos-ask.py, offline: question/answer/qa files in a temp dir,
+    the helper in a real subprocess, a thread playing the orchestrator."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def ask_argv(self, question, *opts):
+        return [sys.executable, str(TOOLS / "autoos-ask.py"), question, *opts]
+
+    def run_ask(self, question, *opts, task_dir=None):
+        env = clean_env(AUTOOS_TASK_DIR=task_dir if task_dir is not None else self.tmp)
+        return subprocess.run(self.ask_argv(question, *opts), env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_the_helper_round_trips_a_question_and_answer(self):
+        """End to end: the helper parks question.json, a thread playing the
+        orchestrator writes answer.json, the helper prints the answer text to
+        stdout, exits 0 and archives the pair as qa-1.json (history kept)."""
+        box = {}
+
+        def answer_later():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:  # it appeared: read its shape
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "ship it", "answered": "2026-09-27T00:00:01Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_later)
+        thread.start()
+        try:
+            proc = self.run_ask("ship or revert?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread.join()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "ship it")
+        self.assertEqual(box["question"]["text"], "ship or revert?")
+        self.assertTrue(box["question"]["asked"])
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertEqual(qa["question"]["text"], "ship or revert?")
+        self.assertEqual(qa["answer"]["text"], "ship it")
+        for name in ("question.json", "answer.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, name)), name)
+
+    def test_the_helper_times_out_and_withdraws_the_question(self):
+        """No answer within --timeout: the question is withdrawn (the run
+        returns to working), the reason goes to stderr, the exit code is 3."""
+        proc = self.run_ask("anyone?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("no answer within", proc.stderr)
+        for name in ("question.json", "answer.json", "qa-1.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, name)), name)
+
+    def test_the_helper_refuses_a_second_question_while_one_is_pending(self):
+        with io.open(os.path.join(self.tmp, "question.json"), "w", encoding="utf-8") as fh:
+            json.dump({"text": "first?", "asked": "2026-09-27T00:00:00Z"}, fh)
+        proc = self.run_ask("second?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("pending", proc.stderr)
+        with io.open(os.path.join(self.tmp, "question.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["text"], "first?")  # the pending one is untouched
+
+    def test_the_helper_needs_the_task_dir_env(self):
+        env = clean_env()
+        env.pop("AUTOOS_TASK_DIR", None)
+        proc = subprocess.run(self.ask_argv("hello?"), env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("AUTOOS_TASK_DIR", proc.stderr)
+
+    def test_a_stale_answer_json_at_start_is_archived_not_returned(self):
+        """An answer.json with no question.json is stale (left by a timeout
+        the previous run hit). Archive it as qa-<n>.json with a 'stale' marker
+        and proceed — never silently delete an answer, never treat it as the
+        answer to a question that has not been asked yet."""
+        with io.open(os.path.join(self.tmp, "answer.json"), "w", encoding="utf-8") as fh:
+            json.dump({"text": "late answer", "answered": "2026-09-27T00:00:02Z"}, fh)
+
+        box = {}
+
+        def answer_later():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "fresh", "answered": "2026-09-27T00:01:00Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_later)
+        thread.start()
+        try:
+            proc = self.run_ask("real question?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread.join()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "fresh")  # not the stale "late answer"
+
+        def answer_second():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            atmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(atmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "second answer", "answered": "2026-09-27T00:02:00Z"}, fh)
+            os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        thread2 = threading.Thread(target=answer_second)
+        thread2.start()
+        try:
+            proc2 = self.run_ask("second?", "--poll", "0.1", "--timeout", "30")
+        finally:
+            thread2.join()
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(proc2.stdout.strip(), "second answer")
+        self.assertEqual(box["question"]["text"], "second?")
+        # the stale answer went to history, never to the second question
+        qa_path = os.path.join(self.tmp, "qa-1.json")
+        self.assertTrue(os.path.exists(qa_path))
+        with io.open(qa_path, encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))  # the archived stale answer is marked
+        self.assertEqual(qa["answer"]["text"], "late answer")
+        self.assertIsNone(qa.get("question"))  # no question preceded it
+
+    def test_a_late_answer_after_timeout_is_archived_and_the_next_ask_works(self):
+        """The exact bug: timeout removes question.json, but an answer landing
+        at/after the deadline left answer.json behind. The next ask used to
+        see answer.json and refuse 'already pending' (exit 2) forever. Now the
+        orphan answer is archived as stale and the next ask works. Sequential,
+        not a thread race: clean timeout, then the late respond(), then ask."""
+        proc1 = self.run_ask("first?", "--poll", "0.05", "--timeout", "0.2")
+        self.assertEqual(proc1.returncode, 3, proc1.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "question.json")))
+        atmp = os.path.join(self.tmp, "answer.json.tmp")
+        with io.open(atmp, "w", encoding="utf-8") as fh:
+            json.dump({"text": "too late", "answered": "2026-09-27T00:00:05Z"}, fh)
+        os.replace(atmp, os.path.join(self.tmp, "answer.json"))
+
+        box = {}
+
+        def answer_second():
+            qpath = os.path.join(self.tmp, "question.json")
+            deadline = time.time() + 10
+            while not os.path.exists(qpath) and time.time() < deadline:
+                time.sleep(0.02)
+            with io.open(qpath, encoding="utf-8") as fh:
+                box["question"] = json.load(fh)
+            tmp = os.path.join(self.tmp, "answer.json.tmp")
+            with io.open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"text": "second answer", "answered": "2026-09-27T00:02:00Z"}, fh)
+            os.replace(tmp, os.path.join(self.tmp, "answer.json"))
+
+        thread = threading.Thread(target=answer_second)
+        thread.start()
+        proc2 = self.run_ask("second?", "--poll", "0.1", "--timeout", "30")
+        thread.join()
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertEqual(proc2.stdout.strip(), "second answer")
+        self.assertEqual(box["question"]["text"], "second?")
+        # the stale answer went to history (qa-1), never to the second question
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))
+        self.assertEqual(qa["answer"]["text"], "too late")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "answer.json")))
+
+    # chmod 0o555 does not stop writes on Windows (only the read-only file
+    # attribute exists there) nor for root: the directory stays writable.
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "chmod cannot make a directory unwritable here")
+    def test_an_unwritable_task_dir_exits_5_with_a_message_not_a_traceback(self):
+        """Under --isolate the outside-path fence can deny writes into
+        AUTOOS_TASK_DIR. The helper must not dump a raw traceback — it must
+        exit 5 with a message that names the reason and suggests --isolate."""
+        ro = os.path.join(self.tmp, "ro")
+        os.mkdir(ro)
+        os.chmod(ro, 0o555)
+        try:
+            proc = self.run_ask("anything?", "--poll", "0.05", "--timeout", "0.2",
+                                task_dir=ro)
+        finally:
+            os.chmod(ro, 0o755)
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("autoos-ask", proc.stderr)
+        self.assertIn("unavailable", proc.stderr)
 
 
 def uv_mcp_cmd():
@@ -649,7 +1090,7 @@ class McpStdioTests(unittest.TestCase):
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
-                                     "route", "list_agents", "context", "heartbeat"})
+                                     "respond", "route", "list_agents", "context", "heartbeat"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
