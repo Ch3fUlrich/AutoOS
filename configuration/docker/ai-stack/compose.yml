@@ -175,6 +175,11 @@ services:
     # response buffering, so SSE and websockets pass through.
     image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     container_name: autoos-opencode-auth
+    # Opt-in: :4097 injects opencode's Basic auth for the proxy, so a host only
+    # wants it when the proxy forwards here instead of straight to :4096. Start
+    # it with COMPOSE_PROFILES=edge-forwarder (ai-stack.sh refuses a LAN bind
+    # until the host firewall restricts :4097; see docs/web-services.md).
+    profiles: ["edge-forwarder"]
     restart: unless-stopped
     # The host user's ids: Caddy writes only into the tmpfs below.
     user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"

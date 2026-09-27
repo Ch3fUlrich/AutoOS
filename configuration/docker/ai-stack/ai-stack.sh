@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manage the AutoOS AI stack in Docker (compose.yml next to this script):
-# OmniRoute gateway :20128, opencode serve :4096, opencode-auth forwarder :4097,
-# OpenHands :3000.
+# OmniRoute gateway :20128, opencode serve :4096, opencode-auth forwarder :4097
+# (opt-in: COMPOSE_PROFILES=edge-forwarder), OpenHands :3000.
 #
 #   ai-stack.sh init              env files + opencode config (idempotent)
 #   ai-stack.sh up [service...]   build/pull what is missing, start, wait healthy
@@ -33,8 +33,10 @@
 #   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/, qoder-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
-# runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1, and an AUTOOS_OMNIROUTE_PUBLIC_URL
-# the gateway would exit on (not an http(s) URL).
+# runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1. The opt-in opencode-auth
+# forwarder is additionally refused on a LAN bind until that firewall actually
+# restricts :4097 (AUTOOS_FW_SCRIPT). An AUTOOS_OMNIROUTE_PUBLIC_URL
+# the gateway would exit on (not an http(s) URL) is refused too.
 # Design, RAM budget, rollback: docs/web-services.md (Server profile section).
 set -euo pipefail
 
@@ -72,6 +74,9 @@ START_STACK="${AUTOOS_START_STACK:-$REPO/configuration/start-stack.sh}"
 # The LiteLLM starter the standby runs through (env-only interface: the four
 # AUTOOS_LITELLM_* names; never argv, never a printed value).
 START_LITELLM="${AUTOOS_START_LITELLM:-$REPO/configuration/litellm/start-litellm.sh}"
+# The host firewall script the forwarder guard reads to learn which ports
+# coding-agents-fw.service limits. Read only - never executed.
+FW_SCRIPT="${AUTOOS_FW_SCRIPT:-/usr/local/sbin/coding-agents-fw.sh}"
 # The port the liveliness probe uses while a failover command runs.
 FAILOVER_PORT=""
 # Filled by migrate; read by migrate_abort / restore_native.
@@ -89,7 +94,7 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --yes)     YES=1 ;;
-        -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "Unknown option: $arg"; exit 2 ;;
         *) if [[ -z "$CMD" ]]; then CMD="$arg"; else SERVICES+=("$arg"); fi ;;
     esac
@@ -551,6 +556,88 @@ bind_guard() {
     return 1
 }
 
+# ─── opt-in profile (the forwarder) ─────────────────────────────────────────
+# compose_profiles: the active compose profiles, exactly as compose resolves
+# them - the environment (which beats --env-file) first, then stack.env.
+compose_profiles() {
+    local active="${COMPOSE_PROFILES:-}"
+    [[ -n "$active" ]] || active="$(env_value "$STACK_ENV" COMPOSE_PROFILES)"
+    printf '%s' "$active"
+}
+
+# profile_requested <name>: COMPOSE_PROFILES names it, or '*' selects all.
+profile_requested() {
+    local name="$1" a list
+    IFS=, read -ra list <<<"$(compose_profiles)"
+    for a in "${list[@]}"; do
+        [[ "$a" == "$name" || "$a" == '*' ]] && return 0
+    done
+    return 1
+}
+
+# The forwarder (:4097) is only wanted when the proxy forwards to it instead of
+# straight to :4096, so it starts only under COMPOSE_PROFILES=edge-forwarder.
+forwarder_requested() { profile_requested edge-forwarder; }
+
+# service_enabled <service>: whether a run that names no service starts it.
+# The forwarder is opt-in; every other service is always in the default set.
+service_enabled() {
+    case "$1" in
+        opencode-auth) forwarder_requested ;;
+        *) return 0 ;;
+    esac
+}
+
+# fw_ports_cover <script> <port>: whether the firewall script's PORTS=
+# assignment names <port> (a bare number or a range a:b that contains it). The
+# script is only read, never executed: a guard must not run root's firewall
+# just to ask it a question.
+fw_ports_cover() {
+    local script="$1" port="$2" raw spec p a b parts
+    [[ -r "$script" ]] || return 1
+    raw="$(grep -E '^[[:space:]]*(export[[:space:]]+)?PORTS=' "$script" 2>/dev/null | tail -n1)" || true
+    [[ -n "$raw" ]] || return 1
+    spec="${raw#*=}"
+    spec="${spec%%#*}"
+    spec="$(printf '%s' "$spec" | tr -d "\"'[:space:]")"
+    local IFS=',;'
+    read -ra parts <<<"$spec"
+    for p in "${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        if [[ "$p" == *:* ]]; then
+            a="${p%%:*}"; b="${p##*:}"
+            if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && (( a <= port && port <= b )); then return 0; fi
+        elif [[ "$p" == "$port" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Runs with bind_guard before every `compose up` (preflight). bind_guard only
+# proves the firewall unit runs; it says nothing about :4097, which the
+# forwarder publishes with NO auth of its own. So when the forwarder is opted
+# in on a LAN bind, this refuses until the firewall itself restricts :4097
+# (or the operator accepts the exposure with AUTOOS_STACK_ALLOW_LAN=1).
+FORWARDER_OK=0
+forwarder_guard() {
+    local bind allow
+    (( FORWARDER_OK )) && return 0
+    if ! forwarder_requested; then FORWARDER_OK=1; return 0; fi
+    bind="$(effective_bind)"
+    if is_loopback "$bind"; then FORWARDER_OK=1; return 0; fi
+    allow="$(env_value "$STACK_ENV" AUTOOS_STACK_ALLOW_LAN)"
+    if [[ "$allow" == 1 ]]; then FORWARDER_OK=1; return 0; fi
+    if fw_ports_cover "$FW_SCRIPT" 4097; then
+        echo "  = publishing the opencode-auth forwarder on $bind:4097: $FW_SCRIPT restricts :4097"
+        FORWARDER_OK=1
+        return 0
+    fi
+    echo "  ! refusing to start the opencode-auth forwarder on $bind:4097: the host firewall ($FW_SCRIPT) does not restrict :4097 - it would expose opencode without a password to the LAN. Ask for :4097 in coding-agents-fw (only the proxy host), or set AUTOOS_STACK_ALLOW_LAN=1."
+    if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
+    return 1
+}
+
 # dc_up [args...]: `docker compose up -d`, never past a refusing bind guard.
 dc_up() {
     preflight || return 1
@@ -604,6 +691,7 @@ public_url_guard() {
 # built, stopped or recreated.
 preflight() {
     bind_guard || return 1
+    forwarder_guard || return 1
     public_url_guard
 }
 
@@ -817,13 +905,21 @@ claim_fresh_host() {
 
 cmd_up() {
     local svcs=("${SERVICES[@]}") start=() svc c port unit
-    (( ${#svcs[@]} )) || svcs=(omniroute opencode openhands opencode-auth)
+    if (( ${#svcs[@]} == 0 )); then
+        for svc in omniroute opencode openhands opencode-auth; do
+            service_enabled "$svc" && svcs+=("$svc")
+        done
+    fi
     if [[ ! -f "$STACK_ENV" ]]; then
         if [[ $DRY -eq 1 ]]; then echo "  - would run init first"; else cmd_init || return 1; fi
     fi
     for svc in "${svcs[@]}"; do
         c="$(service_container "$svc")"; port="$(service_port "$svc")"
         [[ -n "$c" ]] || { echo "  ! unknown service $svc (omniroute, opencode, openhands, opencode-auth)"; return 2; }
+        if ! service_enabled "$svc"; then
+            echo "  = $svc: opt-in and not enabled (set COMPOSE_PROFILES=edge-forwarder) - skipped"
+            continue
+        fi
         if container_running "$c"; then
             if [[ "$svc" == openhands ]] && ! is_compose_container "$c"; then
                 echo "  ! $svc: $c runs outside the stack - replace it with: ai-stack.sh migrate --yes"; continue
@@ -896,6 +992,13 @@ cmd_restart() {
     done
     for svc in "${SERVICES[@]}"; do
         c="$(service_container "$svc")"
+        # An opted-out forwarder is only restarted while it is actually
+        # running: an explicit `restart opencode-auth` stays useful on a host
+        # that turned the profile off without first stopping the container.
+        if ! service_enabled "$svc" && ! container_running "$c"; then
+            echo "  = $svc: opt-in and not running (set COMPOSE_PROFILES=edge-forwarder) - skipped"
+            continue
+        fi
         if [[ $DRY -eq 1 ]]; then echo "  - would run: docker compose -p autoos-ai restart $svc"; continue; fi
         dc restart "$svc" || { echo "  ! docker compose restart $svc failed - see: $0 status"; return 1; }
         echo "  + $svc restarted ($c)"
@@ -907,13 +1010,16 @@ cmd_status() {
     if stack_owned; then echo "  owner: the docker stack ($MARKER)"
     else echo "  owner: native units (no $MARKER)"; fi
     for svc in omniroute opencode openhands opencode-auth; do
+        service_enabled "$svc" || continue
         c="$(service_container "$svc")"
         printf '  %-14s %-22s %s\n' "$svc" "$c" "$(container_state "$c")"
     done
     echo "  gateway :20128 /api/health -> $(http_code http://127.0.0.1:20128/api/health); keyless /v1/models -> $(http_code http://127.0.0.1:20128/v1/models) (401 expected)"
     echo "  opencode :4096 / -> $(http_code http://127.0.0.1:4096/); /api/session without password -> $(http_code http://127.0.0.1:4096/api/session) (401 expected)"
     echo "  openhands :3000 / -> $(http_code http://127.0.0.1:3000/)"
-    echo "  opencode-auth :4097 /api/session -> $(http_code http://127.0.0.1:4097/api/session) (200 expected: opencode's Basic auth added)"
+    if service_enabled opencode-auth; then
+        echo "  opencode-auth :4097 /api/session -> $(http_code http://127.0.0.1:4097/api/session) (200 expected: opencode's Basic auth added)"
+    fi
 }
 
 # Ownership, not container state. The marker is written only after every
@@ -1143,7 +1249,9 @@ cmd_migrate() {
     cmd_init || return 1
     preflight || return 1
     ensure_manage_key || return 1
-    ensure_images omniroute opencode opencode-auth openhands || return 1
+    local imgs=(omniroute opencode openhands)
+    if forwarder_requested; then imgs=(omniroute opencode opencode-auth openhands); fi
+    ensure_images "${imgs[@]}" || return 1
 
     MOVED=(); UNITS_BEFORE=(); OH_REPLACED=0
     local u
@@ -1177,13 +1285,24 @@ cmd_migrate() {
             migrate_abort
             return 1
         fi
-        if ! dc_up --no-deps opencode opencode-auth || ! wait_for opencode_ok || ! wait_for forwarder_ok; then
+        local oc_ok=0 oc_svcs=(opencode)
+        if forwarder_requested; then
+            oc_svcs+=(opencode-auth)
+            if dc_up --no-deps "${oc_svcs[@]}" && wait_for opencode_ok && wait_for forwarder_ok; then oc_ok=1; fi
+        else
+            if dc_up --no-deps "${oc_svcs[@]}" && wait_for opencode_ok; then oc_ok=1; fi
+        fi
+        if (( ! oc_ok )); then
             echo "  ! the opencode container or its forwarder did not answer (:4096 / :4097) - docker logs autoos-opencode autoos-opencode-auth"
             migrate_abort
             return 1
         fi
         attach_shared_mcp
-        echo "  + opencode container answers on :4096; the forwarder injects its Basic auth on :4097"
+        if forwarder_requested; then
+            echo "  + opencode container answers on :4096; the forwarder injects its Basic auth on :4097"
+        else
+            echo "  + opencode container answers on :4096"
+        fi
     fi
 
     # 3. OpenHands: the start-stack.sh container becomes the compose one.
@@ -1558,8 +1677,8 @@ compose_services() {
 # every one without profiles, and those whose profile COMPOSE_PROFILES names
 # (environment first, then stack.env - the two places compose itself reads).
 verify_load_services() {
-    local active="${COMPOSE_PROFILES:-}" svc ctr prof plist alist p a hit
-    [[ -n "$active" ]] || active="$(env_value "$STACK_ENV" COMPOSE_PROFILES)"
+    local active svc ctr prof plist alist p a hit
+    active="$(compose_profiles)"
     IFS=, read -ra alist <<<"$active"
     V_SVCS=(); V_CTRS=()
     while read -r svc ctr prof; do

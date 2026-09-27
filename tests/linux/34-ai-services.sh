@@ -1541,7 +1541,7 @@ _aistack() {
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
-        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL -u AUTOOS_FW_SCRIPT \
         -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
         -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
@@ -1566,7 +1566,7 @@ _aistack_native() {
 _aistack_migrated() {
     local d="$1" c
     mkdir -p "$d/cfg" "$d/data/omniroute"
-    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
     printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
     for c in autoos-omniroute autoos-opencode openhands-app autoos-opencode-auth; do : >"$d/run-$c"; : >"$d/compose-$c"; done
     : >"$d/unit-coding-agents-fw"; : >"$d/active-coding-agents-fw"
@@ -2033,6 +2033,139 @@ if it "aistack: forwarder restart opencode-auth restarts just that service"; the
     [[ "$out" == *"opencode-auth"* ]] || { ok=0; echo "no one-line report: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "restart opencode-auth is not one compose restart"; fi
+fi
+
+# ─── OC-LOCALAUTH: the opencode-auth forwarder is opt-in ─────────────────────
+# The forwarder publishes :4097 with no auth of its own. Only the
+# edge-forwarder profile starts it, and only on a LAN bind whose firewall
+# actually restricts :4097 (bind_guard alone only proves the unit runs).
+if it "aistack: forwarder is opt-in - up and status leave it out without the profile"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "up failed on loopback: rc=$rc: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute opencode openhands$' "$d/docker.log" \
+        || { ok=0; echo "the default set is not omniroute/opencode/openhands: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'opencode-auth' "$d/docker.log" && { ok=0; echo "the forwarder was started without its profile" >&2; }
+    # Naming it explicitly is still a no-op while the profile is off.
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" up opencode-auth)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "an explicit opt-out forwarder did not skip cleanly: rc=$rc: $out" >&2; }
+    [[ "$out" == *"opt-in and not enabled"* ]] || { ok=0; echo "the skip was not explained: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "an explicit opt-out forwarder reached compose" >&2; }
+    out="$(_aistack "$d" status)"
+    [[ "$out" == *"opencode-auth"* || "$out" == *":4097"* ]] \
+        && { ok=0; echo "status still shows the opt-out forwarder: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the forwarder is not opt-in"; fi
+fi
+
+if it "aistack: forwarder starts and is reported when the edge-forwarder profile is on"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "up failed: rc=$rc: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute opencode openhands opencode-auth' "$d/docker.log" \
+        || { ok=0; echo "the forwarder was not started: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$out" == *"opencode-auth answers on :4097"* ]] || { ok=0; echo "the forwarder was not reported: $out" >&2; }
+    out="$(_aistack "$d" status)"
+    [[ "$out" == *"opencode-auth"* && "$out" == *":4097"* ]] || { ok=0; echo "status hides the forwarder: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the opted-in forwarder is not started or reported"; fi
+fi
+
+if it "aistack: forwarder refuses a LAN bind when the firewall script is missing, and starts on loopback"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    : >"$d/active-coding-agents-fw"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" AUTOOS_FW_SCRIPT="$d/no-such-fw.sh" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "started with no firewall script" >&2; }
+    [[ "$out" == *"refusing to start the opencode-auth forwarder"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up reached" >&2; }
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" AUTOOS_FW_SCRIPT="$d/no-such-fw.sh" up)"
+    [[ "$out" == *"refusing to start the opencode-auth forwarder"* ]] && { ok=0; echo "loopback bind refused: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "missing firewall script or loopback bind handled wrong"; fi
+fi
+
+if it "aistack: forwarder refuses a LAN bind the host firewall does not cover"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    : >"$d/active-coding-agents-fw"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    fw="$d/coding-agents-fw.sh"
+    printf 'PORTS="20128,4096,3000"\n' >"$fw"
+    out="$(_aistack "$d" AUTOOS_FW_SCRIPT="$fw" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "a LAN forwarder started with :4097 uncovered" >&2; }
+    [[ "$out" == *"refusing to start the opencode-auth forwarder"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    [[ "$out" == *"$fw"* && "$out" == *":4097"* ]] || { ok=0; echo "the refusal does not name the script and :4097: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up reached: $(grep 'up -d' "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a LAN forwarder starts with :4097 outside the firewall"; fi
+fi
+
+if it "aistack: a dry run announces the forwarder refusal and starts nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    : >"$d/active-coding-agents-fw"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    fw="$d/coding-agents-fw.sh"
+    printf 'PORTS="20128,4096,3000"\n' >"$fw"
+    out="$(_aistack "$d" AUTOOS_FW_SCRIPT="$fw" --dry-run up)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "dry run failed: rc=$rc: $out" >&2; }
+    [[ "$out" == *"refusing to start the opencode-auth forwarder"* ]] || { ok=0; echo "refusal not announced: $out" >&2; }
+    [[ "$out" == *"a real run stops here"* ]] || { ok=0; echo "the dry-run note is missing: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "a dry run called compose up" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the dry run does not preview the forwarder refusal"; fi
+fi
+
+if it "aistack: forwarder runs on a LAN bind once the firewall covers :4097"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    : >"$d/active-coding-agents-fw"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    fw="$d/coding-agents-fw.sh"
+    printf 'PORTS="20128,4096,3000,4097"\n' >"$fw"
+    out="$(_aistack "$d" AUTOOS_FW_SCRIPT="$fw" up)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "a covered :4097 was refused: rc=$rc: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute opencode openhands opencode-auth' "$d/docker.log" \
+        || { ok=0; echo "the forwarder was not started: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$out" == *"restricts :4097"* ]] || { ok=0; echo "the cover was not reported: $out" >&2; }
+    rm -rf "$d"
+    # A range that contains :4097 counts too.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    : >"$d/active-coding-agents-fw"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\n" >"$d/cfg/stack.env"
+    fw="$d/coding-agents-fw.sh"
+    printf 'PORTS="4090:4100"\n' >"$fw"
+    _aistack "$d" AUTOOS_FW_SCRIPT="$fw" up >/dev/null || { ok=0; echo "a covering range was refused" >&2; }
+    grep -q 'opencode-auth' "$d/docker.log" || { ok=0; echo "a covering range did not start the forwarder" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the firewall cover is not honoured"; fi
+fi
+
+if it "aistack: AUTOOS_STACK_ALLOW_LAN=1 accepts the LAN forwarder without the firewall"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\nCOMPOSE_PROFILES=edge-forwarder\nAUTOOS_STACK_ALLOW_LAN=1\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "the explicit override was refused: rc=$rc: $out" >&2; }
+    grep -q 'opencode-auth' "$d/docker.log" || { ok=0; echo "the override did not start the forwarder" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_STACK_ALLOW_LAN=1 does not accept the forwarder"; fi
 fi
 
 if it "aistack: a REPLACE_WITH_ placeholder counts as an unset opencode_password"; then
