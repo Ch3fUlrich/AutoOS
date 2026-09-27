@@ -53,7 +53,7 @@ git log origin/main..main --oneline   # review the 31 commits first
 git push origin main                  # fast-forward; nothing to merge locally
 ```
 
-Pre-push checklist: both suites green (`bash tests/run-tests.sh`,
+Pre-push checklist: both suites green (`AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh`,
 `pwsh -NoProfile -File tests/run-tests.ps1`), `shellcheck` /
 `Invoke-ScriptAnalyzer` clean on touched files, no secrets in the diff
 (`git diff origin/main --stat` + grep for credential shapes). CI runs both
@@ -91,7 +91,7 @@ python tools/audit-router.py                 # live drift gate (--offline for CI
 python tools/autoos-agent.py list            # tiers, models, who spawns whom
 python tools/autoos-agent.py run --tier 2 --isolate "..."   # one tier agent on its own model (--dry-run plans only)
 powershell -NoProfile -File tests\run-tests.ps1
-bash tests/run-tests.sh
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh
 ```
 
 ## 6. Known issues (detail: docs/verification.md)

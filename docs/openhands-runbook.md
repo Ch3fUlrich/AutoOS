@@ -48,7 +48,7 @@ ephemeral — commit + push before you stop, see section 5.)
 ```bash
 ./configuration/omniroute/apply.sh --dry-run   # combos parse, registers nothing
 ./configuration/omniroute/apply.sh --probe     # one live ack per combo (needs gateway)
-bash tests/run-tests.sh                        # full sh suite, must be green
+AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh    # full sh suite, must be green
 ```
 
 (Windows host runs `tests/run-tests.ps1` — same bar, other shell.

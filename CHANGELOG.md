@@ -5,9 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `tests/run-tests.sh` refuses an unfiltered local run (FULLGUARD, 2026-09-27)
+
+- **`tests/run-tests.sh`**, **`.github/workflows/ci.yml`**, **`tests/linux/01-test-harness.sh`**, **`AGENTS.md`**, **`docs/`**: an unfiltered local run now exits 2 and names `--filter` / `AUTOOS_FULL_SUITE=1`; CI sets the opt-in so its one full run is unchanged (the full suite's shellcheck once OOM-killed a 16 GB host, R-host-08).
+
 ### Added — Free.ai free provider restores `t3-driver-free-only` (FREEAI, 2026-09-27)
 
 - **`catalog/ai-registry.json`**, **`configuration/omniroute/combos.json`**, **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`configuration/openhands/tier-profiles.json`**, **`opencode.jsonc`**, **`docs/models.md`**, **`configuration/omniroute/apply.sh`**, **`configuration/api-keys.example.yml`**, **`docs/api-keys.md`**: Free.ai (`free_ai`, model `qwen7b`, OpenAI-compatible at `https://api.free.ai/v1`; 30k tokens/day, 10 rpm, public/may train) joins as the last leg of `t2-worker-free-only` and the only leg of `t3-driver-free-only`, restoring the latter as a servable combo; never private-safe and never in a `*-clean` route. `apply.sh`'s existing-id regex widens to `[a-z0-9_-]+` so the underscored `omniroute_id` stays idempotent.
+### Changed — Antigravity Hub sets up chrome-sandbox itself via sudo (agysb)
+
+- **`lib/linux/install.sh`**: `antigravity_sandbox_note` is now
+  `antigravity_sandbox_setup` (operator decision 2026-09-27: this one step may
+  run sudo). When the kernel needs the SUID helper it re-checks
+  `chrome-sandbox` (regular file, no symlink, 1 hard link), skips an already
+  root-owned 4755 helper, prints the would-run line under `--dry-run`, and
+  otherwise runs `sudo -n chown root:root` + `sudo -n chmod 4755` with
+  `setup.sh --yes` (plain `sudo`, so it may prompt, on an interactive TTY
+  without `--yes`); a missing/failed sudo prints the two commands for the
+  operator and never fails the install. NEVER `--no-sandbox`.
+- **TOCTOU fix**: each privileged step re-checks inside the one root process
+  (`find -P` on a still-regular single-link file, chmod only on a file root
+  owns), so a symlink swapped in after the check can no longer escalate;
+  anything else falls back to the printed commands.
+
 
 ### Changed — standby router renders every servable tier; starter host/key-file/state-dir (LSTBY)
 ### Added — one-command standby router: `ai-stack.sh failover` (lstby)
