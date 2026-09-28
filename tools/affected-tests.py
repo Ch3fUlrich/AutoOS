@@ -10,7 +10,10 @@ Why this exists (lessons PROVPIN, MUSEPIN 2026-09-27): after a route or provider
 flip a worker picks its own --filter terms, the shell and Pester cases naming the
 changed id never run, and CI goes red twice for want of a list nobody derived. The
 list is derivable, so it is derived here: every test block whose text mentions one
-of the ids, word-boundary matched, across all three suites.
+of the ids, matched only where the id ends, across all three suites. Over-inclusion
+is allowed and a miss is not, so the match is strict against a *longer* id
+(`t1-orchestrator` does not name `t1-orchestrator-clean`) and loose against a name
+this id generated (`omniroute-t1-orchestrator` is).
 
 What it reads
     tests/linux/*.sh      `if it "name"; then` blocks
@@ -20,7 +23,10 @@ What it reads
                           located with `ast`
 A shell or Pester block runs from its header to the next header or the next
 `describe` / `Describe-Group`, whichever comes first, so the text is credited to
-one case only and the header's own words count as a mention.
+one case only and the header's own words count as a mention. A heredoc
+(`<<EOS` ... `EOS`) or PowerShell here-string (`@'` ... `'@`) body is data, not
+code: the suites write whole fake scripts into scratch files that way, and a
+header-shaped line in one neither starts a case nor ends the case holding it.
 
 Outputs
     --format filter       one comma-separated string for run-tests.sh --filter /
@@ -28,8 +34,14 @@ Outputs
                           $( ). Both runners split their filter on commas and match
                           each term as a substring of a *test name*, so a term is
                           always a comma-free, space-free substring of a name that
-                          is affected. Over-inclusion is intended: a term that also
-                          names a few extra cases cannot miss one.
+                          is affected - one exception below. Over-inclusion is
+                          intended: a term that also names a few extra cases cannot
+                          miss one. A name with no word character in it at all has
+                          no such token to offer, so its whole name becomes the
+                          term; when even that is impossible - a comma in the name -
+                          it is reported on stderr as unfilterable, because silence
+                          here is how a case goes unrun. Exit status stays 0 either
+                          way.
     --format pytest       space-separated node ids (tests/test_x.py::Class::method)
     --format human        the table: which ids hit, in which runner, and where
 
@@ -70,10 +82,27 @@ SH_GROUP = re.compile(r"^[ \t]*describe[ \t]", re.M)
 PS_HEADER = re.compile(r"""^[ \t]*Test-Case[ \t]+(?P<q>["'])(?P<name>[^\n]*?)(?P=q)""", re.M)
 PS_GROUP = re.compile(r"^[ \t]*Describe-Group[ \t]", re.M)
 
+# Neither header pattern sees whether its line is code. The suites write whole
+# fake scripts into a scratch file (`cat <<EOS` ... `EOS`) and PowerShell carries
+# them in a here-string (`@'` ... `'@`), and every one of those body lines is
+# data: a header-shaped line in it used to end the real case above, hiding that
+# case's own mentions (review F1). `(?<!<)<<(?!<)` is a heredoc opener and never
+# the one-line `<<<` here-string; PowerShell's opener must end its line.
+SHELL_OPENER = re.compile(r"(?<!<)<<(?!<)")
+HEREDOC_NAME = re.compile(r"[A-Za-z0-9_@%+=:,./-]+")
+PS_OPENER = re.compile(r"""(?:^|[\s=(,{$])@(['"])$""")
+
 # A filter term: whitespace-free and comma-free by construction, and a literal
 # substring of the test name it came from. ':' and '+' are out of the charset -
 # they end a token in the suite's names without adding anything a filter needs.
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@-]*")
+
+# Characters that continue an id to the right. Registry ids are kebab-case model
+# names, so `-` and `_` belong inside one; `.` does not - it is the sentence's own
+# punctuation or a file extension, and a mention followed by either is still a
+# mention. `\b` reads `-` as a word break, which is what let `t1-orchestrator`
+# match inside `t1-orchestrator-clean` (review F2).
+ID_CHARS = r"[A-Za-z0-9_\-]"
 
 
 class Test(NamedTuple):
@@ -99,22 +128,135 @@ def _line_starts(text: str):
     return starts
 
 
-def regions(text: str, header: re.Pattern, group: re.Pattern):
+def _code_view(line: str) -> str:
+    """The line with quoted content and the trailing comment blanked out.
+
+    Same length, same offsets, so a match found in it is still the right place in
+    the original: `echo "<<"` and `# see <<EOF` must not read as heredocs.
+    """
+    out, quote, index = list(line), "", 0
+    while index < len(line):
+        ch = line[index]
+        if quote:
+            out[index] = " "
+            if ch == quote:
+                quote = ""
+            elif quote == '"' and ch == "\\" and index + 1 < len(line):
+                out[index + 1] = " "
+                index += 1
+            index += 1
+            continue
+        if ch in "'\"":
+            out[index] = " "
+            quote = ch
+        elif ch == "#" and (not index or line[index - 1] in " \t"):
+            return "".join(out[:index] + [" "] * (len(line) - index))
+        elif ch == "\\" and index + 1 < len(line):
+            out[index + 1] = " "
+            index += 1
+        index += 1
+    return "".join(out)
+
+
+def _heredoc_opener(line: str, at: int):
+    """Parse `<<DELIM`, `<<-DELIM`, `<<'DELIM'`, `<<"DELIM"` or `<<\\DELIM` at `at`.
+
+    `at` is just past the `<<`. Returns (delimiter, tab-strip) or None when the
+    line does not open a heredoc there - `<<$var` names its delimiter at run time
+    and is left untracked rather than guessed at.
+    """
+    tab_strip = at < len(line) and line[at] == "-"
+    if tab_strip:
+        at += 1
+    if at >= len(line):
+        return None
+    if line[at] in "'\"":
+        quote, at = line[at], at + 1
+        end = line.find(quote, at)
+        name = line[at:end] if end > at else ""
+    else:
+        if line[at] == "\\":
+            at += 1
+        matched = HEREDOC_NAME.match(line, at)
+        name = matched.group() if matched else ""
+    return (name, tab_strip) if name else None
+
+
+def _ps_opener(line: str) -> str:
+    """The quote char of a here-string opened at the end of this line, else "".
+
+    PowerShell puts its opening delimiter at the end of a line and nothing else
+    there, and the parity check rejects a line that merely ends inside a string -
+    `Write-Host 'text @'` closes one, it does not start a here-string.
+    """
+    match = PS_OPENER.search(line.rstrip())
+    if not match:
+        return ""
+    quote = match.group(1)
+    if line[:match.start() + 1].count(quote) % 2:
+        return ""
+    return quote
+
+
+def masked_lines(text: str, syntax: str):
+    """The 0-based line numbers this runner's parser reads as data, not code.
+
+    sh: each heredoc body, from the line after the opener through the line
+    carrying its delimiter; a line may open two heredocs, so openers queue and
+    each delimiter closes only the body it ends. ps1: each here-string body,
+    closed by the delimiter at column 0 - PowerShell lets nothing precede it.
+    """
+    lines = text.split("\n")
+    masked = set()
+    if syntax == "ps1":
+        open_quote = ""
+        for index, raw in enumerate(lines):
+            line = raw.rstrip("\r")
+            if open_quote:
+                masked.add(index)
+                if line.startswith(open_quote + "@"):
+                    open_quote = ""
+                continue
+            open_quote = _ps_opener(line)
+        return masked
+    pending = []
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        if pending:
+            masked.add(index)
+            head = line.lstrip("\t") if pending[0][1] else line
+            if head.rstrip() == pending[0][0]:
+                del pending[0]
+            continue
+        view = _code_view(line)
+        for match in SHELL_OPENER.finditer(view):
+            opener = _heredoc_opener(line, match.end())
+            if opener:
+                pending.append(opener)
+    return masked
+
+
+def regions(text: str, header: re.Pattern, group: re.Pattern, syntax: str):
     """Yield (name, line, body) for every test block in one runner's source text.
 
     A block starts where its own comment block starts - this suite writes the
     explaining comment above the `if it`, so that text belongs to the case below
     it, not to the case before - and ends at the next block's start, the next
     `describe` / `Describe-Group`, or the end of the file, whichever comes first.
+    A header or group heading inside a heredoc / here-string body is data, so it
+    neither opens a block nor closes one; its text still counts toward the block
+    that contains it.
     """
-    found = list(header.finditer(text))
-    if not found:
-        return
     lines = text.split("\n")
     starts = _line_starts(text)
     line_of = lambda offset: bisect.bisect_right(starts, offset) - 1
+    masked = masked_lines(text, syntax)
+    found = [m for m in header.finditer(text) if line_of(m.start()) not in masked]
+    if not found:
+        return
     heads = [line_of(m.start()) for m in found]
-    groups = sorted(line_of(m.start()) for m in group.finditer(text))
+    groups = sorted(line_of(m.start()) for m in group.finditer(text)
+                    if line_of(m.start()) not in masked)
     begins = []
     for head in heads:
         begin = head
@@ -133,7 +275,7 @@ def parse_runner_text(rel: Path, text: str, runner: str):
     """The Test list one file contributes to the shell or the Pester runner."""
     header, group = (SH_HEADER, SH_GROUP) if runner == "sh" else (PS_HEADER, PS_GROUP)
     return [Test(runner=runner, name=name, path=rel, line=line, body=body)
-            for name, line, body in regions(text, header, group)]
+            for name, line, body in regions(text, header, group, runner)]
 
 
 def parse_pytest_file(rel: Path, text: str):
@@ -188,11 +330,26 @@ def _read(path: Path) -> str:
 
 
 def id_pattern(an_id: str) -> re.Pattern:
-    """Word-boundary match for an id, tolerant of one that starts or ends on punctuation."""
+    """Match an id where that id ends: no id character may follow it.
+
+    Registry ids are kebab-case, so `-` and `_` continue one: `t1-orchestrator-clean`
+    and `auto-added` are not mentions of `t1-orchestrator` and `auto` - each is its
+    own registry entry or plain English - and `\\b` let both through because it
+    reads `-` as a word break (review F2). A `.` is not an id character, so
+    `t1-orchestrator.json` and a sentence-ending `t1-orchestrator.` still count:
+    dropping those would be a *miss*, which - unlike over-inclusion - this tool may
+    not emit. The left side keeps the plain word boundary for the same reason:
+    `omniroute-t1-orchestrator` is the profile file this route generates, and a
+    strict left edge hides 24 blocks here - among them every service case naming
+    that profile and every cap case naming `claude-opus-4-6`, the model the route
+    serves. What that looseness lets back in (`chip-auto`, `AUTOOS_WIPE_TARGET`)
+    only ever runs one more case.
+    """
+    if not an_id:
+        return re.compile(r"(?!)")
     word = lambda ch: ch.isalnum() or ch == "_"
     left = r"\b" if word(an_id[:1]) else ""
-    right = r"\b" if word(an_id[-1:]) else ""
-    return re.compile(left + re.escape(an_id) + right, re.IGNORECASE)
+    return re.compile(left + re.escape(an_id) + r"(?!" + ID_CHARS + r")", re.IGNORECASE)
 
 
 def affected(tests, ids):
@@ -212,7 +369,7 @@ def name_matches(runner: str, term: str, name: str) -> bool:
 
 
 def choose_terms(hits, corpus, runner: str):
-    """(terms, {test: term}) - a filter term per affected case, and the tight list.
+    """(terms, {test: term}, [name, ...]) - a filter term per affected case, and the tight list.
 
     A term must be a substring of an affected *name* - that is all either runner
     can match - so it comes out of the name itself: a token carrying one of the
@@ -221,7 +378,11 @@ def choose_terms(hits, corpus, runner: str):
     longest. A term contained inside another is dropped: the shorter one already
     selects everything the longer one does. Collateral is therefore small and the
     list is exact enough to run, but its words come from test names, not from the
-    registry - the table format shows which term selects which case.
+    registry - the table format shows which term selects which case. A name with
+    no token in it at all (`✓ ✗ ✗`) has nothing to choose from, so the whole name
+    is the term, and when even that is impossible - a comma in it would split the
+    term in --filter - its name is returned as unfilterable for stderr instead of
+    being dropped in silence.
     """
     def collateral(term):
         return sum(1 for name in corpus if name_matches(runner, term, name))
@@ -229,13 +390,17 @@ def choose_terms(hits, corpus, runner: str):
     def covers(term):
         return sum(1 for test in hits if name_matches(runner, term, test.name))
 
-    picks = []
+    picks, unfilterable = [], []
     for test in hits:
         pool = TOKEN.findall(test.name)
         carrying = [t for t in pool if any(an_id.lower() in t.lower() for an_id in test.ids)]
         candidates = carrying or [t for t in pool if len(t) >= MIN_TERM_LEN] or pool
         if candidates:
             picks.append(min(candidates, key=lambda t: (collateral(t), -covers(t), -len(t), t)))
+        elif test.name.strip() and "," not in test.name:
+            picks.append(test.name.strip())
+        else:
+            unfilterable.append(test.name)
     terms = [t for t in picks if not any(o != t and name_matches(runner, o, t) for o in picks)]
     assignment = {}
     for test in hits:
@@ -250,20 +415,22 @@ def choose_terms(hits, corpus, runner: str):
                 hit = [rescue]
         if hit:
             assignment[test] = hit[0]
-    return sorted(set(terms), key=lambda t: (t.lower(), len(t), t)), assignment
+    return (sorted(set(terms), key=lambda t: (t.lower(), len(t), t)), assignment,
+            unfilterable)
 
 
 def selection(hits_by_runner, corpora):
-    """The filter string, and which term selects which shell / Pester case."""
-    terms, assigned = [], {}
+    """The filter string, which term selects which shell / Pester case, and what cannot."""
+    terms, assigned, unfilterable = [], {}, []
     for runner in ("sh", "ps1"):
         hits = hits_by_runner.get(runner, [])
         if hits:
-            chosen, assignment = choose_terms(hits, corpora.get(runner, []), runner)
+            chosen, assignment, wordless = choose_terms(hits, corpora.get(runner, []), runner)
             terms += chosen
             assigned.update(assignment)
+            unfilterable += wordless
     joined = ",".join(sorted(set(terms), key=lambda t: (t.lower(), len(t), t)))
-    return joined, assigned
+    return joined, assigned, unfilterable
 
 
 def git_show(root: Path, rev: str, path: Path) -> Optional[str]:
@@ -373,7 +540,11 @@ def main(argv=None) -> int:
         corpora.setdefault(test.runner, []).append(test.name)
     for hit in hits:
         by_runner.setdefault(hit.runner, []).append(hit)
-    terms, assigned = selection(by_runner, corpora)
+    terms, assigned, unfilterable = selection(by_runner, corpora)
+    for name in unfilterable:
+        sys.stderr.write("affected-tests: unfilterable test name - no word character "
+                         "to make a term from and a comma in it, so --filter cannot "
+                         "select it: %s\n" % name)
     nodes = " ".join(sorted({t.name for t in by_runner.get("pytest", [])}))
 
     if args.format == "filter":

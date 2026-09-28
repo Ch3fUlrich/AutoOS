@@ -69,6 +69,35 @@ if it "the automatic strategy is not a combo"; then
     # only shares a prefix with the short route id above, so it is not affected
     assert_eq "automatic" "automatic"
 fi
+
+# A heredoc body is data: the `if it` below is text written into a scratch file,
+# not a case, and it must not end the case that contains it (review F1).
+if it "the heredoc case that greps only after the closing delimiter"; then
+    cat >"$tmp/fake.sh" <<'EOS'
+if it "phantom opus-4-6 is not a real case"; then
+    assert_eq "x" "x"
+EOS
+    grep -q 'opus-4-6' "$tmp/fake.sh"
+fi
+
+# A longer id that merely starts with the queried one is a different entry.
+if it "the t1-orchestrator-clean route drops the dead leg"; then
+    assert_eq "class" "mid"
+fi
+
+if it "a case naming only the lite flash model"; then
+    assert_contains "$out" "gemini-3.8-flash-lite"
+fi
+
+# A name with no word characters at all: the fallback term is the whole name.
+if it "✓ ✗ ✗"; then
+    assert_contains "$out" "zenith-route"
+fi
+
+# ... unless the name carries a comma, which no --filter string can express.
+if it "✓ ✗, ✗"; then
+    assert_contains "$out" "zenith-route"
+fi
 '''
 
 FIXTURE_PS1 = '''\
@@ -87,6 +116,18 @@ Test-Case 'a case naming a model that no one else has MuseSpark13' {
 }
 
 Test-Case 'an unrelated detect case' {
+    Pass
+}
+
+# An here-string body is data too: the Test-Case below is text inside a variable,
+# not a case (review F1).
+Test-Case 'the here-string case that asserts after the closing quote' {
+    $sh = @'
+Test-Case 'phantom SambaNova is not a real case' {
+    Pass
+}
+'@
+    Assert-Equal $sh 'SambaNova'
     Pass
 }
 '''
@@ -109,6 +150,85 @@ class RegistryReads(unittest.TestCase):
 
 def test_module_level_opus_route():
     assert "opus-4-6" in ROUTES
+'''
+
+# The names the fixture cases above carry, spelled once.
+HEREDOC_SH_CASE = "the heredoc case that greps only after the closing delimiter"
+PHANTOM_SH_CASE = "phantom opus-4-6 is not a real case"
+HEREDOC_PS_CASE = "the here-string case that asserts after the closing quote"
+PHANTOM_PS_CASE = "phantom SambaNova is not a real case"
+LONGER_ID_CASE = "the t1-orchestrator-clean route drops the dead leg"
+LITE_ONLY_CASE = "a case naming only the lite flash model"
+ZERO_TOKEN_CASE = "✓ ✗ ✗"
+COMMA_CASE = "✓ ✗, ✗"
+
+SH_TAB_TEXT = '''\
+if it "the tab-strip case"; then
+    cat <<-EOS
+\tif it "phantom inside the tab heredoc"; then
+\tdescribe "phantom group"
+\tEOS
+    assert_eq "x" "muse-spark"
+fi
+
+if it "the plain case after it"; then
+    assert_eq "y" "y"
+fi
+'''
+
+SH_QUOTED_TEXT = '''\
+if it "the quoted-delimiter case"; then
+    cat >"$f" <<"X"
+if it "phantom inside the quoted heredoc"; then
+describe "phantom group"
+X
+    assert_eq "y" "muse-spark"
+fi
+
+if it "the plain case after it"; then
+    assert_eq "z" "z"
+fi
+'''
+
+SH_READ_TEXT = '''\
+if it "the case that reads from a here-string"; then
+    read -r a b <<<"$out"
+    assert_eq "z" "muse-spark"
+fi
+'''
+
+PS_TEXT = '''\
+Test-Case 'the interpolated here-string case' {
+    $t = @"
+Test-Case 'phantom inside' {
+    Pass
+}
+Describe-Group 'phantom group'
+"@
+    Assert-Equal $t 'muse-spark'
+    Pass
+}
+
+Test-Case 'the literal here-string case' {
+    $t = @'
+"@ cannot close an @' here-string
+Test-Case 'phantom inside' {
+'@
+    Assert-Equal $t 'opus-4-6'
+    Pass
+}
+'''
+
+PS_FALSE_OPENER_TEXT = '''\
+Test-Case 'the case that writes a trailing at sign' {
+    Write-Host 'ends with an at @'
+    Pass
+}
+
+Test-Case 'the case that must still be found' {
+    Assert-Equal $t 'muse-spark'
+    Pass
+}
 '''
 
 MODELS = {"muse-spark": {"id": "muse-spark", "context_advertised": 1048576},
@@ -220,6 +340,70 @@ class FixtureTests(unittest.TestCase):
         terms = filter_terms(result.stdout)
         self.assertTrue(any(t in "the auto route is a strategy, not a combo"
                             for t in terms), result.stdout)
+
+    def test_a_heredoc_body_never_ends_the_shell_case_that_contains_it(self):
+        # Review F1: the `if it "phantom" ...` line is text written into a scratch
+        # file. Before the fix it ended the case above it, so the mention after the
+        # closing delimiter was credited to the phantom instead.
+        hit = affected_in("sh", self.root, ["opus-4-6"])
+        self.assertIn(HEREDOC_SH_CASE, hit)
+        self.assertNotIn(PHANTOM_SH_CASE, hit)
+        terms = filter_terms(self.tool("opus-4-6", "--format", "filter").stdout)
+        self.assertTrue(any(t in HEREDOC_SH_CASE for t in terms),
+                        "filter %r cannot select %r" % (terms, HEREDOC_SH_CASE))
+
+    def test_a_here_string_body_never_ends_the_pester_case_that_contains_it(self):
+        hit = affected_in("ps1", self.root, ["SambaNova"])
+        self.assertIn(HEREDOC_PS_CASE, hit)
+        self.assertNotIn(PHANTOM_PS_CASE, hit)
+        terms = filter_terms(self.tool("SambaNova", "--format", "filter").stdout)
+        self.assertTrue(any(t.lower() in HEREDOC_PS_CASE.lower() for t in terms),
+                        "filter %r cannot select %r" % (terms, HEREDOC_PS_CASE))
+
+    def test_a_dashed_id_does_not_select_a_block_naming_a_longer_id(self):
+        # Review F2 / Haiku: \b treats the `-` of t1-orchestrator-clean as a
+        # boundary, so querying the short id also selected the -clean block.
+        hit = affected_in("sh", self.root, ["t1-orchestrator"])
+        self.assertIn("route t1-orchestrator plans three legs", hit)
+        self.assertNotIn(LONGER_ID_CASE, hit)
+
+    def test_an_id_does_not_select_a_block_naming_an_id_with_a_dashed_suffix(self):
+        # Querying the short id finds nothing; querying the id the block actually
+        # names finds it. That is the whole of the -clean complaint (review F2).
+        self.assertEqual(affected_in("sh", self.root, ["gemini-3.8-flash"]), [])
+        self.assertIn(LITE_ONLY_CASE,
+                      affected_in("sh", self.root, ["gemini-3.8-flash-lite"]))
+
+    def test_id_pattern_boundaries_reject_a_longer_id_and_accept_a_derived_name(self):
+        short = at.id_pattern("t1-orchestrator")
+        self.assertIsNone(short.search("t1-orchestrator-clean"))
+        self.assertIsNone(short.search("t1-orchestrator-paid's"))
+        self.assertIsNotNone(short.search("the t1-orchestrator route"))
+        self.assertIsNotNone(short.search('"t1-orchestrator"'))
+        # The other direction is a miss, not over-inclusion: `omniroute-…json` is
+        # the profile this route generates, and a leading `-` or a trailing `.` is
+        # not part of the id.
+        self.assertIsNotNone(short.search("omniroute-t1-orchestrator.json"))
+        flash = at.id_pattern("gemini-3.8-flash")
+        self.assertIsNone(flash.search("gemini-3.8-flash-lite"))
+        self.assertIsNotNone(flash.search("gemini-3.8-flash"))
+
+    def test_a_name_with_no_word_characters_falls_back_to_the_whole_name(self):
+        # Review F2 (Sonnet): a name TOKEN cannot split yields no term at all, so
+        # the case was silently unreachable. The whole name is the only term left.
+        result = self.tool("zenith-route", "--format", "filter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        terms = filter_terms(result.stdout)
+        self.assertIn(ZERO_TOKEN_CASE, terms)
+
+    def test_a_comma_in_a_wordless_name_is_reported_on_stderr_and_still_exits_zero(self):
+        result = self.tool("zenith-route", "--format", "filter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        terms = filter_terms(result.stdout)
+        self.assertFalse(any(t in COMMA_CASE for t in terms),
+                         "a comma-bearing name cannot be a --filter term: %r" % terms)
+        self.assertIn("unfilterable", result.stderr.lower(), result.stderr)
+        self.assertIn(COMMA_CASE, result.stderr)
 
     def test_a_pester_case_is_hit_by_the_registry_spelling_of_a_provider(self):
         # The registry spells the provider "SambaNova"; the suite says "samba"
@@ -354,12 +538,73 @@ class RealRepoTests(unittest.TestCase):
                                 "real %s case %r is not reachable by %r"
                                 % (t.runner, t.name, terms))
 
+    def test_a_boundary_tightening_keeps_the_case_naming_a_profile_the_route_makes(self):
+        # tests/linux/34-ai-services.sh names `omniroute-t1-orchestrator`: the
+        # profile file this route generates. A boundary that also rejected a
+        # leading `-` would hide these cases from a flip of the very route they
+        # cover - a miss, which the tool's own contract does not allow.
+        hit = affected_in("sh", ROOT, ["t1-orchestrator"])
+        self.assertIn("svc: profile sync pushes the tiers into a running app, "
+                      "idempotently and capped", hit)
+        self.assertIn("svc: profile push re-sends a profile whose key was rotated", hit)
+
+    def test_a_boundary_tightening_drops_only_the_case_naming_a_longer_id(self):
+        # This one mentions `t1-orchestrator-clean`, a different route, in a comment
+        # and nothing else: reviewing it belongs to a change of that id (review F2).
+        hit = affected_in("sh", ROOT, ["t1-orchestrator"])
+        self.assertNotIn("apply sets the resilience deadline and the fast-skip breaker", hit)
+
     def test_pytest_nodes_found_in_the_real_repo_are_valid_files(self):
         result = run_tool(["registry", "--format", "pytest"])
         nodes = result.stdout.split()
         for node in nodes:
             path = node.split("::")[0]
             self.assertTrue((ROOT / path).is_file(), "node id points at no file: %s" % node)
+
+
+class RegionSyntaxTests(unittest.TestCase):
+    """regions() must read a heredoc / here-string body as data (review F1).
+
+    The suites write whole fake scripts into scratch files with `cat <<EOS`, and
+    PowerShell carries them in `@' … '@` here-strings. Those lines are text, so a
+    header-shaped line in one (`if it "…"`, `Test-Case '…'`) or a `describe` must
+    neither become a case of its own nor cut the body of the case that contains it.
+    """
+
+    def blocks(self, text, runner):
+        header, group = ((at.SH_HEADER, at.SH_GROUP) if runner == "sh"
+                         else (at.PS_HEADER, at.PS_GROUP))
+        return {name: body for name, line, body in at.regions(text, header, group, runner)}
+
+    def test_a_tab_strip_heredoc_body_neither_opens_a_case_nor_closes_the_real_one(self):
+        blocks = self.blocks(SH_TAB_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the tab-strip case", "the plain case after it"])
+        self.assertIn("muse-spark", blocks["the tab-strip case"])
+
+    def test_a_quoted_heredoc_delimiter_is_matched_as_written(self):
+        blocks = self.blocks(SH_QUOTED_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the quoted-delimiter case", "the plain case after it"])
+        self.assertIn("muse-spark", blocks["the quoted-delimiter case"])
+
+    def test_a_here_string_operator_does_not_open_a_heredoc(self):
+        blocks = self.blocks(SH_READ_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the case that reads from a here-string"])
+        self.assertIn("muse-spark", blocks["the case that reads from a here-string"])
+
+    def test_an_interpolating_here_string_hides_its_fake_case(self):
+        blocks = self.blocks(PS_TEXT, "ps1")
+        self.assertEqual(list(blocks), ["the interpolated here-string case",
+                                        "the literal here-string case"])
+        self.assertIn("muse-spark", blocks["the interpolated here-string case"])
+        self.assertIn("opus-4-6", blocks["the literal here-string case"])
+
+    def test_a_string_that_only_ends_on_an_at_sign_is_not_a_here_string(self):
+        # `'ends with an at @'` closes a single-quoted string: the apostrophe ends
+        # it, it does not open a here-string.
+        blocks = self.blocks(PS_FALSE_OPENER_TEXT, "ps1")
+        self.assertEqual(list(blocks), ["the case that writes a trailing at sign",
+                                         "the case that must still be found"])
+        self.assertIn("muse-spark", blocks["the case that must still be found"])
 
 
 if __name__ == "__main__":
