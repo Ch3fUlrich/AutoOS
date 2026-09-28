@@ -87,11 +87,40 @@ AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
 # and runs a shell command unattended in 25 s with bypass_permissions.
 QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
 
+# KEYDENY3g item 3: a leaf that can spawn hands its work to a child carrying none
+# of the leaf's fences, so every client gets an answer — either the spawner
+# renders that CLI's own deny, or the client row says `subagents: False` and the
+# CLI is documented as having nothing to deny. opencode is neither: its gate is
+# the config overlay (spawn_gate_rules), not an argv flag.
+# Flag names verified against each CLI's --help on this host 2026-09-28:
+#   claude  --disallowedTools, --disallowed-tools <tools...>
+#   qoder   --disallowed-tools <tool>
+#   qwen    --exclude-tools  (array)
+# The *values* are tool-name patterns, and a pattern that names no tool denies
+# nothing rather than erroring, so each CLI's known spellings all go in: an extra
+# spelling is inert, a missing one is the gap.
+LEAF_SPAWN_DENY = {
+    "claude": ("--disallowed-tools", "Task", "Agent"),
+    "qoder": ("--disallowed-tools", "Agent", "Task"),
+    "qwen": ("--exclude-tools", "task", "agent", "subagent"),
+}
+
+
+def leaf_spawn_deny(client: "Client") -> tuple:
+    """The argv that denies this client's sub-agent spawn, () when it has none."""
+    return LEAF_SPAWN_DENY.get(client.name, ())
+
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
-                  model: str | None = None, joinable: str | None = None) -> list:
-    """The argv for one headless task. opencode is built by autoos-agent.py itself."""
+                  model: str | None = None, joinable: str | None = None,
+                  deny_spawn: bool = False) -> list:
+    """The argv for one headless task. opencode is built by autoos-agent.py itself.
+
+    `deny_spawn` is the leaf gate: it only ever applies to a run that wears a leaf
+    role, because tier 1 and tier 2 are the tiers that must be able to spawn.
+    """
     mode = client.modes.get(level, [])
+    deny = list(leaf_spawn_deny(client)) if deny_spawn else []
     if client.name == "claude":
         if joinable:
             # No user-scope MCP servers: user-scope graphify started one docker
@@ -99,23 +128,23 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
             # variadic - --name after it keeps the prompt from being read as a path.
             return (["claude", "--bg", "--remote-control", joinable, "--strict-mcp-config",
                      "--mcp-config", '{"mcpServers":{}}', "--name", joinable] + mode +
-                    ([] if not model else ["--model", model]) + [task])
-        return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
+                    ([] if not model else ["--model", model]) + deny + [task])
+        return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + deny + [task]
     if client.name == "codex":
-        inner = ["exec"] + mode + ["--skip-git-repo-check", task]
+        inner = ["exec"] + mode + ["--skip-git-repo-check"] + deny + [task]
     elif client.name == "qoder":
-        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + [task]
+        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + deny + [task]
     elif client.name == "agy":
         # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
         # "--model" as the -p prompt when -p comes first, so the model goes
         # BEFORE -p. Working form measured: `agy --model <m> -p <task>`.
-        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p", task]
+        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p"] + deny + [task]
     elif client.name == "gemini":
         # Headless gemini exits 55 in a folder it does not trust (live
         # 2026-09-25); --skip-trust trusts the spawn cwd for this session only.
-        inner = ["--skip-trust"] + mode + ["-p", task]
+        inner = ["--skip-trust"] + mode + deny + ["-p", task]
     else:  # qwen
-        inner = mode + ["-p", task]
+        inner = mode + deny + ["-p", task]
     return ["omniroute", "run", client.name, "--model", model or combo,
             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] + inner
 

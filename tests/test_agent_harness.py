@@ -1147,5 +1147,67 @@ class OpenhandsTests(unittest.TestCase):
             self.assertFalse(openhands_dir.exists())
 
 
+class FixtureSpawnGateObjectTests(unittest.TestCase):
+    """KEYDENY3g item 5: the checked-in expected document is the permission
+    object the render produces — {task, subagent, bash} and one verdict each."""
+
+    def test_the_fixture_names_every_spawn_gate_spelling(self):
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        for name, role in harness_data()["roles"].items():
+            permission = doc["agent"][name]["permission"]
+            self.assertTrue(set(module_gates()) <= set(permission), name)
+            self.assertIn("bash", permission, name)
+            expected = "allow" if role["spawn"] else "deny"
+            for gate in module_gates():
+                self.assertEqual(permission[gate], expected, "%s.%s" % (name, gate))
+
+    def test_the_render_and_the_fixture_agree_on_the_leaf_gate(self):
+        # The fixture is not a fossil: what the generator renders for a leaf is
+        # what the file says, or the drift is caught here rather than in a run.
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        harness = harness_data()
+        leaves = [n for n, r in harness["roles"].items() if r["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            self.assertEqual(doc["agent"][name]["permission"]["subagent"], "deny")
+            self.assertEqual(doc["agent"][name]["permission"]["task"], "deny")
+
+
+class IgnoredKeyFilesTests(unittest.TestCase):
+    """KEYDENY3g item 6: the premise every isolation rule rests on, checked with
+    git's own two answers — the key file is ignored, and nothing like it is
+    tracked. Fakes only; no real key file is opened by this suite."""
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", str(ROOT)] + list(args),
+                              capture_output=True, text=True)
+
+    def test_the_key_file_and_env_patterns_are_git_ignored(self):
+        for path in ("configuration/api-keys.yml", ".env", ".env.local",
+                     ".env.production"):
+            checked = self._git("check-ignore", "-q", "--no-index", path)
+            self.assertEqual(checked.returncode, 0,
+                             "%s is not ignored: %s" % (path, checked.stderr))
+
+    def test_no_key_file_is_tracked(self):
+        listed = self._git("ls-files", "-z")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        tracked = [p for p in listed.stdout.split("\0") if p]
+        offenders = [p for p in tracked
+                     if fnmatch.fnmatch(p, "configuration/api-keys.yml")
+                     or fnmatch.fnmatch(p, "*/.env") or fnmatch.fnmatch(p, "*/.env.*")
+                     or fnmatch.fnmatch(p, ".env") or fnmatch.fnmatch(p, ".env.*")]
+        # .env.example and the api-keys template are the sanctioned opposites.
+        offenders = [p for p in offenders if not p.endswith(".example")]
+        self.assertEqual(offenders, [], offenders)
+
+    def test_the_template_opposites_are_tracked(self):
+        # The ignore rule is a secret rule, not a rule that hides the templates
+        # an operator is meant to copy.
+        for path in ("configuration/api-keys.example.yml",
+                     "configuration/herdr-sessions/.env.example"):
+            self.assertEqual(self._git("ls-files", path).stdout.strip(), path)
+
+
 if __name__ == "__main__":
     unittest.main()

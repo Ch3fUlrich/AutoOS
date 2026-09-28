@@ -45,6 +45,20 @@ def load_agent():
     return module
 
 
+def allow_in_place(case, agent):
+    """Neutralise the KEYDENY3g isolation gate for a test of something else.
+
+    These suites drive cmd_run with a synthetic tier-2 route to reach an rc that
+    has nothing to do with where the worker runs (signin probes, exit-code
+    classification, free-model fallthrough, worker records). The gate refuses
+    that run before it gets there. The gate is tested by
+    LeafIsolationMandatoryTests / McpIsolateForceTests, which call it for real.
+    """
+    patch = mock.patch.object(agent, "leaf_isolation_refusal", lambda *a, **k: None)
+    patch.start()
+    case.addCleanup(patch.stop)
+
+
 # Every cmd_run writes a worker record (ps). No test may write into the host's
 # real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
 # whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
@@ -865,7 +879,10 @@ class SignInProbeTests(unittest.TestCase):
     def test_run_refuses_a_signed_out_agy_fast_and_never_starts_the_task(self):
         d, env = self.stub(self.SIGNED_OUT)
         start = time.time()
-        r = run_agent("run", "--client", "agy", "Reply with exactly: ack", env=env)
+        # --tier 1 because this test is about the signin probe, and KEYDENY3g
+        # refuses a spawned tier in place long before the probe is reached.
+        r = run_agent("run", "--client", "agy", "--tier", "1",
+                      "Reply with exactly: ack", env=env)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("agy is installed but not signed in", r.stderr)
         self.assertIn("Please sign in", r.stderr)
@@ -874,7 +891,9 @@ class SignInProbeTests(unittest.TestCase):
 
     def test_run_goes_ahead_when_agy_is_signed_in(self):
         d, env = self.stub(self.SIGNED_IN)
-        r = run_agent("run", "--client", "agy", "t", env=env)
+        # tier 1 so the isolation gate (a spawned tier never runs in place) is
+        # not what this test is answering; it is about the argv the client sees.
+        r = run_agent("run", "--client", "agy", "--tier", "1", "t", env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # AGYFIX item 1+2 (measured 2026-09-27): the working form is
         # `agy --model <m> -p <task>`, and with no caller model the spawner
@@ -3028,6 +3047,7 @@ class HeadlessRefusalTests(unittest.TestCase):
 
     def setUp(self):
         self.cli = load_agent()
+        allow_in_place(self, self.cli)
 
     def test_the_agy_refusal_is_recognised_case_insensitively(self):
         for tail in (self.AGY_REFUSAL, "JETSKI: HEADLESS MODE CANNOT PROMPT",
@@ -3071,7 +3091,9 @@ class HeadlessRefusalTests(unittest.TestCase):
         os.chmod(path, 0o755)
         env = clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
                         AUTOOS_STATE_DIR=d)
-        r = run_agent("run", "--client", "agy", "t", env=env)
+        # --tier 1: this test answers "what rc does a headless refusal get", and
+        # KEYDENY3g refuses a spawned tier in place long before the client runs.
+        r = run_agent("run", "--client", "agy", "--tier", "1", "t", env=env)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("autoos-agent: HEADLESS-REFUSAL:", r.stderr)
         self.assertIn("no output produced", r.stderr)
@@ -3533,6 +3555,7 @@ class RawTailClassificationTests(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        allow_in_place(self, self.agent)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
@@ -3963,6 +3986,7 @@ class RouteCliTests(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        allow_in_place(self, self.agent)
 
     def now(self):
         return datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
@@ -5913,7 +5937,10 @@ class LeakStrictnessTests(unittest.TestCase):
         # like a bug that only old leftovers have. Any worktree of the parent's
         # .git is inside the fence - live, stale, or one the worker adds itself.
         doc = self.agent.parent_leak.__doc__
-        self.assertIn("ANY\n    worktree the sandboxed worker can reach", doc)
+        # Whitespace-insensitive: Python 3.13 dedents a docstring when it stores
+        # it and 3.12 does not, so the line break's indentation is the
+        # interpreter's, not the source's, and this assertion is about the words.
+        self.assertRegex(doc, r"carried by ANY\s+worktree the sandboxed worker")
         self.assertIn("live one it did not make and a", doc)
 
     def sibling_worktree(self, branch, existing=False):
@@ -6161,6 +6188,7 @@ class FreeModelFallthroughTests(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        allow_in_place(self, self.agent)
 
     def _run(self, stops, clock=None, policy=None, **args_over):
         over = {"free": True, "free_model": FREE_MODELS[1], "isolate": True}
@@ -6476,6 +6504,7 @@ class FreeConcurrencyCapTests(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        allow_in_place(self, self.agent)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.workers = os.path.join(self.tmp, "workers")
@@ -6847,6 +6876,7 @@ class _WorkerRecordBase(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        allow_in_place(self, self.agent)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.workers = os.path.join(self.tmp, "workers")
@@ -9213,7 +9243,7 @@ class LeafIsolationMandatoryTests(unittest.TestCase):
     def test_a_leaf_tier_without_isolate_is_refused(self):
         # The reason and the fix both name themselves: an operator reading a
         # refusal must not have to guess why the pattern fence is not enough.
-        for tier in self.cli.LEAF_TIERS:
+        for tier in self.cli.ISOLATE_TIERS:
             msg = self.cli.leaf_isolation_refusal(tier, isolate=False, client="opencode")
             self.assertIsNotNone(msg, "tier %s may run in place" % tier)
             self.assertIn("--isolate", msg)
@@ -9242,21 +9272,60 @@ class LeafIsolationMandatoryTests(unittest.TestCase):
         rc, text = self.dispatch(isolate=False, tier=1, dry_run=False)
         self.assertNotIn("cannot run in the caller's checkout", text)
 
-    def test_a_spawning_tier_may_still_run_in_place(self):
-        # The scope of the mandate, pinned: a leaf is a role that never spawns
-        # (catalog `leaf: true` = tier 3). Tier 2 is the suborchestrator, and the
-        # skill documents `run "<task>"` (an empty card is t2-worker) in a lane
-        # the operator owns — refusing it would break the documented flow to buy
-        # a control the operator's own session already has. What remains open is
-        # in the fence comment (lib/agent_harness.py): tier 2's own pattern hole,
-        # and the native t3 subagent it can launch into that cwd.
-        self.assertNotIn(2, self.cli.LEAF_TIERS)
-        rc, text = self.dispatch(isolate=False, tier=2, dry_run=True)
+    def test_every_spawned_tier_is_refused_in_place(self):
+        # KEYDENY3g policy decision (L1-routing): every worker spawned at tier 2
+        # or 3 runs in an isolated clone; only tier 1 (role=orchestrate) runs in
+        # place. The tier-2 hole KEYDENY3b recorded — a t2 in the caller's
+        # checkout greps an ignored key file and hands its bytes to a native t3
+        # child — is closed by the directory, not by the pattern fence.
+        self.assertEqual(set(self.cli.ISOLATE_TIERS), {2, 3})
+        self.assertFalse(hasattr(self.cli, "LEAF_TIERS"))
+        for tier in self.cli.ISOLATE_TIERS:
+            rc, text = self.dispatch(isolate=False, tier=tier, dry_run=False)
+            self.assertEqual(rc, 2, "tier %s ran in place" % tier)
+            self.assertIn("--isolate", text)
+            self.assertIn("isolated clone", text)
+
+    def test_a_tier_2_run_with_isolate_is_not_refused(self):
+        rc, text = self.dispatch(isolate=True, tier=2, dry_run=True)
         self.assertEqual(rc, 0, text)
         self.assertNotIn("would be refused", text)
 
+    def test_the_refusal_is_keyed_on_the_leaf_flag_not_only_the_tier(self):
+        # The role's own `leaf: true` (catalog/agent-harness.json) refuses on its
+        # own, and a tier that is not in ISOLATE_TIERS is refused when the role
+        # it runs as is a leaf — the key is "leaf OR isolated tier", not tier
+        # alone.
+        self.assertIsNotNone(self.cli.leaf_isolation_refusal(
+            1, isolate=False, client="opencode", leaf=True))
+        self.assertIsNone(self.cli.leaf_isolation_refusal(
+            1, isolate=False, client="opencode", leaf=False))
+        self.assertIsNone(self.cli.leaf_isolation_refusal(
+            2, isolate=True, client="opencode", leaf=True))
+        # The catalog is the source of the flag, and it says what the code reads.
+        self.assertTrue(self.cli.harness_role_is_leaf("leaf-reviewer"))
+        self.assertTrue(self.cli.harness_role_is_leaf("leaf-implementer"))
+        self.assertFalse(self.cli.harness_role_is_leaf("suborchestrator"))
+        self.assertFalse(self.cli.harness_role_is_leaf("orchestrator"))
+        self.assertTrue(self.cli.harness_role_is_leaf(
+            self.cli.role_for_run(3, None)))
+        self.assertTrue(self.cli.harness_role_is_leaf(
+            self.cli.role_for_run(2, {"role": "review"})))
+
+    def test_a_review_card_makes_the_run_a_leaf_at_any_tier(self):
+        # role=review is a leaf whatever tier the route landed on, and the CLI
+        # derives the flag from the route's own card rather than trusting a call
+        # site to pass it.
+        self.assertTrue(self.cli.role_is_leaf(1, {"role": "review"}))
+        self.assertTrue(self.cli.role_is_leaf(3, None))
+        self.assertFalse(self.cli.role_is_leaf(1, {"role": "orchestrate"}))
+        self.assertFalse(self.cli.role_is_leaf(2, {"role": "implement"}))
+        leaf = self.cli.role_is_leaf(2, {"role": "review"})
+        self.assertIsNotNone(self.cli.leaf_isolation_refusal(
+            2, isolate=False, client="opencode", leaf=leaf))
+
     def test_an_isolate_leaf_run_is_planned(self):
-        for tier in self.cli.LEAF_TIERS:
+        for tier in self.cli.ISOLATE_TIERS:
             plan = self.plan(tier=tier, isolate=True)
             self.assertIsNotNone(plan["sandbox"], "tier %s" % tier)
 
@@ -9279,6 +9348,218 @@ class LeafIsolationMandatoryTests(unittest.TestCase):
             self.assertTrue(client.headless, "%s cannot be spawned on a cwd" % name)
             self.assertNotIn(name, self.cli.NO_ISOLATE_CLIENTS,
                              "%s may run a leaf without isolation" % name)
+
+
+class McpIsolateForceTests(unittest.TestCase):
+    """KEYDENY3g item 2: an MCP spawn cannot put a tier-2/3 worker in the
+    caller's checkout — the server applies the CLI's own verdict (shared
+    helper, not a copy of it) by forcing --isolate."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN",
+                                                   "AUTOOS_AGENT_DEPTH",
+                                                   "AUTOOS_AGENT_MAX_DEPTH")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        os.environ.pop("AUTOOS_AGENT_DEPTH", None)
+        os.environ.pop("AUTOOS_AGENT_MAX_DEPTH", None)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def wait_done(self, run_id):
+        for _ in range(150):
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("working", "submitted"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
+
+    def job(self, out):
+        with open(os.path.join(out["dir"], "job.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_an_mcp_spawn_without_isolate_is_forced_into_a_clone(self):
+        for tier in (2, 3):
+            out = mcp_server.spawn({"task": "t", "tier": tier, "isolate": False,
+                                    "cwd": str(ROOT)})
+            self.assertNotIn("error", out, tier)
+            argv = self.job(out)["argv"]
+            self.assertIn("--isolate", argv, "tier %s would run in place" % tier)
+            self.wait_done(out["id"])
+            text = mcp_server.result(out["id"])["text"]
+            self.assertIn("git clone --local", text)
+            self.assertNotIn("would be refused", text)
+
+    def test_the_forced_clone_is_visible_in_the_spawn_answer(self):
+        # A caller that asked for nothing must still see that it got a clone:
+        # the force is reported in the route, not applied silently.
+        out = mcp_server.spawn({"task": "t", "tier": 3, "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        self.assertTrue(out["route"].get("forced_isolate"))
+        self.wait_done(out["id"])
+        argv, route = mcp_server.build_argv({"task": "t", "tier": 2})
+        self.assertIn("--isolate", argv)
+        self.assertTrue(route["forced_isolate"])
+        # The verdict itself is the CLI's helper — the server holds no tiers.
+        self.assertIsNotNone(self.cli_leaf_refusal())
+        argv1, route1 = mcp_server.build_argv({"task": "t", "tier": 1})
+        self.assertNotIn("forced_isolate", route1)
+
+    def cli_leaf_refusal(self):
+        return mcp_server.agent.leaf_isolation_refusal(
+            3, False, "opencode", leaf=mcp_server.agent.role_is_leaf(3, None))
+
+    def test_a_tier_1_card_route_is_not_forced(self):
+        argv, route = mcp_server.build_argv(
+            {"task": "t", "card": {"role": "orchestrate", "complexity": "hard"}})
+        self.assertNotIn("--isolate", argv)
+        self.assertNotIn("forced_isolate", route)
+
+    def test_a_card_route_forces_isolate_too(self):
+        out = mcp_server.spawn({"task": "t", "card": {"role": "review"},
+                                 "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        self.assertIn("--isolate", self.job(out)["argv"])
+
+    def test_tier_1_is_the_only_leg_that_may_stay_in_place(self):
+        out = mcp_server.spawn({"task": "t", "tier": 1, "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        job = self.job(out)
+        self.assertNotIn("--isolate", job["argv"])
+        self.assertEqual(job["cwd"], str(ROOT))
+
+    def test_the_force_comes_from_the_shared_helper_not_a_copy(self):
+        # The MCP server holds no second rule table: it asks the CLI's helper.
+        src = (ROOT / "tools" / "autoos_agent_mcp.py").read_text(encoding="utf-8")
+        self.assertIn("leaf_isolation_refusal", src)
+        self.assertNotIn("ISOLATE_TIERS = ", src)
+
+
+class IsolateSourceTests(unittest.TestCase):
+    """KEYDENY3g item 7: an --isolate clone is forked from the caller's
+    checkout (its cwd), not from the checkout the spawner script lives in."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c",
+                               "user.email=t@example.invalid"] + list(args),
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def two_head_repos(self):
+        """A main checkout and a linked worktree on branch `side`, their heads
+        deliberately different: a clone that ignored the cwd is detectable."""
+        main = os.path.join(self.tmp, "main")
+        os.makedirs(main)
+        self.git("init", "-q", main)
+        with open(os.path.join(main, "a.txt"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        self.git("-C", main, "add", "a.txt")
+        self.git("-C", main, "commit", "-q", "-m", "init")
+        base_branch = self.git("-C", main, "rev-parse", "--abbrev-ref", "HEAD")
+        self.git("-C", main, "checkout", "-q", "-b", "side")
+        with open(os.path.join(main, "side.txt"), "w", encoding="utf-8") as fh:
+            fh.write("side work\n")
+        self.git("-C", main, "add", "side.txt")
+        self.git("-C", main, "commit", "-q", "-m", "side")
+        self.git("-C", main, "checkout", "-q", base_branch)
+        worktree = os.path.join(self.tmp, "wt")
+        self.git("-C", main, "worktree", "add", "-q", "--detach", worktree, "side")
+        return main, worktree
+
+    def test_isolate_source_resolves_the_callers_repo(self):
+        main, worktree = self.two_head_repos()
+        self.assertEqual(self.cli.isolate_source(worktree), worktree)
+        self.assertEqual(self.cli.isolate_source(main), main)
+        # A directory that is not a repo at all falls back to the spawner's own.
+        not_a_repo = os.path.join(self.tmp, "plain")
+        os.makedirs(not_a_repo)
+        self.assertEqual(self.cli.isolate_source(not_a_repo), self.cli.ROOT)
+
+    def test_a_clone_from_the_worktree_lands_on_the_worktrees_head(self):
+        main, worktree = self.two_head_repos()
+        heads_apart = self.git("-C", main, "rev-parse", "HEAD") != \
+            self.git("-C", worktree, "rev-parse", "HEAD")
+        self.assertTrue(heads_apart, "the fixture does not distinguish the two")
+        dest = os.path.join(self.tmp, "sandbox")
+        base = self.cli.isolate_clone(self.cli.isolate_source(worktree), dest,
+                                      "agent/keydeny3g")
+        self.assertEqual(base, self.git("-C", worktree, "rev-parse", "HEAD"))
+        self.assertNotEqual(base, self.git("-C", main, "rev-parse", "HEAD"))
+        # the side branch's file is there, so the sandbox really started on X
+        self.assertTrue(os.path.isfile(os.path.join(dest, "side.txt")))
+
+    def test_an_mcp_isolated_spawn_clones_the_cwd_not_the_servers_repo(self):
+        # The MCP runner starts the CLI with cwd=job["cwd"], and the CLI forks
+        # its clone from its own cwd: so the dry-run of a spawn whose cwd is the
+        # worktree names the worktree, never the server's checkout.
+        main, worktree = self.two_head_repos()
+        old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                              "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        try:
+            out = mcp_server.spawn({"task": "t", "tier": 3, "cwd": worktree})
+            self.assertNotIn("error", out)
+            for _ in range(150):
+                st = mcp_server.status(out["id"])
+                if st["state"] not in ("working", "submitted"):
+                    break
+                time.sleep(0.1)
+            text = mcp_server.result(out["id"])["text"]
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertIn("git clone --local %s" % worktree, text)
+        self.assertNotIn("git clone --local %s" % str(ROOT), text)
+
+
+class ClientSpawnGateTests(unittest.TestCase):
+    """KEYDENY3g item 3: no client may leave a leaf able to spawn silently."""
+
+    def test_every_client_has_an_answer_for_the_leaf_spawn_gate(self):
+        # Either the spawner renders the CLI's own deny for a leaf, or the client
+        # row says it cannot spawn. Anything else is a silent gap.
+        for name, client in clients.CLIENTS.items():
+            rendered = name in clients.LEAF_SPAWN_DENY or name == "opencode"
+            self.assertTrue(rendered or client.subagents is False,
+                            "%s can spawn and no gate is rendered for it" % name)
+
+    def test_the_rows_that_claim_no_sub_agents_are_the_ungated_ones(self):
+        for name in ("gemini", "codex", "agy"):
+            self.assertIs(clients.CLIENTS[name].subagents, False, name)
+            self.assertNotIn(name, clients.LEAF_SPAWN_DENY)
+
+    def test_the_deny_is_a_supported_flag_of_each_client(self):
+        # The flag must be one the CLI documents; the tool-name spellings are
+        # patterns, so an unknown one denies nothing rather than erroring.
+        self.assertEqual(clients.LEAF_SPAWN_DENY["claude"][0], "--disallowed-tools")
+        self.assertEqual(clients.LEAF_SPAWN_DENY["qoder"][0], "--disallowed-tools")
+        self.assertEqual(clients.LEAF_SPAWN_DENY["qwen"][0], "--exclude-tools")
+
+    def test_a_leaf_command_carries_the_gate_and_a_spawner_one_does_not(self):
+        for name in ("claude", "qoder", "qwen"):
+            client = clients.CLIENTS[name]
+            leaf = clients.build_command(client, "t", None, "edit",
+                                         deny_spawn=True)
+            plain = clients.build_command(client, "t", None, "edit",
+                                          deny_spawn=False)
+            gate = clients.LEAF_SPAWN_DENY[name][0]
+            self.assertIn(gate, leaf, name)
+            self.assertNotIn(gate, plain, name)
+            self.assertNotIn(gate, plain, name)
 
 
 class LeafSpawnGateOverlayTests(unittest.TestCase):

@@ -5,6 +5,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
+
+Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated
+clone; only tier 1 (`role=orchestrate`, the operator's own session) may run in
+place. KEYDENY3b refused tier 3 and deliberately left tier 2 in the caller's
+checkout, recording the hole it left — a t2 running in place has the same
+pattern-fence gap for itself, and the native `t3-reviewer` it launches inherits
+that cwd and carries none of the fences. The directory, not the pattern, is what
+closes it.
+
+- **`tools/autoos-agent.py`**: `LEAF_TIERS = (3,)` is now `ISOLATE_TIERS = (2, 3)`,
+  and `leaf_isolation_refusal(tier, isolate, client, leaf=)` keys on the role's
+  `leaf` flag **or** the isolated tier, never on the tier number alone — a
+  `role=review` card is a leaf at any tier. The flag is read from
+  `catalog/agent-harness.json` (`harness_role_is_leaf` / `role_for_run`), so there
+  is one home for it. An in-place spawned tier exits 2 with the reason and the fix
+  named; a `--dry-run` only announces it. The qoder-writes force (the plan sets
+  `--isolate` itself) is what keeps that run legal, and the verdict is computed
+  after `build_plan` for exactly that reason.
+- **`tools/autoos_agent_mcp.py`**: `build_argv` calls the same shared helper — no
+  second rule table to drift — and **forces** `isolate` for a spawned tier rather
+  than refusing, because its caller is a headless agent that cannot retype a flag
+  and the alternative is a job that reports itself started and then exits 2. The
+  force is reported as `route.forced_isolate` in the spawn answer.
+- **`tools/autoos-agent.py` (item 7)**: an `--isolate` clone was forked from
+  `ROOT` — the checkout the *script* lives in — so an MCP isolated spawn cloned
+  the MCP server's own repo at its HEAD and every sandbox started on the wrong
+  branch while the worker ran elsewhere. New `isolate_source(cwd)` forks from the
+  caller's `git rev-parse --show-toplevel` (falling back to `ROOT` when the cwd is
+  not a repository), the containment prompt names that source, and the `--dry-run`
+  clone line prints it.
+- **`tools/autoos_clients.py`**: no client may leave a leaf able to spawn
+  silently. `LEAF_SPAWN_DENY` renders each CLI's own deny for a leaf run —
+  `claude`/`qoder` `--disallowed-tools`, `qwen` `--exclude-tools` (flag names
+  verified against each `--help` on this host; the values are tool-name patterns,
+  so every known spelling goes in and an unknown one is inert rather than an
+  error). `gemini`, `codex` and `agy` carry no gate and their rows already say
+  `subagents: False`; opencode's gate stays the config overlay. `opencode.jsonc`'s
+  agent blocks are unchanged.
+- **Tests**: `LeafIsolationMandatoryTests` re-pinned for tiers 2 and 3 plus the
+  leaf-flag keying; `McpIsolateForceTests`, `IsolateSourceTests` (a two-head repo:
+  a worktree on branch X yields a sandbox whose HEAD is X's, never the server's)
+  and `ClientSpawnGateTests` are new; `FixtureSpawnGateObjectTests` pins the
+  `{task, subagent, bash}` permission object against the checked-in fixture, and
+  `IgnoredKeyFilesTests` proves with git's own answers that
+  `configuration/api-keys.yml` and `.env*` are ignored and none of them tracked.
+  Tests of unrelated exit codes call `allow_in_place`, which neutralises only the
+  isolation gate; the two agy signin probes moved to `--tier 1` for the same
+  reason.
+- **Skill/docs**: `.agents/skills/unattended-orchestration` now shows `--isolate`
+  on every spawned-tier example and states the rule; so does `autoos-agent.py`'s
+  own usage block; `lib/agent_harness.py`'s fence comment records the hole as
+  closed.
+- **Open, recorded rather than hidden**: opencode 2.0.16's canonical action names
+  are `shell` / `subagent` / `patch` (its rename map is
+  `{bash: "shell", task: "subagent", apply_patch: "patch"}`) and `Config.Info`
+  declares `permissions` (ordered rules), not the `permission` map the harness
+  writes — the map is the legacy shape the normaliser still accepts, and the
+  spawner's overlay carries the ordered-rule form. A tier-1 run in place still has
+  the pattern hole for itself; that is the operator's own session, in a lane the
+  operator is watching.
+
 ### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
 
 `catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is

@@ -370,17 +370,18 @@ def desired_opencode(user, harness, repo_root, skills_source):
     # pattern, `grep "sk-" .` inside a checkout that holds configuration/
     # api-keys.yml matches nothing in the deny list and runs — the pattern fence
     # stops a search *named* after a key file, never a search *through* one. The
-    # guarantee that actually holds is upstream of the config: a leaf runs only
-    # in an --isolate clone (tools/autoos-agent.py LEAF_TIERS — tier 3, the
-    # catalog's leaf: true roles and t3-reviewer, is refused in place), and
-    # `git clone --local` materialises committed files only, so a git-ignored
-    # secret cannot be present in the directory it greps. Asserted by
-    # tests/test_autoos_spawner.py (the clone carries no ignored file, and the
-    # leaf run without --isolate is refused). What is NOT closed here: a
-    # spawning tier running in the caller's checkout (tier 2's documented lane
-    # use) has the same pattern hole for itself, and the native subagent it
-    # launches inherits that cwd — the gate lives in the CLI, which opencode's
-    # own spawn does not pass through.
+    # guarantee that actually holds is upstream of the config: a spawned tier runs
+    # only in an --isolate clone (tools/autoos-agent.py ISOLATE_TIERS — tiers 2 and
+    # 3, plus any role whose catalog `leaf: true` flag is set, are refused in
+    # place), and `git clone --local` materialises committed files only, so a
+    # git-ignored secret cannot be present in the directory it greps. Asserted by
+    # tests/test_autoos_spawner.py (the clone carries no ignored file, an
+    # in-place spawned tier is refused, and the MCP spawn forces the clone).
+    # What KEYDENY3g closed: KEYDENY3b left tier 2 in place, and that was the
+    # whole hole — a spawning tier in the caller's checkout has the same pattern
+    # gap for itself, and the native subagent it launches inherits that cwd,
+    # because the gate lives in the CLI, which opencode's own spawn does not pass
+    # through. The directory now answers it for every spawned tier.
     for action in ("grep", "glob"):
         permission[action] = _rebuild_read(
             permission.get(action),

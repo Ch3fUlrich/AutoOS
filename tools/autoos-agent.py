@@ -24,10 +24,12 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      approves). NOT a git worktree: opencode resolves a worktree to the main
      checkout's root, and a relative write from inside one landed in the main
      repo (live, 2026-09-24). Nothing is merged or deleted for you.
-  5. A leaf (tier 3) is refused without --isolate (KEYDENY3b): grep/glob is
-     fenced on the search *pattern*, so a leaf grepping "sk-" in a working
-     checkout walks straight through it into configuration/api-keys.yml. The
-     clone is the control that holds — an ignored file is not in it.
+  5. A spawned tier (2 or 3) is refused without --isolate (KEYDENY3b/KEYDENY3g):
+     grep/glob is fenced on the search *pattern*, so a worker grepping "sk-" in a
+     working checkout walks straight through it into
+     configuration/api-keys.yml. The clone is the control that holds — an ignored
+     file is not in it. Tier 1 (role=orchestrate) is the only tier that may still
+     run in the caller's checkout.
 
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
@@ -64,13 +66,13 @@ Usage:
     python3 tools/autoos-agent.py list
     python3 tools/autoos-agent.py run --card role=review --isolate "Review lib/linux/ui.sh"
     python3 tools/autoos-agent.py run --client qwen --card complexity=trivial --isolate "..."
-    python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
+    python3 tools/autoos-agent.py run --client claude --joinable --isolate --title d1 "..."
     python3 tools/autoos-agent.py run --tier 3 --isolate "Review lib/linux/ui.sh for quoting bugs"
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
     python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
-    python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
+    python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
     python3 tools/autoos-agent.py run --tier 3 --isolate --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
@@ -264,38 +266,91 @@ def spawn_gate_rules(tier: int) -> list:
 # KEYDENY3b item 2: grep/glob is asserted against the *pattern* the agent
 # passes, not the files it searches, so `grep "sk-" .` inside a checkout holding
 # a git-ignored api-keys.yml is unfenceable — the pattern matches nothing. The
-# guarantee instead lives in the directory a leaf runs in: an --isolate clone is
-# `git clone --local`, which materialises committed files only, so an ignored
-# secret is never present for the search to walk. A leaf therefore has no option
-# to run in the caller's checkout.
-# A leaf is a role that never spawns — catalog/agent-harness.json's `leaf: true`
-# roles (leaf-implementer, leaf-reviewer), which is tier 3 (t3-reviewer). Tier 2
-# is the suborchestrator (`spawn: true`) and its in-place run stays allowed: the
-# skill documents `run "<task>"` (an empty card is t2-worker) in a lane the
-# operator owns, and a lane's secrets are the operator's own, in a terminal the
-# operator is watching. What that leaves open — recorded rather than hidden: the
-# gate is the CLI's, so a t2 running in place can still launch a native
-# t3-reviewer subagent through opencode's own spawn, and that child inherits t2's
-# cwd. Closing it means isolating every spawned tier, which is a workflow change
-# the brief did not ask for; the pattern fence (KEYDENY3) is what covers it today.
-LEAF_TIERS = (3,)
+# guarantee instead lives in the directory a worker runs in: an --isolate clone
+# is `git clone --local`, which materialises committed files only, so an ignored
+# secret is never present for the search to walk.
+# KEYDENY3g (L1-routing policy decision): that directory is mandatory for every
+# *spawned* tier. Tier 2 was left in place by KEYDENY3b and the hole it recorded
+# is the one that matters: a t2 running in the caller's checkout greps an ignored
+# key file, and the native t3 child it launches inherits that cwd and carries
+# none of the fences. Only tier 1 (role=orchestrate) — the operator's own session,
+# in a lane the operator is watching — may still run in place.
+ISOLATE_TIERS = (2, 3)
 # A client that cannot run in a clone would have to lose grep/glob for its leaf
 # runs instead (the fence is the only control there). None today: isolation is
 # `git clone --local` plus a cwd, and every client here is a CLI started with one.
 NO_ISOLATE_CLIENTS = frozenset()
+# The harness role each tier runs as, and the card role that overrides it. The
+# `leaf` flag itself is read from catalog/agent-harness.json — one home per fact.
+HARNESS_PATH = os.path.join(ROOT, "catalog", "agent-harness.json")
+TIER_HARNESS_ROLE = {1: "orchestrator", 2: "suborchestrator", 3: "leaf-reviewer"}
+HARNESS_LEAF_CACHE = {}
 
 
-def leaf_isolation_refusal(tier, isolate: bool, client: str) -> str | None:
-    """Why this leaf run must not start where it stands, or None when it may."""
-    if not isolate and tier in LEAF_TIERS and client not in NO_ISOLATE_CLIENTS:
-        return ("tier %s is a leaf and cannot run in the caller's checkout: pass "
-                "--isolate. A leaf greps and globs the whole tree, and git-ignored "
-                "files (configuration/api-keys.yml, .env*) live in a working "
-                "checkout — the pattern fence cannot see them, because grep/glob "
-                "is matched against the search pattern, not the searched file. "
-                "An --isolate clone holds committed files only, so no ignored "
-                "secret is present." % tier)
-    return None
+def harness_role_is_leaf(role: str) -> bool:
+    """The catalog's `leaf` flag for a harness role (False when unknown)."""
+    if role not in HARNESS_LEAF_CACHE:
+        try:
+            roles = load_jsonc(HARNESS_PATH).get("roles") or {}
+        except (OSError, ValueError):
+            roles = {}
+        HARNESS_LEAF_CACHE[role] = bool((roles.get(role) or {}).get("leaf"))
+    return HARNESS_LEAF_CACHE[role]
+
+
+def role_for_run(tier, card) -> str:
+    """Which harness role this run wears. A review card is a leaf at any tier;
+    an implement card only becomes the leaf role when it routed down to tier 3."""
+    card_role = (card or {}).get("role")
+    if card_role == "review":
+        return "leaf-reviewer"
+    if card_role == "implement" and (tier or 2) >= 3:
+        return "leaf-implementer"
+    return TIER_HARNESS_ROLE.get(tier, "suborchestrator")
+
+
+def role_is_leaf(tier, card) -> bool:
+    return harness_role_is_leaf(role_for_run(tier, card))
+
+
+def leaf_isolation_refusal(tier, isolate: bool, client: str, leaf: bool = False) -> str | None:
+    """Why this run must not start where it stands, or None when it may.
+
+    Keyed on the role's leaf flag OR the tier being in ISOLATE_TIERS, never on
+    the tier number alone: a leaf role that somehow routed to tier 1 is still a
+    leaf.
+    """
+    if isolate or client in NO_ISOLATE_CLIENTS:
+        return None
+    if not (leaf or tier in ISOLATE_TIERS):
+        return None
+    who = "is a leaf role" if leaf else "is a spawned tier"
+    return ("tier %s %s and cannot run in the caller's checkout: pass --isolate "
+            "so it gets its own isolated clone. It greps and globs the whole "
+            "tree, and git-ignored files (configuration/api-keys.yml, .env*) "
+            "live in a working checkout — the pattern fence cannot see them, "
+            "because grep/glob is matched against the search pattern, not the "
+            "searched file. An --isolate clone holds committed files only, so "
+            "no ignored secret is present, and a child it spawns inherits the "
+            "clone, not your checkout." % (tier, who))
+
+
+def isolate_source(cwd: str | None = None) -> str:
+    """The repo an --isolate clone is forked from (KEYDENY3g item 7).
+
+    ROOT is where *this script* lives, which for the MCP server is its own
+    checkout — so cloning from ROOT silently started every MCP-isolated sandbox
+    on the wrong branch while the worker ran in a clone of an unrelated HEAD.
+    The caller's cwd is the truth: its toplevel, falling back to ROOT when the
+    cwd is not a repository at all (a temp dir a test planned in).
+    """
+    cwd = cwd or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ROOT
+    return top or ROOT
 
 
 def isolate_clone(root: str, path: str, branch: str) -> str:
@@ -1772,7 +1827,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
-        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
+        # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
+        # that gate denied in argv; opencode's gate is the overlay below.
+        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable,
+                                    deny_spawn=role_is_leaf(route.get("tier"),
+                                                            route.get("card")))
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
@@ -1790,7 +1849,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
             # its own .git, so opencode resolves it as its own project root.
             sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                       "branch": "agent/%s-%s-%s" % (stamp, slug, uniq)}
+                       "branch": "agent/%s-%s-%s" % (stamp, slug, uniq),
+                       # Forked from the caller's checkout, not from wherever this
+                       # script happens to live (KEYDENY3g item 7).
+                       "source": isolate_source()}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -1805,7 +1867,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # itself. Every client takes the task as its last argv
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
-        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT,
+        sandbox.setdefault("source", isolate_source())
+        cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
                                      read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if client.name == "opencode":
         # KEYDENY3b item 1: the spawn gate is re-asserted in the overlay, which
@@ -3947,13 +4010,16 @@ def cmd_run(args, cfg: dict) -> int:
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
-    # KEYDENY3b item 2: a leaf gets no option to work in the caller's checkout.
-    # Read *after* build_plan because that is where a client that always isolates
-    # (qoder writes) forces it on. The verdict is computed here and returns
-    # before any client starts; a --dry-run only announces it, because planning
-    # touches nothing and an operator previews a route before deciding to run it.
+    # KEYDENY3b item 2 / KEYDENY3g: a spawned tier gets no option to work in the
+    # caller's checkout. Read *after* build_plan because that is where a client
+    # that always isolates (qoder writes) forces it on — the force is what keeps
+    # that run legal. The verdict is computed here and returns before any client
+    # starts; a --dry-run only announces it, because planning touches nothing and
+    # an operator previews a route before deciding to run it.
     leaf_refusal = leaf_isolation_refusal(route.get("tier"), bool(args.isolate),
-                                          client.name)
+                                          client.name,
+                                          leaf=role_is_leaf(route.get("tier"),
+                                                             route.get("card")))
     # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
     # before anything is started -- a review by the author's own model family is
     # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
@@ -4007,7 +4073,9 @@ def cmd_run(args, cfg: dict) -> int:
               "post-run leak check (exit 7)." % client.name)
     if args.dry_run:
         if plan["sandbox"]:
-            print("would run: git clone --local %s %s && git switch -c %s" % (ROOT, plan["sandbox"]["path"], plan["sandbox"]["branch"]))
+            print("would run: git clone --local %s %s && git switch -c %s" % (
+                plan["sandbox"].get("source") or isolate_source(),
+                plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))
         print("cwd: %s" % plan["cwd"])
         print("env: %s" % (", ".join(env_names) or "-"))
@@ -4084,9 +4152,12 @@ def cmd_run(args, cfg: dict) -> int:
         sb = plan["sandbox"]
         # Snapshot the parent checkout before the run: a worker that writes
         # outside its clone (live 2026-09-26) must fail as a leak, not a NO-OP.
-        parent_snap = parent_snapshot()
+        # The parent is the repo the clone was forked from (the caller's cwd),
+        # not the checkout this script happens to live in (KEYDENY3g item 7).
+        source = sb.get("source") or isolate_source()
+        parent_snap = parent_snapshot(source)
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
-        isolate_clone(ROOT, sb["path"], sb["branch"])
+        isolate_clone(source, sb["path"], sb["branch"])
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
@@ -4309,7 +4380,8 @@ def cmd_run(args, cfg: dict) -> int:
             sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
             reflog=", ".join(reset_away),
             brief=plan.get("brief") or "")
-        leak = parent_leak(parent_snap, sandbox=sb["path"])
+        leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
+                           sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
@@ -4521,9 +4593,9 @@ def _parser_run(sub):
     run.add_argument("--free-model", default=DEFAULT_FREE_MODEL)
     run.add_argument("--isolate", action="store_true",
                      help="run in a private git clone on its own branch; writes outside it are "
-                          "denied. Mandatory for a leaf (tier %s): a clone holds committed files "
-                          "only, so no git-ignored key file is in the tree it greps"
-                          % ", ".join(str(t) for t in LEAF_TIERS))
+                          "denied. Mandatory for every spawned tier (%s): a clone holds "
+                          "committed files only, so no git-ignored key file is in the tree it "
+                          "greps" % ", ".join(str(t) for t in ISOLATE_TIERS))
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",

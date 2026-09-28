@@ -135,8 +135,12 @@ AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh
   in whichever form the build happens to read. And because `grep`/`glob` are
   matched against the *pattern*, `grep "sk-" .` reads a git-ignored
   `configuration/api-keys.yml` right through the fence: the control that holds is
-  the directory, so a leaf (tier 3) is refused unless `--isolate` gives it a
-  `git clone --local`, which carries committed files only. Leaf roles may list
+  the directory, so a spawned tier (2 or 3, or any role whose catalog flag is
+  `leaf: true`) is refused in place unless `--isolate` gives it a
+  `git clone --local` — forked from the caller's checkout, not from wherever the
+  spawner script lives — which carries committed files only. The MCP `spawn` tool
+  does not take the ask: it forces the clone for a spawned tier and reports
+  `forced_isolate` in the route it returns. Leaf roles may list
   `serena` and `graphify` and nothing else — an MCP server whose tools take a URL
   or a path (`playwright`, `context7`, any filesystem server) is denied whole.
 - Serena memory tools are off by design; Omnigraph + graphify are the
