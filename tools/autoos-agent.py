@@ -63,6 +63,8 @@ Usage:
     python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
     python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh for quoting bugs"
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
+    python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
+    python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
     python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -93,7 +95,7 @@ branch reflog (commit-then-reset) or moved side refs - or a tracked file outside
 before - the one exemption being a ref that is another lane's own worktree branch at both ends of the run, and an
 orchestrator that merged or fast-forwarded this parent mid-run is expected to see it: freeze the parent (skill
 R-coord-01). The shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6, 8 and 10); 8 = a provider stop
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6, 8, 10 and 11); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
 output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
 item 3, measured 2026-09-27; the track record carries failure class
@@ -101,7 +103,10 @@ item 3, measured 2026-09-27; the track record carries failure class
 deliverable is its diff), so nothing is lost); 10 = an --isolate run that exited 0 having changed
 nothing AND printed no REPORT heading (INCOMPLETE: the worker stopped mid-task, so there is no report
 to disbelieve - relaunch it, never resume, skill R-orch-06; the track record carries failure class
-"capability", like the NO-OP); the child's
+"capability", like the NO-OP); 11 = an --isolate run marked --read-only (or a card whose kind/role is
+research) that changed its sandbox anyway (READ-ONLY WRITE: changing nothing is that run's success, so an
+edit is the failure - the diff stat is printed and the track record carries failure class "capability".
+The same marked run that only reported is NOT a failure: it exits 0 with "RESEARCH: report only"); the child's
 exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
 mode and the client's accepted list);
@@ -208,18 +213,26 @@ WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
 
 
-def isolate_task_prefix(sandbox_path: str, root: str) -> str:
-    """The two lines prepended to the task text of an --isolate run.
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
+    """The lines prepended to the task text of an --isolate run.
 
     SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
     reaches for approval stops there and exits 0, so the containment line is
     paired with the one fact the worker cannot probe: nobody is answering.
+
+    Item 4 adds the third line a research run needs: an edit is not the
+    deliverable, and a worker that is never told so will helpfully make one.
     """
-    return ("Your working directory %s is your only writable checkout; "
-            "never cd, git -C or write into %s or any other path outside it.\n"
-            "The run is headless: nobody will answer questions or approve "
-            "anything - decide, commit, and report."
-            % (sandbox_path, root))
+    lines = ("Your working directory %s is your only writable checkout; "
+             "never cd, git -C or write into %s or any other path outside it.\n"
+             "The run is headless: nobody will answer questions or approve "
+             "anything - decide, commit, and report."
+             % (sandbox_path, root))
+    if read_only:
+        lines += ("\nThis run is read-only: its deliverable is its REPORT, and "
+                  "changing nothing is success - do not edit, commit or "
+                  "reorganise anything; read and report.")
+    return lines
 
 
 def load_jsonc(path: str) -> dict:
@@ -322,6 +335,12 @@ EXIT_FREE_QUEUE_TIMEOUT = 9
 # nothing"; this says "it never reported at all", and the next action is a
 # relaunch (skill R-orch-06: never resume a no-change child).
 EXIT_INCOMPLETE = 10
+# SPAWNFIX (S3) item 4: a research run is graded on its report, because an edit
+# was never the deliverable (work/L1-routing/R6RES.out and FOLD4MAP.out both
+# ended "NO-OP exit 5" for a run whose job was to read and say something). A
+# run marked read-only that changed its sandbox anyway is its own failure: the
+# report exists, the instruction was not followed.
+EXIT_READ_ONLY_WRITE = 11
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -870,6 +889,22 @@ def _card_asks_review(card: dict) -> bool:
     return card.get("kind") == "review" or card.get("role") == "review"
 
 
+def read_only_run(args, card) -> bool:
+    """True when this run's success is an unchanged sandbox (SPAWNFIX3 item 4).
+
+    Two spellings, one fact: `run --read-only` says it out loud, and a research
+    card (v2 ``kind=research``, v1 ``role=research``) asks for it by name. The
+    verdict that reads this mark is what turned R6RES and FOLD4MAP into a NO-OP:
+    a run that reads code and reports is not a run that failed to edit.
+
+    ``args`` is read with a default because the route helpers are shared with
+    subcommands that carry no run flags at all (``route``, and the hand-built
+    namespaces the tests plan with) - the same convention `args.isolate` uses.
+    """
+    return bool(getattr(args, "read_only", False)) or (
+        (card or {}).get("kind") == "research" or (card or {}).get("role") == "research")
+
+
 def review_run_refusal(review: dict | None):
     """Why an authored review run must not start yet, or None when it may.
 
@@ -1343,6 +1378,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     # resolver's bucket, reason and effort still describe the card's plan.
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
+            "read_only": read_only_run(args, card),
             "bucket": result["bucket"], "class": route_class, "resolver": True,
             "effort": result.get("effort"),
             # who reviews this card (REVROUTE item 2); plan() already walked
@@ -1412,7 +1448,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
-                "review": args.tier == 3, "review_plan": None}
+                "review": args.tier == 3, "read_only": read_only_run(args, None),
+                "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
@@ -1429,6 +1466,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["role"] == "review",
+            "read_only": read_only_run(args, card),
             # a v1 card asks for a review with role=review; author is the shared
             # field, so the same reviewer walk applies (REVROUTE item 2).
             "review_plan": review, "reviewer_note": reviewer_note}
@@ -1523,7 +1561,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # itself. Every client takes the task as its last argv
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
-        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT) + "\n" + cmd[-1]
+        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT,
+                                     read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
@@ -2575,6 +2614,19 @@ def parent_leak(snapshot, root=None, sandbox=None):
     return leaks
 
 
+def sandbox_diffstat(path: str, base: str) -> str:
+    """One line saying how much the sandbox's worktree differs from `base`.
+
+    Covers committed and uncommitted change in one read (`git diff` against a
+    revision compares it with the worktree), which is what a read-only run's
+    failure message has to name. A git that cannot answer returns "": the
+    verdict does not depend on this string, only its detail does.
+    """
+    proc = subprocess.run(["git", "-C", path, "diff", "--shortstat", base],
+                          capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
 def _reflog_len(root: str, branch: str) -> int:
     r = subprocess.run(["git", "-C", root, "reflog", "show", "refs/heads/" + branch],
                        capture_output=True, text=True)
@@ -2598,7 +2650,8 @@ def has_report(output: str) -> bool:
     return REPORT_HEADING_RE.search(output or "") is not None
 
 
-def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = ""):
+def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
+                    diffstat: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
@@ -2608,14 +2661,28 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = ""):
     SPAWNFIX (S3) item 1: a run that changed nothing AND never printed its
     REPORT did not finish the task at all (work/L1-routing/MUSEREG.try1.out),
     which is a different next action from a reported no-change: relaunch it.
+
+    SPAWNFIX (S3) item 4: for a read-only run the empty sandbox IS the success,
+    so a REPORT and no change exits 0 (work/L1-routing/R6RES.out and
+    FOLD4MAP.out were graded NO-OP for doing exactly that) - and the change a
+    writer run is rewarded for is the failure this one is judged by. The diff
+    stat goes into the message because the run's work is now in the sandbox: the
+    operator has to see what to throw away without another git command.
     """
     if route.get("review"):
         return None, ""
     if not changed and not ahead:
         if not has_report(output):
             return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
+        if route.get("read_only"):
+            return 0, "RESEARCH: report only"
         return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
                    "unverified and the run as failed (exit 5)")
+    if route.get("read_only"):
+        return EXIT_READ_ONLY_WRITE, (
+            "READ-ONLY WRITE: a read-only run changed its sandbox "
+            "(exit %d) - its deliverable was the report, never the edit: %s"
+            % (EXIT_READ_ONLY_WRITE, diffstat or "(no diff stat)"))
     return None, ""
 
 
@@ -2698,7 +2765,9 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     "unknown". rc is the same value the run exits with, the NO-OP (5), the
     headless refusal (6, failure class "refusal"), the LEAK (7, failure class
     "containment") and the INCOMPLETE (10, failure class "capability" like the
-    NO-OP) overrides included.
+    NO-OP) and the READ-ONLY WRITE (11, "capability" too - a model that edits
+    when told not to failed the instruction, which is answer quality) overrides
+    included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -2734,7 +2803,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
-        "failure_class": (None if rc == 0 else ("capability" if rc in (5, EXIT_INCOMPLETE) else
+        "failure_class": (None if rc == 0 else ("capability" if rc in (
+                              5, EXIT_INCOMPLETE, EXIT_READ_ONLY_WRITE) else
                           ("refusal" if rc == 6 else
                            ("containment" if rc == 7 else
                             ("provider" if rc == 8 else "logic"))))),
@@ -3430,6 +3500,9 @@ def cmd_run(args, cfg: dict) -> int:
     if route.get("reviewer_note"):
         print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
+    if route.get("read_only"):
+        print("read-only: this run's success is an unchanged sandbox and a REPORT "
+              "(an edit in it exits %d)" % EXIT_READ_ONLY_WRITE)
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
     if args.lean:
@@ -3706,7 +3779,12 @@ def cmd_run(args, cfg: dict) -> int:
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
-        override, message = sandbox_verdict(plan["route"], changed, ahead, client_tail)
+        override, message = sandbox_verdict(
+            plan["route"], changed, ahead, client_tail,
+            # Only the read-only verdict quotes it, so only the read-only run
+            # pays for the extra git call.
+            sandbox_diffstat(sb["path"], sb["base"])
+            if plan["route"].get("read_only") else "")
         leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
@@ -3781,6 +3859,10 @@ def main(argv=None) -> int:
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",
                      help="no heavy MCP servers (%s) - for research/review agents" % ", ".join(LEAN_DROP))
+    run.add_argument("--read-only", dest="read_only", action="store_true",
+                     help="a research run: an unchanged sandbox plus a REPORT is success (exit 0), an "
+                          "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
+                          "run without this flag")
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")

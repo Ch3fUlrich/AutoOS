@@ -2206,6 +2206,83 @@ class NoOpGuardTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(self.cli.has_report(text), text)
 
+    # SPAWNFIX3 (S3) item 4: a research run is judged by its report, not by a
+    # commit (work/L1-routing/R6RES.out and FOLD4MAP.out each ended "NO-OP
+    # exit 5" for a run whose whole job was to read and say something).
+
+    def test_a_read_only_run_that_reported_and_changed_nothing_is_a_research_ok(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False, "read_only": True},
+                                           changed="", ahead="",
+                                           output="REPORT task · completed")
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(msg, "RESEARCH: report only")
+
+    def test_a_read_only_run_with_no_report_is_still_incomplete(self):
+        rc, _msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output="reading the resolver now")
+        self.assertEqual(rc, self.cli.EXIT_INCOMPLETE,
+                         "no report and no change is unfinished, read-only or not")
+
+    def test_a_read_only_run_that_changed_its_sandbox_fails_with_the_diff_stat(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed=" M a.py", ahead="",
+            output="REPORT task · completed",
+            diffstat="1 file changed, 2 insertions(+), 1 deletion(-)")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+        self.assertIn("1 file changed, 2 insertions(+), 1 deletion(-)", msg)
+
+    def test_a_committed_change_counts_against_a_read_only_run(self):
+        # The WIP commit makes the dirt `ahead`, not `changed`; either way the
+        # run changed something it was told not to change.
+        rc, _msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="abc WIP",
+            output="REPORT task · completed", diffstat="1 file changed")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+
+    def test_a_writer_run_is_not_judged_as_a_research_run(self):
+        self.assertEqual(self.cli.sandbox_verdict(
+            {"review": False}, changed=" M a.py", ahead="",
+            output="REPORT task · completed", diffstat="1 file changed")[0], None)
+
+    def test_a_review_run_is_still_exempt_from_every_verdict(self):
+        self.assertEqual(self.cli.sandbox_verdict(
+            {"review": True, "read_only": True}, changed="", ahead="",
+            output="")[0], None)
+
+    def test_read_only_run_marks_the_card_and_the_flag(self):
+        run = self.cli.read_only_run
+        self.assertTrue(run(argparse.Namespace(read_only=True), {}))
+        self.assertTrue(run(argparse.Namespace(read_only=False), {"kind": "research"}))
+        self.assertTrue(run(argparse.Namespace(read_only=False), {"role": "research"}))
+        self.assertFalse(run(argparse.Namespace(read_only=False), {"kind": "implement"}))
+        self.assertFalse(run(argparse.Namespace(read_only=False), None))
+
+    def test_the_containment_prompt_tells_a_research_run_not_to_edit(self):
+        prefix = self.cli.isolate_task_prefix("/tmp/sb", "/tmp/parent", read_only=True)
+        self.assertIn("read-only", prefix)
+        self.assertIn("changing nothing", prefix)
+        self.assertNotIn("read-only", self.cli.isolate_task_prefix("/tmp/sb", "/tmp/parent"))
+
+    def test_the_exit_code_table_names_the_read_only_write_code(self):
+        # R-orch-11: the docstring table is what every caller reads.
+        doc = self.cli.__doc__
+        self.assertIn("11 = an --isolate run marked --read-only", doc)
+        self.assertIn("(READ-ONLY", doc)
+        self.assertEqual(self.cli.EXIT_READ_ONLY_WRITE, 11)
+
+    def test_a_read_only_write_is_recorded_as_a_capability_failure(self):
+        cli = self.cli
+        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+                "client": "opencode", "free": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            tracked = cli.track_entry(plan, cli.EXIT_READ_ONLY_WRITE, 1.0)
+            self.assertIsNotNone(tracked)
+            self.assertEqual(tracked["gate"], "fail")
+            self.assertEqual(tracked["failure_class"], "capability")
+            self.assertTrue(cli.record_run(os.path.join(tmp, "track.jsonl"), tracked),
+                            "rc 11 must be recorded, not dropped")
+
     def test_the_exit_code_table_names_the_incomplete_code(self):
         # R-orch-11: a new return code is only safe if the docstring table that
         # every caller reads says so.
@@ -2257,6 +2334,43 @@ class IncompleteRunEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 5, both)
         self.assertIn("NO-OP", both)
         self.assertNotIn("INCOMPLETE", both)
+
+
+class ReadOnlyRunEndToEndTests(unittest.TestCase):
+    """SPAWNFIX3 (S3) item 4, through the real cmd_run: --read-only marks a run
+    whose success is an empty sandbox and a REPORT. Measured in
+    work/L1-routing/R6RES.out and FOLD4MAP.out — research runs that reported
+    everything and were graded "NO-OP exit 5", i.e. the spawner asked for an
+    edit the task never wanted."""
+
+    def _run(self, mode, **kw):
+        if os.name == "nt":
+            self.skipTest("sh stub; POSIX only")
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        rc, out, err = case.run_isolated(root, stub, state, mode, read_only=True, **kw)
+        return rc, out + err, case
+
+    def test_a_read_only_run_that_only_reports_exits_zero_with_the_research_line(self):
+        rc, both, _case = self._run("report")
+        self.assertEqual(rc, 0, both)
+        self.assertIn("RESEARCH: report only", both)
+        self.assertNotIn("NO-OP", both)
+
+    def test_a_read_only_run_that_edits_its_sandbox_exits_read_only_write(self):
+        rc, both, case = self._run("sandbox-edit")
+        self.assertEqual(rc, case.agent.EXIT_READ_ONLY_WRITE, both)
+        self.assertIn("READ-ONLY", both)
+        self.assertIn("file changed", both)
+        self.assertNotIn("LEAK", both, "an edit inside the sandbox is not a leak")
+
+    def test_a_read_only_run_that_printed_nothing_is_incomplete(self):
+        rc, both, case = self._run("noop")
+        self.assertEqual(rc, case.agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("RESEARCH", both)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
@@ -3594,6 +3708,12 @@ if mode == "report":
     # SPAWNFIX3 (S3) item 1: a worker that stopped having printed its REPORT
     # (but changed nothing) is a NO-OP, not an INCOMPLETE.
     print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "sandbox-edit":
+    # SPAWNFIX3 (S3) item 4: the client's cwd IS its own sandbox, so this is
+    # not a leak (7) — it is the change a read-only run must not make.
+    with open(os.path.join(os.getcwd(), "tracked.txt"), "a") as fh:
+        fh.write("research edit\\n")
+    print("fake: edited its own sandbox")
 elif mode == "commit-worker":
     with open(os.path.join(root, "worker-file.txt"), "w") as fh:
         fh.write("worker\\n")
@@ -4017,7 +4137,7 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
-    def run_isolated(self, root, stubdir, statedir, mode, card=None):
+    def run_isolated(self, root, stubdir, statedir, mode, card=None, read_only=False):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
@@ -4029,6 +4149,7 @@ class IsolateContainmentTests(unittest.TestCase):
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=True, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
+                read_only=read_only,
                 title=None, dry_run=False, no_defer=False)
             cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
                    "providers": {"omniroute": {"models": {"t2-worker": {},
@@ -6322,6 +6443,15 @@ class ReviewerGateTests(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     # --- the reviewer is picked from the registry, not from a constant ------
+
+    def test_a_research_card_and_the_flag_mark_the_route_read_only(self):
+        # SPAWNFIX3 (S3) item 4: the verdict reads the route dict, so the card
+        # kind and the explicit flag must both land in it.
+        self.assertTrue(self.route(
+            card="kind=research,paths=tools/registry.py")["read_only"])
+        self.assertTrue(self.route(read_only=True)["read_only"])
+        self.assertFalse(self.route()["read_only"],
+                         "a review card is graded on its diff, not on an empty sandbox")
 
     def test_an_authored_v2_review_card_carries_a_review_plan(self):
         review = self.route()["review_plan"]

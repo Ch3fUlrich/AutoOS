@@ -27,7 +27,9 @@ EFFORTS = ("unknown", "none", "minimal", "low", "medium", "high", "xhigh", "max"
 GATES = ("pass", "fail")
 # Every failure_class autoos-agent.py's track_entry() emits: rc 5 -> capability
 # (and rc 10, the INCOMPLETE stop, the same class: no edit and nothing to
-# believe), rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
+# believe; and rc 11, the READ-ONLY WRITE, the same class again: the report is
+# there but the run did not follow the one instruction that mattered),
+# rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
 # rc 8 -> provider. Omitting one made validate() reject the record and
 # record_run() silently drop it (REVFIX).
 FAILURES = (None, "logic", "capability", "containment", "provider", "refusal")
