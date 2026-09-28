@@ -5,7 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed — a token-bearing backup is created 0600 and never widened (A3 final review S1, 2026-09-28)
+### Fixed - token-bearing files: backups and temp files (A3 review 4, S1-S2, 2026-09-28)
+
+- **`lib/linux/secret_backup.py`** (new, `lib/linux/install.sh` uses it from both
+  sides): the one implementation of "back up a file that holds a live credential".
+  It creates the copy `O_CREAT | O_EXCL` at `0600` - mode and exclusivity in the
+  same syscall - copies the bytes in, carries only the source's *times* across
+  (`copystat` would copy the mode too and so would widen it), keeps the
+  repository's `<path>.autoos-backup-<stamp>[-N]` name shape, and leaves nothing
+  behind when the copy fails. The shell reaches it through
+  `backup_file_before_write`; `omnigraph_env_state` imports it inside the very
+  process that renames the new bytes into place, because the copy of the old token
+  has to land before the replace that destroys it, not in a second run that could
+  disagree with the first about whether anything changed.
+- **`lib/linux/install.sh`** (`backup_file_before_write`,
+  `file_holds_omnigraph_token`, `append_line_once`,
+  `omnigraph_retire_rc_token_lines`, `replace_or_append_marked_line`): the rc-file
+  edits backed the user's dotfile up with `backup_file`, i.e. `cp -p`, which
+  creates the destination with the *source's* mode - so a 0644 `.bashrc` got a 0644
+  backup holding `OMNIGRAPH_TOKEN=...`, and that copy outlives the line the step
+  deletes: the backup becomes the place the bearer token stays readable to every
+  local user (and survives the rotation, and the checkout, and the machine). Every
+  edit a token-bearing file can reach now takes its copy through
+  `backup_file_before_write`, which hands that case to `secret_backup.py` and keeps
+  `backup_file` - mode and times included - for every other file, unchanged for all
+  its other callers. That is four sites, not the one the finding named: on a first
+  run the rc file is opened by `append_line_once` (the current line is missing)
+  *before* the retire step ever runs, so fixing only the retire step would have
+  left the same leak on the path production takes first.
+  This corrects the claim in the entry below that `cp -p` was clean: it is clean as
+  to the *window* (coreutils creates the destination with the source's mode, so no
+  group-readable instant exists), which is not the same question as whether the
+  finished copy may be read - and a 0644 copy of a token is the leak either way.
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the rewrite staged the new
+  bytes at the fixed, guessable name `<path>.tmp`, opened `O_CREAT | O_TRUNC`.
+  Anyone able to write in the home - another user on a shared or NFS box, a
+  component that ran earlier - could plant a symlink there, and the step then
+  truncated and overwrote the target they chose with the token's bytes before
+  renaming that link onto `~/.autoos-omnigraph.env` itself (the new test reproduces
+  exactly that: the env file came out a link and mode 777). Two AutoOS runs in one
+  second shared the one name too. The temp is now `tempfile.mkstemp(dir=<dirname>,
+  prefix=<basename>.autoos-tmp-)`: unpredictable, exclusive, `0600` from the birth,
+  fsynced, renamed, and unlinked if anything in between fails - the same shape
+  `lib/linux/serve.py`'s `write_secret` and the Claude Code settings writer already
+  use.
+- **`tests/linux/38-omnigraph-client.sh`**: four cases - the retire step under
+  `umask 022` (a `sitecustomize` probe records the mode each backup is *born* with,
+  so a `cp -p` followed by a `chmod 600` cannot pass), a sweep that reads every
+  `.autoos-backup-*` the component run left behind and refuses any that holds a
+  token line and is group- or world-readable, each of the three rc-writing branches
+  (append, purge, replace), and the planted-symlink temp case. The existing
+  env-backup case now asserts the exclusive `0600` creation across the writer *and*
+  the shared helper, and that the writer imports it rather than re-typing it.
+- Not changed here, and the same defect: `setup_opencode_config` stages
+  `opencode.json.tmp` at a fixed name (`lib/linux/install.sh`, the writer that
+  merges the api-key file) - a separate component, so a separate brief.
+
+### Fixed - a token-bearing backup is created 0600 and never widened (A3 final review S1, 2026-09-28)
 
 - **`lib/linux/install.sh`** (`omnigraph_env_state`): the backup taken before the
   env file is rewritten holds the **previous token**, still a live bearer

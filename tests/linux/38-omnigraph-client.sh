@@ -471,18 +471,26 @@ print(len(loose))
     live_mode="$(stat -c '%a' "$env_file" 2>/dev/null || printf 'none')"
     live_new="$(grep -c '^OMNIGRAPH_TOKEN=rotated-2222$' "$env_file" 2>/dev/null || true)"
     # And the shape of the code, so a future rewrite that dodges both probed
-    # creation paths (a raw os.write on an fd, say) cannot pass by accident.
+    # creation paths (a raw os.write on an fd, say) cannot pass by accident. The
+    # exclusive 0600 creation lives in the shared helper the writer imports -
+    # backup_file_before_write runs the very same file (A3 review 4) - so the
+    # shape is asserted across both homes, not on one of them.
     writer="$(sed -n '/^omnigraph_env_state()/,/^PY$/p' lib/linux/install.sh)"
+    helper="$(cat lib/linux/secret_backup.py 2>/dev/null || printf '')"
     copy2_gone=1
     grep -q 'shutil\.copy2(' <<<"$writer" && copy2_gone=0
     excl=1
-    grep -q 'os\.O_EXCL' <<<"$writer" || excl=0
+    grep -q 'os\.O_EXCL' <<<"$writer$helper" || excl=0
+    imports_helper=1
+    grep -q 'from secret_backup import secret_backup' <<<"$writer" || imports_helper=0
     rm -rf "$tmp"
     ok=1
     [[ -n "$probe" ]] || { ok=0; echo "the probe saw no backup being created - the assertion would be vacuous" >&2; }
     [[ "$loose" == 0 ]] || { ok=0; echo "$loose backup(s) were created with group/world bits while the old token was copied" >&2; }
     (( copy2_gone )) || { ok=0; echo "the env writer still backs up with shutil.copy2 (born at the default umask mode)" >&2; }
-    (( excl )) || { ok=0; echo "the env writer does not create its backup with O_EXCL at 0600" >&2; }
+    (( excl )) || { ok=0; echo "nothing in the env writer's path creates its backup with O_EXCL at 0600" >&2; }
+    (( imports_helper )) \
+        || { ok=0; echo "the env writer re-implements the backup instead of using the one secret_backup.py helper" >&2; }
     [[ "$backups" == 1 ]] || { ok=0; echo "the rewritten secret file had $backups backups" >&2; }
     [[ "$backup_mode" == 600 ]] || { ok=0; echo "the backup ended up mode $backup_mode, not 600" >&2; }
     [[ "$live_mode" == 600 ]] || { ok=0; echo "the env file itself is mode $live_mode" >&2; }
@@ -492,6 +500,286 @@ print(len(loose))
         || { ok=0; echo "the backup lost the source's times ($backup_mtime vs $src_mtime)" >&2; }
     [[ "$live_new" == 1 ]] || { ok=0; echo "the rotation did not land in the env file" >&2; }
     (( ok )) && pass || fail "the token-bearing backup is not created 0600"
+fi
+
+# ─── S1: every backup of a token-bearing file is born private ───────────────
+#
+# The rc files AutoOS edits can hold a bearer token: the retired agent-skills
+# line, a hand-written `export OMNIGRAPH_TOKEN=...`, or the line this component is
+# about to replace. backup_file copies with `cp -p`, which PRESERVES the source's
+# mode - so a 0644 dotfile produced a 0644 backup, and that backup keeps the
+# token after the edit has taken the token out of the rc file itself. The one
+# place the secret used to be readable by every local user is then the place it
+# stays readable: the copy outlives the original by design (AGENTS.md rule 5).
+# So the backup of a file that carries a credential is created 0600 in the same
+# syscall that creates it (O_EXCL) and never widened (A3 review 4).
+#
+# Same rule as the env-file test above, one file over: the probe records the mode
+# at creation, so a `cp -p` followed by a `chmod 600` - right at the end, wrong
+# during the window - cannot pass.
+
+if it "omnigraph-client: a backup of a token-bearing rc file is born 0600, and a plain file's backup keeps its mode"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/shadow"
+    cat >"$tmp/shadow/sitecustomize.py" <<'EOS'
+import builtins, os
+PROBE = os.environ.get("AUTOOS_MODE_PROBE", "")
+_real_open = builtins.open
+_real_os_open = os.open
+def _note(path, mode):
+    with _real_open(PROBE, "a", encoding="utf-8") as out:
+        out.write("%o %s\n" % (mode, os.fsdecode(path)))
+def probed_open(file, *args, **kw):
+    f = _real_open(file, *args, **kw)
+    if PROBE and ".autoos-backup-" in os.fsdecode(file):
+        try:
+            _note(file, os.fstat(f.fileno()).st_mode & 0o777)
+        except OSError:
+            pass
+    return f
+def probed_os_open(path, flags, mode=0o777, *args, **kw):
+    fd = _real_os_open(path, flags, mode, *args, **kw)
+    if PROBE and ".autoos-backup-" in os.fsdecode(path):
+        try:
+            _note(path, os.fstat(fd).st_mode & 0o777)
+        except OSError:
+            pass
+    return fd
+builtins.open = probed_open
+os.open = probed_os_open
+EOS
+    secret='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
+    printf '# my shell\n%s\n' "$secret" >"$tmp/.bashrc"
+    cp "$tmp/.bashrc" "$tmp/.zshrc"
+    chmod 644 "$tmp/.bashrc" "$tmp/.zshrc"
+    (
+        # The mode a normal home has, i.e. the one that makes a default-mode
+        # copy world-readable.
+        umask 022
+        export PYTHONPATH="$tmp/shadow" AUTOOS_MODE_PROBE="$tmp/probe.txt"
+        SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_EXTRA_FAILURES=() OMNIGRAPH_CLIENT_CHANGED=0
+        omnigraph_retire_rc_token_lines
+    ) >/dev/null 2>&1
+    probe="$(cat "$tmp/probe.txt" 2>/dev/null || true)"
+    rc_probe_lines="$(printf '%s\n' "$probe" | grep -c 'autoos-backup' || true)"
+    loose_birth="$(python3 -c '
+import sys
+n = 0
+for line in sys.stdin:
+    parts = line.split(None, 1)
+    if len(parts) == 2 and int(parts[0], 8) & 0o077:
+        n += 1
+print(n)
+' <<<"$probe")"
+    # Every backup that still holds a token line must be private, whichever step
+    # made it and whatever the rc file's own mode is now.
+    loose="$(python3 -c '
+import glob, os, re, sys
+pat = re.compile(rb"^\s*(?:export\s+)?OMNIGRAPH_TOKEN=\S", re.M)
+loose = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], ".*rc.autoos-backup-*"))):
+    with open(f, "rb") as fh:
+        holds = bool(pat.search(fh.read()))
+    mode = os.stat(f).st_mode & 0o777
+    if holds and mode & 0o077:
+        loose.append("%s:%o" % (os.path.basename(f), mode))
+print(" ".join(loose))
+' "$tmp")"
+    backed_up="$(ls -1 "$tmp"/.bashrc.autoos-backup-* 2>/dev/null | wc -l)"
+    oldest="$(ls -1 "$tmp"/.bashrc.autoos-backup-* 2>/dev/null | sort | head -1)"
+    oldest_holds="$( [[ -n "$oldest" ]] && grep -cF -- "$secret" "$oldest" || printf 0 )"
+    gone="$(grep -cF -- "$secret" "$tmp/.bashrc" || true)"
+    rc_mode="$(stat -c '%a' "$tmp/.bashrc")"
+    # The other half of the rule: the private backup is the SECRET case only.
+    # A file with nothing in it keeps the copy semantics backup_file has always
+    # had - the user's own mode - because silently tightening every dotfile
+    # backup is a different change with a different blast radius.
+    printf '# my shell\nexport EDITOR=vim\n' >"$tmp/plain.sh"
+    plain_own="$(stat -c '%a' "$tmp/plain.sh")"
+    plain_backup="$( (umask 022; backup_file_before_write "$tmp/plain.sh") 2>/dev/null )"
+    plain_mode="$(stat -c '%a' "$plain_backup" 2>/dev/null || printf none)"
+    rm -rf "$tmp"
+    ok=1
+    (( backed_up >= 1 )) || { ok=0; echo "the retire step edited the rc file with no backup" >&2; }
+    [[ "$oldest_holds" == 1 ]] || { ok=0; echo "the oldest backup does not hold the line that was removed" >&2; }
+    [[ "$gone" == 0 ]] || { ok=0; echo "the retired line survived ($gone)" >&2; }
+    [[ "$rc_mode" == 644 ]] || { ok=0; echo "the user's rc file itself was re-modeled to $rc_mode" >&2; }
+    (( rc_probe_lines >= 1 )) \
+        || { ok=0; echo "the probe saw no rc backup being created - the assertion would be vacuous" >&2; }
+    [[ "$loose_birth" == 0 ]] || { ok=0; echo "$loose_birth backup(s) were born group/world readable" >&2; }
+    [[ -z "$loose" ]] || { ok=0; echo "token-bearing backup(s) readable by others: $loose" >&2; }
+    [[ "$plain_mode" == "$plain_own" ]] \
+        || { ok=0; echo "a tokenless file's backup came out $plain_mode, not its own mode $plain_own" >&2; }
+    (( ok )) && pass || fail "the token-bearing rc backup is not created 0600"
+fi
+
+# The rule belongs to the backup, not to the step that happens to notice it: on a
+# first run the rc file is opened for writing by append_line_once (the current
+# line is missing), which is BEFORE the retire step ever runs. Testing every
+# branch of the marked-line writer is what keeps a later caller from re-adding
+# the leak by picking backup_file again.
+if it "omnigraph-client: every rc branch backs up a token-bearing file privately before it writes"; then
+    tmp="$(mktemp -d)"
+    marker="$(omnigraph_rc_marker)"
+    token_line='export OMNIGRAPH_TOKEN=inline-token-9999'
+    stale_line='line  # AutoOS:omnigraph-env'
+    # append: neither marker present. purge: current line plus a stale old one.
+    # replace: only the old marker line.
+    printf '%s\n' "$token_line" >"$tmp/append"
+    printf '%s\n%s\nkeep  # %s\n' "$token_line" "$stale_line" "$marker" >"$tmp/purge"
+    printf '%s\n%s\n' "$token_line" "$stale_line" >"$tmp/replace"
+    for f in append purge replace; do chmod 644 "$tmp/$f"; done
+    (
+        umask 022
+        SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_EXTRA_FAILURES=()
+        append_line_once "$tmp/append" "$marker" "appended  # $marker"
+        replace_or_append_marked_line "$tmp/purge" "AutoOS:omnigraph-env" "$marker" "fresh  # $marker"
+        replace_or_append_marked_line "$tmp/replace" "AutoOS:omnigraph-env" "$marker" "fresh  # $marker"
+    ) >/dev/null 2>&1
+    readable="$(python3 -c '
+import glob, os, re, sys
+pat = re.compile(rb"^\s*(?:export\s+)?OMNIGRAPH_TOKEN=\S", re.M)
+bad = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "*.autoos-backup-*"))):
+    with open(f, "rb") as fh:
+        holds = bool(pat.search(fh.read()))
+    if holds and os.stat(f).st_mode & 0o077:
+        bad.append("%s:%o" % (os.path.basename(f), os.stat(f).st_mode & 0o777))
+print(" ".join(bad))
+' "$tmp")"
+    count="$(ls -1 "$tmp"/*.autoos-backup-* 2>/dev/null | wc -l)"
+    # Each branch has to have actually written, or a branch that never ran would
+    # read as "no backup needed" instead of as the defect it is.
+    appended="$(grep -cF -- "appended  # $marker" "$tmp/append" || true)"
+    stale_left="$(grep -cF -- "$stale_line" "$tmp/purge" "$tmp/replace" | grep -c ':0' || true)"
+    keep_line="$(grep -cF -- "keep  # $marker" "$tmp/purge" || true)"
+    fresh="$(grep -cF -- "fresh  # $marker" "$tmp/purge" "$tmp/replace" | tr '\n' ' ')"
+    rm -rf "$tmp"
+    ok=1
+    (( count >= 3 )) || { ok=0; echo "the three branches made $count backup(s) - one of them wrote without backing up" >&2; }
+    [[ -z "$readable" ]] || { ok=0; echo "token-bearing backup(s) readable by others: $readable" >&2; }
+    [[ "$appended" == 1 ]] || { ok=0; echo "the append branch did not write ($appended current line)" >&2; }
+    [[ "$stale_left" == 2 ]] || { ok=0; echo "the stale marker line survived a branch ($stale_left of 2 files clean)" >&2; }
+    [[ "$keep_line" == 1 ]] || { ok=0; echo "the purge took an unrelated line with it ($keep_line)" >&2; }
+    [[ "$fresh" == *":1"* ]] || { ok=0; echo "no replacement line was written: [$fresh]" >&2; }
+    (( ok )) && pass || fail "one of the rc edit branches still leaks the token into a 0644 backup"
+fi
+
+# The helper's own contract, pinned: the stamp argument (the suite pins stamps
+# everywhere else), the -N suffix when a name is taken, the family's name shape,
+# and nothing left behind when the copy cannot be made.
+if it "omnigraph-client: backup_file_before_write keeps the backup_file naming and failure contract"; then
+    tmp="$(mktemp -d)"
+    printf 'export OMNIGRAPH_TOKEN=inline-token-9999\n' >"$tmp/rc"
+    # 0644 like a normal dotfile: cp -p would hand that mode straight to the
+    # backup, which is the defect. The token inside it must not be readable.
+    chmod 644 "$tmp/rc"
+    out="$( (
+        umask 022
+        first="$(backup_file_before_write "$tmp/rc" 20200101-000000)"
+        second="$(backup_file_before_write "$tmp/rc" 20200101-000000)"
+        third="$(backup_file_before_write "$tmp/rc" 20200101-000000)"
+        printf '%s\n%s\n%s\n' "$first" "$second" "$third"
+    ) 2>/dev/null )"
+    names="$(printf '%s\n' "$out" | grep -c "^$tmp/rc\.autoos-backup-20200101-000000" || true)"
+    suffixes="$(printf '%s\n' "$out" | grep -cE '^.*autoos-backup-20200101-000000(-[0-9]+)?$' || true)"
+    modes="$( (umask 022; for f in "$tmp"/rc.autoos-backup-*; do stat -c '%a' "$f"; done) | sort -u | tr '\n' ' ' )"
+    body="$(sed -n '/^backup_file_before_write()/,/^}/p' lib/linux/install.sh)"
+    # A source that cannot be read must leave nothing behind. Root reads a 0600
+    # file regardless of the mode, so the seed only means something to a normal
+    # user (the same guard the read-only-rc case above uses).
+    if [[ "$(id -u)" == 0 ]]; then
+        strays=0; refused=READ-REFUSED
+        rm -rf "$tmp"
+    else
+        printf 'export OMNIGRAPH_TOKEN=inline-token-9999\n' >"$tmp/noread"
+        chmod 000 "$tmp/noread"
+        refused="$( (umask 022; backup_file_before_write "$tmp/noread" >/dev/null 2>&1 \
+                        && printf 'READ-OK\n' || printf 'READ-REFUSED\n') 2>/dev/null )"
+        strays="$(ls -1 "$tmp"/noread.autoos-backup-* 2>/dev/null | wc -l)"
+        chmod 600 "$tmp/noread"
+        rm -rf "$tmp"
+    fi
+    ok=1
+    [[ "$names" == 3 && "$suffixes" == 3 ]] \
+        || { ok=0; echo "the three calls did not get three distinct names in the family's shape: [${out:0:200}]" >&2; }
+    [[ "$modes" == "600 " ]] || { ok=0; echo "a token file's backups came out [$modes], not all 600" >&2; }
+    [[ "$refused" == READ-REFUSED ]] || { ok=0; echo "an unreadable file was 'backed up' anyway" >&2; }
+    [[ "$strays" == 0 ]] || { ok=0; echo "a backup that could not be read was left behind ($strays partial files)" >&2; }
+    [[ -n "$body" ]] || { ok=0; echo "backup_file_before_write is not defined in lib/linux/install.sh" >&2; }
+    (( ok )) && pass || fail "the private backup helper does not keep the backup_file contract"
+fi
+
+# ─── S2: the env rewrite writes through a temp nobody else can name ─────────
+#
+# The rewrite staged the new bytes at a FIXED, guessable name - `<path>.tmp`,
+# opened O_CREAT|O_TRUNC. Anyone who can write in the home (another user on a
+# shared or NFS home, a component that ran earlier, an attacker that only needs
+# to win a same-second race against two AutoOS runs) could plant a symlink there
+# and turn "update my token" into "truncate and overwrite the file I chose" - with
+# the token's bytes. The temp must be created unpredictably in the same directory
+# (so os.replace stays atomic), 0600 by the same syscall that makes it, and
+# removed if anything in between fails. lib/linux/serve.py's write_secret and the
+# Claude Code settings writer already do exactly this (A3 review 4, S2).
+if it "omnigraph-client: the env rewrite stages in its own temp and never follows a planted link"; then
+    tmp="$(mktemp -d)"
+    env_file="$tmp/.autoos-omnigraph.env"
+    victim="$tmp/victim.txt"
+    printf 'DO NOT TOUCH\n' >"$victim"
+    (
+        umask 022
+        omnigraph_env_state "$env_file" "https://graph.example.invalid" first-token-1111 write >/dev/null 2>&1
+    )
+    ln -s "$victim" "$env_file.tmp" 2>/dev/null
+    if [[ ! -L "$env_file.tmp" ]]; then
+        rm -rf "$tmp"
+        skip "the host refuses symlinks"
+    else
+        (
+            umask 022
+            omnigraph_env_state "$env_file" "https://graph.example.invalid" rotated-2222 write >/dev/null 2>&1
+        )
+        link_still="$( [[ -L "$env_file.tmp" ]] && printf yes || printf no )"
+        target="$(readlink "$env_file.tmp" 2>/dev/null || printf none)"
+        victim_bytes="$(cmp -s "$victim" <(printf 'DO NOT TOUCH\n') && printf same || printf changed)"
+        live="$(grep -c '^OMNIGRAPH_TOKEN=rotated-2222$' "$env_file" 2>/dev/null || true)"
+        live_mode="$(stat -c '%a' "$env_file" 2>/dev/null || printf none)"
+        # The token file must still be a file of ours, not a link the planted name
+        # turned it into - that is what `os.replace` of a hijacked temp would do.
+        live_kind="$( [[ -L "$env_file" ]] && printf link \
+            || { [[ -f "$env_file" ]] && printf file || printf other; } )"
+        # Nothing temp-shaped may survive the write: neither the fixed `<name>.tmp`
+        # (only the link this test planted sits at that name) nor an mkstemp name
+        # the writer failed to clean up after itself.
+        strays=()
+        for f in "$tmp"/.*.tmp "$tmp"/.*autoos-tmp* "$tmp"/*.tmp "$tmp"/*autoos-tmp*; do
+            [[ -e "$f" || -L "$f" ]] || continue
+            [[ "$f" == "${env_file}.tmp" ]] && continue
+            strays+=("${f##*/}")
+        done
+        stray="${strays[*]-}"
+        # And the shape, so a future edit cannot reintroduce a fixed name that
+        # the probe would still catch only when somebody happens to plant a link.
+        writer="$(sed -n '/^omnigraph_env_state()/,/^PY$/p' lib/linux/install.sh)"
+        fixed_name=1
+        grep -qE 'path \+ "\.tmp"' <<<"$writer" && fixed_name=0
+        mkstemp=1
+        grep -q 'tempfile\.mkstemp' <<<"$writer" || mkstemp=0
+        fsync=1
+        grep -q 'os\.fsync' <<<"$writer" || fsync=0
+        rm -rf "$tmp"
+        ok=1
+        [[ "$link_still" == yes && "$target" == "$tmp/victim.txt" ]] \
+            || { ok=0; echo "AutoOS replaced the planted link at its own temp name (link=$link_still target=$target)" >&2; }
+        [[ "$victim_bytes" == same ]] || { ok=0; echo "the rewrite went through the planted link into the victim file" >&2; }
+        [[ "$live" == 1 ]] || { ok=0; echo "the rotation did not land in the env file ($live)" >&2; }
+        [[ "$live_mode" == 600 ]] || { ok=0; echo "the env file is mode $live_mode" >&2; }
+        [[ -z "$stray" ]] || { ok=0; echo "a temp file was left behind: $stray" >&2; }
+        (( fixed_name )) || { ok=0; echo "the env writer stages the new bytes at a fixed '<path>.tmp' name again" >&2; }
+        (( mkstemp )) || { ok=0; echo "the env writer does not create its temp with mkstemp (O_EXCL, unpredictable name)" >&2; }
+        (( fsync )) || { ok=0; echo "the env writer does not fsync the temp before renaming it onto the token file" >&2; }
+        (( ok )) && pass || fail "the env rewrite is not atomic-and-private in its temp file"
+    fi
 fi
 
 # rc is how every step here reports "did the write work". A branch that assigns it

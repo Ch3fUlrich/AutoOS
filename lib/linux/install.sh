@@ -89,6 +89,44 @@ backup_file() {
     printf '%s\n' "$dest"
 }
 
+# file_holds_omnigraph_token <path>: does this file assign OMNIGRAPH_TOKEN
+# anything at all? Bare `KEY=`, `export KEY=` and any indent all count, and so does
+# a value that is a command substitution instead of the secret itself - the line
+# still names where the token lives, and the file is edited by steps that are about
+# to lose it. LC_ALL=C because an rc file is not necessarily valid UTF-8 (the
+# retire step edits those in bytes) and a multibyte character class refuses to
+# match in exactly the file that has to be recognised.
+file_holds_omnigraph_token() {
+    LC_ALL=C grep -qE '^[[:space:]]*(export[[:space:]]+)?OMNIGRAPH_TOKEN=[^[:space:]]' -- "$1" 2>/dev/null
+}
+
+# backup_file_before_write <path> [stamp]: the copy a step takes immediately
+# before it modifies one of the user's files. The contract is backup_file's - print
+# the name, return non-zero and leave nothing behind when the copy could not be
+# made - with one rule added: a file that still carries a bearer token gets its copy
+# created 0600, by the same syscall that creates it (A3 review 4, S1). `cp -p` hands
+# a 0644 dotfile a 0644 backup, and that backup outlives the token the edit removes,
+# so the copy becomes the place the secret stays readable to every local user. A
+# file with no token in it keeps backup_file's behaviour exactly, its own mode
+# included: silently re-modelling every dotfile backup is a different decision, and
+# backup_file stays untouched for its other callers.
+backup_file_before_write() {
+    local path="$1" stamp="${2:-}" dest rc=0
+    if file_holds_omnigraph_token "$path"; then
+        # The same python the env writer imports, run as a CLI: one implementation
+        # of "back up a file that holds a live credential", found next to this file
+        # the way run() finds process.py.
+        dest="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/secret_backup.py" \
+            "$path" "$stamp")" || rc=$?
+        if (( rc != 0 )); then
+            return 1
+        fi
+        printf '%s\n' "$dest"
+        return 0
+    fi
+    backup_file "$path" "$stamp"
+}
+
 # backup_name_key <path> <backup>: a string that sorts the backups of <path> in
 # the order backup_path named them - the stamp first, then the -N counter zero-
 # padded, so -10 follows -2 under plain string comparison. Done in bash: BSD and
@@ -141,7 +179,7 @@ append_line_once() {
     fi
     mkdir -p "$(dirname "$file")"
     # Never modify a user's file without a copy of the original: no copy, no write.
-    if [[ -f "$file" ]] && ! backup_file "$file" >/dev/null; then
+    if [[ -f "$file" ]] && ! backup_file_before_write "$file" >/dev/null; then
         ui_warn "could not back up ${file} - nothing was changed"
         return 1
     fi
@@ -4167,8 +4205,16 @@ omnigraph_readiness() {
 # a log line or a shell word.
 omnigraph_env_state() {
     local path="$1" base="$2" token="$3" mode="${4:-write}"
-    OMNI_BASE="$base" OMNI_TOKEN="$token" OMNI_MODE="$mode" python3 - "$path" <<'PY'
-import os, shutil, sys, time
+    local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    OMNI_BASE="$base" OMNI_TOKEN="$token" OMNI_MODE="$mode" OMNI_LIBDIR="$here" python3 - "$path" <<'PY'
+import os, sys, tempfile
+# The one implementation of "back up a file that holds a live credential", shared
+# with the shell side (backup_file_before_write). Imported rather than re-typed,
+# and inside THIS process rather than a second run, because the copy of the old
+# token has to land before the replace that destroys it.
+sys.dont_write_bytecode = True   # an install run leaves no __pycache__ in the user's checkout
+sys.path.insert(0, os.environ["OMNI_LIBDIR"])
+from secret_backup import secret_backup
 path = sys.argv[1]
 mode = os.environ.get("OMNI_MODE", "write")
 want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
@@ -4222,39 +4268,34 @@ if mode == "check":
     sys.exit(0)
 if old:
     # The file being replaced holds the PREVIOUS token, which is still a live
-    # bearer credential until the server expires it. shutil.copy2 creates the
-    # destination with open(dst, "wb") — mode 0666 & ~umask, i.e. 0644 on a normal
-    # machine — and only tightens it to the source's mode after the bytes landed,
-    # so on a shared or NFS home another local user could read the token inside
-    # that window. Create it 0600 in the same syscall that makes it, with O_EXCL so
-    # a same-second backup is never clobbered, then carry the times across only:
-    # copystat would copy the mode as well and this must never widen it.
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    n = 0
-    while True:
-        backup = "%s.autoos-backup-%s%s" % (path, stamp, "" if n == 0 else "-%d" % n)
-        try:
-            bfd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            break
-        except FileExistsError:
-            n += 1
+    # bearer credential until the server expires it: the copy is created 0600 by
+    # the same syscall that creates it, with O_EXCL so a same-second backup is
+    # never clobbered, and only the source's times are carried across - copystat
+    # would copy the mode as well and this must never widen it. The helper is
+    # secret_backup.py, the one the shell's backup_file_before_write runs too
+    # (A3 review 4, S1).
+    secret_backup(path)
+folder = os.path.dirname(path) or "."
+# An unpredictable name in the file's own directory, so os.replace stays atomic.
+# This step used to open the fixed, guessable name `<path>.tmp` with O_CREAT|O_TRUNC:
+# anyone who could write in the home (another user on a shared or NFS box, a
+# component that ran earlier) could plant a symlink there and turn "update my
+# token" into "truncate and rename over the file I chose" - token bytes and all,
+# and two runs in the same second shared the one name. mkstemp creates it 0600
+# with O_EXCL in the same step (A3 review 4, S2).
+fd, tmp = tempfile.mkstemp(dir=folder, prefix=os.path.basename(path) + ".autoos-tmp-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n", errors="surrogateescape") as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except BaseException:
     try:
-        with open(path, "rb") as src, os.fdopen(bfd, "wb") as dst:
-            shutil.copyfileobj(src, dst)
+        os.unlink(tmp)
     except OSError:
-        try:
-            os.unlink(backup)
-        except OSError:
-            pass
-        raise
-    src_stat = os.stat(path)
-    os.utime(backup, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
-tmp = path + ".tmp"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8", newline="\n", errors="surrogateescape") as f:
-    f.write(new)
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+        pass
+    raise
 print("written", "token" if has_token else "no-token")
 PY
 }
@@ -4588,6 +4629,10 @@ omnigraph_retire_rc_token_lines() {
     # form — the one that read the token out of the agent-skills tree. A line has
     # to carry BOTH halves to go; anything else in the file stays, whoever wrote
     # it. Backed up first, and a file that cannot be backed up is not touched.
+    # The copy is taken by backup_file_before_write: this is the step that deletes
+    # a token line, so the file it copies is the one that still holds it, and the
+    # copy has to be 0600 or the removal would only move the secret somewhere more
+    # permanent (A3 review 4, S1).
     local file hits
     for file in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$file" ]] || continue
@@ -4597,7 +4642,7 @@ omnigraph_retire_rc_token_lines() {
             ui_muted "would remove the retired agent-skills OMNIGRAPH_TOKEN line from ${file}"
             continue
         fi
-        if ! backup_file "$file" >/dev/null; then
+        if ! backup_file_before_write "$file" >/dev/null; then
             ui_warn "could not back up ${file} - left unchanged"
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
             continue
@@ -4684,7 +4729,7 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            if ! backup_file "$file" >/dev/null; then
+            if ! backup_file_before_write "$file" >/dev/null; then
                 ui_warn "could not back up ${file} - left unchanged"
                 autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
                 return 0
@@ -4710,7 +4755,7 @@ replace_or_append_marked_line() {
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    if ! backup_file "$file" >/dev/null; then
+    if ! backup_file_before_write "$file" >/dev/null; then
         ui_warn "could not back up ${file} - left unchanged"
         autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
         return 0
