@@ -7854,8 +7854,9 @@ print('%s|%s|%s' % (
         Assert-Equal $c.context $contexts[$c.name]
     }
     # Every route the render fails closed is named in "omitted" and is never a
-    # combo (t1-orchestrator-clean since DSMAX 2026-09-27, deepseek-v4.1-flash
-    # since the deepseek 402 of 2026-09-27T16:4xZ, and whatever flips next —
+    # combo (t1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
+    # left that set on DSBACK 2026-09-28 when the operator top-up made
+    # providers.deepseek available again, and whatever flips next —
     # derived, so there is no per-route list to keep current here).
     foreach ($gone in $expectedOmitted) {
         Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
@@ -8132,15 +8133,17 @@ Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, nev
     try {
         $srv = Start-AutoOSPruneGateway $d
         # PROVFIX3 verify: the example id follows the registry — T1FREE/MUSEAPI
-        # re-serviced t1-orchestrator-free-only, so the orphan on show today is
-        # deepseek-v4.1-flash (deepseek 402, 2026-09-27T16:4xZ). Same rule, real id.
-        Set-AutoOSPruneList $d @('deepseek-v4.1-flash', 't2-worker', 'my-own-combo')
+        # re-serviced t1-orchestrator-free-only, and DSBACK 2026-09-28 re-serviced
+        # deepseek-v4.1-flash (the operator top-up made providers.deepseek
+        # available again), so the orphan on show today is t1-orchestrator-clean.
+        # Same rule, real id.
+        Set-AutoOSPruneList $d @('t1-orchestrator-clean', 't2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
-        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete deepseek-v4.1-flash --yes'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t1-orchestrator-clean --yes'
         Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
-        Assert-True ($out -like '*  - deepseek-v4.1-flash: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -like '*  - t1-orchestrator-clean: omitted, deleted*') "no omitted-deletion line in: $out"
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
@@ -8153,12 +8156,14 @@ Test-Case 'apply prune: --dry-run names the omitted combo and never names a live
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('deepseek-v4.1-flash', 'auto', 't2-worker-paid', 'my-own-combo')
+        # DSBACK 2026-09-28: deepseek-v4.1-flash is a live combo again, so the
+        # orphan on show is t1-orchestrator-clean (see the case above).
+        Set-AutoOSPruneList $d @('t1-orchestrator-clean', 'auto', 't2-worker-paid', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
-        Assert-True ($out -like '*  - deepseek-v4.1-flash: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -like '*  - t1-orchestrator-clean: omitted, would delete*') "no omitted would-delete line in: $out"
         Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
         Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
         Assert-True ($out -notlike '*- t2-worker-paid:*') 'a live "t2-worker-paid" combo was named'
@@ -8359,17 +8364,21 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
     Assert-Equal $registry.Map['antigravity'] 'antigravity'
     # cc: provider available:false since 2026-09-27 (operator: never connected
     # to OmniRoute), so it now lands in Skipped with the dead providers below.
-    # Regression lock for today's registry (2026-09-27, OR1e): cerebras (402/401
+    # Regression lock for today's registry (2026-09-28, OR1e): cerebras (402/401
     # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter
-    # (DSMAX 401, 2026-09-27T15:05:54Z), deepseek (402, 2026-09-27T16:4xZ) and
-    # the zen free pool are all-unavailable across every route that lists them;
-    # antigravity still carries a live leg, so it is offered. A dead
+    # (DSMAX 401, 2026-09-27T15:05:54Z) and the zen free pool (every
+    # deepseek-v4.1-flash leg route-gated) are all-unavailable across every route
+    # that lists them; antigravity and deepseek each carry a live leg, so they are
+    # offered — deepseek rejoined them on DSBACK 2026-09-28 (operator top-up,
+    # router balance 19.99 USD) after its 402 of 2026-09-27T16:4xZ. A dead
     # provider must land in Skipped and never in Map.
-    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc', 'openrouter', 'deepseek')) {
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc', 'openrouter')) {
         Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
         Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
     }
     Assert-True ($registry.Map.Contains('antigravity')) 'antigravity (has a live leg today) must be offered'
+    Assert-True ($registry.Map.Contains('deepseek')) 'deepseek has a live leg since DSBACK but is not offered'
+    Assert-True (-not ($registry.Skipped -contains 'deepseek')) 'deepseek must no longer land in Skipped'
     # The UA escaping branch is a pure function of the registry's provider_data;
     # both real carriers (groq, cerebras) are skipped today, so a fixture keeps
     # both PowerShell generations under test. It is the exact call apply.ps1 makes.

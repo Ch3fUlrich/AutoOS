@@ -1665,5 +1665,103 @@ class ReviewerPolicyTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class DeepSeekBackTests(unittest.TestCase):
+    """BRIEF DSBACK (S2 urgent, operator 2026-09-28 07:4xZ): DeepSeek's credit
+    ran out on 2026-09-27T16:4xZ (402 Insufficient Balance) and the whole
+    provider was switched off at the registry. The operator topped the balance
+    up and the router's own measured GET /user/balance answers
+    is_available=true at 19.99 USD, so the provider is back on.
+
+    These are written against the registry the renders read from, so a second
+    writer who flips the flag back off fails here rather than silently shipping
+    combos.json without the head of the -clean routes.
+    """
+
+    #: The rung list every laddered deepseek model must keep, verbatim.
+    LADDER = ["none", "low", "high", "max"]
+    #: The v4.1-Flash snapshots that carry the reasoning ladder (DSMAX).
+    #: 'deepseek-v4-flash' is a *different* snapshot — non-reasoning, ladder
+    #: empty, and denied outright by the operator's "DeepSeek = ONLY V4.1
+    #: Flash" rule — so it is pinned separately, not folded in here.
+    LADDERED = ("deepseek-flash", "deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def test_deepseek_provider_is_available_again(self):
+        self.assertIs(self.reg["providers"]["deepseek"]["available"], True)
+
+    def test_deepseek_availability_carries_the_operator_source_note(self):
+        # The note is the provenance a later reader needs to know WHY the flag
+        # is on: a bare flip reads like an accidental re-enable (DSBACK).
+        entry = self.reg["providers"]["deepseek"]
+        note = " ".join(str(entry.get(key, "")) for key in ("$comment", "source"))
+        self.assertIn(
+            "operator top-up 2026-09-28T07:4xZ, router balance check "
+            "19.99 USD (DSBACK)", note)
+
+    def test_every_deepseek_ladder_rung_is_unchanged(self):
+        # DSMAX moved the ladder onto the native leg precisely so the aliases
+        # would re-render unchanged when the balance came back; a flip that
+        # also edited the ladders would silently change the effort surface.
+        models = self.reg["models"]
+        for mid in self.LADDERED:
+            self.assertEqual(models[mid]["effort_ladder"], self.LADDER, mid)
+        # The v4 (not v4.1) snapshot stays exactly as it was: an empty ladder
+        # and reasoning off. Pinning it here keeps "unchanged" honest for the
+        # whole family instead of only for the models we wanted flipped.
+        self.assertEqual(models["deepseek-v4-flash"]["effort_ladder"], [])
+        self.assertIs(models["deepseek-v4-flash"]["reasoning"], False)
+
+    def test_the_zen_leg_keeps_its_own_route_gate(self):
+        # DSBACK changes the PROVIDER, not the per-leg operator flags: the
+        # tool-calling probe measured 402/429 on the zen leg and that verdict
+        # stands until someone re-probes it.
+        reg = self.reg
+        for rid in ("deepseek-v4.1-flash", "t2-worker", "t2-worker-clean",
+                    "t3-driver", "t3-driver-clean"):
+            entry = reg["routes"][rid]["unavailable_legs"].get(
+                "opencode-zen/deepseek-v4.1-flash")
+            self.assertIsInstance(entry, dict, rid)
+            self.assertIs(entry["available"], False, rid)
+
+    def test_openrouter_stays_unavailable(self):
+        # DSBACK is a DeepSeek-credit event; OpenRouter's own blanket flag is
+        # not ours to lift.
+        self.assertIs(self.reg["providers"]["openrouter"]["available"], False)
+
+    def test_deepseek_legs_are_no_longer_gated_by_the_provider(self):
+        reg = self.reg
+        self.assertFalse(
+            registry._leg_is_unavailable("deepseek/deepseek-flash",
+                                         reg["routes"]["t2-worker-clean"], reg))
+
+    def test_t2_worker_clean_starts_with_the_native_deepseek_leg(self):
+        # The render, not the registry list, is what the gateway serves: the
+        # -clean route's head must be back at the front of the combo.
+        rendered = {c["name"]: c for c in
+                    registry.render_omniroute(self.reg)["combos"]}
+        self.assertEqual(rendered["t2-worker-clean"]["models"][0],
+                         "deepseek/deepseek-flash")
+        self.assertEqual(rendered["t3-driver-clean"]["models"][0],
+                         "deepseek/deepseek-flash")
+
+    def test_the_deepseek_route_is_servable_again(self):
+        # The route whose ONLY served leg was deepseek/* failed closed during
+        # the 402; it must be offered again.
+        self.assertIn("deepseek-v4.1-flash", registry.servable_route_ids(self.reg))
+
+    def test_models_doc_no_longers_strike_the_native_leg(self):
+        row = next(r for r in registry.render_models_doc(self.reg).splitlines()
+                   if "t2-worker-clean" in r)
+        self.assertNotIn("~~`deepseek-flash`~~ (unavailable)", row)
+        self.assertIn("`deepseek-flash`", row)
+
+    def test_real_registry_passes_check_after_the_flip(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -242,14 +242,16 @@ class GatewayRefTests(unittest.TestCase):
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         # Providers without a model_prefix keep their registry spelling in
-        # the render (mistral has none; deepseek was the example until
-        # providers.deepseek went 402/unavailable 2026-09-27T16:4xZ and its
-        # legs stopped rendering).
+        # the render (mistral has none; deepseek's omniroute_id is its registry
+        # id too, so its leg renders under the same spelling it is declared
+        # with - DSBACK 2026-09-28 put that leg back in the renders).
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("mistral/mistral-code-latest",
                       by_name["t3-driver"]["models"])
         self.assertIn("gemini/gemini-3.8-flash", by_name["t2-worker"]["models"])
+        self.assertIn("deepseek/deepseek-flash",
+                      by_name["t2-worker-clean"]["models"])
 
     def test_registry_legs_keep_their_own_spelling(self):
         self.assertIn("antigravity/gemini-3.7-flash-high",
@@ -1227,12 +1229,13 @@ class GatewayLegsFilterTests(unittest.TestCase):
     def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        # t2-worker-clean serves mistral only: the deepseek direct leg is
-        # provider-gated (402, 2026-09-27T16:4xZ), the openrouter leg died
-        # with DSMAX, the zen leg is route-gated.
+        # DSBACK 2026-09-28: t2-worker-clean serves deepseek FIRST again —
+        # providers.deepseek is back on after the operator top-up. The openrouter
+        # leg stays out (provider off, DSMAX) and the zen leg stays out (its own
+        # route gate), so the combo is exactly the two live legs in registry order.
         self.assertEqual(
             combos["t2-worker-clean"]["models"],
-            ["mistral/mistral-small-latest"])
+            ["deepseek/deepseek-flash", "mistral/mistral-small-latest"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes.
         # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
@@ -1247,12 +1250,13 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertNotIn("gpt-oss-120b", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
         # the client-bound opencode-zen leg (litellm transport openai/…) is
-        # dropped; the openrouter leg of the same model died with it (DSMAX
-        # provider-off 2026-09-27), and the deepseek direct leg is provider-
-        # gated (402, 2026-09-27T16:4xZ) - none of the three stays.
+        # dropped, and so is the openrouter leg of the same model (DSMAX
+        # provider-off 2026-09-27, and DSBACK did not lift it). The deepseek
+        # DIRECT leg is back in since DSBACK 2026-09-28 topped the balance up —
+        # pinned here as present, so a future flip that drops it again names it.
+        self.assertIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
         self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
-        self.assertNotIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
         # t3-driver: groq denied; samba/sambanova/cerebras provider-dead;
         # opencode-zen client-bound.
