@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a tombstone names what replaced it, so a replayed state keeps the work (A7a)
+
+Sonnet's final review of the A7b lane found the retirement mechanism keeping the
+id and losing the job. A state file saved **before** a component was retired names
+the retired id and cannot name the ids that inherited its work, and `--from-state`
+took the selection verbatim: the tombstone was known, skipped, and nothing else was
+planned. The machine came back without that work and the run reported `skipped`,
+which reads like success.
+
+- **`replaced_by`** (catalog field, tombstone only): the ids that took the retired
+  component's work on. Both validators reject one that is empty, that sits on a live
+  entry, or that names an unknown id or another tombstone — a successor that installs
+  nothing would replay into a second `skipped` row, the same defect one step later.
+- **`lib/linux/catalog.sh`** (`catalog_expand_replacements`) and
+  **`lib/windows/AutoOS.Catalog.psm1`** (`Expand-AutoOSTombstoneReplacements`):
+  expand a retired id into its successors, once per id, and are asked by every
+  selection built from explicit ids — `--from-state` / `-FromState`, `--only` /
+  `-Only`, and a browser run, whose payload the server passes in as `--only`. The
+  retired row stays (it is still what reports `skipped: retired`), a successor the
+  selection already lists is not added twice, a successor this machine does not
+  offer is left out of both the plan and the announcement, and a successor retired
+  since is expanded in turn. Profiles never name a tombstone, so they never expand.
+- **`setup.sh` / `setup.ps1`**: one muted line per expanded tombstone — `agent-skills
+  is retired: replaced by agent-skill-links, omnigraph-client` — before the plan, so
+  nothing is substituted silently.
+- **`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`, `web/index.html`**: the
+  payload carries `replaced_by` and the retired row shows it, the way it shows the
+  note. The page displays the successors; the installer is the one that plans them.
+- **`docs/catalog.md`**: the field and the replay rules.
+- Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`), the PowerShell
+  suite (`tests/run-tests.ps1 -Filter tombstone`) and the page checks
+  (`tests/test-web-progress.js`) cover the validator, the loader column, the
+  expansion (dedupe, unoffered successor, chain), a hand-written pre-retirement
+  state file replayed to a plan that installs the successors, and `-Only` /
+  `--only` of a retired id.
+
 ### Fixed — tombstones reach the browser, and a requirement on a retired id fails out loud (A7a review, 2026-09-28)
 
 Muse's review of the A7a commits found the retirement mechanism stopping at the

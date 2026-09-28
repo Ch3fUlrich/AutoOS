@@ -74,6 +74,7 @@ Adding software means adding a catalog entry — no code changes. See
 | `launcher` | | `none` when the component installs a background service and no command. Without it the post-run report hunts for an executable and tells the user "no launcher found yet", which for a service is a wrong answer rather than a blank one. |
 | `tombstone` | | `true` — the component is retired: the id stays known and selecting it installs nothing ([why](#retiring-a-component-tombstone)) |
 | `note` | | tombstone only — why it went away; it is printed in the skip line |
+| `replaced_by` | | tombstone only — the ids that took its work on; a replayed selection expands to them ([why](#replaced_by-keeping-the-work)) |
 
 ### Retiring a component (tombstone)
 
@@ -90,7 +91,8 @@ every one of those into "Unknown component id", so a retired component is
   "provider": "custom",
   "package": "old-thing",
   "tombstone": true,
-  "note": "wired by new-thing now"
+  "note": "wired by new-thing now",
+  "replaced_by": ["new-thing"]
 }
 ```
 
@@ -116,19 +118,64 @@ What that changes, on both platforms:
   time, so the run exits non-zero instead of installing green without the thing it
   needed. Its own dependents are refused on the same grounds, transitively. A
   tombstone still drags nothing in when it is chosen.
-- The browser UI sees the same facts: `--serve` / `-Serve` sends `tombstone` and
-  `note` with every component, and the page draws a retired id **shown, disabled
-  and labelled** `(retired)` rather than hiding it — the row is where a reader
-  learns the product went away and what replaced it, which is the only reason the
-  catalog still carries the id. It is never pre-ticked by a profile, never pulled
-  in as a dependency, never asked about in the questions card, and offers neither
-  a Configure button nor a one-click install.
+- The browser UI sees the same facts: `--serve` / `-Serve` sends `tombstone`,
+  `note` and `replaced_by` with every component, and the page draws a retired id
+  **shown, disabled and labelled** `(retired)` rather than hiding it — the row is
+  where a reader learns the product went away and what replaced it, which is the
+  only reason the catalog still carries the id. It is never pre-ticked by a
+  profile, never pulled in as a dependency, never asked about in the questions
+  card, and offers neither a Configure button nor a one-click install. A browser
+  selection reaches the installer as `--only` / `-Only`, so it is expanded there
+  exactly like a replayed state file — the page shows the successors, it does not
+  plan them on its own.
 - `tombstone` must be the boolean `true` (a truthy string would silently retire a
   live entry), and `note` is rejected on an entry that installs something.
 
 `note` is the retirement reason; `notes` is the ordinary plan-entry line above.
 They are different fields on purpose: a live component can have `notes`, and a
 tombstone's `note` is what makes its skip line readable.
+
+### `replaced_by`: keeping the work
+
+Marking an id retired solves the "old state file names a deleted component"
+problem and leaves a worse one behind. A state file saved **before** the
+retirement lists the retired id and none of the ids that inherited its work, and
+those ids cannot be added to a file that was written years earlier. Replaying it
+used to book the retirement and install nothing: the machine the user is
+provisioning simply never gets that work done, and the run reports `skipped`,
+which reads like success.
+
+`replaced_by` is the catalog's answer — the ids that took the work on:
+
+```jsonc
+{ "id": "agent-skills", "tombstone": true, "replaced_by": ["agent-skill-links", "omnigraph-client"] }
+```
+
+Wherever a selection is built from **explicit ids** — `--from-state` /
+`-FromState`, `--only` / `-Only`, and a browser run, whose payload the server
+passes in as `--only` — a retired id expands to its replacements:
+
+- One muted line announces it: `agent-skills is retired: replaced by
+  agent-skill-links, omnigraph-client`. Nothing is substituted silently.
+- The retired row **stays** in the plan and still reports `skipped: retired`, so
+  what the reader replayed is what the report names, and the successors do the
+  installing beside it.
+- A successor the selection already lists is not added twice, so replaying a state
+  file that a replay wrote is a no-op; `requires` are then resolved as usual.
+- A successor this machine does not offer (another architecture, another profile
+  of catalog) is left out, and the line names only the ids that really entered the
+  plan — an announcement that promises more than the plan delivers would be the
+  same defect with better manners.
+- A successor that has itself been retired since is expanded in turn, so a second
+  retirement of the same work still lands.
+- Profiles are unaffected: a profile never pre-ticks a tombstone, so a profile run
+  never names one and never expands one. The menu cannot tick one either.
+
+The validators on both platforms reject a `replaced_by` that is empty, that sits
+on an entry which is not a tombstone, or that names an id which does not exist or
+is itself retired — a successor that installs nothing would replay into another
+`skipped` row and lose the work one step later, which is precisely the bug the
+field closes.
 
 ## Providers
 
