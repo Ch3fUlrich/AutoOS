@@ -585,6 +585,54 @@ def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
     return path
 
 
+def worker_dir_refusal(path: str) -> str | None:
+    """Why ``path`` cannot serve as the worker's private dir; None if it can.
+
+    Judged by the same rule `provision_runtime_dir` applies, and one level up:
+    a leaf that was never created is only fine if it could have been.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            return "it was never created"
+        return _provision_path_usable(pst, parent, "its parent") or "it was never created"
+    return _provision_path_usable(st, path, "it")
+
+
+def provision_worker_dirs(env: dict) -> bool:
+    """Provision both private XDG dirs a worker launches with; False = refuse it.
+
+    `provision_runtime_dir` returns the path it made usable and None when it
+    REFUSES — a symlink, a tree of another uid, a non-dir leaf, a parent like
+    that, or a racer still there after the retry. Both launch sites used to drop
+    that result (FF1 merge review, rev-merge MED), so the worker started with the
+    very directory the fence had just refused: its sockets, tokens and client
+    state land wherever the link points, and the 0700 chmod punches a hole in a
+    directory it never owned. A directory that merely could not be created keeps
+    the old fallback — the client uses its own default — but only once verified,
+    because an absent or hostile one is the same exposure the refusal was for.
+
+    An env that names no dir (the scrub pops both when the plan has no state
+    tree) is not a refusal: there is nothing to provision.
+    """
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+        path = env.get(name)
+        if not path:
+            continue
+        provision_runtime_dir(path)
+        why = worker_dir_refusal(path)
+        if why is not None:
+            print("autoos-agent: refusing to launch the worker: its %s %s "
+                  "could not be provisioned: %s" % (name, path, why),
+                  file=sys.stderr)
+            return False
+    return True
+
+
 def fence_sandbox_push(sandbox: str) -> None:
     """Make the obvious push out of an --isolate clone fail: every remote's push
     URL is disabled, and the clone gets a pre-push hook that exits 1.
@@ -5265,10 +5313,11 @@ def cmd_run(args, cfg: dict) -> int:
     env = worker_env(plan, key)
     # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
     # this is the first point past the dry run, where a directory is allowed.
-    provision_runtime_dir(env.get("XDG_RUNTIME_DIR"))
     # FF1c item 1: the private config home is named in the plan and created
     # here, under the same rule — a dry run writes nothing.
-    provision_runtime_dir(env.get("XDG_CONFIG_HOME"))
+    if not provision_worker_dirs(env):
+        # FF1d: a dir the provisioner refused is not a dir to launch into.
+        return 2
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -5527,8 +5576,12 @@ def cmd_run(args, cfg: dict) -> int:
                 # launch provisioned the stopped attempt's; without this the
                 # fallthrough worker runs with an XDG dir nobody created (and
                 # may create itself, outside the 0700 rule).
-                provision_runtime_dir(env.get("XDG_RUNTIME_DIR"))
-                provision_runtime_dir(env.get("XDG_CONFIG_HOME"))
+                if not provision_worker_dirs(env):
+                    # FF1d: same rule as the first launch — a refused dir stops
+                    # the re-run (2 is the code a refused card or route gives),
+                    # and the break still announces the stopped attempt's WIP.
+                    rc = 2
+                    break
                 register_secret_env(env)
         if not fell_through:
             break

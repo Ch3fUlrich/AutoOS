@@ -10945,6 +10945,99 @@ class ChildRuntimeDirTests(unittest.TestCase):
             self.assertEqual([], os.listdir(rerun[name]), name)
 
 
+class WorkerDirRefusalStopsLaunchTests(unittest.TestCase):
+    """FF1d: `provision_runtime_dir` returns None when it REFUSES a path — a
+    symlink, a tree of another uid, a non-dir leaf or parent, a racer still there
+    after the retry. Both launch sites in `cmd_run` dropped that result, so the
+    worker started anyway and ran with the very directory the fence had refused
+    (or with none at all). A refusal now stops the launch: exit 2, no child — at
+    the first attempt and on a provider-stop re-run."""
+
+    RUN_ID = "20260928-000000-refuse-a00001"
+    RERUN_ID = "20260928-000000-refuse-b00002"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        # The state tree is pinned to a private tmp dir so the runtime/config
+        # path the plan names is one this test can pre-plant before cmd_run
+        # reaches it (the run id itself is pinned per test, see pin_run_ids).
+        self.state = tempfile.mkdtemp()
+        self.elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+        self.addCleanup(shutil.rmtree, self.elsewhere, True)
+        patch = mock.patch.object(self.agent.clients, "state_dir",
+                                  lambda *a, **k: self.state)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def pin_run_ids(self, *ids):
+        """Hand `cmd_run`'s plans these run ids, in order (the last repeats)."""
+        box = list(ids)
+
+        def _mint(title, task, now=None):
+            return box.pop(0) if len(box) > 1 else box[0]
+
+        patch = mock.patch.object(self.agent, "mint_run_id", _mint)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def plant_runtime_symlink(self, run_id):
+        """Pre-create the worker's runtime dir as a link out of the state tree."""
+        target = os.path.join(self.state, "runtimes", run_id)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.symlink(self.elsewhere, target)
+        return target
+
+    def run_first_launch(self):
+        # Non-isolate so nothing but the launch site touches the disk.
+        return _fallthrough_run(self, ["r-a"], 0, args_over={"isolate": False})
+
+    def test_a_refused_runtime_dir_refuses_the_launch(self):
+        self.pin_run_ids(self.RUN_ID)
+        target = self.plant_runtime_symlink(self.RUN_ID)
+        rc, out, err, calls, _ = self.run_first_launch()
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(0, calls["n"], "the worker started with a refused XDG dir")
+        self.assertIn(target, err, "the refusal did not name the path")
+        self.assertTrue(os.path.islink(target), "the refused link was replaced")
+        self.assertEqual([], os.listdir(self.elsewhere),
+                         "the refused path was still written through")
+
+    def test_a_refused_parent_dir_refuses_the_launch(self):
+        # The leaf was never there: its PARENT is the link, and isdir() follows
+        # it, so this is the hole the leaf check alone cannot see.
+        self.pin_run_ids(self.RUN_ID)
+        link = os.path.join(self.state, "runtimes")
+        os.symlink(self.elsewhere, link)
+        rc, out, err, calls, _ = self.run_first_launch()
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(0, calls["n"], "the worker started through a linked parent")
+        self.assertIn(os.path.join(link, self.RUN_ID), err)
+        self.assertTrue(os.path.islink(link), "the parent link was replaced")
+        self.assertEqual([], os.listdir(self.elsewhere),
+                         "the runtime dir was created through the parent link")
+
+    def test_a_refused_dir_refuses_the_fallthrough_rerun(self):
+        # The stopped attempt's dirs were fine, so it launched; the re-plan minted
+        # a fresh run id, and THAT dir is the refused one. A fallthrough must not
+        # be the path that launches into a refused directory.
+        self.pin_run_ids(self.RUN_ID, self.RERUN_ID)
+        target = self.plant_runtime_symlink(self.RERUN_ID)
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], 1,
+            args_over={"free": True, "free_model": FREE_MODELS[0],
+                       "isolate": False},
+            policy={"free_client_models": {"opencode": FREE_MODELS}})
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(1, calls["n"], "the refused re-run was launched: %s" % out)
+        self.assertIn(target, err)
+        self.assertTrue(os.path.isdir(calls["envs"][0]["XDG_RUNTIME_DIR"]),
+                        "the first attempt should still have provisioned its own")
+
+
 class PushFenceHonestyTests(unittest.TestCase):
     """FF1b item 3: the pre-push hook and the disabled pushurl are an ACCIDENT
     guard. `--no-verify`, `core.hooksPath` and `git remote set-url` walk past
