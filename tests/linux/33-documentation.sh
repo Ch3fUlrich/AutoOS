@@ -606,6 +606,13 @@ if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch ta
     out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RESTART spec §1 (lane R2a): the state-card checker (tools/autoos_card.py) and
+# the `card check` verb. Fixtures are temp files; the checker is read-only, so
+# nothing here writes a card or reads a live run dir.
+if it "autoos_card: section order, line caps, header fields, the card check verb (unit tests)"; then
+    out="$(python3 tests/test_autoos_card.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
 # the glob matcher, every policy.risk_rules shape, the sha audit draw, assess()
 # against a temp git repo, and the `risk` verb. Fixtures are temp repos and
