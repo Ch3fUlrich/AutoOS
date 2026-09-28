@@ -304,14 +304,6 @@ custom_is_installed() {
         wsl-agent-home)
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
-        agent-skills)
-            # The tombstone's work is the link above and the omnigraph/mcp-*
-            # components', so there is never anything left for this id to do —
-            # whatever is on disk. Reporting "installed" is what keeps a saved
-            # selection or an old state file from planning a step that only
-            # prints a retirement line.
-            return 0
-            ;;
         agent-skill-links)
             # "Installed" = nothing left to link, checked by the same function the
             # postInstall asks, so the gate and the writer can never disagree.
@@ -375,6 +367,10 @@ catalog_probe_installed() {
     CAT_INSTALLED=()
     local i
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        # A retired id is never "installed": the ✓ would advertise machinery
+        # AutoOS no longer provides, and its name would join the "Installed
+        # apps" line of every later run.
+        if catalog_is_tombstone "$i"; then CAT_INSTALLED+=(0); continue; fi
         if is_installed "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"; then
             CAT_INSTALLED+=(1)
         else
@@ -4791,20 +4787,6 @@ replace_or_append_marked_line() {
         return 0
     fi
     ui_ok "replaced the '${old_marker}' line in ${file}"
-}
-
-install_agent_skills() {
-    # A tombstone, not an installer (A7b): the id stays known so a saved
-    # selection, a state file and `--only agent-skills` all still resolve, and
-    # the step that carries that id says where every duty went. Each piece has
-    # exactly one home now - agent-skill-links for the skills directories,
-    # omnigraph-client for the MCP wiring and this checkout's project servers,
-    # and the mcp-* components for the servers they each register. Widening a
-    # gate or re-wiring here would put a second owner on work that already has
-    # one, so this returns 0 and touches nothing.
-    ui_muted "agent-skills is retired: its work moved to agent-skill-links, omnigraph-client and the mcp-* components."
-    INSTALL_SCRIPT_STATE=skipped
-    return 0
 }
 
 # agent_skill_link_dests [repo_root]
