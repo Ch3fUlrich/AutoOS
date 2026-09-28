@@ -327,7 +327,12 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
     # cannot fix a flag interactively, and the alternative is a job that reports
     # as started and then exits 2.
     if not req.get("isolate") and agent.leaf_isolation_refusal(
-            run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card)):
+            run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card),
+            # SB-B (from SB-C's open item): the tier-1 write-role leg rides on the
+            # same call — the CLI's helper delegates to it, so a tier-1 spawn whose
+            # card says "implement" is forced into a clone here too, and this file
+            # still holds no second rule table.
+            card=gate_card):
         req = dict(req, isolate=True)
         route["forced_isolate"] = True
     if req.get("max_depth") is not None:
