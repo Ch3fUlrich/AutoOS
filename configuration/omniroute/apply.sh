@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Apply the AutoOS router configuration to OmniRoute:
-#   1. registers every provider key found in configuration/api-keys.yml
+#   1. registers every provider key found in configuration/api-keys.yml: as a
+#      built-in connection where the installed CLI knows the provider id, and as
+#      an OpenAI-compatible provider node plus a connection bound to it where it
+#      does not (a registry endpoint such as meta-api's, which `providers add`
+#      alone has nothing to attach to)
 #   2. refreshes the gateway's model catalog for what it just registered
 #      (omniroute models <provider>), so one run is enough on a fresh machine
 #   3. (re)creates the tier combos from configuration/omniroute/combos.json
@@ -154,7 +158,7 @@ for name, entry in providers.items():
     # simply unused elsewhere) - only a used provider whose every leg is down
     # is skipped here.
     if legs and all(leg_is_unavailable(leg, route) for leg, route in legs):
-        print("SKIP\t%s" % provider_id)
+        print("SKIP\x1f%s" % provider_id)
         continue
     data = entry.get("provider_data")
     # One compact JSON string per provider: the exact argv value the CLI wants.
@@ -171,18 +175,26 @@ for name, entry in providers.items():
         # from one api-keys.yml name means one of them silently never gets a
         # key, so the registry - not the operator with a half-configured
         # gateway - has to say so.
-        print("ERR\tapi-keys.yml name '%s' is claimed by both %s and %s - "
+        print("ERR\x1fapi-keys.yml name '%s' is claimed by both %s and %s - "
               "give one of them its own key entry" % (key_name, claimed, provider_id))
         continue
     by_key_name[key_name] = provider_id
-    print("ROW\t%s\t%s\t%s" % (key_name, provider_id, data_json))
+    # The provider's own OpenAI-compatible endpoint, if it has one: apply needs
+    # it to register a gateway provider node for an id the CLI does not know
+    # (see ensure_provider_node below). Fields are separated by 0x1f, not a tab:
+    # bash's `read` treats tab as IFS whitespace and merges consecutive
+    # separators, so a provider with no provider_data would shift api_base into
+    # the data slot (and --provider-specific-data would carry a URL).
+    print("ROW\x1f%s\x1f%s\x1f%s\x1f%s"
+          % (key_name, provider_id, data_json, entry.get("api_base") or ""))
 PY
 )" || { echo "apply.sh: cannot read $REGISTRY_FILE" >&2; exit 1; }
 PROVIDER_MAP=()
 PROVIDER_SKIPPED=()
 REGISTERED_NOW=()
 declare -A PROVIDER_DATA=()
-while IFS=$'\t' read -r tag a b c; do
+declare -A PROVIDER_BASE=()
+while IFS=$'\x1f' read -r tag a b c e; do
     [[ -z "$tag" ]] && continue
     if [[ "$tag" == SKIP ]]; then
         PROVIDER_SKIPPED+=("$a")
@@ -192,10 +204,13 @@ while IFS=$'\t' read -r tag a b c; do
         echo "apply.sh: $a" >&2
         exit 1
     fi
-    key_name="$a" provider_id="$b" data_json="$c"
+    key_name="$a" provider_id="$b" data_json="$c" api_base="$e"
     PROVIDER_MAP+=("$key_name:$provider_id")
     if [[ -n "$data_json" ]]; then
         PROVIDER_DATA["$provider_id"]="$data_json"
+    fi
+    if [[ -n "$api_base" ]]; then
+        PROVIDER_BASE["$provider_id"]="$api_base"
     fi
 done <<<"$provider_rows"
 
@@ -355,6 +370,242 @@ fi
 if gateway_up; then echo "Gateway OK on $GATEWAY"; fi
 
 # ─── Register providers ─────────────────────────────────────────────────────
+# The manage key for the REST calls below: the same one omni() puts into the
+# CLI's environment. It never goes in argv, where `ps` can read it for the
+# lifetime of the call.
+REST_KEY="${OMNIROUTE_API_KEY:-$MANAGE_KEY}"
+
+# redact_secrets - read stdin and replace every argument (a secret value) with
+# [REDACTED]. A quoted bash pattern matches literally, so a key that contains
+# glob characters is stripped instead of being read as a pattern.
+redact_secrets() {
+    local text secret
+    text="$(cat)"
+    for secret in "$@"; do
+        [[ -z "$secret" ]] && continue
+        text="${text//"$secret"/[REDACTED]}"
+    done
+    printf '%s\n' "$text"
+}
+
+# print_cli_error <text> [secret...] - the failure's own words on the log, with
+# every secret stripped and the CLI's ANSI banner removed. Swallowing this is
+# what made the meta-api failure undiagnosable (routing-00 04:5xZ): the reason
+# went to /dev/null and only "register it in the dashboard" came out.
+print_cli_error() {
+    local text="$1"
+    shift
+    [[ -z "$text" ]] && return 0
+    LC_ALL=C tr -d '\000-\010\013-\037' <<<"$text" |
+        redact_secrets "$@" | head -n 3 | cut -c 1-200 | sed 's/^/      /' || true
+}
+
+# BUILTIN_IDS - the provider ids and aliases the installed CLI knows, read once
+# per run and cached. `omniroute providers available` lists 352 of them
+# (measured 2026-09-28 against omniroute 3.8.51: openai, meta-llama, free-ai,
+# opencode-zen and 348 more); deciding this per provider would ask the CLI once
+# per registry entry. Aliases count too, because the gateway rejects a provider
+# node whose prefix collides with one (omniroute
+# src/shared/constants/reservedProviderPrefixes.ts).
+BUILTIN_IDS=""
+BUILTIN_READ=0
+builtin_provider() {
+    local id="$1"
+    if [[ $BUILTIN_READ -eq 0 ]]; then
+        BUILTIN_READ=1
+        # Same banner strip as the --drift block: the CLI prints its .env lines
+        # before the JSON document.
+        BUILTIN_IDS="$(omni providers available --json 2>/dev/null |
+            sed -n '/^[[:space:]]*[{[]/,$p' |
+            python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+rows = doc.get("providers") if isinstance(doc, dict) else None
+ids = []
+for p in rows or []:
+    if isinstance(p, dict):
+        for v in (p.get("id"), p.get("alias")):
+            if isinstance(v, str) and v:
+                ids.append(v)
+print("\n".join(dict.fromkeys(ids)))' 2>/dev/null || true)"
+        if [[ -z "$BUILTIN_IDS" ]]; then
+            echo "  ! the CLI's provider catalog is unreadable - treating every id as built-in" >&2
+        fi
+    fi
+    # Unreadable catalog: keep the behaviour this script had before - everything
+    # is a built-in. Guessing the other way would create a provider node for
+    # every registry entry on a machine where the CLI simply did not answer.
+    [[ -z "$BUILTIN_IDS" ]] && return 0
+    grep -qxF "$id" <<<"$BUILTIN_IDS"
+}
+
+# provider_needs_node - true for a registry provider with an api_base of its own
+# whose omniroute_id the CLI has no built-in connection for. Such an endpoint
+# only reaches the gateway as a PROVIDER NODE: `providers add meta-api` had
+# nothing to attach the key to, which is the live failure this block fixes.
+provider_needs_node() {
+    local provider_id="$1"
+    [[ -n "${PROVIDER_BASE[$provider_id]:-}" ]] || return 1
+    builtin_provider "$provider_id" && return 1
+    return 0
+}
+
+# omni_rest <METHOD> <path> [json-body] - one gateway REST call with the manage
+# key. The key goes in a private curl config file and the request body on
+# stdin, never in argv. The response lands in REST_BODY (empty on a failure),
+# the reason in REST_ERROR, redacted by the caller before it reaches the log.
+# Both are globals, not stdout, on purpose: a caller that read the body with
+# $( ) would run this function in a subshell, and the two temp files would then
+# belong to a shell that an interrupted run cannot reach - which is exactly how
+# the key outlived the call (MUSEFIX). A caller that needs the failure's reason
+# has to be in this shell too, for the same reason.
+REST_ERROR=""
+REST_BODY=""
+omni_rest() {
+    local method="$1" path="$2" body="${3:-}"
+    local cfg out code escaped
+    REST_BODY=""
+    cfg="$(mktemp)" || { REST_ERROR="no curl config file could be created"; return 1; }
+    out="$(mktemp)" || { rm -f -- "$cfg"; REST_ERROR="no response file could be created"; return 1; }
+    chmod 600 "$cfg" "$out"
+    escaped="${REST_KEY//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped" >"$cfg"
+    # The config file holds the manage key and the response file holds whatever
+    # the gateway answered - GET /api/providers returns every provider's live
+    # apiKey. Removing them after the call only covers the path that gets there:
+    # a run interrupted (Ctrl-C, or killed) while the call was in flight left a
+    # 0600 file carrying the key in /tmp on the user's machine. So the removal
+    # is trapped for the duration of the call and the trap cleared (back to no
+    # trap - this script sets none of its own) right after, the same shape
+    # ai-stack.sh uses for its edge-webhook header file.
+    trap 'rm -f -- "$cfg" "$out"' INT TERM EXIT
+    if [[ -n "$body" ]]; then
+        code="$(printf '%s' "$body" | curl -s -S -m 20 --config "$cfg" -X "$method" \
+            -H 'Content-Type: application/json' --data @- \
+            -o "$out" -w '%{http_code}' "$GATEWAY$path" 2>/dev/null)" || code=""
+    else
+        code="$(curl -s -S -m 20 --config "$cfg" -X "$method" -o "$out" \
+            -w '%{http_code}' "$GATEWAY$path" 2>/dev/null)" || code=""
+    fi
+    [[ -s "$out" ]] && REST_BODY="$(cat "$out")"
+    rm -f -- "$cfg" "$out"
+    trap - INT TERM EXIT
+    if [[ -z "$code" ]]; then
+        REST_ERROR="the gateway could not be reached for $path"
+        REST_BODY=""
+        return 1
+    fi
+    if [[ "$code" != 2* ]]; then
+        REST_ERROR="HTTP $code for $path: $(head -c 300 <<<"$REST_BODY")"
+        REST_BODY=""
+        return 1
+    fi
+}
+
+# provider_node_id <prefix> - sets NODE_ID to the id of the provider node
+# carrying this prefix, or to nothing. GET /api/provider-nodes answers
+# {"nodes":[…],"total":N} (measured live 2026-09-28); {"items":[…]} and a bare
+# list are tolerated. A global rather than stdout, and called without $( ), for
+# the reason in omni_rest's comment.
+NODE_ID=""
+provider_node_id() {
+    NODE_ID=""
+    local doc=""
+    if omni_rest GET /api/provider-nodes; then
+        doc="$REST_BODY"
+    fi
+    [[ -n "$doc" ]] || return 0
+    NODE_ID="$(python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(doc, dict):
+    rows = doc.get("nodes") or doc.get("items") or []
+else:
+    rows = doc
+for n in rows or []:
+    if isinstance(n, dict) and n.get("prefix") == sys.argv[1]:
+        print(n.get("id") or "")
+        break
+' "$1" <<<"$doc" || true)"
+}
+
+# provider_connection_exists <node-id> <name> - is a key already bound to this
+# node? `omniroute providers list` cannot answer it: its second column is the
+# provider, and a node-bound connection's provider is the node's
+# "<type>-<uuid>" id, which apply's hex-id scan never matches (omniroute
+# src/lib/db/providers/nodes.ts:61-71 says a new connection carries exactly
+# that concrete id). GET /api/providers answers {"connections":[…],"total":N}
+# (measured live 2026-09-28) and also carries every stored apiKey, so only these
+# two fields are read and the body is never printed.
+provider_connection_exists() {
+    if ! omni_rest GET '/api/providers?limit=5000'; then
+        return 1
+    fi
+    [[ -n "$REST_BODY" ]] || return 1
+    python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+rows = doc.get("connections") if isinstance(doc, dict) else doc
+for c in rows or []:
+    if isinstance(c, dict) and (c.get("provider") == sys.argv[1]
+                                or c.get("name") == sys.argv[2]):
+        sys.exit(0)
+sys.exit(1)
+' "$1" "$2" <<<"$REST_BODY"
+}
+
+# ensure_provider_node <provider-id> - sets the globals NODE_NOTE ("created" or
+# "existing") and NODE_ID, so the caller can say which one it was. Globals, not
+# stdout, and called without $( ): the REST calls below own the two temp files
+# and write the failure's reason into REST_ERROR, and both belong to the shell
+# that runs them - a subshell would hide the reason from the log and put the
+# files out of reach of the interrupt trap. Creates the node only when the
+# gateway has no node with that prefix - GET first, or a re-run adds a second
+# one.
+NODE_NOTE=""
+ensure_provider_node() {
+    local provider_id="$1" body
+    NODE_NOTE=""
+    provider_node_id "$provider_id"
+    if [[ -n "$NODE_ID" ]]; then
+        NODE_NOTE="existing"
+        return 0
+    fi
+    # createProviderNodeSchema, omniroute
+    # src/shared/validation/schemas/provider.ts:307-385: it demands name and
+    # prefix, an apiType for type "openai-compatible", and a baseUrl only for
+    # the "vibeproxy-openai" preset - every other field is optional, so the
+    # gateway would accept this body without it. apply sends baseUrl anyway: a
+    # node without the endpoint the registry names is a node nobody can route
+    # to. The CLI's own POST sends no body at all (bin/cli/api-commands/
+    # provider-nodes.mjs:18-25), so this is the REST call, not `omniroute api`.
+    body="$(python3 -c 'import json,sys
+print(json.dumps({"name": sys.argv[1], "prefix": sys.argv[1],
+                  "type": "openai-compatible", "apiType": "chat",
+                  "baseUrl": sys.argv[2]}))' "$provider_id" "${PROVIDER_BASE[$provider_id]}")" || {
+        REST_ERROR="the provider node request could not be built"
+        return 1
+    }
+    if ! omni_rest POST /api/provider-nodes "$body"; then
+        return 1
+    fi
+    # The created node is read back rather than trusted from the POST response:
+    # the response shape is not the documented contract, the prefix is.
+    provider_node_id "$provider_id"
+    if [[ -z "$NODE_ID" ]]; then
+        REST_ERROR="the gateway accepted the node but does not list it"
+        return 1
+    fi
+    NODE_NOTE="created"
+}
+
 register_provider() {
     local key_name="$1" provider_id="$2" value="${KEYS[$1]:-}"
     if [[ -z "$value" ]]; then
@@ -362,6 +613,13 @@ register_provider() {
         return 0
     fi
     if [[ $DRY -eq 1 ]]; then
+        # Say how the connection would be made, not only that it would be: an
+        # id with no built-in needs its provider node first. Reading the CLI's
+        # catalog is a read; the dry run creates no node and adds no key.
+        if gateway_up && provider_needs_node "$provider_id"; then
+            echo "  - $provider_id: would create its provider node (OpenAI-compatible" \
+                "endpoint ${PROVIDER_BASE[$provider_id]}) and add the key to it"
+        fi
         echo "  - $provider_id: would register (key from $key_name)"
         # The catalog step below plans from this list too: a dry run has to say
         # it would refresh what it would just have registered.
@@ -373,14 +631,45 @@ register_provider() {
     if [[ -n "${PROVIDER_DATA[$provider_id]:-}" ]]; then
         data_args=(--provider-specific-data "${PROVIDER_DATA[$provider_id]}")
     fi
+    local add_id="$provider_id" node_id="" err="" rc=0
+    local name_args=()
+    if provider_needs_node "$provider_id"; then
+        if [[ -z "$REST_KEY" ]]; then
+            echo "  ! $provider_id is not a built-in provider - it needs a gateway provider node"
+            echo "      and no manage key is available (OMNIROUTE_API_KEY, or the ai-stack"
+            echo "      manage.key): register it in the dashboard"
+            return 0
+        fi
+        # No $( ) here: the reason has to survive in REST_ERROR.
+        if ! ensure_provider_node "$provider_id"; then
+            echo "  ! $provider_id provider node could not be created — register it in the dashboard"
+            print_cli_error "${REST_ERROR:-the gateway refused the request}" "$value" "$REST_KEY"
+            return 0
+        fi
+        node_id="$NODE_ID"
+        if [[ "$NODE_NOTE" == "created" ]]; then
+            echo "  + $provider_id: provider node created (prefix $provider_id -> ${PROVIDER_BASE[$provider_id]})"
+        fi
+        if provider_connection_exists "$node_id" "$provider_id"; then
+            echo "  = $provider_id already registered"
+            return 0
+        fi
+        # The key binds to the node, and the connection keeps the registry's
+        # name so the gateway UI and --drift both read "meta-api".
+        add_id="$node_id"
+        name_args=(--name "$provider_id")
+    fi
     # Subshell export, not `env VAR=value`: env would put the key in argv,
     # where `ps` can read it for the lifetime of the call.
-    if ( export "$var=$value"; omni providers add "$provider_id" \
-            --credential-env "$var" "${data_args[@]}" --yes ) >/dev/null 2>&1; then
+    err="$( { ( export "$var=$value"; omni providers add "$add_id" \
+            "${name_args[@]}" --credential-env "$var" "${data_args[@]}" --yes ) \
+            2>&1 1>/dev/null; } )" || rc=$?
+    if [[ $rc -eq 0 ]]; then
         echo "  + $provider_id registered"
         REGISTERED_NOW+=("$provider_id")
     else
         echo "  ! $provider_id registration failed — register it in the dashboard"
+        print_cli_error "$err" "$value" "$REST_KEY"
     fi
 }
 

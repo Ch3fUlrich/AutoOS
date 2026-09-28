@@ -17,23 +17,19 @@ one its own Serena process and its own graph.
 
 **The branch a sandbox was cloned from is frozen while the sandbox runs.** Do not fast-forward or
 merge a parent branch while a child sandbox cloned from it is working: the containment check
-(`--isolate`, exit 7 LEAK) reads the parent's new commits — and, because git worktrees share refs,
-any other lane's concurrent commits — as the worker's own writes. Two measured false positives
-(inbox 2026-09-27 19:55:43Z, 20:55:47Z). Lane LEAKFP narrows the check to the parent worktree's own
-HEAD and the sandbox's objects; until that lands, freezing the parent is the only safe order
-(R-coord-01).
+(`--isolate`, exit 7 LEAK) reads the parent's new commits as the worker's own writes (R-coord-01).
+The two measured false positives (inbox 2026-09-27 19:55:43Z, 20:55:47Z) are fixed — `parent_leak()`
+now reads the parent worktree's own first-parent range and the sandbox's objects (LEAKFP2 7da69d4) —
+and `--isolate`'s semantics live in [`../unattended-orchestration.md`](../unattended-orchestration.md).
 
 **A lane that changes shared data greps every consumer of it.** The list: the changed id as a
 DEFAULT in `tests/`, `configuration/`, `lib/`, `start-stack.*`, and in any file that renders from
 the registry; plus, for a change to `install.sh`'s return codes, *every caller of the function* —
 `install_script`, the catalog's `postInstall` entries (which run bare under `set -e` through
 `run_post_install`, so a non-zero return aborts `setup.sh`), and direct calls (inbox 2026-09-27
-19:59:32Z, L1-backlog/rv 765f189). A route-set change then runs the tests
-`python3 tools/affected-tests.py --from-diff <base> --format filter` selects — not a hand-picked filter: two
-provider flips in one day each broke literal shell pins the chosen filter missed (PROVPIN 18:4xZ,
-MUSEPIN 21:1xZ, CI 36340556590, 36350743072). Test expectations *derive* from the rendered files;
-the only thing pinned as a literal is an order a human approved (R-worker-01, R-worker-03,
-R-orch-11).
+19:59:32Z, L1-backlog/rv 765f189). Which tests a route-set change then runs is derived, never
+hand-picked: that fact and its evidence live in *Testing*, `docs/testing.md` (R-worker-01,
+R-worker-03, R-orch-11).
 
 ```mermaid
 flowchart LR
