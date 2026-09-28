@@ -373,6 +373,21 @@ def spawn(req: dict) -> dict:
         argv, route = build_argv(req)
     except (ValueError, clients.DepthError) as exc:
         return _refused(str(exc))
+    # CLAUDEBUDGET-b item 3(e): this tool is a spawn path, and the preflight
+    # below was not enough to make it a gated one. A caller that never reads the
+    # CLI's exit code -- an agent that only looks at this dict -- would have seen
+    # a refusal arrive as a mysterious "route refused" string instead of the
+    # budget's own reason, and a future launch path that skipped preflight would
+    # have skipped the policy entirely. Checked here, before any run dir exists.
+    try:
+        budget_refusal, budget_note = agent.claude_spawn_refusal(
+            req.get("client") or "opencode", os.environ)
+    except (OSError, ValueError) as exc:
+        return _refused("cannot read the Claude budget: %s" % exc)
+    if budget_refusal is not None:
+        return _refused(budget_refusal)
+    if budget_note is not None:
+        route["claude_budget"] = budget_note
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)

@@ -3330,11 +3330,12 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         return {"opencode": {"installed": True, "signed_in": True, "reason": ""},
                 "claude": {"installed": True, "signed_in": True, "reason": ""}}
 
-    def legs(self, card, route_id="r-mixed", registry=None, client="opencode"):
+    def legs(self, card, route_id="r-mixed", registry=None, client="opencode",
+             env=None):
         registry = registry or self.registry()
         kept, skipped, _ = r.usable_legs(registry["routes"][route_id], card,
                                         self.features(), self.state(),
-                                        registry, {}, client)
+                                        registry, {}, client, None, env)
         return kept, skipped
 
     def card(self, **over):
@@ -3350,6 +3351,65 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         self.assertTrue(r.is_claude_leg("antigravity/claude-opus-4-6", registry))
         self.assertFalse(r.is_claude_leg("groq/openai/gpt-oss-120b", registry))
         self.assertFalse(r.is_claude_leg("antigravity/gemini-3-flash", registry))
+
+    # --- the predicate is the model's family/name, not the provider id -------
+
+    def proxy_registry(self):
+        """Claude reached through an unrelated provider: a proxy leg whose model
+        row says nothing about Claude, and one whose family does. The old
+        predicate read `provider in (cc, anthropic)` and let both through."""
+        registry = self.registry()
+        registry["providers"]["relay"] = {"id": "relay"}
+        registry["models"]["fable-5"] = {
+            "id": "fable-5", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["models"]["masked-1"] = {
+            "id": "masked-1", "family": "anthropic", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["models"]["opus-4-6"] = {
+            "id": "opus-4-6", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["models"]["sonnet-5"] = {
+            "id": "sonnet-5", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["models"]["haiku-4-5"] = {
+            "id": "haiku-4-5", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["models"]["nemotron-3"] = {
+            "id": "nemotron-3", "family": "nvidia", "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["routes"]["r-relay"] = {"id": "r-relay", "class": "frontier",
+                                         "legs": ["relay/fable-5"]}
+        return registry
+
+    def test_a_proxy_or_openrouter_spelling_is_a_claude_leg(self):
+        registry = self.proxy_registry()
+        for leg in ("relay/fable-5", "relay/masked-1", "relay/opus-4-6",
+                    "relay/sonnet-5", "relay/haiku-4-5",
+                    "openrouter/anthropic/claude-opus-4-6"):
+            self.assertTrue(r.is_claude_leg(leg, registry), leg)
+        self.assertFalse(r.is_claude_leg("relay/nemotron-3", registry))
+
+    def test_the_claude_name_check_is_case_insensitive(self):
+        registry = self.proxy_registry()
+        registry["models"]["Sonnet-5"] = dict(registry["models"]["sonnet-5"],
+                                              id="Sonnet-5")
+        self.assertTrue(r.is_claude_leg("relay/Sonnet-5", registry))
+
+    def test_a_proxy_claude_leg_is_held_like_any_other(self):
+        kept, skipped = self.legs(self.card(), "r-relay",
+                                  registry=self.proxy_registry())
+        self.assertEqual(kept, [])
+        self.assertIn("claude_budget: relay/fable-5 held for finals",
+                      skipped["relay/fable-5"])
+
+    def test_a_claude_provider_is_never_a_wait(self):
+        registry = self.proxy_registry()
+        self.assertTrue(r.is_claude_provider("cc", registry))
+        self.assertTrue(r.is_claude_provider("anthropic", registry))
+        self.assertTrue(r.is_claude_provider("relay", registry))
+        self.assertFalse(r.is_claude_provider("groq", registry))
+        self.assertFalse(r.is_claude_provider("antigravity", registry))
 
     def test_the_real_registry_has_exactly_the_known_claude_legs(self):
         path = (Path(__file__).resolve().parent.parent
@@ -3386,10 +3446,33 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         kept, skipped = self.legs(self.card(kind="review"))
         self.assertIn("antigravity/claude-opus-4-6", skipped)
 
-    def test_a_critical_card_keeps_the_claude_leg(self):
-        kept, skipped = self.legs(self.card(critical=True))
+    def test_a_critical_card_alone_is_still_held_and_names_what_it_needs(self):
+        # CLAUDEBUDGET-b item 1: `critical` was self-grantable -- any worker could
+        # write critical=true on its own card and unlock Claude. Only the
+        # orchestrator's env declares a critical path now.
+        kept, skipped = self.legs(self.card(critical=True), env={})
+        self.assertNotIn(("antigravity", "claude-opus-4-6"), kept)
+        self.assertIn(
+            "claude_budget: critical needs the orchestrator's "
+            "AUTOOS_CLAUDE_CRITICAL", skipped["antigravity/claude-opus-4-6"])
+
+    def test_the_orchestrator_env_unlocks_the_claude_leg(self):
+        env = {r.CLAUDE_CRITICAL_ENV: "CI is red on main, nothing else can close it"}
+        kept, skipped = self.legs(self.card(critical=True), env=env)
         self.assertIn(("antigravity", "claude-opus-4-6"), kept)
         self.assertNotIn("antigravity/claude-opus-4-6", skipped)
+
+    def test_an_empty_critical_reason_is_not_a_declaration(self):
+        kept, _ = self.legs(self.card(critical=True),
+                            env={r.CLAUDE_CRITICAL_ENV: "   "})
+        self.assertNotIn(("antigravity", "claude-opus-4-6"), kept)
+
+    def test_the_env_unlocks_a_card_that_never_claimed_critical(self):
+        # The declaration is the orchestrator's, not the card's: a card that says
+        # nothing still gets Claude when its spawner set the env.
+        kept, _ = self.legs(self.card(),
+                            env={r.CLAUDE_CRITICAL_ENV: "critical path"})
+        self.assertIn(("antigravity", "claude-opus-4-6"), kept)
 
     def test_budget_off_changes_nothing(self):
         registry = self.registry(mode="normal", weekly_share_left=0.3)
@@ -3487,7 +3570,7 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
         registry["policy"]["claude_budget"].update(budget)
         return registry
 
-    def plan(self, registry=None, client="opencode", now=None,
+    def plan(self, registry=None, client="opencode", now=None, env=None,
              **card_overrides):
         registry = registry or self.registry()
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
@@ -3499,7 +3582,7 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
                  "claude": {"installed": True, "signed_in": True, "reason": ""}}
         return r.plan(card, features, state, registry, {}, [], "orch",
                       now or datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc),
-                      client)
+                      client, env)
 
     # --- the deferred path (Claude-only card) ------------------------------
 
@@ -3534,10 +3617,11 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
         self.assertEqual(plan["wait_until"], "free capacity")
         self.assertEqual(plan["reason"], "claude_budget")
 
-    def test_a_claude_offpeak_window_is_a_wait_until_too(self):
-        # cc's own quiet window (the shipped registry records one) is an
-        # off-peak signal like any other: with no cheap-p window on file, the
-        # 21:00 load window is what the card waits for.
+    def test_a_claude_offpeak_window_is_never_a_wait(self):
+        # CLAUDEBUDGET-b item 2: cc's 21:00 window is a *Claude* window. Waiting
+        # for it means the card runs on Claude as soon as the price drops -- the
+        # opposite of holding Claude for finals. With no non-Claude window on
+        # file the answer is the honest one: free capacity.
         registry = self.claude_only()
         del registry["providers"]["cheap-p"]["windows"]
         registry["providers"]["cc"]["windows"] = [
@@ -3547,7 +3631,36 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
         plan = self.plan(registry, deferrable=True,
                          now=datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc))
         self.assertEqual(plan["state"], "deferred")
-        self.assertEqual(plan["wait_until"], "2026-09-29T21:00Z")
+        self.assertEqual(plan["wait_until"], "free capacity")
+        self.assertEqual(plan["reason"], "claude_budget")
+
+    def test_a_non_claude_window_still_wins_over_a_claude_one(self):
+        # The exclusion is per provider, not "no windows at all": cc turns cheap
+        # at 09:30 and cheap-p at 10:00, and the card waits for cheap-p -- the
+        # Claude window is not merely later, it is off the board.
+        registry = self.claude_only()
+        registry["providers"]["cc"]["windows"] = [
+            {"days": ["mon", "tue", "wed", "thu", "fri"], "utc_from": "09:30",
+             "utc_to": "23:59", "price_factor": 0.5, "kind": "load",
+             "source": "test"}]
+        plan = self.plan(registry, deferrable=True)
+        self.assertEqual(plan["wait_until"], "2026-09-29T10:00Z")
+
+    def test_budget_wait_until_reads_only_non_claude_providers(self):
+        registry = self.claude_only()
+        now = datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc)
+        del registry["providers"]["cheap-p"]["windows"]
+        registry["providers"]["mid-p"]["windows"] = [
+            {"days": ["mon", "tue", "wed", "thu", "fri"], "utc_from": "19:00",
+             "utc_to": "23:59", "price_factor": 0.5, "kind": "load",
+             "source": "test"}]
+        registry["providers"]["cc"]["windows"] = [
+            {"days": ["mon", "tue", "wed", "thu", "fri"], "utc_from": "18:00",
+             "utc_to": "23:59", "price_factor": 0.5, "kind": "load",
+             "source": "test"}]
+        wait, reason = r.budget_wait_until(registry, now)
+        self.assertEqual(wait, "2026-09-29T19:00Z")
+        self.assertIn("claude_budget", reason)
 
     def test_a_non_deferrable_claude_only_card_never_gets_claude(self):
         plan = self.plan(self.claude_only())
@@ -3557,10 +3670,44 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
 
     # --- the critical-path override ---------------------------------------
 
-    def test_a_critical_card_still_routes_to_claude_and_says_why(self):
+    def test_a_critical_card_alone_routes_to_nothing(self):
+        # CLAUDEBUDGET-b item 1 rewrote this test. HEAD's version was the hole:
+        # `critical=true` on a card unlocked Claude, and a card is written by the
+        # worker that wants the model, so every worker could unlock it. Without
+        # the orchestrator's env there is now no route left at all.
         plan = self.plan(self.claude_only(), critical=True)
+        self.assertIsNone(plan["route"])
+        self.assertIn(r.CLAUDE_BUDGET_CRITICAL_NEEDED, plan["reason"])
+
+    def test_a_declared_critical_card_routes_to_claude_and_cites_the_reason(self):
+        # The declaration is the orchestrator's, and the reason text it put in
+        # the env is what the plan carries, so a DONE line can cite why Claude
+        # was spent (item 1: the record has to name the authority, not the flag).
+        reason = "CI is red on main, nothing else can close it"
+        plan = self.plan(self.claude_only(), critical=True,
+                         env={r.CLAUDE_CRITICAL_ENV: reason})
         self.assertEqual(plan["route"], "r-claude")
         self.assertIn("claude_budget: critical-path override", plan["reason"])
+        self.assertIn(reason, plan["reason"])
+
+    def test_a_declared_critical_card_never_claims_the_field(self):
+        # The env alone is the declaration: a card that says nothing about
+        # critical still gets Claude, because it is not the card's call.
+        plan = self.plan(self.claude_only(),
+                         env={r.CLAUDE_CRITICAL_ENV: "critical path"})
+        self.assertEqual(plan["route"], "r-claude")
+
+    def test_a_deferred_plan_carries_the_keys_a_ready_plan_has(self):
+        # Item 4: the deferred dict had its own, smaller shape, so a caller that
+        # read plan["reviewers"] on every plan raised only on a deferred one --
+        # the state that arrives most when the fleet is busy.
+        plan = self.plan(self.claude_only(), deferrable=True)
+        self.assertEqual(plan["state"], "deferred")
+        for key, expected in (("leg", None), ("p", None), ("theta", None),
+                              ("expected_cost", None), ("reviewers", []),
+                              ("escalation", [])):
+            self.assertIn(key, plan, key)
+            self.assertEqual(plan[key], expected, key)
 
     def test_a_final_card_routes_to_claude_without_the_override_line(self):
         plan = self.plan(self.claude_only(), kind="final")
@@ -3681,19 +3828,231 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                               if any(x.startswith("claude_budget:")
                                      for x in reasons)], [], route_id)
 
-    def test_a_critical_card_is_held_by_nothing(self):
+    def legs_of_card(self, card, route_id, env=None):
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in self.registry["clients"]}
-        kept, skipped, _ = r.usable_legs(
-            self.registry["routes"]["t2-orchestrator"],
+        return r.usable_legs(self.registry["routes"][route_id], card,
+                             {"need_tokens": 1000}, state, self.registry, {},
+                             "opencode", self.NOW, env)
+
+    def test_a_critical_card_is_held_by_the_budget_now(self):
+        # CLAUDEBUDGET-b item 1 rewrote this test: on the shipped registry, a
+        # card that only carries its own `critical` field keeps NO Claude leg.
+        # It was the self-grantable override, and the operator's D-102 answer is
+        # that the orchestrator, not the card, declares a critical path.
+        kept, skipped, _ = self.legs_of_card(
             {"kind": "review", "privacy": "public", "critical": True},
-            {"need_tokens": 1000}, state, self.registry, {}, "opencode",
-            self.NOW)
+            "t2-orchestrator", env={})
         self.assertEqual([leg for leg, reasons in skipped.items()
                           if any(x.startswith("claude_budget:")
-                                 for x in reasons)], [])
+                                 for x in reasons)],
+                         ["antigravity/claude-opus-4-6-thinking"])
+        self.assertNotIn(("antigravity", "claude-opus-4-6-thinking"), kept)
+
+    def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
+        # The same card, same route, with the declaration set by the spawner.
+        kept, skipped, _ = self.legs_of_card(
+            {"kind": "review", "privacy": "public", "critical": True},
+            "t2-orchestrator",
+            env={r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
         self.assertIn(("antigravity", "claude-opus-4-6-thinking"), kept)
+        self.assertNotIn("antigravity/claude-opus-4-6-thinking", skipped)
+
+    def test_the_shipped_run_command_refuses_claude_and_the_env_unlocks_it(self):
+        # The CLI half of the same rule (item 3(d)), on the shipped registry:
+        # see ClaudeBudgetSpawnTests in tests/test_autoos_spawner.py, which runs
+        # this through `autoos-agent.py run` rather than the resolver alone.
+        self.assertTrue(r.claude_budget_of(self.registry)["on"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+class ClaudeBudgetGateTests(unittest.TestCase):
+    """CLAUDEBUDGET-b item 3: one gate function, every Claude caller.
+
+    HEAD wrote the same policy three times in three shapes (the leg filter, the
+    client hold in filter_routes, the plan's override note) and never wrote it at
+    all in the two places that also pick a model: reviewer selection and the
+    escalation ladders. One function -- `claude_allowed(kind, env, registry,
+    now)` -- so a caller cannot escape the budget by forgetting to copy it.
+    """
+
+    NOW = datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc)
+    DECLARED = {r.CLAUDE_CRITICAL_ENV: "CI is red on main, nothing else closes it"}
+
+    def registry(self, on=True):
+        entry = {"mode": "budget" if on else "normal",
+                 "weekly_share_left": 0.05 if on else 0.9,
+                 "budget_below": 0.25, "source": "test"}
+
+        def model(model_id, family):
+            return {"id": model_id, "family": family, "tool_calls": "proven",
+                    "reasoning": True, "output_max": 32000,
+                    "effort_ladder": ["none", "low", "high"],
+                    "price_in": 1e-5, "price_out": 5e-5,
+                    "context_usable": {"tokens": 200000, "source": "default"}}
+        return {
+            "providers": {"cc": {"id": "cc"}, "antigravity": {"id": "antigravity"},
+                          "groq": {"id": "groq"}},
+            "models": {"claude-opus-4-6": model("claude-opus-4-6", "anthropic"),
+                       "gemini-3-flash": model("gemini-3-flash", "google"),
+                       "openai/gpt-oss-120b": model("openai/gpt-oss-120b",
+                                                    "openai-oss")},
+            "routes": {
+                # "mid", not "frontier": the escalation test starts on the cheap
+                # route, and the class immediately above "cheap" is the one the
+                # Claude route has to occupy for the ladder to reach for it.
+                "r-claude": {"id": "r-claude", "class": "mid",
+                             "legs": ["cc/claude-opus-4-6"]},
+                "r-mixed": {"id": "r-mixed", "class": "mid",
+                            "legs": ["groq/openai/gpt-oss-120b"]},
+                "r-clean": {"id": "r-clean", "class": "cheap",
+                            "legs": ["antigravity/gemini-3-flash"]},
+            },
+            "clients": {"claude": {"id": "claude"}, "opencode": {"id": "opencode"}},
+            "policy": {"claude_budget": entry}}
+
+    def score(self, route_id, registry):
+        leg = registry["routes"][route_id]["legs"][0]
+        return {"route": route_id, "leg": leg, "effort": "low",
+                "expected_cost": 0.001, "p": 0.9}
+
+    def candidates(self, registry, route_ids):
+        return [self.score(rid, registry) for rid in route_ids]
+
+    # --- (0) the gate itself ------------------------------------------------
+
+    def test_the_gate_is_open_for_every_kind_when_budget_is_off(self):
+        registry = self.registry(on=False)
+        for kind in r.CLAUDE_USE_KINDS:
+            allowed, reason = r.claude_allowed(kind, {}, registry, self.NOW)
+            self.assertTrue(allowed, kind)
+            self.assertIn("off", reason, kind)
+
+    def test_only_a_final_passes_the_gate_without_a_declaration(self):
+        registry = self.registry()
+        allowed, _ = r.claude_allowed("final", {}, registry, self.NOW)
+        self.assertTrue(allowed)
+        for kind in ("leg", "review", "escalation", "spawn"):
+            allowed, reason = r.claude_allowed(kind, {}, registry, self.NOW)
+            self.assertFalse(allowed, kind)
+            self.assertIn(r.CLAUDE_CRITICAL_ENV, reason, kind)
+
+    def test_the_declaration_opens_every_kind_and_travels_with_the_verdict(self):
+        registry = self.registry()
+        for kind in ("leg", "review", "escalation", "spawn"):
+            allowed, reason = r.claude_allowed(kind, self.DECLARED,
+                                               registry, self.NOW)
+            self.assertTrue(allowed, kind)
+            # Item 1: the reason text has to reach the plan, because the DONE
+            # line is what cites why a Claude run was allowed at all.
+            self.assertIn("nothing else closes it", reason, kind)
+
+    def test_a_blank_declaration_is_not_a_declaration(self):
+        registry = self.registry()
+        for value in ("", "   ", "\n"):
+            allowed, _ = r.claude_allowed("leg",
+                                         {r.CLAUDE_CRITICAL_ENV: value},
+                                         registry, self.NOW)
+            self.assertFalse(allowed, repr(value))
+
+    def test_an_unknown_kind_is_refused_not_assumed(self):
+        with self.assertRaises(ValueError):
+            r.claude_allowed("vibes", {}, self.registry(), self.NOW)
+
+    def test_the_claude_client_is_always_a_claude_spend(self):
+        self.assertTrue(r.is_claude_client("claude"))
+        self.assertFalse(r.is_claude_client("opencode"))
+        self.assertFalse(r.is_claude_client("agy"))
+
+    # --- (b) cross-family reviewer selection --------------------------------
+
+    def reviewers(self, card, registry, env=None, chosen="r-mixed"):
+        return r._select_reviewers(
+            self.candidates(registry, ["r-claude", "r-clean", "r-mixed"]),
+            ["r-claude", "r-clean", "r-mixed"],
+            self.score(chosen, registry), card, "S2",
+            {"need_tokens": 1000}, {}, registry, {}, [], "orch", "balanced",
+            "opencode", self.NOW, env)["routes"]
+
+    def test_a_claude_reviewer_is_not_selected_for_a_non_final_card(self):
+        routes = self.reviewers({"kind": "implement", "risk": "high"},
+                                self.registry())
+        for route_id in routes:
+            self.assertFalse(any(r.is_claude_leg(leg, self.registry())
+                                 for leg in self.registry()["routes"][route_id]["legs"]),
+                             "%s reviewed by Claude" % route_id)
+
+    def test_a_claude_reviewer_is_selected_for_a_final_card(self):
+        self.assertIn("r-claude", self.reviewers({"kind": "final", "risk": "high"},
+                                                 self.registry()))
+
+    def test_the_declaration_selects_the_claude_reviewer_for_a_non_final(self):
+        routes = self.reviewers({"kind": "implement", "risk": "high"},
+                                self.registry(), env=self.DECLARED)
+        self.assertIn("r-claude", routes)
+
+    def test_the_budget_line_says_what_unlocks_it(self):
+        # The explain line is what an operator reads; naming the card field as
+        # the key taught them to set it on the card.
+        line = r.claude_budget_explain(self.registry())[0]
+        self.assertIn(r.CLAUDE_CRITICAL_ENV, line)
+        self.assertNotIn("critical=true", line)
+
+    def test_budget_off_selects_the_claude_reviewer_as_before(self):
+        self.assertIn("r-claude",
+                      self.reviewers({"kind": "implement", "risk": "high"},
+                                     self.registry(on=False)))
+
+    # --- (c) escalation ladders ---------------------------------------------
+
+    def escalator(self, card, registry, env=None):
+        chosen = self.score("r-clean", registry)
+        # Only the Claude route occupies the class above the chosen one, so a
+        # step that appears here appeared *onto Claude*, and one that is absent
+        # is absent because the budget took it away -- not because a cheaper
+        # non-Claude route won the cost comparison.
+        steps = r._escalation(chosen,
+                              self.candidates(registry, ["r-claude"]),
+                              registry, card, env)
+        return {step["on"]: step for step in steps}
+
+    def test_a_capability_escalation_never_raises_onto_claude_in_budget_mode(self):
+        steps = self.escalator({"kind": "implement"}, self.registry())
+        route_id = steps["capability"].get("route")
+        self.assertNotEqual(route_id, "r-claude")
+        if route_id:
+            self.assertFalse([leg for leg
+                              in self.registry()["routes"][route_id]["legs"]
+                              if r.is_claude_leg(leg, self.registry())])
+
+    def test_a_capability_escalation_may_raise_onto_claude_when_declared(self):
+        steps = self.escalator({"kind": "implement"}, self.registry(),
+                               env=self.DECLARED)
+        self.assertEqual(steps["capability"]["route"], "r-claude")
+
+    def test_a_final_escalates_onto_claude_without_a_declaration(self):
+        steps = self.escalator({"kind": "final"}, self.registry())
+        self.assertEqual(steps["capability"]["route"], "r-claude")
+
+    # --- (a) the leg filter and the plan line it feeds -----------------------
+
+    def legs(self, card, registry, env=None):
+        kept, skipped, _ = r.usable_legs(
+            registry["routes"]["r-claude"], card, {"need_tokens": 1000},
+            {}, registry, {}, "opencode", self.NOW, env)
+        return kept, skipped
+
+    def test_a_held_critical_card_names_what_would_unlock_it(self):
+        _kept, skipped = self.legs({"kind": "implement", "critical": True},
+                                   self.registry(), env={})
+        self.assertIn(r.CLAUDE_BUDGET_CRITICAL_NEEDED,
+                      skipped["cc/claude-opus-4-6"])
+
+    def test_a_held_non_critical_card_keeps_the_plain_reason(self):
+        _kept, skipped = self.legs({"kind": "implement"}, self.registry(),
+                                   env={})
+        self.assertEqual(skipped["cc/claude-opus-4-6"],
+                         ["claude_budget: cc/claude-opus-4-6 held for finals"])
+

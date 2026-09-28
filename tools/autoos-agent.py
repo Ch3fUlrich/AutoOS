@@ -645,6 +645,54 @@ def free_slot_refusal(plan: dict, policy: dict | None, directory: str | None = N
             % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap), None)
 
 
+# CLAUDEBUDGET-b item 1: the prefix the orchestrator's Claude declarations
+# live under. A worker must never hold one, so this is both the gate's env
+# namespace and the strip list -- one home for the spelling.
+CLAUDE_ENV_PREFIX = "AUTOOS_CLAUDE"
+
+
+def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = None,
+                         now=None) -> tuple:
+    """``(refusal, note)`` for a spawn of `client_name` under the Claude budget.
+
+    CLAUDEBUDGET-b item 3(d): the resolver holds Claude *legs*, and HEAD had
+    nothing at all for the case where the caller simply names the client --
+    `--client claude` ran inside Claude Code and spent the allowance on ordinary
+    implement work, which is the exact spend D-102 reserved for finals. The
+    answer comes from the resolver's one gate (`claude_allowed`), so a budget
+    that flips in the registry flips this too, and a card's own `critical=true`
+    is not input: only the orchestrator's `AUTOOS_CLAUDE_CRITICAL` is.
+
+    `note` is the reason an *allowed* Claude spawn is allowed, so the run says
+    out loud what let it happen (item 1: the record has to cite the authority).
+    """
+    if not resolver.is_claude_client(client_name):
+        return None, None
+    if registry is None:
+        registry = load_live_registry()
+    allowed, reason = resolver.claude_allowed("spawn", env, registry, now)
+    if allowed:
+        return None, reason
+    return ("%s runs inside Claude Code, which spends the Claude allowance "
+            "whatever a route leg says: %s. Finals only, unless the "
+            "orchestrator sets %s=<why> on this spawn (a card's own "
+            "critical=true does not)."
+            % (client_name, reason, resolver.CLAUDE_CRITICAL_ENV), None)
+
+
+def strip_claude_env(env: dict) -> dict:
+    """`env` without any `AUTOOS_CLAUDE*` key -- the child's view of it.
+
+    The declaration is one process's authority over one run. If it were
+    inherited, the first worker spawned under it could spawn its own Claude
+    workers with the reason it was handed, and the budget would be back where
+    item 1 started. Stripped on the way out, at the one place a child env is
+    built (and in the MCP server's own launch), so no lane has to remember it.
+    """
+    return {k: v for k, v in env.items()
+            if not k.startswith(CLAUDE_ENV_PREFIX)}
+
+
 def lean_decision(client_name: str, route: dict) -> tuple:
     """(note, refusal) for `--lean` on `client_name` given a planned `route`.
 
@@ -1492,8 +1540,16 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     overlay = load_overlay(MEASURED_OVERLAY_PATH)
     track_record = track.load(TRACK_RECORD)
     client_state = measure_mod.client_state(clients)
-    result = route_plan_for(parsed_card, args.task, ROOT, DEFAULT_ORCHESTRATOR_MODEL,
-                            now, registry, overlay, track_record, client_state)
+    # CLAUDEBUDGET-b item 3(d): `run` and `route` share this core, so the client
+    # being spawned has to reach it -- a card routed for client "claude" is a
+    # Claude spend even where no route leg names Claude. `env` carries the
+    # orchestrator's critical-path declaration (item 1); it is this process's
+    # env, which is where a declaration can come from with authority.
+    result = route_plan_for(parsed_card, args.task, ROOT,
+                            DEFAULT_ORCHESTRATOR_MODEL, now, registry, overlay,
+                            track_record, client_state,
+                            getattr(args, "client", None) or "opencode",
+                            os.environ)
 
     if result["state"] == "input_required":
         raise RouteInputRequired(result["reason"])
@@ -1948,13 +2004,21 @@ def load_overlay(path: str) -> dict:
 
 def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
-                   client_state: dict) -> dict:
+                   client_state: dict, client: str = "opencode",
+                   env: dict | None = None) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
     `card` is a task card exactly as `run --card` accepts it - text
     (``kind=review,paths=...`` or a JSON object string, parsed by
     ``routing.parse_card``) - or already a dict (the MCP tool's own shape).
+    `client`/`env` (CLAUDEBUDGET-b item 3) are the two things the Claude gate
+    asks about: the client because a run *inside* Claude Code spends the
+    allowance whatever the route says, and the env because the critical-path
+    exception belongs to the orchestrator that set it, not to the card. A caller
+    that left them out gets the conservative answer -- client "opencode", no
+    declaration -- never a Claude leg it was not entitled to.
+
     Either way it is normalized to v2 with ``routing.normalize_v2`` (a
     ``routing.CardError`` on a bad one propagates to the caller). Features come
     from ``autoos_measure.measure`` against `repo`; the resolver itself
@@ -1969,7 +2033,8 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
-                           overlay, track_record, orchestrator_model, now)
+                           overlay, track_record, orchestrator_model, now,
+                           client, env)
     # D-102 CLAUDEBUDGET: the budget state leads every explain block, ON or off.
     # A plan that dropped a Claude leg looks identical to one that never had a
     # Claude candidate, and `route --explain` is what an operator reads to tell
@@ -2008,7 +2073,9 @@ def cmd_route(args) -> int:
     try:
         result = route_plan_for(args.card, args.brief or "", repo,
                                 args.orchestrator_model, now, registry, overlay,
-                                track_record, client_state)
+                                track_record, client_state,
+                                getattr(args, "client", None) or "opencode",
+                                os.environ)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
@@ -3843,6 +3910,18 @@ def cmd_run(args, cfg: dict) -> int:
         if refusal is not None:
             return refuse(refusal)
     client = clients.CLIENTS[args.client]
+    # CLAUDEBUDGET-b item 3(d): the client is a spend, so it is gated here --
+    # ahead of build_plan, so a refused Claude spawn clones no sandbox, writes no
+    # worker record and burns no route.
+    try:
+        budget_refusal, budget_note = claude_spawn_refusal(client.name, os.environ,
+                                                           registry)
+    except (OSError, ValueError) as exc:
+        return refuse("cannot read the Claude budget: %s" % exc)
+    if budget_refusal is not None:
+        return refuse(budget_refusal)
+    if budget_note is not None:
+        print("claude-budget: %s" % budget_note, file=sys.stderr)
     # SPAWNFREE (S2) item 3: a mode the CLI does not offer is not rejected by
     # the CLI - qodercli 1.1.63 took `--permission-mode accept_edits`, ignored
     # it, and refused every write (62 runs). Check the adapter's modes against
@@ -3887,7 +3966,10 @@ def cmd_run(args, cfg: dict) -> int:
         if lean_refusal is not None:
             return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
-    env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
+    # Item 1: the printed env is the child's env, not this process's, so a
+    # declaration that is about to be stripped never looks like it was passed on.
+    env_names = sorted(strip_claude_env(
+        dict(plan["env"], **({"AUTOOS_OMNIROUTE_KEY": ""} if uses_key else {}))))
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     if route.get("review_plan"):
@@ -3940,6 +4022,9 @@ def cmd_run(args, cfg: dict) -> int:
     # checkout (live 2026-09-24).
     env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
     env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    # CLAUDEBUDGET-b item 1: this process may hold the orchestrator's Claude
+    # declaration; the worker it is starting may not.
+    env = strip_claude_env(env)
     if uses_key:
         key = client_key(ROOT)
         if not key:
@@ -4473,6 +4558,10 @@ def _parser_route(sub):
     route.add_argument("--card", required=True,
                        help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
     route.add_argument("--brief", default="", help="the task brief text (counts toward need_tokens)")
+    route.add_argument("--client", choices=sorted(clients.CLIENTS),
+                       help="the client the card would run under, so the Claude "
+                            "budget is answered for that client (CLAUDEBUDGET-b "
+                            "item 3); default opencode")
     route.add_argument("--explain", action="store_true",
                        help="print the explain lines and reason to stderr before the JSON")
     route.add_argument("--orchestrator-model", dest="orchestrator_model",

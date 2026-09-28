@@ -62,11 +62,36 @@ def tearDownModule():
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 
+SHIPPED_REGISTRY = json.loads(
+    (ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+
+
+def r_leg_is_claude(leg):
+    """The shipped registry's own Claude predicate, for CLI-level assertions."""
+    return bool(leg) and resolver.is_claude_leg(leg, SHIPPED_REGISTRY)
+
+
 def clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k != "AUTOOS_OMNIROUTE_KEY"}
     env.update(extra)
     return env
+
+
+def claude_env(**extra):
+    """`clean_env` plus the orchestrator's Claude declaration.
+
+    CLAUDEBUDGET-b item 1/3(d): with the shipped `claude_budget` on, spawning
+    `--client claude` is refused -- Claude is held for finals and for the work the
+    orchestrator declares. The tests below that only want to look at the *claude
+    client's own shape* (its argv, `--joinable`, `--lean`'s mcp config, the
+    sandbox containment path) are not tests of the budget, so they declare the run
+    the way an orchestrator would. The budget's own tests
+    (ClaudeBudgetSpawnTests/ClaudeBudgetMcpSpawnTests) deliberately leave it unset:
+    that refusal is what they measure.
+    """
+    return clean_env(AUTOOS_CLAUDE_CRITICAL="test: the claude client's own argv",
+                     **extra)
 
 
 def run_agent(*args, env=None):
@@ -373,12 +398,13 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("omniroute run codex --model t2-worker --api-key-env AUTOOS_OMNIROUTE_KEY -- exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
 
     def test_claude_is_headless_print_on_its_own_login(self):
-        r = plan_of("--client", "claude", "t")
+        r = plan_of("--client", "claude", "t", env=claude_env())
         self.assertIn("would run: claude -p --permission-mode acceptEdits t", r.stdout)
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", r.stdout)
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t",
+                    env=claude_env())
         self.assertIn("claude --bg --remote-control d1 --strict-mcp-config --mcp-config "
                       "'{\"mcpServers\":{}}' --name d1", r.stdout)
 
@@ -633,7 +659,8 @@ class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
     def test_joinable_keeps_an_explicit_model(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "--model", "opus", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1",
+                    "--model", "opus", "t", env=claude_env())
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
@@ -712,7 +739,7 @@ class LeanTests(unittest.TestCase):
         self.assertIn("lean: no serena, playwright, context7", r.stdout)
 
     def test_lean_claude_uses_a_strict_empty_mcp_config(self):
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertIn("--strict-mcp-config", r.stdout)
 
     def test_lean_is_refused_where_it_cannot_be_applied(self):
@@ -783,7 +810,7 @@ class LeanTests(unittest.TestCase):
         r = plan_of("--lean", "--card", "role=review", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
 
@@ -5694,6 +5721,11 @@ class IsolateContainmentTests(unittest.TestCase):
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
             env["AUTOOS_FAKE_ROOT"] = root
+            # CLAUDEBUDGET-b: this Namespace spawns client "claude", which the
+            # shipped budget holds for finals. The test measures the joinable
+            # sandbox's containment, so it carries the orchestrator's
+            # declaration; without it cmd_run refuses before it gets that far.
+            env[agent.resolver.CLAUDE_CRITICAL_ENV] = "test: joinable containment"
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -5778,12 +5810,16 @@ def _fallthrough_registry(route_ids, policy=None):
 
 
 def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
-                      track_record, client_state):
+                      track_record, client_state, client="opencode", env=None):
     """route_plan_for stand-in: the first route id still in `registry`.
 
     `_resolve_route_v2` drops the excluded ids before calling, so the second
     attempt sees only the routes that have not been tried yet. No routes left
-    is the resolver's own input_required."""
+    is the resolver's own input_required. `client`/`env` (CLAUDEBUDGET-b item 3)
+    are the Claude gate's two inputs; this stub plans without the resolver, so it
+    takes them and ignores them -- but it must take them, because `run` now
+    passes them and a stub that silently dropped them would let the real gate
+    drift from what a spawn actually sees."""
     routes = list((registry.get("routes") or {}).keys())
     if not routes:
         return {"route": None, "state": "input_required",
@@ -9110,3 +9146,137 @@ def _reviewer_client_state():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeBudgetSpawnTests(unittest.TestCase):
+    """CLAUDEBUDGET-b item 3(d) + item 1: the spawn-time half of the budget.
+
+    The resolver holds Claude *legs*; nothing stopped a caller from simply
+    naming the client (`--client claude`) or from exporting
+    AUTOOS_CLAUDE_CRITICAL in a worker and passing it down the tree. These are
+    the tests for the two things that close that: one gate at every spawn path,
+    and a spawner that strips its own Claude declaration from every child.
+    """
+
+    # A v1 card, deliberately: this gate belongs to the spawn path, not to the
+    # resolver, and a resolver card cannot plan at all in a checkout with no
+    # measured overlay -- an unrelated environment fact would decide these tests.
+    CARD = "role=implement"
+    CRITICAL = "CI is red on main and only this run can close it"
+
+    def run_(self, *args, env=None):
+        return run_agent("run", *args, "--dry-run", "--card", self.CARD,
+                         "reply with exactly: ack", env=env or clean_env())
+
+    def test_run_client_claude_is_refused_in_budget_mode(self):
+        r = self.run_("--client", "claude")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+
+    def test_the_refusal_is_a_route_refusal_code(self):
+        # Item 3: a refused spawn exits with an existing refusal code, not a new
+        # one callers would have to learn: 2 is "card or route refused".
+        r = self.run_("--client", "claude")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_cards_own_critical_field_does_not_unlock_the_claude_client(self):
+        # The whole point of item 1: the card is written by the worker that wants
+        # the model, so it cannot be the thing that authorises the spend.
+        r = run_agent("run", "--client", "claude", "--dry-run",
+                      "--card", self.CARD + ",critical=true", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_spawn(self):
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude-budget:", r.stderr)
+
+    def test_the_declaration_reason_is_cited_on_the_allowed_spawn(self):
+        # Item 1: the allowed path has to say *why*, in the declared words, or a
+        # DONE line citing Claude is indistinguishable from a violated policy.
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertIn(self.CRITICAL, r.stderr)
+
+    def test_a_non_claude_spawn_is_never_gated(self):
+        r = self.run_("--client", "opencode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude_budget", r.stderr + r.stdout)
+
+    def test_the_refusal_comes_before_any_planning(self):
+        # Nothing is burned by a refusal: no route line, no depth line, no clone.
+        r = self.run_("--client", "claude")
+        self.assertNotIn("would run:", r.stdout)
+        self.assertNotIn("route:", r.stdout)
+
+    def test_the_spawner_strips_claude_env_from_a_child(self):
+        # Item 1: the declaration is this process's, never a worker's to pass on.
+        r = self.run_("--client", "opencode",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL,
+                                    AUTOOS_CLAUDE_OTHER="x"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        env_line = [line for line in r.stdout.splitlines()
+                    if line.startswith("env: ")]
+        self.assertTrue(env_line, r.stdout)
+        self.assertNotIn("AUTOOS_CLAUDE", env_line[0])
+
+    def test_strip_claude_env_drops_the_whole_namespace(self):
+        # The prefix, not one key: an `AUTOOS_CLAUDE_*` added later is stripped
+        # by the same rule, and a second declaration name is exactly how a
+        # worker gets one the spawner forgot to remove.
+        cli = load_agent()
+        out = cli.strip_claude_env({"AUTOOS_CLAUDE_CRITICAL": "x",
+                                   "AUTOOS_CLAUDE_WHATEVER": "y",
+                                   "AUTOOS_AGENT_DEPTH": "1",
+                                   "PATH": "/bin"})
+        self.assertEqual(out, {"AUTOOS_AGENT_DEPTH": "1", "PATH": "/bin"})
+
+    def test_the_plan_sees_the_client_that_would_run(self):
+        # Item 3(d): route_plan_for must pass the client. Under the shipped
+        # budget, a card planned for client `claude` is held by the *client*
+        # rule, which only appears in the plan if the client reached the
+        # resolver; the same card planned for opencode never mentions it.
+        claude = run_agent("route", "--client", "claude", "--card",
+                           "kind=implement,mode=balanced,risk=normal,"
+                           "paths=README.md")
+        opencode = run_agent("route", "--client", "opencode", "--card",
+                             "kind=implement,mode=balanced,risk=normal,"
+                             "paths=README.md")
+        blob = lambda r: (r.stdout or "") + (r.stderr or "")
+        self.assertIn("client claude held for finals", blob(claude),
+                      blob(claude))
+        self.assertNotIn("client claude held for finals", blob(opencode))
+
+
+class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
+    """Item 3(e): the MCP `spawn` tool is a spawn path too."""
+
+    def test_spawn_refuses_the_claude_client_in_budget_mode(self):
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "card": {"role": "implement"}, "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("claude_budget", out.get("error", ""))
+
+    def test_spawn_refuses_before_starting_anything(self):
+        # No run dir, no child: the gate is checked ahead of the launch, so a
+        # refused Claude spawn cannot leave a working record behind.
+        before = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "dry_run": True})
+        self.assertIn("claude_budget", out.get("error", ""))
+        after = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        self.assertEqual(before, after)
+
+    def test_spawn_allows_claude_with_the_orchestrator_declaration(self):
+        os.environ["AUTOOS_CLAUDE_CRITICAL"] = self.CRITICAL = "critical path"
+        try:
+            out = mcp_server.spawn({"client": "claude", "task": "t",
+                                    "dry_run": True})
+        finally:
+            del os.environ["AUTOOS_CLAUDE_CRITICAL"]
+        self.assertNotIn("claude_budget", out.get("error", ""), out)

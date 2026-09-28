@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the Claude budget has one gate, and only the orchestrator holds the key (CLAUDEBUDGET-b, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET (`claude_budget`, same day). Four holes in a policy that was written
+  once per caller instead of once:
+  - **`critical=true` was self-grantable.** A card is written by the worker that wants the model, so
+    any worker could unlock Claude. The override now needs `AUTOOS_CLAUDE_CRITICAL="<why>"` in the
+    **spawning process's** env; `tools/autoos-agent.py` `strip_claude_env()` removes every
+    `AUTOOS_CLAUDE*` key from each child env, so a declaration cannot travel down the tree. A held
+    card that claimed `critical` is refused with `claude_budget: critical needs the orchestrator's
+    AUTOOS_CLAUDE_CRITICAL`, and an allowed plan cites the declared *reason* so the DONE line says
+    why Claude was spent.
+  - **`wait_until` could name a Claude window** — `cc`'s 21:00 hour, i.e. "wait until Claude gets
+    cheap", the opposite of holding it. `budget_wait_until` now skips every Claude provider
+    (`is_claude_provider`: a provider whose every leg is Claude); with no non-Claude window on file
+    the answer is `free capacity`. `tests/test_autoos_resolver.py` `test_a_claude_offpeak_window_is_never_a_wait`
+    replaces the test that pinned the old behaviour.
+  - **One gate: `claude_allowed(kind, env, registry, now)`**, called by the leg filter, the
+    client-bound hold, **cross-family reviewer selection** (a Claude reviewer only for the final —
+    this caller had no budget check at all at HEAD), **the escalation ladders** (same), `route_plan_for`
+    (which now passes `client`/`env`, and `route` grew a `--client` so a plan can be asked for the
+    client that would run), `autoos-agent.py run --client claude` (refused at rc 2, the existing
+    "card or route refused" code, before any sandbox is cloned), and `tools/autoos_agent_mcp.py`
+    `spawn`.
+  - **The Claude predicate is the model's family and name, not the provider id**: family `anthropic`
+    or a model id containing claude/opus/sonnet/haiku/fable, case-insensitive, under *any* provider
+    (a proxy, `openrouter/anthropic/*`), plus client `claude` always. An unknown provider now fails
+    toward "Claude" — guessing the other way is the side that spends the allowance.
+- Deferred plans carry the same key set a ready plan does (`leg`/`p`/`theta`/`expected_cost` null,
+  `reviewers`/`escalation` empty): a caller that read `plan["reviewers"]` on every plan raised only
+  on a deferred one, which is the state that arrives most when the fleet is busy.
+
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
