@@ -55,16 +55,18 @@ json.dump(data, open(dst, "w", encoding="utf-8"))
     printf '%s\n' "$file"
 }
 
-# oh_run_client <sandbox> [setup lines...]: the component, with a URL answer and a
-# token, npm stubbed. Prints the UI output.
+# oh_run_client <sandbox> [harness] [token]: the component, with a URL answer and
+# a token, npm stubbed. Prints the UI output. The token argument defaults to a
+# dummy; "-" means "the env carries no token", so the api-keys.yml path is the
+# one that resolves — which is how a rotation is tested.
 oh_run_client() {
-    local tmp="$1" harness="${2:-}"
+    local tmp="$1" harness="${2:-}" token="${3-dummy-token-1234}"
     (
         SYS_HOME="$tmp"
         AUTOOS_DRY_RUN=0
         AUTOOS_EXTRA_FAILURES=()
         OMNIGRAPH_CLIENT_CHANGED=0
-        OMNIGRAPH_TOKEN="dummy-token-1234"
+        if [[ "$token" == - ]]; then unset OMNIGRAPH_TOKEN; else OMNIGRAPH_TOKEN="$token"; fi
         unset OMNIGRAPH_GRAPH_ID
         AUTOOS_KEYS_FILE="$tmp/keys.yml"
         [[ -n "$harness" ]] && AUTOOS_HARNESS="$harness"
@@ -93,6 +95,27 @@ oh_run_client() {
             "${OMNIGRAPH_CLIENT_CHANGED:-0}" "${INSTALL_SCRIPT_STATE:-installed}" \
             "${AUTOOS_EXTRA_FAILURES[*]-}"
     ) 2>&1
+}
+
+# oh_gate <sandbox> [token]: asks the question install_component asks BEFORE it
+# would run the postInstall at all — `is_installed custom omnigraph-client` on
+# this machine, with this answer and this token. Prints "current" when the gate
+# would skip the component, "open" when it would run it. A rotation that the gate
+# cannot see never reaches the writer, so the gate is the thing that has to be
+# compared against the resolved values (A3 review, HIGH).
+oh_gate() {
+    local tmp="$1" token="${2-dummy-token-1234}"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        AUTOOS_KEYS_FILE="$tmp/keys.yml"
+        if [[ "$token" == - ]]; then unset OMNIGRAPH_TOKEN; else OMNIGRAPH_TOKEN="$token"; fi
+        unset OMNIGRAPH_GRAPH_ID
+        # shellcheck disable=SC2016
+        AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
+        is_installed custom omnigraph-client
+    ) >/dev/null 2>&1 \
+        && printf 'current\n' || printf 'open\n'
 }
 
 if it "omnigraph-client: a missing omnigraph_url answer skips with a hint and records no failure"; then
@@ -216,6 +239,51 @@ if it "omnigraph-client: a bridge at another pin is reinstalled, a bridge at the
     (( ok )) && pass || fail "the pin guard is wrong"
 fi
 
+if it "omnigraph-client: a pin with an empty version is refused, not read as current"; then
+    tmp="$(oh_client_sandbox)"
+    harness="$(oh_harness_with_pin "")"
+    src_before="$(md5sum <tools/omnigraph-mcp-autoos.sh)"
+    out="$(oh_run_client "$tmp" "$harness")"
+    gate="$(oh_gate "$tmp")"
+    have_tree="$(ls "$tmp"/.local/share/autoos/omnigraph-mcp/lib/node_modules 2>/dev/null | wc -l)"
+    src_after="$(md5sum <tools/omnigraph-mcp-autoos.sh)"
+    rm -rf "$tmp" "$harness"
+    ok=1
+    [[ "$out" == *"carries no @version"* ]] \
+        || { ok=0; echo "an empty pin was not refused: [${out:0:400}]" >&2; }
+    [[ "$have_tree" == 0 ]] || { ok=0; echo "npm installed an empty-pinned spec ($have_tree trees)" >&2; }
+    [[ "$gate" == open ]] || { ok=0; echo "the empty pin reads as current" >&2; }
+    [[ "$src_before" == "$src_after" ]] || { ok=0; echo "the tracked wrapper changed" >&2; }
+    (( ok )) && pass || fail "the empty-pin guard is wrong"
+fi
+
+if it "omnigraph-client: a symlinked wrapper is refused and nothing is written through the link"; then
+    tmp="$(oh_client_sandbox)"
+    oh_run_client "$tmp" >/dev/null
+    wrapper="$tmp/.local/bin/omnigraph-mcp-autoos"
+    src_before="$(md5sum <tools/omnigraph-mcp-autoos.sh)"
+    # The shape a developer leaves behind: a link to the tracked file, whose
+    # bytes match, so a content-only check calls it current forever — and a real
+    # content change would be `cp`'d straight through the link into the checkout.
+    rm -f "$wrapper"
+    ln -s "$PWD/tools/omnigraph-mcp-autoos.sh" "$wrapper"
+    gate="$(oh_gate "$tmp")"
+    out="$(oh_run_client "$tmp")"
+    is_link=no; [[ -L "$wrapper" ]] && is_link=yes
+    src_after="$(md5sum <tools/omnigraph-mcp-autoos.sh)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gate" == open ]] || { ok=0; echo "a symlink counts as the installed wrapper" >&2; }
+    [[ "$out" == *"link"* && "$out" == *"left alone"* ]] \
+        || { ok=0; echo "the symlink was not refused by name: [${out:0:400}]" >&2; }
+    [[ "$out" == *"FAILURES omnigraph-client"* ]] \
+        || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
+    [[ "$is_link" == yes ]] || { ok=0; echo "AutoOS replaced the user's link without asking" >&2; }
+    [[ "$src_before" == "$src_after" ]] \
+        || { ok=0; echo "the wrapper was copied THROUGH the link into the tracked checkout" >&2; }
+    (( ok )) && pass || fail "the copied-not-linked contract is not enforced"
+fi
+
 if it "omnigraph-client: an AutoOS wrapper is updated after a backup; the user's own file is left alone"; then
     tmp="$(oh_client_sandbox)"
     mkdir -p "$tmp/.local/bin"
@@ -287,6 +355,243 @@ if it "omnigraph-client: a retired agent-skills token line is removed after a ba
     (( ok )) && pass || fail "the recognised-only rc removal is wrong"
 fi
 
+# ─── the skip gate: what install_component asks before the step ever runs ───
+
+if it "omnigraph-client: a rotated token opens the skip gate and the next run lands it"; then
+    tmp="$(oh_client_sandbox)"
+    oh_run_client "$tmp" >/dev/null
+    gate_same="$(oh_gate "$tmp" first-token-1111)"
+    oh_run_client "$tmp" "" first-token-1111 >/dev/null
+    gate_rot="$(oh_gate "$tmp" rotated-token-2222)"
+    out="$(oh_run_client "$tmp" "" rotated-token-2222)"
+    tok_lines="$(grep -c '^OMNIGRAPH_TOKEN=' "$tmp/.autoos-omnigraph.env")"
+    has_new="$(grep -c '^OMNIGRAPH_TOKEN=rotated-token-2222$' "$tmp/.autoos-omnigraph.env")"
+    has_old="$(grep -c 'first-token-1111' "$tmp/.autoos-omnigraph.env" || true)"
+    gate_after="$(oh_gate "$tmp" rotated-token-2222)"
+    again="$(oh_run_client "$tmp" "" rotated-token-2222)"
+    backups="$(ls "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gate_same" == current ]] || { ok=0; echo "an unchanged machine does not read as current (gate [$gate_same])" >&2; }
+    [[ "$gate_rot" == open ]] \
+        || { ok=0; echo "the gate called the machine current after the token rotated - the rotation would never be written" >&2; }
+    [[ "$out" == *"CHANGED 1"* ]] || { ok=0; echo "the rotating run changed nothing: [${out:0:400}]" >&2; }
+    [[ "$tok_lines" == 1 && "$has_new" == 1 && "$has_old" == 0 ]] \
+        || { ok=0; echo "the env file holds lines=$tok_lines new=$has_new old=$has_old" >&2; }
+    (( backups >= 1 )) || { ok=0; echo "the rewritten secret file had no backup" >&2; }
+    [[ "$gate_after" == current ]] || { ok=0; echo "after the rotation the gate is still open ([$gate_after])" >&2; }
+    [[ "$again" == *"CHANGED 0"* ]] || { ok=0; echo "the run after the rotation changed the disk again" >&2; }
+    [[ "$out" != *rotated-token-2222* && "$out" != *first-token-1111* ]] \
+        || { ok=0; echo "a token value was printed" >&2; }
+    (( ok )) && pass || fail "the token rotation is not visible to the skip gate"
+fi
+
+if it "omnigraph-client: a token rotated in api-keys.yml opens the gate; the same token keeps it closed"; then
+    tmp="$(oh_client_sandbox)"
+    printf 'omnigraph_token: keys-first\n' >"$tmp/keys.yml"
+    oh_run_client "$tmp" "" - >/dev/null
+    gate_same="$(oh_gate "$tmp" -)"
+    printf 'omnigraph_token: keys-rotated\n' >"$tmp/keys.yml"
+    gate_rot="$(oh_gate "$tmp" -)"
+    out="$(oh_run_client "$tmp" "" -)"
+    tok="$(grep -c '^OMNIGRAPH_TOKEN=keys-rotated$' "$tmp/.autoos-omnigraph.env")"
+    stale="$(grep -c 'keys-first' "$tmp/.autoos-omnigraph.env" || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gate_same" == current ]] || { ok=0; echo "the keys-file token does not satisfy the gate ([$gate_same])" >&2; }
+    [[ "$gate_rot" == open ]] || { ok=0; echo "a rotated keys-file token is invisible to the gate" >&2; }
+    [[ "$out" == *"CHANGED 1"* ]] || { ok=0; echo "the rotating run wrote nothing: [${out:0:300}]" >&2; }
+    [[ "$tok" == 1 && "$stale" == 0 ]] || { ok=0; echo "env rows new=$tok stale=$stale" >&2; }
+    [[ "$out" != *keys-rotated* ]] || { ok=0; echo "the keys-file token was printed" >&2; }
+    (( ok )) && pass || fail "the api-keys.yml rotation is wrong"
+fi
+
+if it "omnigraph-client: a commented or longer-suffix URL line is not current"; then
+    tmp="$(oh_client_sandbox)"
+    oh_run_client "$tmp" >/dev/null
+    # Two shapes the old unanchored substring grep matched as "already the
+    # answer's URL": a comment naming it, and a URL that merely starts with it.
+    for shape in comment suffix; do
+        if [[ "$shape" == comment ]]; then
+            bad='# OMNIGRAPH_BASE_URL=https://graph.example.invalid'
+            live='OMNIGRAPH_BASE_URL=https://somewhere-else.example'
+        else
+            bad='OMNIGRAPH_BASE_URL=https://graph.example.invalid.evil'
+            live="$bad"
+        fi
+        python3 - "$tmp/.autoos-omnigraph.env" "$bad" "$live" <<'PY'
+import sys
+path, bad, live = sys.argv[1:4]
+lines = open(path, encoding="utf-8").read().splitlines()
+out = [bad if l.startswith("OMNIGRAPH_BASE_URL=") else l for l in lines]
+out.append(live)
+open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+        gate="$(oh_gate "$tmp")"
+        out_run="$(oh_run_client "$tmp")"
+        base_ok="$(grep -c '^OMNIGRAPH_BASE_URL=https://graph.example.invalid$' "$tmp/.autoos-omnigraph.env")"
+        evil="$(grep -c 'graph.example.invalid.evil\|somewhere-else' "$tmp/.autoos-omnigraph.env" || true)"
+        ok=1
+        [[ "$gate" == open ]] || { ok=0; echo "[$shape] the gate read a wrong URL line as current" >&2; }
+        [[ "$out_run" == *"CHANGED 1"* ]] || { ok=0; echo "[$shape] the repair run wrote nothing" >&2; }
+        [[ "$base_ok" == 1 ]] || { ok=0; echo "[$shape] the answer URL is not the live line ($base_ok)" >&2; }
+        [[ "$evil" == 0 ]] || { ok=0; echo "[$shape] the wrong line survived ($evil rows)" >&2; }
+        [[ "$ok" == 1 ]] || break
+    done
+    rm -rf "$tmp"
+    (( ok )) && pass || fail "an unanchored URL match still passes for current"
+fi
+
+if it "omnigraph-client: a deleted rc line, a reappeared retired line and a lost environment.d link are repaired"; then
+    tmp="$(oh_client_sandbox)"
+    printf '# my shell\n' >"$tmp/.bashrc"
+    oh_run_client "$tmp" >/dev/null
+    gate_fresh="$(oh_gate "$tmp")"
+    # (1) the user's shell cleanup deleted the source line.
+    grep -v 'AutoOS:omnigraph-env' "$tmp/.bashrc" >"$tmp/.bashrc.new" && mv "$tmp/.bashrc.new" "$tmp/.bashrc"
+    gate_rc="$(oh_gate "$tmp")"
+    out_rc="$(oh_run_client "$tmp")"
+    v2="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc")"
+    # (2) a retired agent-skills token line came back (a restored dotfile).
+    retired='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
+    printf '%s\n' "$retired" >>"$tmp/.bashrc"
+    gate_retired="$(oh_gate "$tmp")"
+    out_retired="$(oh_run_client "$tmp")"
+    gone="$(grep -cF -- "$retired" "$tmp/.bashrc" || true)"
+    # (3) the environment.d link was removed by a cleanup.
+    rm -f "$tmp/.config/environment.d/60-autoos-omnigraph.conf"
+    gate_link="$(oh_gate "$tmp")"
+    out_link="$(oh_run_client "$tmp")"
+    link="$(readlink "$tmp/.config/environment.d/60-autoos-omnigraph.conf" 2>/dev/null || echo none)"
+    gate_after="$(oh_gate "$tmp")"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gate_fresh" == current ]] \
+        || { ok=0; echo "a machine the run just configured is not current ([$gate_fresh])" >&2; }
+    [[ "$gate_rc" == open ]] || { ok=0; echo "a deleted rc line is invisible to the gate" >&2; }
+    [[ "$out_rc" == *"CHANGED 1"* && "$v2" == 1 ]] || { ok=0; echo "the rc line was not re-added ($v2)" >&2; }
+    [[ "$gate_retired" == open ]] || { ok=0; echo "a reappeared retired line is invisible to the gate" >&2; }
+    [[ "$out_retired" == *"CHANGED 1"* && "$gone" == 0 ]] || { ok=0; echo "the reappeared retired line stayed ($gone)" >&2; }
+    [[ "$gate_link" == open ]] || { ok=0; echo "a missing environment.d link is invisible to the gate" >&2; }
+    [[ "$out_link" == *"CHANGED 1"* ]] || { ok=0; echo "the link run reported no change: [${out_link:0:300}]" >&2; }
+    [[ "$link" == *".autoos-omnigraph.env" ]] || { ok=0; echo "the link was not restored ($link)" >&2; }
+    [[ "$gate_after" == current ]] || { ok=0; echo "the repaired machine is still not current" >&2; }
+    (( ok )) && pass || fail "the gate does not cover every artifact it claims"
+fi
+
+if it "omnigraph-client: the retire step keeps a CRLF rc file byte-for-byte except the line it removes"; then
+    tmp="$(oh_client_sandbox)"
+    l1='# my shell'
+    l2='export MY_DIR="$HOME/Documents/code/agent-skills/tools"'   # agent-skills, but not a token line
+    l3='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
+    l4='alias ll="ls -alF"'
+    printf '%s\r\n%s\r\n%s\r\n%s\r\n' "$l1" "$l2" "$l3" "$l4" >"$tmp/.bashrc"
+    printf '%s\r\n%s\r\n' "$l1" "$l2" >"$tmp/expected"
+    out="$(oh_run_client "$tmp")"
+    gone="$(grep -cF -- "$l3" "$tmp/.bashrc" || true)"
+    head -c "$(stat -c %s "$tmp/expected")" "$tmp/.bashrc" | cmp -s - "$tmp/expected" && kept_bytes=yes || kept_bytes=no
+    crs="$(grep -c $'\r' "$tmp/.bashrc" || true)"
+    crs_first_backup="$(
+        first="$(ls -1 "$tmp"/.bashrc.autoos-backup-* 2>/dev/null | sort | head -1)"
+        [[ -n "$first" ]] && grep -c $'\r' "$first" || printf '0\n'
+    )"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gone" == 0 ]] || { ok=0; echo "the retired line survived" >&2; }
+    [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log" >&2; }
+    [[ "$kept_bytes" == yes ]] \
+        || { ok=0; echo "the lines around the removed one were rewritten (CRLF converted to LF)" >&2; }
+    [[ "$crs" == 3 ]] || { ok=0; echo "the file holds $crs CR-terminated lines, expected 3" >&2; }
+    [[ "$crs_first_backup" == 4 ]] || { ok=0; echo "the oldest backup is not the file as found ($crs_first_backup CRs)" >&2; }
+    (( ok )) && pass || fail "the retire step is not newline-preserving"
+fi
+
+if it "omnigraph-client: a retire step that cannot write the rc file warns, records, and the run continues"; then
+    tmp="$(oh_client_sandbox)"
+    printf '# my shell\n' >"$tmp/.bashrc"
+    oh_run_client "$tmp" >/dev/null
+    # The rc file is now AutoOS-configured (the v2 line is in it), so the only
+    # step left that wants to write it is the retirement of this line — and the
+    # file is read-only, so that write fails.
+    printf 'export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")\n' >>"$tmp/.bashrc"
+    if [[ "$(id -u)" == 0 ]]; then
+        rm -rf "$tmp"
+        skip "root writes a read-only file, so the refusal cannot be seeded"
+    else
+        chmod 444 "$tmp/.bashrc"
+        before="$(md5sum <"$tmp/.bashrc")"
+        out="$( (
+            set -euo pipefail
+            SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_EXTRA_FAILURES=()
+            OMNIGRAPH_TOKEN="dummy-token-1234" AUTOOS_KEYS_FILE="$tmp/keys.yml"
+            # shellcheck disable=SC2016
+            AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
+            npm() { :; }
+            run_post_install install_omnigraph_client omnigraph-client
+            printf 'RUN CONTINUED\nFAILURES %s\n' "${AUTOOS_EXTRA_FAILURES[*]-}"
+        ) 2>&1)"; rc=$?
+        after="$(md5sum <"$tmp/.bashrc")"
+        chmod 644 "$tmp/.bashrc"
+        still_there="$(grep -cF -- '/agent-skills/' "$tmp/.bashrc" || true)"
+        rm -rf "$tmp"
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "the run aborted with $rc: [${out:0:300}]" >&2; }
+        [[ "$out" == *"RUN CONTINUED"* ]] || { ok=0; echo "the component took the run down: [${out:0:300}]" >&2; }
+        [[ "$out" == *"FAILURES"*"omnigraph-client"* ]] \
+            || { ok=0; echo "the refused repair was not recorded for the summary: [${out:0:400}]" >&2; }
+        [[ "$out" != *"retired agent-skills token line(s) from"* ]] \
+            || { ok=0; echo "the step claimed to have removed a line it could not write: [${out:0:400}]" >&2; }
+        [[ "$out" == *"left unchanged"* ]] || { ok=0; echo "the refusal was not announced: [${out:0:400}]" >&2; }
+        [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log: [${out:0:400}]" >&2; }
+        [[ "$before" == "$after" && "$still_there" == 1 ]] \
+            || { ok=0; echo "the unwritable file was modified anyway" >&2; }
+        (( ok )) && pass || fail "an unwritable rc file is not contained"
+    fi
+fi
+
+if it "omnigraph-client: an rc file that is not valid UTF-8 is still repaired and its bytes stay"; then
+    tmp="$(oh_client_sandbox)"
+    retired='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
+    # Bytes a UTF-8 decoder refuses (an old Latin-1 or cp1252 dotfile) plus CRLF
+    # endings: the step must neither abort, leak a traceback, nor re-encode the
+    # file it is editing one line in.
+    printf '# Mein sch\xc3hen Shell\r\n%s\r\nalias ll="ls -alF"\r\n' "$retired" >"$tmp/.bashrc"
+    printf '\xff\xfe trailing junk\n' >>"$tmp/.bashrc"
+    printf '# Mein sch\xc3hen Shell\r\n' >"$tmp/expected"
+    out="$(oh_run_client "$tmp")"
+    gone="$(grep -cF -- "$retired" "$tmp/.bashrc" || true)"
+    head -c "$(stat -c %s "$tmp/expected")" "$tmp/.bashrc" | cmp -s - "$tmp/expected" && bytes=yes || bytes=no
+    raw="$(grep -c $'\xff\xfe' "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gone" == 0 ]] || { ok=0; echo "the retired line survived an undecodable file ($gone)" >&2; }
+    [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log" >&2; }
+    [[ "$bytes" == yes ]] || { ok=0; echo "the bytes before the edited line changed" >&2; }
+    [[ "$raw" == 1 ]] || { ok=0; echo "the non-UTF-8 bytes were re-encoded away ($raw)" >&2; }
+    (( ok )) && pass || fail "the retire step is not byte-safe"
+fi
+
+if it "omnigraph-client: a hand-edited export/quoted token line is normalised instead of shadowing the resolved value"; then
+    tmp="$(oh_client_sandbox)"
+    oh_run_client "$tmp" >/dev/null
+    printf 'export OMNIGRAPH_TOKEN="stale-hand-line"\n' >>"$tmp/.autoos-omnigraph.env"
+    gate="$(oh_gate "$tmp")"
+    out="$(oh_run_client "$tmp")"
+    tok="$(grep -c '^OMNIGRAPH_TOKEN=dummy-token-1234$' "$tmp/.autoos-omnigraph.env")"
+    rows="$(grep -c 'OMNIGRAPH_TOKEN' "$tmp/.autoos-omnigraph.env")"
+    decorated="$(grep -c 'export OMNIGRAPH_TOKEN' "$tmp/.autoos-omnigraph.env" || true)"
+    gate_after="$(oh_gate "$tmp")"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$gate" == open ]] || { ok=0; echo "a decorated duplicate line reads as current" >&2; }
+    [[ "$out" == *"CHANGED 1"* ]] || { ok=0; echo "the decorated line was not normalised" >&2; }
+    [[ "$tok" == 1 && "$rows" == 1 && "$decorated" == 0 ]] \
+        || { ok=0; echo "env token rows=$tok total=$rows decorated=$decorated" >&2; }
+    [[ "$gate_after" == current ]] || { ok=0; echo "the normalised file is still not current" >&2; }
+    [[ "$out" != *stale-hand-line* ]] || { ok=0; echo "the file's value was printed" >&2; }
+    (( ok )) && pass || fail "a hand-edited token line is left to shadow the real one"
+fi
+
 if it "omnigraph-client: the wrapper reads the env file itself, keeps a value already in the env, and never echoes the token"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/.local/share/autoos/omnigraph-mcp/bin"
@@ -333,6 +638,75 @@ if it "omnigraph-client: the wrapper exits 127 with a one-line hint when the bri
     [[ "$hint_lines" == 1 ]] || { ok=0; echo "the hint is not one line ($hint_lines): [$out]" >&2; }
     [[ "$out" != *"secret-from-file"* ]] || { ok=0; echo "the hint echoed the token" >&2; }
     (( ok )) && pass || fail "the missing-bridge path is wrong"
+fi
+
+if it "omnigraph-client: the wrapper reads export-prefixed, indented, quoted and CRLF lines without evaluating them"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/share/autoos/omnigraph-mcp/bin"
+    cat >"$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp" <<'EOF'
+#!/bin/sh
+printf 'base=[%s]\n' "${OMNIGRAPH_BASE_URL:-}"
+printf 'token=[%s]\n' "${OMNIGRAPH_TOKEN:-}"
+printf 'graph=[%s]\n' "${OMNIGRAPH_GRAPH_ID:-}"
+printf 'other=[%s]\n' "${OTHER_SECRET-}"
+EOF
+    chmod 755 "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp"
+    # A file a person edited by hand: an export prefix, an indent, one layer of
+    # quotes, CRLF line endings, a comment, a key that is not one of the three,
+    # and a value shaped like a command substitution.
+    printf '# a comment OMNIGRAPH_TOKEN=not-this-one\r\n' >"$tmp/.autoos-omnigraph.env"
+    printf 'OMNIGRAPH_TOKEN=""\r\n' >>"$tmp/.autoos-omnigraph.env"
+    printf 'export OMNIGRAPH_TOKEN="quoted-token"\r\n' >>"$tmp/.autoos-omnigraph.env"
+    printf '  export OMNIGRAPH_BASE_URL=https://plain.example\r\n' >>"$tmp/.autoos-omnigraph.env"
+    printf "OMNIGRAPH_BASE_URL=\"\"\r\n" >>"$tmp/.autoos-omnigraph.env"
+    printf "OMNIGRAPH_GRAPH_ID='single-quoted-graph'\r\n" >>"$tmp/.autoos-omnigraph.env"
+    printf 'OTHER_SECRET=nope\r\n' >>"$tmp/.autoos-omnigraph.env"
+    printf 'OMNIGRAPH_TOKEN=$(touch %s/pwned)\r\n' "$tmp" >>"$tmp/.autoos-omnigraph.env"
+    cp tools/omnigraph-mcp-autoos.sh "$tmp/wrapper.sh"
+    chmod 755 "$tmp/wrapper.sh"
+    out="$(env -i HOME="$tmp" PATH=/usr/bin:/bin bash "$tmp/wrapper.sh" 2>&1)"; rc=$?
+    pwned=no; [[ -e "$tmp/pwned" ]] && pwned=yes
+    rm -rf "$tmp"
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "the wrapper exited $rc: [$out]" >&2; }
+    [[ "$out" == *"token=[quoted-token]"* ]] \
+        || { ok=0; echo "an export-prefixed quoted line was not parsed: [$out]" >&2; }
+    [[ "$out" == *"base=[https://plain.example]"* ]] \
+        || { ok=0; echo "an indented export line was not parsed: [$out]" >&2; }
+    [[ "$out" == *"graph=[single-quoted-graph]"* ]] \
+        || { ok=0; echo "a single-quoted line was not parsed: [$out]" >&2; }
+    [[ "$pwned" == no ]] || { ok=0; echo "a value was evaluated as a command" >&2; }
+    [[ "$out" != *not-this-one* && "$out" != *nope* ]] \
+        || { ok=0; echo "a comment or an unlisted key reached the bridge: [$out]" >&2; }
+    (( ok )) && pass || fail "the wrapper's env parsing is wrong"
+fi
+
+if it "omnigraph-client: the wrapper execs the bridge with no arguments of its own under set -u"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.local/share/autoos/omnigraph-mcp/bin"
+    cat >"$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp" <<'EOF'
+#!/bin/sh
+printf 'argc=%s all=[%s]\n' "$#" "$*"
+printf 'have_token=%s\n' "$([ -n "${OMNIGRAPH_TOKEN:-}" ] && echo yes || echo no)"
+EOF
+    chmod 755 "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp"
+    printf 'OMNIGRAPH_BASE_URL=https://from-file.example\nOMNIGRAPH_TOKEN=secret-from-file\n' \
+        >"$tmp/.autoos-omnigraph.env"
+    cp tools/omnigraph-mcp-autoos.sh "$tmp/wrapper.sh"
+    chmod 755 "$tmp/wrapper.sh"
+    # An MCP client starts the bridge over stdio with no arguments at all, in an
+    # environment that has none of these variables.
+    zero="$(env -i HOME="$tmp" PATH=/usr/bin:/bin bash "$tmp/wrapper.sh" 2>&1)"; rc=$?
+    one="$(env -i HOME="$tmp" PATH=/usr/bin:/bin bash "$tmp/wrapper.sh" 'a b' --flag 2>&1)"; rc2=$?
+    rm -rf "$tmp"
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "the zero-arg start exited $rc: [$zero]" >&2; }
+    [[ "$zero" == *"argc=0 all=[]"* ]] || { ok=0; echo "the bridge got arguments of its own: [$zero]" >&2; }
+    [[ "$zero" == *"have_token=yes"* ]] || { ok=0; echo "the env file was not read: [$zero]" >&2; }
+    (( rc2 == 0 )) || { ok=0; echo "the arg pass-through exited $rc2: [$one]" >&2; }
+    [[ "$one" == *"argc=2 all=[a b --flag]"* ]] \
+        || { ok=0; echo "arguments were not passed through intact: [$one]" >&2; }
+    (( ok )) && pass || fail "the wrapper's zero-arg start is wrong"
 fi
 
 if it "omnigraph-client: a dry run announces and writes nothing"; then
