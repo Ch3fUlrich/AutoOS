@@ -679,7 +679,7 @@ if it "from-state: a replay records the replacements as installed and the tombst
     second="$(printf '%s\n' "$again" | grep -E '^ +[0-9]+\. ')"
     rm -rf "$tree"
     problems=""
-    [[ "$saved" == "installed=[keep-demo successor-demo] skipped=[replaced-demo] failed=[] answers={}" ]] \
+    [[ "$saved" == "installed=[keep-demo,successor-demo] skipped=[replaced-demo] failed=[] answers={}" ]] \
         || problems+="[the state file says: $saved] "
     # Replaying the replay: the saved selection now lists the successors itself,
     # so the tombstone adds nothing and each row appears exactly once.
@@ -689,7 +689,7 @@ if it "from-state: a replay records the replacements as installed and the tombst
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
-if it "end-to-end: --only a retired id plans the ids that replaced it"; then
+if it "end-to-end: --only a retired id plans the ids in its replaced_by"; then
     # --serve/-Send reaches setup.sh as --only, so the browser's saved selection
     # replays through this same expansion; profiles never name a tombstone.
     tree="$(tombstone_tree)"

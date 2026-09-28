@@ -473,9 +473,11 @@ def state_components(catalog: dict, platform: str, platforms: dict, arch: str,
     """The catalog rows the browser is served, filtered for this machine.
 
     Pure so a test can ask the same question the server asks without starting a
-    server or touching a machine. `tombstone` and `note` are in the payload
-    because the page resolves dependencies, pre-ticks profiles and collects
-    prompts in the browser: it can only honour a retired id if the row says so.
+    server or touching a machine. `tombstone`, `note` and `replaced_by` are in the
+    payload because the page resolves dependencies, pre-ticks profiles and
+    collects prompts in the browser: it can only honour a retired id, and say
+    what took its work over, if the row says so. A browser selection comes back
+    to setup.sh as --only, where the same expansion runs before anything plans.
     """
     rows = []
     for grp in catalog.get("categories", []):
@@ -497,6 +499,7 @@ def state_components(catalog: dict, platform: str, platforms: dict, arch: str,
                 "installedStatus": status,
                 "tombstone": c.get("tombstone") is True,
                 "note": c.get("note"),
+                "replaced_by": c.get("replaced_by") or [],
             })
     return rows
 

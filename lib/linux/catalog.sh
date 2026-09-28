@@ -16,7 +16,7 @@
 CATALOG_PATH=""
 declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
 declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP CAT_VERIFY CAT_CASK
-declare -a CAT_TOMBSTONE CAT_RETIRE_NOTE
+declare -a CAT_TOMBSTONE CAT_RETIRE_NOTE CAT_REPLACED_BY
 
 catalog_require_python() {
     if ! has_cmd python3; then
@@ -93,6 +93,26 @@ for grp in cats:
                 problems.append(f"{where}: 'note' is present but empty")
             if t is not True:
                 problems.append(f"{where}: 'note' is only meaningful on a tombstone entry")
+        # "replaced_by" is what keeps a retirement's work on a replay: the ids the
+        # catalog says took it over. They have to exist and have to install
+        # something, because the expansion of an old state file plans exactly
+        # these ids — a name that resolves to a tombstone would replay into
+        # another row that can only report skipped, which is the defect this
+        # field exists to close.
+        if "replaced_by" in c:
+            rb = c.get("replaced_by")
+            if t is not True:
+                problems.append(f"{where}: 'replaced_by' is only meaningful on a tombstone entry")
+            if not isinstance(rb, list) or not rb:
+                problems.append(f"{where}: 'replaced_by' must be a non-empty list of component ids")
+            else:
+                for r in rb:
+                    if not isinstance(r, str) or not r.strip():
+                        problems.append(f"{where}: 'replaced_by' must name component ids")
+                    elif r not in all_ids:
+                        problems.append(f"{where}: 'replaced_by' names unknown component '{r}'")
+                    elif r in retired_ids:
+                        problems.append(f"{where}: 'replaced_by' names '{r}', a tombstone that installs nothing")
         v = c.get("verify")
         if "verify" in c and not (v or "").strip():
             problems.append(f"{where}: 'verify' is present but empty")
@@ -180,11 +200,11 @@ catalog_load() {
     CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
     CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
     CAT_VERIFY=(); CAT_CASK=(); CAT_HOMEPAGE=(); CAT_INSTALLED=()
-    CAT_TOMBSTONE=(); CAT_RETIRE_NOTE=()
+    CAT_TOMBSTONE=(); CAT_RETIRE_NOTE=(); CAT_REPLACED_BY=()
 
     # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
     # bash collapses runs of them and every empty field shifts the columns left.
-    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage tombstone note; do
+    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage tombstone note replaced_by; do
         [[ -z "$id" ]] && continue
         CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
         CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
@@ -192,6 +212,7 @@ catalog_load() {
         CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
         CAT_CASK+=("$cask"); CAT_HOMEPAGE+=("$homepage"); CAT_INSTALLED+=(0)
         CAT_TOMBSTONE+=("$tombstone"); CAT_RETIRE_NOTE+=("$note")
+        CAT_REPLACED_BY+=("$replaced_by")
     done < <(python3 - "$path" "$arch" "$headless" <<'PY'
 import json, sys
 path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -213,6 +234,7 @@ for grp in cat.get("categories", []):
             "1" if c.get("cask") else "0", c.get("homepage", ""),
             "1" if c.get("tombstone") is True else "0",
             (c.get("note","") or "").replace("\x1f"," "),
+            ",".join(c.get("replaced_by") or []),
         ]))
 PY
     )
@@ -232,6 +254,67 @@ catalog_index_of() {
         [[ "${CAT_ID[i]}" == "$want" ]] && { echo "$i"; return 0; }
     done
     return 1
+}
+
+# EXPANDED_IDS / EXPANDED_LINES — what the last catalog_expand_replacements
+# returned: the selection with the successors added, and one muted line per
+# retired id that has any. Globals because the caller needs both the list and the
+# lines, and a command substitution would lose them.
+EXPANDED_IDS=""
+declare -a EXPANDED_LINES=()
+
+# catalog_expand_replacements <id...> — echo <id...> with every retired id
+# followed by the ids that took its work over.
+#
+# A state file saved before a component was retired names the retired id and
+# none of its successors, so replaying it booked the retirement and installed
+# nothing: the work the user had simply stopped happening. Every selection built
+# from explicit ids asks this first — --from-state, --only, and a browser run,
+# which --serve passes in as --only. A profile never names a tombstone, so a
+# profile run never comes here.
+#
+# The retired row stays in the list: it is what still reports "skipped: retired",
+# and the added ids are what do the work. A successor this machine does not offer
+# is left out — the line names only the successors that are really in the plan, so
+# the announcement and the plan can never disagree — and one the selection already
+# lists is not added twice. A successor that is itself retired is expanded in
+# turn, which is how a second retirement of the same work still lands.
+catalog_expand_replacements() {
+    local id i r named
+    local -a queue=() repl
+    local seen=" " out=""
+    EXPANDED_IDS=""; EXPANDED_LINES=()
+
+    for id in "$@"; do
+        [[ -n "$id" ]] || continue
+        [[ "$seen" == *" $id "* ]] && continue
+        seen+="$id "
+        queue+=("$id")
+    done
+
+    while ((${#queue[@]})); do
+        id="${queue[0]}"; queue=("${queue[@]:1}")
+        out+="$id "
+        i="$(catalog_index_of "$id")" || continue
+        catalog_is_tombstone "$i" || continue
+        [[ -n "${CAT_REPLACED_BY[i]}" ]] || continue
+        named=""
+        IFS=',' read -ra repl <<<"${CAT_REPLACED_BY[i]}"
+        for r in "${repl[@]}"; do
+            [[ -n "$r" ]] || continue
+            [[ "$seen" == *" $r "* ]] && { [[ -n "$named" ]] && named+=", "; named+="$r"; continue; }
+            catalog_index_of "$r" >/dev/null 2>&1 || continue
+            seen+="$r "
+            queue+=("$r")
+            [[ -n "$named" ]] && named+=", "
+            named+="$r"
+        done
+        [[ -n "$named" ]] || continue
+        EXPANDED_LINES+=("$id is retired: replaced by $named")
+    done
+
+    EXPANDED_IDS="${out% }"
+    echo "$EXPANDED_IDS"
 }
 
 # catalog_profile_defaults <profile> — echoes ids pre-selected for that profile.

@@ -2320,17 +2320,26 @@ function componentIcon(c) {
    hide the only answer to "where did that product go?", which is precisely why
    the catalog still carries the id — so the page keeps it visible and makes it
    un-tickable instead, the same choice the terminal menu makes. */
+function replacedByText(c) {
+  /* The ids that took the retired component's work, spelled the way the
+     terminal's skip line spells them. Empty when nothing replaced it. */
+  return (c.replaced_by && c.replaced_by.length)
+    ? "replaced by " + c.replaced_by.join(", ") : "";
+}
+
 function retiredChip(c) {
   if (!c.tombstone) return "";
+  const why = [c.note, replacedByText(c)].filter(Boolean).join(" — ");
   return '<span class="chip chip-retired" title="' +
-    esc(c.note || "Retired: the id stays known, nothing installs.") + '">retired</span>';
+    esc(why || "Retired: the id stays known, nothing installs.") + '">retired</span>';
 }
 
 function itemDescription(c) {
   if (!c.tombstone) return c.description;
   // The same wording the terminal row uses, plus the note that names what
   // replaced it: a reader comparing the two must read one product, not two.
-  return c.description + " (retired)" + (c.note ? " — " + c.note : "");
+  const why = [c.note, replacedByText(c)].filter(Boolean);
+  return c.description + " (retired)" + (why.length ? " — " + why.join(" — ") : "");
 }
 
 function itemHtml(c) {

@@ -583,6 +583,19 @@ if [[ -z "${SELECTED// /}" ]]; then
     exit 0
 fi
 
+# A selection named by ids — a replayed state file, --only, or the browser's
+# payload arriving as --only — may still name a retired id, and the ids that
+# took its work over cannot be in a file written before the retirement. Expand
+# once here so the plan, the run and the saved state all read the same list.
+if [[ -n "$FROM_STATE" || -n "$ONLY" ]]; then
+    # shellcheck disable=SC2086  # SELECTED is a deliberate word list
+    catalog_expand_replacements $SELECTED >/dev/null
+    SELECTED="$EXPANDED_IDS"
+    if (( ${#EXPANDED_LINES[@]} )); then
+        for _line in "${EXPANDED_LINES[@]}"; do ui_muted "$_line"; done
+    fi
+fi
+
 # ─── 4. Plan ────────────────────────────────────────────────────────────────
 # shellcheck disable=SC2086  # SELECTED is a deliberate word list
 catalog_resolve $SELECTED >/dev/null
