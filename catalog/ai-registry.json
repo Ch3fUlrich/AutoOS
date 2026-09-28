@@ -1972,6 +1972,8 @@
       "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. BACK ON (DSBACK): operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK); GET /user/balance measured is_available=true. This reverses the 402 Insufficient Balance of 2026-09-27T16:4xZ, when the provider was switched off entirely (available: false) until topped up and the routes whose only served leg was deepseek/* (deepseek-v4.1-flash) failed closed like t1/spark. The per-leg operator flags are NOT reversed by this: opencode-zen/deepseek-v4.1-flash keeps its own route gate (measured 402/429 by tools/probe-toolcalls.py) and openrouter stays available: false.",
       "api_base": null,
       "available": true,
+      "monthly_cap_usd": 25,
+      "monthly_cap_source": "operator 2026-09-28T07:4xZ DeepSeek paid cap",
       "source": "operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK)",
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",

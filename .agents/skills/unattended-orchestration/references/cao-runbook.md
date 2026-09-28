@@ -294,20 +294,24 @@ review from Git Bash or any POSIX shell with Python 3.9+, through
 is one user message, the answer goes to stdout, one `served: <model> via <leg>`
 line to stderr.
 
-- **Route:** OmniRoute first, asked for the route's allowed leg itself
-  (`deepseek/deepseek-flash`; the route id is not an API id and answers 400),
-  skipped when `/api/health` does not answer; then OpenRouter
-  `deepseek/deepseek-v4.1-flash`. Every request carries `max_tokens` 4096
-  (reasoning rungs answer an empty 502 below it).
-  Never local Ollama; both legs failing exits 1 and says so.
+- **Route:** the OmniRoute gateway only, asked for the route's allowed leg
+  itself (`deepseek/deepseek-flash`; the route id is not an API id and answers
+  400). Every request carries `max_tokens` 4096 (reasoning rungs answer an empty
+  502 below it). OpenRouter is not a fallback (`providers.openrouter` has no
+  credit), and neither is local Ollama: a failed call exits 1 and says so.
+- **Monthly cap, fail-closed:** orchestrator-only. Before each call this
+  month's DeepSeek spend is read from the gateway's call logs
+  (`tools/autoos_usage.py`, manage key) and compared with
+  `providers.deepseek.monthly_cap_usd` ($25). At or above the cap, or when the
+  spend cannot be read, it refuses with exit 3 before any model call: no
+  gateway, no paid review.
 - **Model policy is the registry's:** a served model passes only when it is one
   of route `deepseek-v4.1-flash`'s legs that `policy.leg_rules` allows, exactly
   (no dated snapshot, no other provider), with the deny rules run on the served
-  id itself; the OpenRouter leg runs only while the rules allow
-  `openrouter/deepseek/deepseek-v4.1-flash`. V4 Pro never passes, in any
-  spelling. A gateway that re-routed in silence is a failure, not a review.
+  id itself. V4 Pro never passes, in any spelling. A gateway that re-routed in
+  silence is a failure, not a review.
 - **Keys** are read in-process from AutoOS `configuration/api-keys.yml`
-  (`omniroute:` / `openrouter:`; `$AUTOOS_API_KEYS`, `$AUTOOS_ROOT`, then the
+  (`omniroute:`; `$AUTOOS_API_KEYS`, `$AUTOOS_ROOT`, then the
   main checkout), never passed in argv or printed; an error body that echoes a
   key is scrubbed.
 

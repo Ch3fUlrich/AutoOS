@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Chunked cross-family review through DeepSeek (the OmniRoute combo first, then OpenRouter
-# direct, via deepseek_call.py). The diff is split into <=900-line parts, each reviewed with the
+# Chunked cross-family review through paid DeepSeek on the OmniRoute gateway, under the
+# monthly cap (via deepseek_call.py). The diff is split into <=900-line parts, each reviewed with the
 # same standing instruction, outputs concatenated. The split dates from opencode (measured
 # 2026-09-17, OpenCode 1.18.30: its --file attachment silently truncated to ~1,000 lines); the
 # direct API call has no such limit, but a part that size still gets a closer read than one
@@ -15,7 +15,7 @@
 #   DSR_WORKDIR       scratch dir base (default: ${TMPDIR:-/tmp}); work dir is $DSR_WORKDIR/dsr_<label>
 #   AUTOOS_API_KEYS   path to AutoOS api-keys.yml (a missing file is an error); else $AUTOOS_ROOT,
 #                     else the AutoOS checkout is searched — see deepseek_call.py. Single keys:
-#                     AUTOOS_OMNIROUTE_KEY, OPENROUTER_API_KEY. Same lookup as deepseek_review.sh
+#                     AUTOOS_OMNIROUTE_KEY. Same lookup as deepseek_review.sh
 #   DSR_BRANCH_DESC   how the merge is described in the prompt (default: "branch $label into its target")
 #   DSR_REPO_DESC     one-line description of the reviewed repository (default: "this repository")
 #   PYTHON            interpreter for deepseek_call.py (default: first working python3/python/py)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-family review through DeepSeek — the OmniRoute combo first, then OpenRouter direct —
+# Cross-family review through paid DeepSeek on the OmniRoute gateway, under the monthly cap —
 # via deepseek_call.py, which reads the keys from AutoOS configuration/api-keys.yml itself, so a
 # key never appears in a command line or a log.
 #
@@ -7,12 +7,13 @@
 #
 # <prompt-file> is a Windows, Git-Bash or POSIX path to a UTF-8 text file whose first line is
 # the standing instruction "DO NOT USE ANY TOOLS ..."; the whole file is sent as one user
-# message. [model] may only be deepseek-v4.1-flash (the combo), deepseek/deepseek-v4.1-flash or
-# empty; anything else exits 2. Which served models count is catalog/ai-registry.json's call
+# message. [model] may only be deepseek-v4.1-flash (the route) or empty; anything else
+# exits 2. Which served models count is catalog/ai-registry.json's call
 # (route deepseek-v4.1-flash, policy.leg_rules; V4 Pro never passes). Output:
 # the model's plain-text answer on stdout; one "served: <model> via <leg>" line on stderr.
 # Keys: $AUTOOS_API_KEYS (path) or $AUTOOS_ROOT, else the AutoOS checkout is searched; env
-# AUTOOS_OMNIROUTE_KEY / OPENROUTER_API_KEY override single keys. Details: deepseek_call.py.
+# AUTOOS_OMNIROUTE_KEY overrides the key. Exit 3: refused by the monthly cap (or spend
+# unreadable). Details: deepseek_call.py.
 # Adopted 2026-09-17 when agy's Gemini quota kept failing mid-run (owner); moved off
 # opencode + ~/.config/autoos/api_keys.conf on 2026-09-25 when that file no longer existed.
 set -euo pipefail

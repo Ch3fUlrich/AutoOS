@@ -1,13 +1,15 @@
 """``deepseek_call.py`` and the two review scripts that use it.
 
-Operator rules (2026-09-25): every key lives in AutoOS ``configuration/api-keys.yml``; which
+Operator rules: every key lives in AutoOS ``configuration/api-keys.yml`` (2026-09-25); which
 DeepSeek models count comes from catalog/ai-registry.json (route ``deepseek-v4.1-flash`` and
-``policy.leg_rules``, DSBACK 2026-09-28); the route is OmniRoute first, then OpenRouter direct;
-never local Ollama; no key is ever printed or put on a command line. Each rule below has a test
-that fails if the rule is broken, not merely one that passes when it holds.
+``policy.leg_rules``, DSBACK 2026-09-28); the OmniRoute gateway is the only leg, under the
+registry's monthly cap (``providers.deepseek.monthly_cap_usd``, fail-closed, 2026-09-28); never
+OpenRouter, never local Ollama; no key is ever printed or put on a command line. Each rule below
+has a test that fails if the rule is broken, not merely one that passes when it holds.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -25,33 +27,44 @@ sys.path.insert(0, str(SKILL))
 import deepseek_call as dc  # noqa: E402
 
 OMNI_KEY = "sk-omni-TESTSECRET-1111"
-OR_KEY = "sk-or-TESTSECRET-2222"
-OMNI_SERVES = "deepseek/deepseek-flash"          # the combo's allowed leg in the fixture
-OR_SERVES = "deepseek/deepseek-v4.1-flash"
+MANAGE_KEY = "sk-manage-TESTSECRET-3333"
+OMNI_SERVES = "deepseek/deepseek-flash"          # the route's allowed leg in the fixture
 
-# The shape of the real registry's DeepSeek policy (DSBACK/DSAMEND 2026-09-28), frozen here so
-# a registry edit cannot make these tests pass or fail by accident; the real one is checked
-# separately below.
+# The shape of the real registry's DeepSeek policy and cap (DSBACK/DSAMEND/DSCALL 2026-09-28),
+# frozen here so a registry edit cannot make these tests pass or fail by accident; the real one
+# is checked separately below. The price makes one call-log token cost one dollar.
 POLICY = {
+    "providers": {"deepseek": {"monthly_cap_usd": 25,
+                               "monthly_cap_source": "operator DeepSeek paid cap"}},
+    "models": {"deepseek-flash": {"price_in": 1.0, "price_out": 1.0}},
     "routes": {"deepseek-v4.1-flash": {"legs": ["deepseek/deepseek-flash",
                                                 "opencode-zen/deepseek-v4.1-flash"]}},
     "policy": {"leg_rules": [
         {"id": "deny-deepseek-pro", "match": "*deepseek*pro*", "allow": False},
-        {"id": "allow-openrouter-deepseek-v4.1-flash",
-         "match": "openrouter/deepseek/deepseek-v4.1-flash*", "allow": True},
         {"id": "allow-deepseek-native-flash", "match": "deepseek/deepseek-flash", "allow": True},
         {"id": "deny-deepseek", "match": "*deepseek*", "allow": False},
     ]},
 }
 
 
+def spend_rows(dollars):
+    """Call-log rows costing `dollars` this month at the fixture price."""
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not dollars:
+        return []
+    return [{"id": "r1", "provider": "deepseek", "model": OMNI_SERVES, "timestamp": now,
+             "tokens": {"in": dollars, "out": 0}}]
+
+
 @pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
+def clean_env(monkeypatch, tmp_path):
     for name in ("AUTOOS_API_KEYS", "AUTOOS_ROOT", "AUTOOS_OMNIROUTE_KEY", "OPENROUTER_API_KEY",
-                 "DSR_OMNIROUTE_URL", "DSR_OPENROUTER_URL", "DSR_REGISTRY"):
+                 "DSR_OMNIROUTE_URL", "DSR_OPENROUTER_URL", "DSR_REGISTRY",
+                 "AUTOOS_AI_STACK_CONFIG", "XDG_CONFIG_HOME"):
         monkeypatch.delenv(name, raising=False)
-    # The real host has a real api-keys.yml; tests must never find it by accident.
+    # The real host has a real api-keys.yml and manage key; tests must never find them.
     monkeypatch.setattr(dc, "default_candidates", lambda: [])
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 def keys_file(tmp_path, body):
@@ -63,30 +76,30 @@ def keys_file(tmp_path, body):
 
 # ── key lookup ─────────────────────────────────────────────────────────────────
 
-def test_reads_both_keys_from_yml(tmp_path, monkeypatch):
-    p = keys_file(tmp_path, f"# c\nomniroute: {OMNI_KEY}\nopenrouter: \"{OR_KEY}\"\n")
+def test_reads_the_omniroute_key_from_yml(tmp_path, monkeypatch):
+    p = keys_file(tmp_path, f"# c\nomniroute: \"{OMNI_KEY}\"\n")
     monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
-    assert dc.load_keys() == {"omniroute": OMNI_KEY, "openrouter": OR_KEY}
+    assert dc.load_key() == OMNI_KEY
 
 
 def test_placeholder_is_not_a_key(tmp_path, monkeypatch):
-    p = keys_file(tmp_path, "omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY\nopenrouter: x\n")
+    p = keys_file(tmp_path, "omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY\n")
     monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
-    assert dc.load_keys() == {"omniroute": None, "openrouter": "x"}
+    with pytest.raises(dc.KeyError_):
+        dc.load_key()
 
 
 def test_env_key_overrides_file(tmp_path, monkeypatch):
-    p = keys_file(tmp_path, f"omniroute: {OMNI_KEY}\nopenrouter: {OR_KEY}\n")
+    p = keys_file(tmp_path, f"omniroute: {OMNI_KEY}\n")
     monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
     monkeypatch.setenv("AUTOOS_OMNIROUTE_KEY", "env-omni")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "env-or")
-    assert dc.load_keys() == {"omniroute": "env-omni", "openrouter": "env-or"}
+    assert dc.load_key() == "env-omni"
 
 
 def test_autoos_root_locates_the_file(tmp_path, monkeypatch):
     keys_file(tmp_path, f"omniroute: {OMNI_KEY}\n")
     monkeypatch.setenv("AUTOOS_ROOT", str(tmp_path))
-    assert dc.load_keys()["omniroute"] == OMNI_KEY
+    assert dc.load_key() == OMNI_KEY
 
 
 def test_explicit_missing_file_fails_loudly(tmp_path, monkeypatch):
@@ -95,39 +108,43 @@ def test_explicit_missing_file_fails_loudly(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOOS_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTOOS_API_KEYS", str(tmp_path / "nope.yml"))
     with pytest.raises(dc.KeyError_) as e:
-        dc.load_keys()
+        dc.load_key()
     assert "AUTOOS_API_KEYS" in str(e.value)
 
 
 def test_no_file_and_no_env_names_where_it_looked(tmp_path):
     with pytest.raises(dc.KeyError_) as e:
-        dc.load_keys()
+        dc.load_key()
     assert "api-keys.yml" in str(e.value)
 
 
 # ── model guard ────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("m", ["", "deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash"])
-def test_only_v41_flash_is_accepted(m):
+@pytest.mark.parametrize("m", ["", "deepseek-v4.1-flash"])
+def test_only_the_route_is_accepted(m):
     dc.check_model(m)
 
 
-@pytest.mark.parametrize("m", ["deepseek/deepseek-v4-flash", "deepseek-chat", "ollama/deepseek"])
+@pytest.mark.parametrize("m", ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-flash",
+                               "deepseek-chat", "ollama/deepseek"])
 def test_other_models_are_refused(m):
     with pytest.raises(ValueError):
         dc.check_model(m)
 
 
-# ── routing, against a fake gateway ────────────────────────────────────────────
+# ── the gateway, faked ─────────────────────────────────────────────────────────
 
 class Fake:
-    """One HTTP server playing either leg; records what it was sent."""
+    """One HTTP server playing the gateway (and, for the OpenRouter test, a would-be
+    OpenRouter); records what it was sent. GET /api/usage/call-logs answers `rows`."""
 
-    def __init__(self, status=200, model="deepseek/deepseek-flash", content="ack",
-                 health=200, echo_auth=False):
+    def __init__(self, status=200, model=OMNI_SERVES, content="ack", health=200,
+                 echo_auth=False, rows=None):
         self.status, self.model, self.content, self.health = status, model, content, health
         self.echo_auth = echo_auth
+        self.rows = rows if rows is not None else []
         self.calls = []
+        self.gets = []
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -135,6 +152,13 @@ class Fake:
                 pass
 
             def do_GET(self):
+                fake.gets.append({"path": self.path, "auth": self.headers.get("Authorization", "")})
+                if self.path.startswith("/api/usage/call-logs"):
+                    offset = int(self.path.split("offset=")[1].split("&")[0]) if "offset=" in self.path else 0
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(json.dumps(fake.rows if offset == 0 else []).encode())
+                    return
                 self.send_response(fake.health)
                 self.end_headers()
                 self.wfile.write(b"{}")
@@ -164,131 +188,173 @@ class Fake:
 
 
 @pytest.fixture()
-def legs(tmp_path, monkeypatch):
+def gw(tmp_path, monkeypatch):
+    """make(omni=Fake(...), policy=...) wires the fake gateway, keys, manage key and registry."""
     made = []
 
-    def make(omni=None, openrouter=None):
-        omni = omni or Fake(model=OMNI_SERVES)
-        openrouter = openrouter or Fake(model=OR_SERVES)
-        made.extend([omni, openrouter])
+    def make(omni=None, policy=None):
+        omni = omni or Fake()
+        made.append(omni)
         reg = tmp_path / "ai-registry.json"
-        reg.write_text(json.dumps(POLICY), encoding="utf-8")
+        reg.write_text(json.dumps(policy or POLICY), encoding="utf-8")
         monkeypatch.setenv("DSR_REGISTRY", str(reg))
         monkeypatch.setenv("DSR_OMNIROUTE_URL", omni.url)
-        monkeypatch.setenv("DSR_OPENROUTER_URL", openrouter.url)
-        p = keys_file(tmp_path, f"omniroute: {OMNI_KEY}\nopenrouter: {OR_KEY}\n")
-        monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
-        return omni, openrouter
+        monkeypatch.setenv("AUTOOS_API_KEYS", str(keys_file(tmp_path, f"omniroute: {OMNI_KEY}\n")))
+        stack = tmp_path / "ai-stack"
+        stack.mkdir(exist_ok=True)
+        (stack / "manage.key").write_text(MANAGE_KEY + "\n", encoding="utf-8")
+        monkeypatch.setenv("AUTOOS_AI_STACK_CONFIG", str(stack))
+        return omni
 
     yield make
     for f in made:
         f.close()
 
 
-def test_omniroute_first_with_its_key_and_the_pinned_combo(legs):
-    omni, orr = legs()
+def test_the_allowed_leg_is_asked_with_the_key_and_max_tokens(gw):
+    omni = gw()
     text, served, leg = dc.complete("hello", timeout=10)
     assert (text, served, leg) == ("ack", OMNI_SERVES, "omniroute")
-    assert orr.calls == []
     call = omni.calls[0]
     assert call["path"] == "/v1/chat/completions"
     assert call["auth"] == "Bearer " + OMNI_KEY
-    # The allowed registry leg, never the combo's display id (deepseek-v4.1-flash answers
-    # 400; L1-routing review 2026-09-28), and a max_tokens reasoning rungs can answer in.
+    # The allowed registry leg, never the route id (deepseek-v4.1-flash answers 400;
+    # L1-routing review 2026-09-28), and a max_tokens reasoning rungs can answer in.
     assert call["body"]["model"] == "deepseek/deepseek-flash"
     assert call["body"]["max_tokens"] >= 4096
     assert call["body"]["messages"] == [{"role": "user", "content": "hello"}]
     assert call["body"]["temperature"] == 0.1
 
 
-def test_falls_back_to_openrouter_when_omniroute_errors(legs):
-    omni, orr = legs(omni=Fake(status=502))
-    text, served, leg = dc.complete("hello", timeout=10)
-    assert leg == "openrouter"
-    assert orr.calls[0]["auth"] == "Bearer " + OR_KEY
-    assert orr.calls[0]["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+# ── the monthly cap ────────────────────────────────────────────────────────────
+
+def test_spend_below_the_cap_is_read_with_the_manage_key_and_the_call_is_made(gw):
+    omni = gw(Fake(rows=spend_rows(10)))
+    assert dc.complete("hello", timeout=10)[2] == "omniroute"
+    logs = [g for g in omni.gets if g["path"].startswith("/api/usage/call-logs")]
+    assert logs and logs[0]["auth"] == "Bearer " + MANAGE_KEY
+    assert len(omni.calls) == 1
 
 
-def test_skips_omniroute_when_its_health_check_fails(legs):
-    omni, orr = legs(omni=Fake(health=503))
-    assert dc.complete("hello", timeout=10)[2] == "openrouter"
+@pytest.mark.parametrize("dollars", [25, 40])
+def test_spend_at_or_above_the_cap_refuses_before_any_model_call(gw, dollars):
+    omni = gw(Fake(rows=spend_rows(dollars)))
+    with pytest.raises(dc.CapError) as e:
+        dc.complete("hello", timeout=10)
+    assert "cap" in str(e.value)
     assert omni.calls == []
 
 
+def test_unreadable_spend_refuses_before_any_model_call(gw, monkeypatch):
+    omni = gw()
+
+    def boom(url, headers, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(dc, "usage_fetch", boom)
+    with pytest.raises(dc.CapError) as e:
+        dc.complete("hello", timeout=10)
+    assert "cannot read" in str(e.value)
+    assert omni.calls == []
+
+
+def test_no_manage_key_refuses(gw, monkeypatch, tmp_path):
+    omni = gw()
+    monkeypatch.setenv("AUTOOS_AI_STACK_CONFIG", str(tmp_path / "no-stack"))
+    with pytest.raises(dc.CapError):
+        dc.complete("hello", timeout=10)
+    assert omni.calls == []
+
+
+def test_a_registry_without_a_cap_refuses(gw):
+    policy = json.loads(json.dumps(POLICY))
+    del policy["providers"]["deepseek"]["monthly_cap_usd"]
+    omni = gw(policy=policy)
+    with pytest.raises(dc.CapError) as e:
+        dc.complete("hello", timeout=10)
+    assert "monthly_cap_usd" in str(e.value)
+    assert omni.calls == []
+
+
+def test_the_cli_exits_3_on_a_cap_refusal(gw, tmp_path, capsys):
+    gw(Fake(rows=spend_rows(30)))
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x\n", encoding="utf-8")
+    assert dc.main([str(prompt)]) == 3
+    assert "refused" in capsys.readouterr().err
+
+
+# ── OpenRouter is gone ─────────────────────────────────────────────────────────
+
+def test_no_openrouter_url_is_ever_called(gw, monkeypatch):
+    # Even with the old env var pointing at a live server and the gateway failing.
+    decoy = Fake()
+    try:
+        monkeypatch.setenv("DSR_OPENROUTER_URL", decoy.url)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-decoy")
+        gw(Fake(status=502))
+        with pytest.raises(dc.RouteError):
+            dc.complete("hello", timeout=10)
+        assert decoy.calls == [] and decoy.gets == []
+    finally:
+        decoy.close()
+
+
+def test_the_module_names_no_openrouter_outside_its_docstring():
+    source = (SKILL / "deepseek_call.py").read_text(encoding="utf-8")
+    code = source.split('"""', 2)[2]  # everything after the module docstring
+    assert "openrouter" not in code.casefold()
+
+
+# ── served-model policy ────────────────────────────────────────────────────────
+
 @pytest.mark.parametrize("served", ["deepseek/deepseek-v4-pro", "DeepSeek/DeepSeek-V4-Pro",
-                                    "opencode-zen/deepseek-v4.1-flash", "deepseek-flash-pro"])
-def test_a_served_model_the_policy_denies_is_rejected(legs, served):
-    # V4 Pro in any spelling, and a combo leg leg_rules deny, never pass as the review.
-    legs(omni=Fake(model=served), openrouter=Fake(model=served))
+                                    "opencode-zen/deepseek-v4.1-flash", "deepseek-flash-pro",
+                                    "deepseek-flash-20260927", "deepseek/deepseek-flash-20260927",
+                                    "deepseek-v4-pro", "cheaperinference/deepseek-flash",
+                                    "deepseek/deepseek-v4-flash", "qwen/qwen3"])
+def test_the_served_model_is_denied_unless_it_is_exactly_an_allowed_leg(gw, served):
+    # Muse xhigh (L1-routing): never normalise before the deny check. A dated snapshot, a
+    # pro id in any spelling, a leg the rules deny or the same model from a foreign provider
+    # is not the allowed leg - a gateway that re-routed in silence is not a DeepSeek review.
+    gw(Fake(model=served))
     with pytest.raises(dc.RouteError) as e:
         dc.complete("hello", timeout=10)
     assert served in str(e.value)
 
 
-@pytest.mark.parametrize("served", ["deepseek-flash-20260927", "deepseek/deepseek-flash-20260927",
-                                    "deepseek-v4-pro", "cheaperinference/deepseek-flash",
-                                    "openrouter/deepseek/deepseek-v4-pro"])
-def test_the_served_model_is_denied_unless_it_is_exactly_an_allowed_leg(legs, served):
-    # Muse xhigh (L1-routing): never normalise before the deny check. A dated snapshot, a
-    # bare pro id or the same model from a foreign provider is not the allowed leg.
-    legs(omni=Fake(model=served), openrouter=Fake(model=served))
-    with pytest.raises(dc.RouteError):
-        dc.complete("hello", timeout=10)
-
-
-def test_a_bare_served_id_of_the_one_allowed_leg_passes(legs):
-    legs(omni=Fake(model="DeepSeek-Flash"))
+def test_a_bare_served_id_of_the_one_allowed_leg_passes(gw):
+    gw(Fake(model="DeepSeek-Flash"))
     assert dc.complete("hello", timeout=10)[2] == "omniroute"
 
 
-def test_openrouter_is_asked_for_its_allowed_model_with_max_tokens(legs):
-    omni, orr = legs(omni=Fake(status=502))
-    assert dc.complete("hello", timeout=10)[2] == "openrouter"
-    assert orr.calls[0]["body"]["model"] == "deepseek/deepseek-v4.1-flash"
-    assert orr.calls[0]["body"]["max_tokens"] >= 4096
-
-
-def test_the_openrouter_leg_is_skipped_when_the_policy_denies_it(legs, tmp_path, monkeypatch):
-    omni, orr = legs(omni=Fake(status=502))
-    denied = json.loads(json.dumps(POLICY))
-    denied["policy"]["leg_rules"] = [r for r in denied["policy"]["leg_rules"]
-                                     if not r["id"].startswith("allow-openrouter")]
-    (tmp_path / "ai-registry.json").write_text(json.dumps(denied), encoding="utf-8")
-    with pytest.raises(dc.RouteError) as e:
-        dc.complete("hello", timeout=10)
-    assert "openrouter: no DeepSeek leg allowed" in str(e.value)
-    assert orr.calls == []
-
-
-def test_an_unreadable_registry_is_a_usage_error(legs, tmp_path, monkeypatch):
-    legs()
+def test_an_unreadable_registry_is_a_usage_error(gw, tmp_path, monkeypatch):
+    gw()
     monkeypatch.setenv("DSR_REGISTRY", str(tmp_path / "missing.json"))
     with pytest.raises(dc.PolicyError):
         dc.complete("hello", timeout=10)
 
 
-def test_the_real_registry_allows_a_flash_leg_and_never_pro():
-    allowed, openrouter, _registry, _denied = dc.load_policy()
+def test_the_real_registry_allows_a_flash_leg_never_pro_and_carries_the_cap():
+    import autoos_usage
+    allowed, registry, _denied = dc.load_policy()
     assert allowed, "route deepseek-v4.1-flash has no leg policy.leg_rules allows"
     assert not any("pro" in leg.casefold() for leg in allowed)
-    assert isinstance(openrouter, bool)
+    assert autoos_usage.monthly_cap_usd(registry) > 0
 
 
-def test_a_different_served_model_is_rejected(legs):
-    # A combo that silently re-routed to another model must not pass as a DeepSeek review.
-    omni, orr = legs(omni=Fake(model="deepseek/deepseek-v4-flash"),
-                     openrouter=Fake(model="qwen/qwen3"))
+def test_an_unreachable_gateway_says_it_did_not_go_local(gw):
+    gw(Fake(health=503))
     with pytest.raises(dc.RouteError) as e:
         dc.complete("hello", timeout=10)
-    assert "deepseek/deepseek-v4-flash" in str(e.value) and "qwen/qwen3" in str(e.value)
+    assert "Ollama" in str(e.value)
 
 
-def test_a_key_echoed_in_an_error_body_is_scrubbed(legs):
-    legs(omni=Fake(status=401, echo_auth=True), openrouter=Fake(status=401, echo_auth=True))
+def test_a_key_echoed_in_an_error_body_is_scrubbed(gw):
+    gw(Fake(status=401, echo_auth=True))
     with pytest.raises(dc.RouteError) as e:
         dc.complete("hello", timeout=10)
-    assert OMNI_KEY not in str(e.value) and OR_KEY not in str(e.value)
-    assert "Ollama" in str(e.value)  # says it did not fall back to local, rather than doing so
+    assert OMNI_KEY not in str(e.value)
 
 
 # ── the shell scripts, end to end against the fake gateway ─────────────────────
@@ -318,31 +384,41 @@ def run_script(args, env, cwd=None):
 
 
 @needs_bash
-def test_review_script_prints_the_answer_and_never_the_key(legs, tmp_path):
-    omni, _ = legs(omni=Fake(content="line one\n\nline two"))
+def test_review_script_prints_the_answer_and_never_the_key(gw, tmp_path):
+    omni = gw(Fake(content="line one\n\nline two"))
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("DO NOT USE ANY TOOLS.\nReview this.\n", encoding="utf-8")
     r = run_script([str(SKILL / "deepseek_review.sh"), str(prompt)], {})
     assert r.returncode == 0, r.stderr
     assert r.stdout == "line one\n\nline two\n"
     assert "served: %s via omniroute" % OMNI_SERVES in r.stderr
-    assert OMNI_KEY not in r.stdout + r.stderr and OR_KEY not in r.stdout + r.stderr
+    assert OMNI_KEY not in r.stdout + r.stderr and MANAGE_KEY not in r.stdout + r.stderr
     assert omni.calls[0]["body"]["messages"][0]["content"] == prompt.read_text(encoding="utf-8")
 
 
 @needs_bash
-def test_review_script_refuses_another_model(legs, tmp_path):
-    omni, orr = legs()
+def test_review_script_refuses_another_model(gw, tmp_path):
+    omni = gw()
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("x\n", encoding="utf-8")
     r = run_script([str(SKILL / "deepseek_review.sh"), str(prompt), "deepseek/deepseek-v4-flash"], {})
     assert r.returncode == 2
-    assert omni.calls == [] and orr.calls == []
+    assert omni.calls == []
 
 
 @needs_bash
-def test_chunked_script_writes_one_section_per_part(legs, tmp_path):
-    omni, _ = legs(omni=Fake(content="no defects"))
+def test_review_script_passes_the_cap_refusal_through(gw, tmp_path):
+    omni = gw(Fake(rows=spend_rows(30)))
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("x\n", encoding="utf-8")
+    r = run_script([str(SKILL / "deepseek_review.sh"), str(prompt)], {})
+    assert r.returncode == 3, r.stderr
+    assert omni.calls == []
+
+
+@needs_bash
+def test_chunked_script_writes_one_section_per_part(gw, tmp_path):
+    omni = gw(Fake(content="no defects"))
     repo = tmp_path / "repo"
     repo.mkdir()
     g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True)  # noqa: E731
