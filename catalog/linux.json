@@ -616,13 +616,17 @@
           "description": "Retired: its work moved to other components",
           "provider": "custom",
           "package": "agent-skills",
-          "postInstall": "install_agent_skills",
-          "profiles": [
-            "workstation",
-            "ai-coding"
+          "tombstone": true,
+          "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
+          "replaced_by": [
+            "agent-skill-links",
+            "omnigraph-client",
+            "mcp-graphify",
+            "mcp-serena",
+            "mcp-playwright",
+            "mcp-context7"
           ],
-          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
-          "notes": "Kept so a saved selection or an --only agent-skills run still resolves; its step now only says where the work went. The links are the agent-skill-links component, the MCP wiring is omnigraph-client's and the mcp-* components'."
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {
           "id": "agent-skill-links",
@@ -691,7 +695,7 @@
             "server"
           ],
           "verify": "uv --version",
-          "notes": "Used by agent-skills to run graphify and Python MCP servers.",
+          "notes": "Used by the mcp-* components to run graphify and the Python MCP servers.",
           "homepage": "https://docs.astral.sh/uv/"
         },
         {
