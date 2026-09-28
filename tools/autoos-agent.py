@@ -3658,8 +3658,10 @@ def cmd_inbox(args) -> int:
     """Print one inbox's records since a position (RESTART spec §2, lane R1).
 
     The record shapes live in tools/autoos_inbox.py (§0, one home); this is the
-    window and the printing. Records go to stdout with their continuations,
-    every notice to stderr, so a context pack can embed stdout verbatim.
+    window and the printing. Records go to stdout with their continuations and
+    a malformed line goes there too, tagged `(malformed line N)` with the lines
+    under it, so a context pack that embeds stdout keeps every acknowledgement;
+    every notice goes to stderr as well.
 
     Exit 0 read, 1 the file holds no timestamped record (an inbox of another
     shape is never read as "no events"), 2 no window named, a bad position, or
@@ -3719,14 +3721,23 @@ def cmd_inbox(args) -> int:
     if not records:
         print("inbox: no timestamped records in %s" % path, file=sys.stderr)
         return 1
-    for line in malformed:
-        print("inbox: malformed at line %d: the line looks like a UTC timestamp "
-              "but is not one, so it is neither a record nor a continuation"
-              % line, file=sys.stderr)
-    selected = inbox.window(records, since)
+    for entry in malformed:
+        lines = 1 + len(entry.continuations)
+        print("inbox: malformed at line %d (%d %s): the line looks like a UTC "
+              "timestamp but is not one, so it is neither a record nor a "
+              "continuation; its text is on stdout tagged (malformed line %d)"
+              % (entry.line, lines, "line" if lines == 1 else "lines",
+                 entry.line), file=sys.stderr)
+    entries = inbox.window_entries(records, malformed, since)
+    selected = [entry for entry in entries if not
+                isinstance(entry, inbox.Malformed)]
     if len(selected) > args.max_records:
         cut = len(selected) - args.max_records
-        selected = selected[cut:]
+        dropped = {id(entry) for entry in selected[:cut]}
+        entries = [entry for entry in entries
+                   if id(entry) not in dropped
+                   and not (isinstance(entry, inbox.Malformed)
+                            and id(entry.anchor) in dropped)]
         print("inbox: cut %d earlier records" % cut, file=sys.stderr)
     if not selected:
         # Names the window as the caller wrote it: a bare UTC cut reads that
@@ -3734,10 +3745,14 @@ def cmd_inbox(args) -> int:
         # may hold, so echoing it would invite an unparseable last-event.
         print("inbox: nothing since %s (%d records in %s)"
               % (since_text or "the start", len(records), path), file=sys.stderr)
-    for record in selected:
-        print("%s%s %s" % (record.position, " (late)" if record.late else "",
-                           record.text))
-        for extra in record.continuations:
+    for entry in entries:
+        if isinstance(entry, inbox.Malformed):
+            # No position to head it with — the tag is its place in the file.
+            print("(malformed line %d) %s" % (entry.line, entry.text))
+        else:
+            print("%s%s %s" % (entry.position,
+                               " (late)" if entry.late else "", entry.text))
+        for extra in entry.continuations:
             print(extra)
     return 0
 

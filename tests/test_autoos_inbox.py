@@ -202,6 +202,64 @@ class PositionTests(_Files):
         self.assertEqual(inbox.latest_position(path), "2026-09-25T19:21:08Z#4")
 
 
+class MalformedEntryTests(_Files):
+    """R1FIX: a malformed line is text a pack must keep, not only a stderr hint.
+
+    The measured shape is the sample's line 277, a minute-precision stamp:
+    `2026-09-27T03:55Z → done: answers read (...)`. It is an acknowledgement,
+    so keeping it off stdout loses a real message from the pack that embeds
+    stdout verbatim — the defect this closes.
+    """
+
+    SAMPLE = ("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+              "2026-09-27T03:55Z → done: answers read (BYOK opt2, LEAK opt1);\n"
+              "  waiting leak-exempt PASS\n"
+              "2026-09-27T04:03:09Z lesson: host omniroute CLI calls 401\n")
+
+    def test_a_malformed_entry_keeps_its_own_text_and_the_lines_under_it(self):
+        path = self.write(self.SAMPLE)
+        records, malformed = inbox.parse_file(path)
+        self.assertEqual([m.line for m in malformed], [2])
+        self.assertEqual(
+            malformed[0].text,
+            "2026-09-27T03:55Z → done: answers read (BYOK opt2, LEAK opt1);")
+        self.assertEqual(malformed[0].continuations, ["  waiting leak-exempt PASS"])
+        self.assertEqual(inbox.malformed_lines(path), [2])
+        # the record it follows keeps exactly its own text and nothing more
+        self.assertEqual([r.text for r in records],
+                         ["E3 RTK A/B plan", "lesson: host omniroute CLI calls 401"])
+        self.assertEqual([r.continuations for r in records], [[], []])
+
+    def test_a_malformed_entry_is_read_with_the_record_that_precedes_it(self):
+        # Its place in the file is "right after the record before it", so a
+        # reader resuming AT that record has not seen it yet: it must be read.
+        path = self.write(self.SAMPLE)
+        records, malformed = inbox.parse_file(path)
+        got = inbox.window_entries(records, malformed,
+                                  inbox.parse_position("2026-09-27T03:53:13Z#1"))
+        self.assertEqual([type(e).__name__ for e in got], ["Malformed", "Record"])
+        self.assertEqual(got[0].line, 2)
+
+    def test_a_malformed_entry_behind_the_window_is_not_read(self):
+        path = self.write(self.SAMPLE)
+        records, malformed = inbox.parse_file(path)
+        got = inbox.window_entries(records, malformed,
+                                  inbox.parse_position("2026-09-27T04:03:09Z#1"))
+        self.assertEqual(got, [])
+
+    def test_a_malformed_line_before_the_first_record_rides_at_the_head(self):
+        path = self.write("2026-09-27T03:55Z → done\n"
+                          "2026-09-27T04:03:09Z first real record\n"
+                          "2026-09-27T04:04:09Z second real record\n")
+        records, malformed = inbox.parse_file(path)
+        got = inbox.window_entries(records, malformed)
+        self.assertEqual([type(e).__name__ for e in got],
+                         ["Malformed", "Record", "Record"])
+        cut = inbox.window_entries(records, malformed,
+                                  inbox.parse_position("2026-09-27T04:03:09Z#1"))
+        self.assertEqual([type(e).__name__ for e in cut], ["Record"])
+
+
 class CardPositionTests(_Files):
     HEADER = ("# card L1-routing — 2026-09-28T07:00:00Z | gen=0123456789abcdef "
               "| context 210k/350k | last-event 2026-09-28T06:12:00Z#2\n")
@@ -330,13 +388,85 @@ class InboxCliTests(_Files):
         self.assertEqual(rc, 1)
         self.assertIn("no timestamped records in %s" % path, err)
 
-    def test_a_malformed_line_is_reported_with_its_line_number(self):
+    def test_a_malformed_line_is_reported_and_still_reaches_stdout(self):
+        # R1FIX flipped this expectation: it used to require stdout to carry the
+        # record only, which is exactly the acknowledgement a pack lost.
         path = self.write("2026-09-27T03:54:00Z first\n"
                           "2026-09-27T03:55Z → done: answers read\n")
         rc, out, err = self.invoke("inbox", "--file", path, "--all")
         self.assertEqual(rc, 0, err)
         self.assertIn("malformed at line 2", err)
-        self.assertEqual(out.splitlines(), ["2026-09-27T03:54:00Z#1 first"])
+        self.assertEqual(out.splitlines(), [
+            "2026-09-27T03:54:00Z#1 first",
+            "(malformed line 2) 2026-09-27T03:55Z → done: answers read"])
+
+    def test_a_malformed_line_inside_the_window_is_printed_in_file_order(self):
+        # The sample's line 277 shape, read since a record that precedes it.
+        path = self.write("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+                          "2026-09-27T03:55Z → done: answers read (BYOK opt2);\n"
+                          "  waiting leak-exempt PASS\n"
+                          "2026-09-27T04:03:09Z lesson: host omniroute CLI 401\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                  "--since", "2026-09-27T03:53:13Z#1")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines(), [
+            "(malformed line 2) 2026-09-27T03:55Z → done: answers read (BYOK opt2);",
+            "  waiting leak-exempt PASS",
+            "2026-09-27T04:03:09Z#1 lesson: host omniroute CLI 401"])
+
+    def test_a_malformed_line_outside_the_window_is_not_printed(self):
+        path = self.write("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+                          "2026-09-27T03:55Z → done: answers read (BYOK opt2);\n"
+                          "2026-09-27T04:03:09Z lesson: host omniroute CLI 401\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                  "--since", "2026-09-27T04:03:09Z#1")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("done: answers read", out)
+        self.assertEqual(out, "")
+
+    def test_a_malformed_line_appended_after_the_resume_point_is_still_read(self):
+        # The reason the fix exists: a card stopped at the last record, and the
+        # writer appended an acknowledgement that will never parse. No record is
+        # new, yet this text is — so stdout carries it while stderr still says
+        # the record window is empty.
+        path = self.write("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+                          "2026-09-27T03:55Z → done: answers read (BYOK opt2);\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                  "--since", "2026-09-27T03:53:13Z#1")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines(), [
+            "(malformed line 2) 2026-09-27T03:55Z → done: answers read (BYOK opt2);"])
+        self.assertIn("nothing since 2026-09-27T03:53:13Z#1", err)
+
+    def test_the_notice_counts_the_lines_a_malformed_entry_absorbed(self):
+        path = self.write("2026-09-27T03:54:00Z first\n"
+                          "2026-09-27T03:55Z → done: answers read\n"
+                          "  waiting leak-exempt PASS\n"
+                          "  and a third line\n")
+        rc, out, err = self.invoke("inbox", "--file", path, "--all")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("malformed at line 2 (3 lines)", err)
+        self.assertEqual(out.splitlines(), [
+            "2026-09-27T03:54:00Z#1 first",
+            "(malformed line 2) 2026-09-27T03:55Z → done: answers read",
+            "  waiting leak-exempt PASS",
+            "  and a third line"])
+
+    def test_records_cut_from_the_window_take_their_malformed_line_with_them(self):
+        # --max-records budgets RECORDS; a malformed line is not one, but it
+        # must not survive the record it rode on and print over a kept record.
+        path = self.write("2026-09-27T03:50:00Z oldest\n"
+                          "2026-09-27T03:55Z → done: an acknowledgement\n"
+                          "2026-09-27T03:56:00Z second\n"
+                          "2026-09-27T03:57:00Z third\n")
+        rc, out, err = self.invoke("inbox", "--file", path, "--all",
+                                   "--max-records", "2")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cut 1 earlier records", err)
+        self.assertNotIn("an acknowledgement", out)
+        self.assertEqual(out.splitlines(), [
+            "2026-09-27T03:56:00Z#1 second",
+            "2026-09-27T03:57:00Z#1 third"])
 
     def test_a_name_and_a_file_together_is_refused(self):
         path = self.write(COLLIDING)

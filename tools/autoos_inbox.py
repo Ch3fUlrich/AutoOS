@@ -3,9 +3,10 @@
 One home for what an inbox record *is*, so the card checker, the pack builder
 and the `inbox` verb cannot drift apart:
 
-    parse_file(path)         -> (records, malformed_line_numbers)
+    parse_file(path)         -> (records, malformed entries)
     read_records(path)       -> records, or NoTimestampedRecords
     read_since(path, since)  -> at-least-once window, file order, `(late)` flags
+    window_entries(...)      -> that window with the malformed lines in it
     parse_position("…Z#2")   -> Position
     card_last_event(path)    -> the position a session stopped reading at
     inbox_path(name)         -> <RUN>/inbox/<name>.md
@@ -18,6 +19,13 @@ it, so a record that lands in the same second as the one already read is seen
 again rather than lost. Records whose timestamps are out of order are still
 returned in file order and flagged `(late)`; file order is the truth, because
 several sessions append to one inbox.
+
+A line that looks like a record but does not parse (the measured shape is a
+minute-precision stamp, `2026-09-27T03:55Z → done: …`) is a **malformed entry**:
+its own text plus the continuation lines under it. It carries no position, and
+it is read whenever its place in the file — right after the record preceding it
+— lies inside the window, so an acknowledgement is never lost from a pack that
+embeds stdout (R1FIX). It is never glued onto the record it follows.
 
 Nothing here writes: every function is read-only, and a torn append (a final
 line with no trailing newline, from a writer that has not finished) is ignored
@@ -34,7 +42,8 @@ from dataclasses import dataclass, field
 # A record's leading token, exactly as an inbox writes it: `…Z`.
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z(?=$|\s)")
 # A line that *looks* like a record but does not parse (the measured shape is a
-# minute-precision stamp: "2026-09-27T03:55Z …"). Reported, never glued on.
+# minute-precision stamp: "2026-09-27T03:55Z …"). It opens a Malformed entry,
+# which owns the lines under it and is never glued onto the record it follows.
 _TS_LIKE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 _POSITION_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:Z)?(?:#(\d+))?$")
@@ -94,6 +103,21 @@ class Record:
         return (self.timestamp, self.ordinal)
 
 
+@dataclass
+class Malformed:
+    """A line that looks like a stamp but does not parse, and its continuations.
+
+    It has no position — it is not a record — so `anchor`, the record it follows
+    in file order (None when nothing precedes it), is what places it in a window.
+    Its text reaches stdout tagged `(malformed line N)` (R1FIX).
+    """
+
+    line: int               # 1-based line of the malformed line itself
+    text: str               # that line, whole — the bogus stamp included
+    continuations: list = field(default_factory=list)
+    anchor: Record | None = None
+
+
 def run_dir(env=None) -> str:
     """``$AUTOOS_RUN_DIR``, or an error naming the alternative."""
     env = os.environ if env is None else env
@@ -144,43 +168,38 @@ def _is_real_timestamp(stamp: str) -> bool:
     return True
 
 
-def _iter_records(lines):
-    """Yield one (payload, line_number, is_record) per decision over readlines().
+def _iter_entries(lines):
+    """Yield one Record or Malformed per decision over readlines().
 
     The caller owns line numbering and the ordinals; this owns the record
     boundaries: a timestamp line opens a record, a line without one continues
-    it, and a line that looks like a timestamp but fails the parse is malformed
-    and closes the record it follows — never glued onto it (§0). The lines after
-    a malformed one belong to nothing and are skipped, exactly like the leading
-    header block.
+    whichever entry is open, and a line that looks like a timestamp but fails
+    the parse opens a Malformed entry — it closes the record it follows and owns
+    the lines under it, so nothing is glued onto that record and nothing is
+    absorbed in silence (§0, R1FIX).
     """
     current = None
     for number, raw in enumerate(lines, 1):
         line = raw.rstrip("\n").rstrip("\r")
         found = _TS_RE.match(line)
         if found and _is_real_timestamp(found.group(1) + "Z"):
-            if current is not None:
-                yield current
-            current = (Record(timestamp=found.group(1) + "Z", ordinal=0,
-                               line=number,
-                               text=line[found.end(1) + 1:].lstrip(" \t")),
-                       number, True)
+            current = Record(timestamp=found.group(1) + "Z", ordinal=0,
+                             line=number,
+                             text=line[found.end(1) + 1:].lstrip(" \t"))
+            yield current
             continue
         if _TS_LIKE_RE.match(line):
-            if current is not None:
-                yield current
-                current = None
-            yield None, number, False
+            current = Malformed(line=number, text=line)
+            yield current
             continue
-        if current is not None:
-            current[0].continuations.append(line)
-        # else: a leading (or detached) untimestamped block — not a record.
-    if current is not None:
-        yield current
+        if current is None:
+            # a leading (or detached) untimestamped block — not an entry.
+            continue
+        current.continuations.append(line)
 
 
 def parse_file(path: str):
-    """(records, malformed line numbers) for one inbox file.
+    """(records, malformed entries) for one inbox file.
 
     A final line with no trailing newline is dropped before parsing: a
     concurrent writer may still be appending it (§0).
@@ -195,14 +214,14 @@ def parse_file(path: str):
     records = []
     malformed = []
     seen = {}
-    for item, number, is_record in _iter_records(lines):
-        if not is_record:
-            malformed.append(number)
+    for entry in _iter_entries(lines):
+        if isinstance(entry, Malformed):
+            entry.anchor = records[-1] if records else None
+            malformed.append(entry)
             continue
-        record = item
-        seen[record.timestamp] = seen.get(record.timestamp, 0) + 1
-        record.ordinal = seen[record.timestamp]
-        records.append(record)
+        seen[entry.timestamp] = seen.get(entry.timestamp, 0) + 1
+        entry.ordinal = seen[entry.timestamp]
+        records.append(entry)
     return records, malformed
 
 
@@ -216,7 +235,7 @@ def read_records(path: str):
 
 def malformed_lines(path: str):
     """Line numbers that look like a record timestamp but do not parse."""
-    return parse_file(path)[1]
+    return [entry.line for entry in parse_file(path)[1]]
 
 
 def _flag_late(records):
@@ -238,6 +257,29 @@ def window(records, since=None):
         if record.key == key:
             return records[index + 1:]
     return [record for record in records if record.key > key]
+
+
+def window_entries(records, malformed, since=None):
+    """The window in file order: `window`'s records plus the malformed entries
+    whose place in the file lies inside it (R1FIX).
+
+    A malformed entry has no position, so it is placed by the record it follows:
+    it is read whenever that record is the cut point or comes after it. Read
+    that way, the entry a reader resumes *past* is still delivered — a line
+    appended right after the last position a card held is new text, and losing
+    it is the defect this closes. An entry with no record before it sits at the
+    head of the file and is read whenever the window starts there.
+    """
+    selected = window(records, since)
+    where = {id(record): index for index, record in enumerate(records)}
+    start = where[id(selected[0])] if selected else len(records)
+    entries = list(selected)
+    for entry in malformed:
+        anchor = -1 if entry.anchor is None else where[id(entry.anchor)]
+        if anchor >= start - 1:
+            entries.append(entry)
+    entries.sort(key=lambda entry: entry.line)
+    return entries
 
 
 def read_since(path: str, since=None):

@@ -66,6 +66,11 @@ card's `last-event` instead of opening a 50k-token inbox. The RUN dir is
 stamp re-reads its whole second and a late append (an older timestamp written
 after a newer one) is returned and flagged `(late)`, because reading is
 at-least-once. An inbox with no timestamped record exits 1 — never "no events".
+A line that looks like a stamp but does not parse (a minute-precision one, say
+`2026-09-27T03:55Z → done: …`) is still an acknowledgement, so it prints on
+stdout too, in file order, tagged `(malformed line N)` with the lines under it —
+no position, because it is not a record — beside the stderr notice that counts
+them.
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
