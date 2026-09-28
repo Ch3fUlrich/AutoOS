@@ -49,8 +49,9 @@ Three subcommands:
        measured on ``clients.agy`` which had ``unavailable_until`` without
        ``available: false`` and silently lost the re-probe on expiry);
     9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
-       rules, first match wins, no match = allowed; leg_rule_for()); a denied
-       leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
+       rules, matched case-insensitively, first match wins, no match = allowed;
+       leg_rule_for()); a denied leg must be gated (available false) - L0
+       ONE-ROUTER 2026-09-27.
     10. every providers.<id>.limits key resolves to one of that provider's
         models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
         2026-09-27);
@@ -2144,21 +2145,36 @@ def _canonical_leg_spelling(leg: str, registry: dict) -> str:
 def leg_rule_for(leg: str, registry: dict):
     """The first policy.leg_rules entry whose fnmatch `match` pattern matches
     `leg`, or None when no rule matches (no match = allowed). The single
-    matcher: _check_leg_rules() and the renders (OR1) both call it.
+    matcher: _check_leg_rules() and the renders (OR1) both call it, and
+    autoos_resolver/probe_common import leg_denied/leg_rule_for from here, so
+    this is the only place the comparison's semantics are decided.
 
     Both valid spellings of a leg are tested - the raw string and its canonical
     `omniroute_id` re-spelling (PROV finding 3) - so a rule matches whichever
-    spelling the leg was written with. Rule order still decides first match."""
+    spelling the leg was written with. Rule order still decides first match.
+
+    Matching is case-INSENSITIVE (DSAMEND2, Muse review of DSAMEND): pattern and
+    leg are both casefolded before the fnmatch. `fnmatchcase` binds a rule to
+    one casing only, so `*deepseek*pro*` left `samba/DeepSeek-V4-Pro` matching
+    nothing at all and therefore allowed - the operator rule is 'never DeepSeek
+    Pro under ANY provider id', and a deny an id's capitalisation can escape is
+    no deny. The fold changes no committed verdict for any leg the registry
+    names (LegRulesTests.test_no_committed_verdict_changes_when_matching_folds_case
+    sweeps them); it only closes spellings that matched nothing before. The
+    canonical re-spelling still resolves case-sensitively via resolve_leg, which
+    is the providers catalog's own contract, not this matcher's."""
     rules = _section(registry, "policy").get("leg_rules")
     candidates = [leg]
     canonical = _canonical_leg_spelling(leg, registry)
     if canonical not in candidates:
         candidates.append(canonical)
+    folded = [c.casefold() if isinstance(c, str) else c for c in candidates]
     for rule in rules if isinstance(rules, list) else []:
         if not (isinstance(rule, dict) and isinstance(rule.get("match"), str)):
             continue
-        for candidate in candidates:
-            if fnmatch.fnmatchcase(candidate, rule["match"]):
+        pattern = rule["match"].casefold()
+        for candidate in dict.fromkeys(folded):
+            if fnmatch.fnmatchcase(candidate, pattern):
                 return rule
     return None
 

@@ -15,6 +15,7 @@ suite has to be runnable on a machine where nothing is installed (AGENTS.md sect
 from __future__ import annotations
 
 import copy
+import fnmatch
 import importlib.util
 import json
 import re
@@ -1054,6 +1055,71 @@ class LegRulesTests(unittest.TestCase):
         }
         got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
         self.assertEqual(got, cases)
+
+    def test_matching_is_case_insensitive(self):
+        """DSAMEND2 (Muse review of DSAMEND, operator rule 'never DeepSeek Pro
+        under ANY provider id'): the matcher casefolds pattern and leg alike.
+        Under case-SENSITIVE fnmatchcase a deny only binds the exact casing it
+        was written in, so `samba/DeepSeek-V4-Pro` — the very model the operator
+        forbids, spelled with capitals — matched no rule at all and fell through
+        to the no-match-allowed default. No deny may be escapable by
+        re-capitalising it."""
+        for leg in ("samba/DeepSeek-V4-Pro",
+                    "openrouter/deepseek/DeepSeek-V4-PRO",
+                    "Deepseek-V4-Pro"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    "deny-deepseek-pro", leg)
+        # and the mixed-case spellings of an ALLOW stay allowed (first match
+        # still wins, the casefold does not let a deny outrank an allow that
+        # precedes it): the registry's one mixed-case leg is samba/MiniMax-M3.
+        self.assertIs(registry.leg_denied("samba/MiniMax-M3", self.reg), False)
+        self.assertIs(registry.leg_denied("deepseek/deepseek-flash", self.reg), False)
+
+    def test_no_committed_verdict_changes_when_matching_folds_case(self):
+        """The 'expect none' guard the DSAMEND2 review asks for: for every leg
+        the registry actually names — every route leg, every unavailable_legs
+        key, and every provider spelling x model id it can be written with —
+        folding the case must not change which rule fires or its verdict. A leg
+        whose verdict does change is a leg some rule was only ever binding in
+        one casing, and the render and the resolver would disagree with the
+        operator's budget over it."""
+        legs = set()
+        for route in self.reg["routes"].values():
+            legs.update(l for l in (route.get("legs") or []) if isinstance(l, str))
+            legs.update(l for l in (route.get("unavailable_legs") or {})
+                        if isinstance(l, str))
+        for pid, prov in self.reg["providers"].items():
+            for sp in {pid, prov.get("omniroute_id") or pid}:
+                for mid in self.reg["models"]:
+                    legs.add("%s/%s" % (sp, mid))
+        # the case-SENSITIVE matcher, exactly as leg_rule_for worked before the
+        # fix: same rule order, fnmatchcase on the raw and canonical spellings.
+        rules = [r for r in self.reg["policy"]["leg_rules"]
+                 if isinstance(r, dict) and isinstance(r.get("match"), str)]
+
+        def old_rule(leg):
+            candidates = [leg]
+            canonical = registry._canonical_leg_spelling(leg, self.reg)
+            if canonical not in candidates:
+                candidates.append(canonical)
+            for rule in rules:
+                for candidate in candidates:
+                    if fnmatch.fnmatchcase(candidate, rule["match"]):
+                        return rule
+            return None
+
+        changed = {}
+        for leg in sorted(legs):
+            before, after = old_rule(leg), registry.leg_rule_for(leg, self.reg)
+            if (before or {}).get("id") != (after or {}).get("id") or \
+                    (before or {}).get("allow") != (after or {}).get("allow"):
+                changed[leg] = ((before or {}).get("id"), (after or {}).get("id"))
+        self.assertEqual(changed, {}, "rules whose verdict changed for a leg in "
+                                     "the registry: %s" % sorted(changed.items()))
+        self.assertGreater(len(legs), 1000, "the sweep must cover the registry")
 
     def test_providers_key_spelling_matches_the_omniroute_id_rule(self):
         """PROV finding 3: resolve_leg() accepts either the providers key or a

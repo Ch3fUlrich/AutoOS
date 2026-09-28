@@ -2141,10 +2141,16 @@ class GatewayOrderTests(unittest.TestCase):
         # v4.1-flash (the two BYOK/zen V4.1 paths) are the only ones left
         # servable.
         registry = self.registry()
-        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro",
-                          "deepseek/deepseek-v4-flash")
+        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro")
         for mid in rejected_models:
             self.assertNotIn(mid, registry["models"])
+        # DSAMEND2 (review 2): the third entry used to be the *leg* string
+        # "deepseek/deepseek-v4-flash", and `models` is keyed by model id, not by
+        # leg, so that limb could never fail. What DSAMEND actually left of that
+        # snapshot is a reseller row with no native `direct` block — assert that.
+        self.assertNotIn("direct", registry["models"].get("deepseek-v4-flash") or {})
+        self.assertIn("deepseek-v4-flash", registry["models"],
+                      "the reseller row keeps its model entry, only not a native one")
         for route_id, route in registry["routes"].items():
             for leg in route.get("legs") or []:
                 if leg == "cheaperinference/deepseek-v4-flash":

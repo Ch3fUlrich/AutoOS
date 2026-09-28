@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
+
+- **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the
+  matcher used `fnmatch.fnmatchcase`, which binds a rule to the one casing it was
+  written in. `deny-deepseek-pro` (`*deepseek*pro*`) therefore did not match
+  `samba/DeepSeek-V4-Pro` — the same model, spelled with capitals — and matched
+  nothing else either, so the leg fell through to the *no-match = allowed*
+  default and the catch-all `deny-deepseek` never saw it. `openrouter/deepseek/
+  DeepSeek-V4-PRO` was only ever caught by the unrelated `deny-openrouter`.
+  Pattern and leg are now both casefolded before the match, first-match-wins
+  order unchanged. One matcher, so every consumer moved with it (R-orch-11):
+  `_check_leg_rules` (rule 9), the gateway renders via `gateway_legs`,
+  `autoos_resolver.usable_legs` and `probe_common._skip_reason` all import
+  `leg_denied`/`leg_rule_for` from here — none re-implements the comparison, and
+  `audit-router.py` / `sync-*.py` do not match legs at all. `resolve_leg` stays
+  case-sensitive: it is the providers catalog's own contract, not this matcher's.
+- **No verdict moves for any leg the registry names.** Swept over every route
+  leg, every `unavailable_legs` key and every provider spelling × model id
+  (1421 legs, 30 of them real): the rule that fires and its `allow` are identical
+  before and after, for the one mixed-case leg `samba/MiniMax-M3` included — the
+  fold only closes spellings that previously matched *nothing*. Kept as
+  `LegRulesTests.test_no_committed_verdict_changes_when_matching_folds_case`.
+- **`tests/test_autoos_resolver.py`** (review 2, LOW):
+  `test_only_deepseek_v41_flash_survives_of_the_deepseek_family` asserted
+  `"deepseek/deepseek-v4-flash" not in models` — a *leg* string tested against a
+  map keyed by model id, so that limb could never fail. It now asserts what
+  DSAMEND actually left behind: the bare `deepseek-v4-flash` row still exists for
+  its reseller leg and carries **no** native `direct` block.
+- Tests: `LegRulesTests.test_matching_is_case_insensitive` (was red: the three
+  Pro spellings above came back allowed); `validate` and all five
+  `render --check` surfaces unchanged.
+
 ### Fixed — the native DeepSeek id is `deepseek-flash` only, and V4 Pro is denied by name (DSAMEND, 2026-09-28)
 
 - **`catalog/ai-registry.json`**: routing-00 measured `GET /models` on
