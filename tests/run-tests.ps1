@@ -1847,6 +1847,51 @@ Test-Case 'omnigraph-client: the env file is born user-only and its backup keeps
     } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
 }
 
+Test-Case 'omnigraph-client: the token backup is born protected, never Copy-Item then icacls' {
+    # Cross-family review (Muse) 2026-09-28: the env file itself was born
+    # restricted, but the copy of the token it replaced was made with Copy-Item
+    # and icacls'd afterwards — so the previous bearer token sat readable by
+    # anything holding the profile's inherited ACLs for the length of that
+    # window. The backup goes through the same writer as the file it copies
+    # (AGENTS.md §1, §5).
+    $copier = (Get-Command Copy-AutoOSBackup).ScriptBlock.ToString()
+    $envWriter = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $writer = (Get-Command Write-AutoOSProtectedFile).ScriptBlock.ToString()
+
+    Assert-True ($envWriter -match "Copy-AutoOSBackup[^\r\n]*-Protect") 'the env backup is not taken through the protected path'
+    Assert-True ($envWriter -notmatch 'Copy-Item') 'a copy of the token file remains in the env writer'
+    Assert-True ($copier -notmatch 'Protect-AutoOSUserFile') 'the copier re-implements the ACL rule instead of reusing the writer'
+    $protectedAt = $copier.IndexOf('Write-AutoOSProtectedFile')
+    Assert-True ($protectedAt -ge 0) 'the copier never reaches the born-protected writer'
+    # One copy statement left, and it belongs to the unprotected branch the
+    # protected one returns ahead of — so no token backup can take it.
+    Assert-Equal ([regex]::Matches($copier, 'Copy-Item -LiteralPath').Count) 1 'a second copy statement was added to the backup helper'
+    Assert-True ($copier.IndexOf('Copy-Item -LiteralPath') -gt $protectedAt) 'the plain copy is not the branch after the protected one'
+
+    # Same ordering rule inside the writer, whichever way the bytes arrive: the
+    # sibling is protected empty, and the copied token lands after that.
+    $protectAt = $writer.IndexOf('Protect-AutoOSUserFile')
+    Assert-True ($writer.IndexOf('ReadAllBytes($SourcePath') -gt $protectAt) 'the copied token bytes land before the ACL does'
+
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $paths = Get-AutoOSOmnigraphClientPath
+        $old = [Text.Encoding]::UTF8.GetBytes("OMNIGRAPH_BASE_URL=http://old.invalid`nOMNIGRAPH_TOKEN=fixture-token-0`n")
+        [IO.File]::WriteAllBytes($paths.EnvFile, $old)
+        # An old mtime, so a backup that did not carry the times across reads as
+        # this run's own new file (the copy it replaces is the user's original).
+        $when = (Get-Date).AddMinutes(-5)
+        (Get-Item -LiteralPath $paths.EnvFile -Force).LastWriteTime = $when
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $backups = @(Get-ChildItem -LiteralPath $ctx.Profile -Force -Filter '.autoos-omnigraph.env.autoos-backup-*')
+        Assert-Equal $backups.Count 1 'the previous token was not backed up'
+        $copied = [IO.File]::ReadAllBytes($backups[0].FullName)
+        Assert-True ([Convert]::ToBase64String($copied) -ceq [Convert]::ToBase64String($old)) 'the backup is not the byte-for-byte previous file'
+        $age = [Math]::Abs(((Get-Item -LiteralPath $backups[0].FullName -Force).LastWriteTime - $when).TotalSeconds)
+        Assert-True ($age -lt 2) "the backup did not carry the source's times ($age s off)"
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
 Test-Case 'omnigraph-client: a second run reports skipped and writes nothing new' {
     $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
     try {

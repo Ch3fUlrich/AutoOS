@@ -65,10 +65,19 @@ function Copy-AutoOSBackup {
         ... so every backup is its own file. -Stamp exists so a test can force
         the clash without touching the clock. Callers that do not need the path
         discard it ($null = ...), or it leaks into their output.
+
+        -Protect is for a file that holds a live credential. The copy then goes
+        through Write-AutoOSProtectedFile, which restricts an empty sibling
+        before any byte lands, instead of creating the backup with the profile's
+        inherited ACLs and restricting it afterwards — the window between those
+        two is when the previous token could be read by other accounts (review
+        finding 2026-09-28). It returns $null when the restriction failed, so the
+        caller knows it has no backup and leaves the original alone.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [string]$Stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+        [string]$Stamp = (Get-Date -Format 'yyyyMMdd-HHmmss'),
+        [switch]$Protect
     )
     $base = "$Path.autoos-backup-$Stamp"
     $backup = $base
@@ -76,6 +85,10 @@ function Copy-AutoOSBackup {
     while (Test-Path -LiteralPath $backup) {
         $n++
         $backup = "$base-$n"
+    }
+    if ($Protect) {
+        if ((Write-AutoOSProtectedFile -Path $backup -SourcePath $Path) -eq 'failed') { return $null }
+        return $backup
     }
     Copy-Item -LiteralPath $Path -Destination $backup
     $backup
@@ -1139,11 +1152,18 @@ function Write-AutoOSProtectedFile {
         still has to be written, because that is what a test (and a WSL run of the
         Linux-shaped part of this module) can check.
 
+        -SourcePath is the same guarantee for bytes that already exist on disk —
+        the copy of a token file a run is about to replace. They are read and
+        written through the protected sibling like any other content, never
+        copied onto the final name first, and only their times (not their
+        permissions) carry across.
+
         Returns 'ok', 'failed' or 'skipped' for the file now at $Path.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+        [Parameter(Mandatory, ParameterSetName='Content')][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory, ParameterSetName='From')][string]$SourcePath
     )
     $dir = Split-Path -Parent $Path
     if (-not $dir) { throw "Write-AutoOSProtectedFile needs a directory to hold the sibling it moves in: $Path" }
@@ -1160,7 +1180,17 @@ function Write-AutoOSProtectedFile {
             Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
             return 'failed'
         }
-        [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
+        if ($PSCmdlet.ParameterSetName -eq 'From') {
+            [IO.File]::WriteAllBytes($temp, [IO.File]::ReadAllBytes($SourcePath))
+            # The times, by hand: a copy keeps the original's, but the permissions
+            # must not come across, so this cannot take the source's whole stat.
+            $from = New-Object IO.FileInfo($SourcePath)
+            $to = New-Object IO.FileInfo($temp)
+            $to.LastWriteTime = $from.LastWriteTime
+            $to.CreationTime = $from.CreationTime
+        } else {
+            [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
+        }
         if (Test-Path -LiteralPath $Path) {
             # Move-Item onto an existing file needs the destination gone; the
             # caller backed it up first (Copy-AutoOSBackup), which is what makes
@@ -1255,9 +1285,15 @@ function Set-AutoOSOmnigraphEnv {
         $state = 'unchanged'
     } else {
         if ($old) {
-            $backup = Copy-AutoOSBackup -Path $EnvFile
-            if ((Protect-AutoOSUserFile -Path $backup) -eq 'failed') {
-                Write-AutoOSLine "could not restrict $backup to your account (icacls)" -Level warn
+            # The copy holds the PREVIOUS token, which is a live bearer credential
+            # until the server expires it, so it is born restricted exactly like
+            # the file it is made from. A copy that cannot be restricted stops the
+            # rewrite: overwriting the file with no backup to show for it is the
+            # other half of the rule (AGENTS.md section 5).
+            $backup = Copy-AutoOSBackup -Path $EnvFile -Protect
+            if (-not $backup) {
+                Write-AutoOSLine "could not restrict a backup of $EnvFile to your account (icacls) - the env file was not rewritten" -Level warn
+                return 'failed'
             }
         }
         # The bytes are a live bearer token, so the file is created protected and

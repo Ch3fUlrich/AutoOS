@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the Windows token backup is born protected (w1 cross-family review S1, 2026-09-28)
+
+- **`lib/windows/AutoOS.Install.psm1`** (`Set-AutoOSOmnigraphEnv`, `Copy-AutoOSBackup`,
+  `Write-AutoOSProtectedFile`): the env file itself was born restricted, but the copy of
+  the token it replaces went out through the plain copy helper and was `icacls`'d
+  *afterwards* — so the previous bearer token, live until the server expires it, sat under
+  the profile's inherited ACLs for the length of that window, readable by every other
+  account on a shared or imaged machine. It is the same defect the Linux side closed on
+  2026-09-28 (two entries below); the fix is the same shape. `Write-AutoOSProtectedFile`
+  takes `-SourcePath`: bytes that already exist on disk are read and written into the
+  protected sibling like any other content, and only the source's *times* carry across —
+  its permissions must not, so this cannot take the whole stat. `Copy-AutoOSBackup
+  -Protect` routes a credential's backup through that one writer, which is what keeps the
+  ACL rule in a single home instead of a second copy beside the `Copy-Item`. A backup that
+  cannot be restricted returns `$null` and the env file is left exactly as it was: the
+  alternative is overwriting a user's file with no backup (AGENTS.md §1, §5).
+- **`tests/run-tests.ps1`**: a case that reads the three units' source, in the shape the
+  env-file case already uses — the env writer backs up with `-Protect` and holds no plain
+  copy, the backup helper reaches the protected writer and its one remaining copy
+  statement belongs to the branch the protected one returns ahead of, the writer never
+  re-implements the ACL rule, and the copied bytes land after the protection — plus a
+  behavioural half: the backup is byte-for-byte the previous file and carries its mtime,
+  which is how "we copied the content, not just created the name" stays true if the
+  writer is rewritten. Red before the fix on the `-Protect` assertion.
+- Not changed here, same shape, and `-Protect` now exists for them: the backups taken by
+  `Set-AutoOSClaudeGateway` and `Install-AutoOSOmniRouteRouting`, whose settings files can
+  hold a gateway key. Each is a separate component, so each is its own brief and its own
+  test.
+
 ### Added - `omnigraph-client` on Windows, and `agent-skills` stops cloning (A3 Windows twin, 2026-09-28)
 
 The Linux side got its machine component on 2026-09-27/28; Windows had no

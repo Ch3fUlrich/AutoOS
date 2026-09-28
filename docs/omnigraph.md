@@ -213,8 +213,13 @@ restricted: `Write-AutoOSProtectedFile` creates an empty sibling, protects *that
 writes the content into it and moves it onto the target name on the same volume,
 where the rename carries the DACL and the target path is never itself created with
 the profile's inherited permissions. A protection that fails stops the write and
-the component says so. A file it replaces is backed up first, and the backup is
-protected the same way.
+the component says so. The file it replaces is copied to a backup first, and the
+backup is born the same way — `Copy-AutoOSBackup -Protect` hands it to the same
+writer, which takes the previous bytes through the protected sibling (`-SourcePath`)
+rather than copying them onto the final name and restricting them afterwards. A
+backup that cannot be restricted means no rewrite at all: the previous token is a
+live credential, and it is not left readable to the profile's inherited ACLs while
+being kept.
 
 Detection answers the coarse question and only the coarse question:
 `Get-AutoOSInstalledStatus` reports the component installed once the prefix and
