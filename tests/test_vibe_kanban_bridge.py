@@ -143,6 +143,14 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(vkb.blocked_title("[blocked: do X] do B", ["do A"]),
                          "[blocked: do A] do B")
 
+    def test_blocked_title_round_trips_when_a_blocking_title_contains_brackets(self):
+        # A blocking dependency's own title can contain "]" (e.g. "do [x] A"); the
+        # strip must match the LAST "] ", not the first, or a repoll corrupts the
+        # title instead of rewriting the same string.
+        once = vkb.blocked_title("do B", ["do [x] A"])
+        self.assertEqual(once, "[blocked: do [x] A] do B")
+        self.assertEqual(vkb.blocked_title(once, ["do [x] A"]), once)
+
 
 # ---------------------------------------------------------------------------
 # 3. Pause check (pure logic, no I/O)

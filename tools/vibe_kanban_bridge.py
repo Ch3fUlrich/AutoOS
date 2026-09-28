@@ -121,8 +121,11 @@ def dependencies_of(conn: sqlite3.Connection, task_id: str) -> list[str]:
 # The one place this module states its own title convention. A blocked todo has
 # nowhere honest to sit in Vibe Kanban's four columns, so the bridge writes the
 # reason into the title instead; this regex is the only thing that recognises a
-# prefix it wrote, which is what keeps blocked_title idempotent.
-BLOCKED_PREFIX_RE = re.compile(r"^\[blocked: [^\]]*\] ")
+# prefix it wrote, which is what keeps blocked_title idempotent. Greedy `.*` to
+# the LAST "] " (not `[^\]]*` to the first) - a blocking title can itself
+# contain "]" (e.g. "do [x] A"), and a first-"]" match would stop there and
+# leave a stale fragment behind on the next strip.
+BLOCKED_PREFIX_RE = re.compile(r"^\[blocked: .*\] ")
 
 
 def is_ready(depends_on: list[str], is_done: Callable[[str], bool]) -> bool:
