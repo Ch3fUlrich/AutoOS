@@ -11046,6 +11046,39 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         self.assertEqual(sorted(self.agent.clients.CLIENTS), sorted(table),
                          "MODEL_INPUT rows vs CLIENTS rows")
 
+    def test_every_flag_row_names_the_flag_the_builder_actually_emits(self):
+        # The coverage test above proves each client HAS a row; it says nothing
+        # about the token a row names. A builder renaming its model flag
+        # (`--model` -> `--m`) keeps the gate scanning a flag that never reaches
+        # the argv, so the plan prices no model and every run of that client
+        # benches as unpriceable -- refused loudly, but pointing nowhere. So build
+        # the argv from the code that builds it, and read it back through the very
+        # extractor the gate uses (`_argv_flag_values`): if either side moves, this
+        # fails.
+        sentinel = "omniroute/drift-sentinel"
+        clients_mod = self.agent.clients
+        cfg = self.cfg()
+        # declared_models() prefixes the provider id, so the row is the bare id.
+        cfg["providers"]["omniroute"]["models"]["drift-sentinel"] = {}
+        for name, entries in sorted(clients_mod.MODEL_INPUT.items()):
+            flags = [key for entry in entries
+                     for (kind, key) in [entry if len(entry) == 2 else (entry[0], "")]
+                     if kind == "flag"]
+            self.assertTrue(flags, "%s: MODEL_INPUT row names no flag" % name)
+            if name == "opencode":
+                # opencode's argv is the CLI's own, not the adapter's (build_command
+                # says so), so the drift guard reads build_plan's product instead.
+                argv = self.agent.build_plan(
+                    self.args(client="opencode", model=sentinel), cfg)["cmd"]
+            else:
+                argv = clients_mod.build_command(clients_mod.CLIENTS[name], "x", None,
+                                                 "edit", model=sentinel)
+            for flag in flags:
+                self.assertEqual([sentinel],
+                                 self.agent._argv_flag_values(argv, flag),
+                                 "%s: MODEL_INPUT says %s carries the model, the "
+                                 "builder disagrees: %r" % (name, flag, argv))
+
     # --- CLAUDEBUDGET-h item 4: the undeclared Claude path refuses on its own ---
 
     def test_an_undeclared_claude_model_on_qoder_is_refused(self):
