@@ -707,57 +707,103 @@ class PauseStateTests(unittest.TestCase):
         for word in ("acknowledged", "acked"):
             self.assertIn(word, hb.RELEASE_ACK_WORDS, word)
 
-    def test_a_stop_in_a_later_sentence_of_a_closed_pause_is_still_an_order(self):
+    def test_a_stop_in_a_later_sentence_of_a_closed_pause_is_a_mention(self):
         # The read-only probe R2a8's brief asked for: `→ main: PAUSE lifted. STOP all
-        # lanes`. `_gives_order` reports the STOP as an active order (the PAUSE half of
-        # the record is closed, the STOP half is not). At R2a8 `pause_state` only called
-        # the inbox active here *because* the record also contained a PAUSE word; from
-        # R2a9 the STOP activates it on its own.
+        # lanes`. `_gives_order` still reports it as an order (the PAUSE half of the
+        # record is closed, the STOP half is not), but R2a10 item 2 reads a STOP as a
+        # *stop* only in the imperative shape — the bare word at the head of the payload
+        # of an unmarked record — so this acknowledgement quoting one is an order that
+        # does not stop the run.
         text = "→ main: PAUSE lifted. STOP all lanes"
         self.assertTrue(hb._gives_order(text), text)
+        self.assertFalse(hb._gives_stop(text), text)
         write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
-        self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+        self.assertFalse(hb.pause_state(self.inbox)["active"], text)
 
-    # R2a9 item 3 (S1, safety): a STOP is the stop the operator meant, so it is read
-    # exactly like a PAUSE. `pause_state` used to filter on the PAUSE word alone, so the
-    # record `_gives_order` calls an order — `operator: STOP all lanes` — reported
-    # `active: False`, which is the one unacceptable direction: a lost stop. The class is
-    # one list (`PAUSE_ORDER_WORDS`), a subset of `ORDER_WORDS`, and it is the same
-    # exemption the PAUSE half reads (an acknowledgement closes it, a negation vetoes
-    # that, `_gives_order` is its one home). FREEZE is not in the class — the corpus's
-    # `→ done: freeze cleared (2/4 units, 6.73GB)` is a report about memory, and reading
-    # it as a hard stop is the spurious-class cost this round declines to pay — and
-    # RESUME never is, or a release would stop the run it releases.
+    def test_a_genuine_imperative_stop_after_a_closed_pause_stops_the_run(self):
+        # The same corpus shape with the operator's own line after it: the STOP a record
+        # merely mentions is nothing next to the STOP the operator writes.
+        pause = "2026-09-28T10:00:00Z → main: PAUSE lifted. STOP all lanes"
+        stop = "2026-09-28T11:00:00Z operator: STOP all lanes"
+        write_inbox(self.inbox, pause)
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+        write_inbox(self.inbox, pause, stop)
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertEqual(state["text"], stop.split(None, 1)[1])
+
+    # R2a9 item 3 (S1, safety) added the stop words to the class after `operator: STOP all
+    # lanes` reported `active: False` — a lost stop is the unacceptable direction. R2a10
+    # (S1, safety, the operator's decision) keeps every stop the operator actually wrote
+    # and takes back the vocabulary that came with reading them as wide as PAUSE:
+    # `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) …` became a hard stop, heartbeat
+    # exited 3, and `run`/`spawn` refused on three live inboxes. The class is
+    # `PAUSE_ORDER_WORDS` (PAUSE, STOP, HALT, ABORT — HOLD and FREEZE are capacity notes
+    # with their own lift wording); PAUSE keeps the wide R2a4–R2a9 rules and the other
+    # three stop only as the bare imperative at the head of an unmarked payload.
+    # `pause_state` reads that through `_gives_stop`; `_gives_order` is unchanged.
 
     def test_a_bare_stop_order_activates_pause_state(self):
         for text in ("operator: STOP all lanes",
-                     "from L0 (operator) HOLD every merge",
                      "operator: HALT the pack build",
                      "operator: ABORT the run",
-                     "STOP everything now"):
+                     "STOP everything now",
+                     "from L0 (operator) HALT the fleet"):
             self.assertTrue(hb._gives_order(text), text)
+            self.assertTrue(hb._gives_stop(text), text)
             write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
             state = hb.pause_state(self.inbox)
             self.assertTrue(state["active"], "%s: %s" % (text, state))
             self.assertEqual(state["text"], text)
 
-    def test_a_pause_class_order_is_closed_and_vetoed_exactly_like_a_pause(self):
-        for text in ("→ done: STOP cancelled",
+    def test_an_acknowledgement_never_carries_a_bare_stop(self):
+        # R2a10 item 2: a stop word inside an ack/lesson record is vocabulary, closed or
+        # not — and the negation veto of R2a9 can no longer turn such a mention back into
+        # a stop, because there was never a stop in it.
+        for text in ("→ done: STOP all lanes obeyed",
+                     "→ done: STOP cancelled",
                      "→ main: HOLD lifted",
                      "L1: → ack: HALT ended",
-                     "operator on duty: → done: ABORT was cleared at 12:00"):
-            self.assertFalse(hb._gives_order(text), text)
+                     "operator on duty: → done: ABORT was cleared at 12:00",
+                     "→ done: STOP was not cancelled",
+                     "→ main: HOLD lifted e.g. not confirmed by ops",
+                     "→ ack: HALT cancelled. Ops never signed it off",
+                     "lesson: STOP all lanes is the wording to avoid"):
+            self.assertFalse(hb._gives_stop(text), text)
             write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
             self.assertFalse(hb.pause_state(self.inbox)["active"], text)
-        for text in ("→ done: STOP was not cancelled",
-                     "→ main: HOLD lifted e.g. not confirmed by ops",
-                     "→ ack: HALT cancelled. Ops never signed it off"):
-            self.assertTrue(hb._gives_order(text), text)
+
+    def test_a_stop_word_mentioned_in_a_note_is_not_an_order(self):
+        # R2a10 item 2, the other half: mid-record, lowercase, or quoted, a stop word
+        # reports on a stop instead of giving one. The MEM HOLD LIFTED note the operator
+        # measured on the real corpus is the case that set this round.
+        for text in ("fleet note: runs were stopped at 14:00",
+                     "fleet note: no STOP needed after all",
+                     "operator: `STOP`",
+                     'operator: "STOP all lanes"',
+                     "operator: (STOP all lanes)",
+                     "operator: stop all lanes",
+                     "from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) max 4 local units/workers",
+                     "from L1-main: HOLD lifted, MemAvailable recovered to 7.0G",
+                     "operator: STOPs are logged but not enforced"):
+            self.assertFalse(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_pause_still_reads_wide_where_a_stop_does_not(self):
+        # R2a10 item 2, last clause: PAUSE keeps its current (wider) rules unchanged — an
+        # unmarked record naming PAUSE anywhere stops the run, an ack exempts it only on
+        # an unnegated closing word, and the record-wide negation veto of R2a9 stands.
+        for text in ("fleet note: PAUSE every lane until ops says so",
+                     "→ main: PAUSE lifted e.g. not confirmed by ops",
+                     "from L1-main: note. PAUSE all lanes until further notice",
+                     "→ done: STOP all lanes obeyed. PAUSE every lane again"):
+            self.assertTrue(hb._gives_stop(text), text)
             write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
             self.assertTrue(hb.pause_state(self.inbox)["active"], text)
 
     def test_a_pause_class_order_lifts_only_to_a_strict_resume(self):
-        for word in ("STOP", "HOLD", "HALT", "ABORT"):
+        for word in ("PAUSE", "STOP", "HALT", "ABORT"):
             write_inbox(self.inbox,
                         "2026-09-28T10:00:00Z operator: %s all lanes" % word,
                         "2026-09-28T11:00:00Z operator: RESUME all lanes")
@@ -777,30 +823,35 @@ class PauseStateTests(unittest.TestCase):
                 self.assertTrue(hb.pause_state(self.inbox)["active"], "%s / %s"
                                 % (word, release))
 
-    def test_freeze_and_resume_are_not_pause_class_words(self):
-        # The boundary of the class: FREEZE was not in this round's brief and RESUME is
-        # the release, so neither may activate a pause on its own.
+    def test_freeze_hold_and_resume_are_not_pause_class_words(self):
+        # The boundary of the class: HOLD and FREEZE are capacity notes with their own
+        # lift wording and RESUME is the release, so none of them may activate a pause on
+        # its own — not even as the bare first word of the payload.
         for text in ("operator: FREEZE the pack lane",
                      "operator: RESUME all lanes",
-                     "operator: freeze every lane please"):
+                     "operator: freeze every lane please",
+                     "operator: HOLD every merge",
+                     "from L0 (operator) HOLD every merge",
+                     "from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G)"):
+            self.assertFalse(hb._gives_stop(text), text)
             write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
             self.assertFalse(hb.pause_state(self.inbox)["active"], text)
 
     def test_pause_class_words_are_the_one_list_the_stop_filter_uses(self):
-        # §0: one home, as `ACK_MARKERS`, `ORDER_WORDS` and `CLOSING_WORDS` are — the
-        # filter is built from the list, never restated, and it is a subset of the order
-        # words so an unclosed stop is always an order. Case-sensitive and whole-word
-        # like PAUSE: `stop`, `PAUSED` and `HOLDs` are prose.
-        self.assertIn("|".join(hb.PAUSE_ORDER_WORDS), hb._PAUSE_ORDER_RE.pattern)
+        # §0: one home, as `ACK_MARKERS`, `ORDER_WORDS` and `CLOSING_WORDS` are. The list
+        # names the vocabulary and `_gives_stop` decides which shape of each word stops
+        # the run; it is a subset of the order words, so a stop is always an order.
+        # Case-sensitive and whole-word like PAUSE: `stop`, `PAUSED` and `HOLDs` are prose.
+        self.assertEqual(("PAUSE", "STOP", "HALT", "ABORT"), hb.PAUSE_ORDER_WORDS)
         self.assertTrue(set(hb.PAUSE_ORDER_WORDS) <= set(hb.ORDER_WORDS))
-        for word in ("PAUSE", "STOP", "HOLD", "HALT", "ABORT"):
-            self.assertIn(word, hb.PAUSE_ORDER_WORDS, word)
+        self.assertIn("|".join(hb.PAUSE_ORDER_WORDS[1:]), hb._IMPERATIVE_STOP_RE.pattern)
         for word in hb.PAUSE_ORDER_WORDS:
-            self.assertIsNotNone(hb._PAUSE_ORDER_RE.search(word), word)
-            self.assertIsNone(hb._PAUSE_ORDER_RE.search(word.lower()), word)
-            self.assertIsNone(hb._PAUSE_ORDER_RE.search(word + "D"), word)
-        self.assertNotIn("FREEZE", hb.PAUSE_ORDER_WORDS)
-        self.assertNotIn("RESUME", hb.PAUSE_ORDER_WORDS)
+            self.assertTrue(hb._gives_stop("operator: %s all lanes" % word), word)
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match(word.lower()), word.lower())
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match(word + "D"), word + "D")
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match("`%s`" % word), word)
+        for word in ("HOLD", "FREEZE", "RESUME"):
+            self.assertNotIn(word, hb.PAUSE_ORDER_WORDS, word)
 
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a

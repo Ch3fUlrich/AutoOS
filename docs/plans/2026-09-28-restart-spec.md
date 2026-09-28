@@ -77,15 +77,22 @@ code from state the session keeps small at every wave. Then the context cap drop
   orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
   wide list costs a spurious order at worst, and `hold on: → main merged` is one).
   **The pause-class subset — `PAUSE_ORDER_WORDS` in `tools/autoos_heartbeat.py`
-  (`PAUSE`, `STOP`, `HOLD`, `HALT`, `ABORT`) — is the filter `pause_state` reads**
-  (R2a9 item 3, closing the probe R2a8 recorded: `operator: STOP all lanes` was a record
-  `_gives_order` called an order and `pause_state` reported `active: False` with, because
-  its filter was the PAUSE word alone — a lost stop, the one unacceptable direction). Case-
-  sensitive and whole-word like PAUSE itself, so `stop`, `PAUSED` and `HOLDs` are prose, and
-  a subset of `ORDER_WORDS`, so every stop is a word the exemption rules already clear.
-  FREEZE is deliberately outside the class: the real corpus's `→ done: freeze cleared
-  (2/4 units, 6.73GB)` reports memory, and reading it as a hard stop turns a report into an
-  order nobody gave. RESUME is the release, so it can never be a stop.
+  (`PAUSE`, `STOP`, `HALT`, `ABORT`) — is the vocabulary `pause_state` reads, and
+  `_gives_stop` is its filter** (R2a9 item 3, closing the probe R2a8 recorded: `operator:
+  STOP all lanes` was a record `_gives_order` called an order and `pause_state` reported
+  `active: False`, because its filter was the PAUSE word alone — a lost stop, the one
+  unacceptable direction). Case-sensitive and whole-word like PAUSE itself, so `stop`,
+  `PAUSED` and `HOLDs` are prose, and a subset of `ORDER_WORDS`, so every stop is a word
+  the exemption rules already clear. **R2a10 (S1, safety) splits the class by shape:** PAUSE
+  keeps the wide rules above (an unmarked record names it anywhere), while STOP, HALT and
+  ABORT stop the run only as the bare word at the head of the payload of an unmarked record
+  — the same strict head `_resumes` requires of a release — so `→ done: STOP all lanes
+  obeyed`, `fleet note: runs were stopped at 14:00`, `no STOP needed` mid-note and
+  `` operator: `STOP` `` are mentions, not orders. HOLD and FREEZE are outside the class:
+  they are capacity words with their own lift wording, and the real corpus paid for R2a9's
+  wide read at once — `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze
+  rule …` became a hard stop, heartbeat exited 3 and `run`/`spawn` refused on three live
+  inboxes. RESUME is the release, so it can never be a stop.
   **An acknowledgement then exempts only an order word its own record closes — one
   more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`,
   `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`,
@@ -124,7 +131,12 @@ code from state the session keeps small at every wave. Then the context cap drop
   applies again: max 4 local units/workers fleet-wide …` reads as a stop whose `LIFTED`
   the `units` in its next sentence vetoes. That is the spurious direction, which this
   rule is allowed to cost, never a lost order — but it is a cost measured on live inboxes,
-  and it is recorded here rather than glossed. A *release* word is read
+  and it is recorded here rather than glossed. **R2a10 paid that bill:** the operator
+  declined a stop class that halts three live inboxes on a memory note, narrowed the class
+  to PAUSE + imperative STOP/HALT/ABORT, and the scan re-ran — **0** real records are a bare
+  imperative stop, so `pause_state` is back to the R2a8 baseline exactly (3 active:
+  `L1-backlog.md`, `L1-main.md`, `L1-routing.md`, same winning records), with the
+  `MEM HOLD LIFTED` note inactive in all ten. A *release* word is read
   **strictly** — not the stop rule loosened, but a rule of its own, because the asymmetry
   points the other way here: a refused release costs one wasted heartbeat and a re-issued
   `RESUME`, a release nobody gave is the lost stop (R2a8's HIGH: R2a7 gated `RESUME` the

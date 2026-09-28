@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the stop class is PAUSE plus the imperative STOP/HALT/ABORT; HOLD and FREEZE stay capacity notes (RESTART R2a10, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a9 open #1, S1, safety): R2a9 widened
+  the pause class to stop *vocabulary* with PAUSE's wide rules, and the live corpus paid at
+  once — `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) … max 4 local units/workers`, a
+  released memory-capacity note, read as a hard stop: heartbeat exited 3 and `run`/`spawn`
+  refused on three live inboxes. A false stop that halts the fleet is not acceptable, so the
+  class is now `PAUSE_ORDER_WORDS` = PAUSE, STOP, HALT, ABORT (HOLD and FREEZE out) and
+  `_gives_stop` splits it by **shape**, symmetric with the strict release: PAUSE keeps the
+  R2a4–R2a9 wide read unchanged, the other three stop only when the bare uppercase word is
+  the first word of an unmarked payload — `→ done: STOP all lanes obeyed`,
+  `fleet note: runs were stopped at 14:00`, `no STOP needed` mid-note and
+  ``operator: `STOP` `` are mentions. The record-wide negation veto and the bare-leading
+  `RESUME` release are untouched. Re-scanned over the ten real inboxes: **0** records are a
+  bare imperative stop, and `pause_state` is back to the R2a8 baseline exactly — 3 active
+  (`L1-backlog.md`, `L1-main.md`, `L1-routing.md`) with the same winning records, the
+  `MEM HOLD LIFTED` note inactive everywhere.
+
 ### Fixed — the veto is the record, the release is a bare leading RESUME, and STOP/HOLD/HALT/ABORT stop the run (RESTART R2a9, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (this repo's own R2a8, S1, safety, FIX-FIRST): R2a8

@@ -71,9 +71,34 @@ _ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE
 # `→ done: freeze cleared (2/4 units, 6.73GB)` reports memory, and widening the class to
 # it turns that report into a hard stop nobody gave. RESUME is the release, so it can
 # never be a stop.
-PAUSE_ORDER_WORDS = ("PAUSE", "STOP", "HOLD", "HALT", "ABORT")
+#
+# R2a10 (S1, safety) takes HOLD back out again. R2a9 widened the class to stop *vocabulary*
+# rather than to stop *shapes*, and a real inbox paid for it at once:
+# `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) … max 4 local units/workers` is a
+# memory-capacity note that names the `HOLD` of the launcher's own `max … units` wording —
+# read as an order, it made heartbeat exit 3 and `run`/`spawn` refuse on three live inboxes.
+# A false stop that halts the fleet is not acceptable either, and it is the wider half of
+# the asymmetry: the PAUSE rules that read a stop from anywhere in the record are safe for
+# PAUSE because nothing in the corpus writes PAUSE for anything but a stop. HOLD and FREEZE
+# are capacity words with their own lift wording (`HOLD LIFTED`, `freeze cleared`), so they
+# are not stop-class. STOP, HALT and ABORT stay in the class — but only in the imperative
+# shape `IMPERRATIVE_STOP_RE` defines, never as a mention.
+PAUSE_ORDER_WORDS = ("PAUSE", "STOP", "HALT", "ABORT")
 assert set(PAUSE_ORDER_WORDS) <= set(ORDER_WORDS)
-_PAUSE_ORDER_RE = re.compile(r"\b(?:%s)\b" % "|".join(PAUSE_ORDER_WORDS))
+# PAUSE alone keeps the wide reading — an order word anywhere in an unmarked record stops
+# the run, exactly as the R2a4–R2a9 rules have always worked. The other three are read
+# only in the imperative shape below, so this list names the vocabulary and
+# `_gives_stop` decides which shape of each word counts.
+_PAUSE_WORD_RE = re.compile(r"\bPAUSE\b")
+# The bare stop imperative: STOP, HALT or ABORT as the *first word of the payload*, after
+# the speaker prefix and with nothing in front of it. Case-sensitive and whole-word. A
+# quote, backtick or parenthesis in front of it is a mention (`operator: STOP-in-backticks`), a
+# lowercase `stop` is prose, and a word further into the sentence is a note about a stop,
+# not one (`fleet note: runs were stopped at 14:00`, `no STOP needed`) — R2a10 item 2,
+# strict by shape and symmetric with `_BARE_RESUME_RE`: the same head test that makes a
+# release an order makes a stop one. PAUSE is *not* in this list; it is read by the wider
+# `_PAUSE_WORD_RE` instead, unchanged from R2a9.
+_IMPERATIVE_STOP_RE = re.compile(r"\A(?:STOP|HALT|ABORT)\b")
 # The closing words (RESTART spec §0) — one list beside the two above, and the only
 # thing that lets an acknowledgement absorb an order word. An ack record reports on
 # what already happened, so a word from this list within `_CLOSING_WINDOW` words of
@@ -326,8 +351,8 @@ def _order_word_is_closed(text: str, end: int,
 def _gives_order(text: str, word_re: re.Pattern = _ORDER_WORD_RE) -> bool:
     """True when the record body `text` gives an order rather than reporting one — over
     every `ORDER_WORDS` word by default, or over one class of them when a narrower
-    `word_re` is passed (`_PAUSE_ORDER_RE`, `pause_state`'s stop filter: the same
-    exemption read over just the words that stop the run).
+    `word_re` is passed (`_PAUSE_WORD_RE`, as read by `_gives_stop`: the same exemption
+    over just the word that stops the run).
 
     A record with no acknowledgement marker at its head gives one wherever an
     `ORDER_WORDS` word appears — the wide reading of R2a4: an order that wears its
@@ -347,6 +372,39 @@ def _gives_order(text: str, word_re: re.Pattern = _ORDER_WORD_RE) -> bool:
         return any(not _order_word_is_closed(text, match.end())
                    for match in word_re.finditer(text))
     return word_re.search(text) is not None
+
+
+def _gives_stop(text: str) -> bool:
+    """True when the record body `text` *stops the run* — `pause_state`'s stop filter,
+    and the shape R2a10 (S1, safety) narrowed out of R2a9's one wide class read.
+
+    Two shapes, each as wide as its own word deserves, and no wider:
+
+    (a) **PAUSE** keeps the R2a4–R2a9 rules unchanged: `_gives_order` over `_PAUSE_WORD_RE`
+        — an unmarked record orders a stop wherever the word stands; an acknowledgement
+        absorbs it only when an unnegated closing word follows it and no negation stands
+        anywhere in the record.
+    (b) **STOP / HALT / ABORT** count only as the bare imperative the operator actually
+        writes: the word is the *first word of the payload* (after the speaker prefix, with
+        nothing in front of it — no quote, backtick or parenthesis), the record carries no
+        acknowledgement marker at its head, and it is not a `lesson:` record. So
+        `operator: STOP all lanes` and `from L0 (operator) HALT the pack build` stop the
+        fleet, while `→ done: STOP all lanes obeyed`, `fleet note: runs were stopped at
+        14:00`, `operator: STOP-in-backticks` and a `no STOP needed` mid-note do not.
+
+    That asymmetry between (a) and (b) is deliberate. R2a9 read the whole stop vocabulary
+    with PAUSE's wide rules and a capacity note (`from L1-main: MEM HOLD LIFTED …`)
+    halted three live inboxes; a false stop that stops the fleet costs a wasted operator
+    round-trip on every lane, while a stop written in the imperative shape is what the
+    operator's own releases (`_resumes`) have always required. HOLD and FREEZE are in
+    neither class — they are capacity notes with their own lift wording.
+    """
+    if _gives_order(text, _PAUSE_WORD_RE):
+        return True
+    marker, head = _ack_head(text)
+    if marker is not None:
+        return False
+    return _IMPERATIVE_STOP_RE.match(text[head:]) is not None
 
 
 def _is_punctuation_or_time(text: str) -> bool:
@@ -502,11 +560,13 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     R-heartbeat-03: "a hard stop, checked every heartbeat and before every
     launch").
 
-    A stop is active when the newest record that *gives* a pause-class order (one of
-    `PAUSE_ORDER_WORDS`: PAUSE, STOP, HOLD, HALT, ABORT — R2a9, closing the probe R2a8
-    recorded: `operator: STOP all lanes` was an order `_gives_order` reported and this
-    filter ignored, because it keyed on the PAUSE word alone, and a lost stop is the one
-    unacceptable outcome) is newer than the newest record that *orders* the release, or
+    A stop is active when the newest record that *gives* a stop (see `_gives_stop`: PAUSE
+    read wide, or a bare imperative STOP / HALT / ABORT at the head of the payload —
+    R2a9 added the stop words to the class after `operator: STOP all lanes` reported
+    `active: False`, and R2a10 narrowed them again when the real corpus turned
+    `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) …` into a hard stop that made
+    heartbeat exit 3 and `run`/`spawn` refuse on three live inboxes; HOLD and FREEZE are
+    capacity notes, not orders) is newer than the newest record that *orders* the release, or
     there is no release at all. Both halves read the same head, payload and closing-word
     helpers — never a second copy of the rule — with the release gated strictly, as
     `_resumes` defines it (R2a7, the Sonnet review of R2a6: a bare RESUME match let
@@ -562,7 +622,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
             newest_resume = when
         if since is not None and when < since:
             continue
-        if (_gives_order(text, _PAUSE_ORDER_RE)
+        if (_gives_stop(text)
                 and (newest_pause is None or when > newest_pause[0])):
             newest_pause = (when, text)
     if newest_pause is None:
