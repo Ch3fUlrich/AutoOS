@@ -5738,42 +5738,86 @@ Test-Case 'Install-AutoOSAgentSkills no longer links global skills from the agen
     Pass
 }
 
-Test-Case 'retired agent-skills links: kept by default, retargeted with a backup record only when switched on' {
+Test-Case 'retired agent-skills links: only the known clone path, live or dangling, swapped safely, recorded after the move' {
+    # Muse review of 28a835b: a dangling link never converged, a suffix match
+    # took a user's own checkout, and the old link was gone when the new one
+    # could not be made. Retired roots are passed explicitly: never the real ones.
     Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
     $repo = Join-Path $scratch 'repo'
     $src = Join-Path $repo '.agents\skills'
-    $clone = Join-Path $scratch 'Code\agent-skills\skills'
-    $dest = Join-Path $scratch 'dest'
+    $clone = Join-Path $scratch 'Documents\Code\agent-skills\skills'
+    $mine = Join-Path $scratch 'my\agent-skills\skills'
+    $dests = @{}
+    foreach ($d in @('main', 'foreign', 'optout', 'dry', 'fail')) { $dests[$d] = Join-Path $scratch "dest-$d" }
+    $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
+    $records = { param($d) @(Get-ChildItem -LiteralPath $scratch -Filter "$(Split-Path $d -Leaf).autoos-backup-*") }
+    $savedEnv = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    $mod = Get-Module AutoOS.Install
+    $realLink = & $mod { ${function:script:New-AutoOSSkillLink} }
     try {
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
         New-TestSkillRepo -Repo $repo
         foreach ($n in @('alpha', 'beta', 'other')) { $null = New-Item -ItemType Directory -Path (Join-Path $clone $n) -Force }
-        $null = New-Item -ItemType Directory -Path $dest -Force
-        # alpha: the exact shape the old installer made -> recognised.
-        # beta: a live link into the clone under ANOTHER name -> the user's.
-        $null = New-Item -ItemType Junction -Path (Join-Path $dest 'alpha') -Target (Join-Path $clone 'alpha')
-        $null = New-Item -ItemType Junction -Path (Join-Path $dest 'beta') -Target (Join-Path $clone 'other')
-        $cloneAlpha = [IO.Path]::GetFullPath((Join-Path $clone 'alpha')).TrimEnd('\', '/')
-        $cloneOther = [IO.Path]::GetFullPath((Join-Path $clone 'other')).TrimEnd('\', '/')
-        $wantAlpha = [IO.Path]::GetFullPath((Join-Path $src 'alpha')).TrimEnd('\', '/')
+        $null = New-Item -ItemType Directory -Path (Join-Path $mine 'alpha') -Force
+        foreach ($d in $dests.Values) { $null = New-Item -ItemType Directory -Path $d -Force }
+        # main: alpha live into the clone; beta dangling into the clone (the clone's
+        # beta is deleted after the link is made - junctions need a target to exist).
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'alpha') -Target (Join-Path $clone 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'beta') -Target (Join-Path $clone 'beta')
+        Remove-Item -LiteralPath (Join-Path $clone 'beta') -Recurse -Force
+        # foreign: a user's own checkout that merely ends in agent-skills\skills\alpha,
+        # and a clone link under ANOTHER skill's name.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'alpha') -Target (Join-Path $mine 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'beta') -Target (Join-Path $clone 'other')
+        foreach ($d in @('optout', 'dry', 'fail')) {
+            $null = New-Item -ItemType Junction -Path (Join-Path $dests[$d] 'alpha') -Target (Join-Path $clone 'alpha')
+        }
 
-        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest
-        if ((Get-TestLinkTarget -Path (Join-Path $dest 'alpha')) -ne $cloneAlpha) { throw 'default run moved a live agent-skills link' }
-        if (@(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*').Count) { throw 'default run wrote a backup record' }
-
-        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest -RetargetRetiredClone
-        if ((Get-TestLinkTarget -Path (Join-Path $dest 'alpha')) -ne $wantAlpha) { throw 'switched run did not retarget the recognised link' }
-        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $cloneOther) { throw 'switched run moved a link it does not recognise' }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        foreach ($n in @('alpha', 'beta')) {
+            $got = Get-TestLinkTarget -Path (Join-Path $dests.main $n)
+            if ($got -ne (& $full (Join-Path $src $n))) { throw "main: $n points at [$got]" }
+        }
         if (-not (Test-Path -LiteralPath (Join-Path $clone 'alpha'))) { throw 'the old link target was deleted' }
-        $records = @(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*')
-        if ($records.Count -ne 1) { throw "expected one backup record, found $($records.Count)" }
-        $text = Get-Content -LiteralPath $records[0].FullName -Raw
-        if ($text -notmatch [regex]::Escape($cloneAlpha)) { throw 'backup record does not name the old target' }
+        $rec = @(& $records $dests.main)
+        if ($rec.Count -ne 1) { throw "main: expected one record, found $($rec.Count)" }
+        $text = Get-Content -LiteralPath $rec[0].FullName -Raw
+        foreach ($n in @('alpha', 'beta')) {
+            if ($text -notmatch [regex]::Escape((& $full (Join-Path $clone $n)))) { throw "main: the record does not name the old $n target" }
+        }
+        if (@(Get-ChildItem -LiteralPath $dests.main -Filter '*.autoos-new-*' -Force).Count) { throw 'main: a staged link was left behind' }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        if (@(& $records $dests.main).Count -ne 1) { throw 'main: a second run wrote another record' }
 
-        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest -RetargetRetiredClone
-        if (@(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*').Count -ne 1) { throw 'a second switched run wrote another backup record' }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.foreign -RetargetRetiredClone -RetiredSkillRoots $clone
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'alpha')) -ne (& $full (Join-Path $mine 'alpha'))) { throw "foreign: a user's own checkout was retargeted" }
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'beta')) -ne (& $full (Join-Path $clone 'other'))) { throw 'foreign: a link under another name was retargeted' }
+
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = '0'
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.optout -RetargetRetiredClone -RetiredSkillRoots $clone
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.optout 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'optout: =0 did not stop the switch' }
+
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.dry -RetargetRetiredClone -RetiredSkillRoots $clone
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.dry 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'dry: a dry run retargeted' }
+
+        # A new link that cannot be made leaves the old one and writes no record.
+        & $mod { Set-Item function:script:New-AutoOSSkillLink { param($Path, $Target) $false } }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.fail -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.fail 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'fail: the old link is gone' }
+        if (@(& $records $dests.fail).Count) { throw 'fail: a record was written for a move that did not happen' }
+        foreach ($d in @('foreign', 'optout', 'dry', 'fail')) {
+            if (@(& $records $dests[$d]).Count) { throw "${d}: a record was written" }
+        }
     } finally {
-        Remove-TestDirLinks -Directory $dest
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $savedEnv
+        foreach ($d in $dests.Values) { Remove-TestDirLinks -Directory $d }
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
     Pass
@@ -5789,7 +5833,8 @@ Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by 
         $repo = Join-Path $scratch 'repo'
         $homeDir = Join-Path $scratch 'home'
         $claude = Join-Path $homeDir '.claude\skills'
-        $old = Join-Path $scratch 'Code\agent-skills\skills\alpha'
+        # Where Get-AutoOSRetiredSkillRoots looks under the redirected home.
+        $old = Join-Path $homeDir 'Documents\Code\agent-skills\skills\alpha'
         try {
             New-TestSkillRepo -Repo $repo
             $null = New-Item -ItemType Directory -Path $old, $claude -Force

@@ -1484,41 +1484,49 @@ if it "agent-skill-links: a moved checkout leaves a dangling link and detection 
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "agent-skill-links: a live link into the retired agent-skills clone is retargeted with a backup record; =0 keeps it (Q-018)"; then
-    # Operator Q-018 (2026-09-28): setup moves links in the exact shape the
-    # retired installer made (<clone>/agent-skills/skills/<name>), records each
-    # old target first, never touches the target. =0 opts out.
+if it "agent-skill-links: links into the retired agent-skills clone are retargeted, live or dangling, with a record; =0, foreign and failed cases keep the link (Q-018)"; then
+    # Operator Q-018 (2026-09-28): setup moves links into the retired clone -
+    # exactly $SYS_HOME/Documents/{Code,code}/agent-skills/skills/<name>, the path
+    # autoos_skills_source used - live or dangling (the clone is what gets
+    # deleted). The record is written only after a successful move and names the
+    # literal readlink value; the target is never touched. A user's own checkout
+    # that merely ends in agent-skills/skills/<name> is theirs. =0 opts out.
     problems=""
-    for mode in default optout; do
+    for mode in live dangling optout foreign lnfail; do
         tmp="$(mktemp -d)"
+        home="$tmp/home"
         oh_skill_repo "$tmp/repo"
-        old="$tmp/Documents/code/agent-skills/skills/alpha"
-        mkdir -p "$old" "$tmp/home/.claude/skills"
-        ln -s "$old" "$tmp/home/.claude/skills/alpha"
-        env_val=""; [[ "$mode" == optout ]] && env_val=0
+        old="$home/Documents/code/agent-skills/skills/alpha"
+        [[ "$mode" == foreign ]] && old="$home/my/agent-skills/skills/alpha"
+        mkdir -p "$old" "$home/.claude/skills"
+        ln -s "$old" "$home/.claude/skills/alpha"
+        [[ "$mode" == dangling ]] && rm -rf "$home/Documents/code/agent-skills"
+        [[ "$mode" == lnfail ]] && chmod 555 "$home/.claude/skills"
         (
-            export AUTOOS_RETARGET_RETIRED_SKILL_LINKS="$env_val"
-            [[ -z "$env_val" ]] && unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
-            if [[ "$mode" == default ]]; then
-                asl_gate "$tmp/home" "$tmp/repo" && echo "[default: a retired-clone link was detected as installed]"
-            fi
-            asl_run "$tmp/home" "$tmp/repo" >/dev/null
-            got="$(readlink "$tmp/home/.claude/skills/alpha")"
-            records=("$tmp"/home/.claude/skills.autoos-backup-*)
-            if [[ "$mode" == default ]]; then
-                [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[default: alpha points at $got]"
-                [[ -f "${records[0]}" ]] && grep -qF "$old" "${records[0]}" || echo "[default: no backup record naming the old target]"
-                asl_gate "$tmp/home" "$tmp/repo" || echo "[default: not installed after the retarget]"
-                asl_run "$tmp/home" "$tmp/repo" >/dev/null
-                n=$(ls -d "$tmp"/home/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
-                [[ "$n" == 1 ]] || echo "[default: second run left $n backup records]"
-            else
-                [[ "$got" == "$old" ]] || echo "[optout: alpha was moved to $got]"
-                [[ ! -e "${records[0]}" ]] || echo "[optout: a backup record was written]"
-            fi
-            [[ -d "$old" ]] || echo "[$mode: the old target was deleted]"
+            unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+            [[ "$mode" == optout ]] && export AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0
+            asl_run "$home" "$tmp/repo" >/dev/null
+            got="$(readlink "$home/.claude/skills/alpha")"
+            records=("$home"/.claude/skills.autoos-backup-*)
+            case "$mode" in
+                live|dangling)
+                    [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[$mode: alpha points at $got]"
+                    [[ -f "${records[0]}" ]] && grep -qxF "$home/.claude/skills/alpha -> $old" "${records[0]}" \
+                        || echo "[$mode: no record naming the literal old target]"
+                    asl_gate "$home" "$tmp/repo" || echo "[$mode: not installed after the retarget]"
+                    asl_run "$home" "$tmp/repo" >/dev/null
+                    n=$(ls -d "$home"/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
+                    [[ "$n" == 1 ]] || echo "[$mode: second run left $n records]"
+                    ;;
+                *)
+                    [[ "$got" == "$old" ]] || echo "[$mode: alpha was moved to $got]"
+                    [[ ! -e "${records[0]}" ]] || echo "[$mode: a record was written]"
+                    ;;
+            esac
+            if [[ "$mode" != dangling && ! -d "$old" ]]; then echo "[$mode: the old target was deleted]"; fi
         ) >"$tmp/out" 2>&1
         problems+="$(grep '^\[' "$tmp/out")"
+        chmod 755 "$home/.claude/skills" 2>/dev/null
         rm -rf "$tmp"
     done
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi

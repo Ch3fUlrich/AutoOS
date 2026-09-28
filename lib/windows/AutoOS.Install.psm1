@@ -2488,6 +2488,19 @@ function New-AutoOSSkillLink {
     return $true
 }
 
+function Get-AutoOSRetiredSkillRoots {
+    <#
+      .SYNOPSIS
+        The retired agent-skills clone's skills directories: <Documents>\Code or
+        \code \agent-skills\skills, for the shell's Documents folder and $HOME's.
+        Where Install-AutoOSAgentSkills linked skills from before 2026-09-25.
+    #>
+    $docs = @([Environment]::GetFolderPath('MyDocuments'), (Join-Path $HOME 'Documents')) | Where-Object { $_ }
+    @(foreach ($d in $docs) {
+        foreach ($code in @('Code', 'code')) { Join-Path $d "$code\agent-skills\skills" }
+    }) | Select-Object -Unique
+}
+
 function Sync-AutoOSSkillDirs {
     <#
       .SYNOPSIS
@@ -2511,22 +2524,25 @@ function Sync-AutoOSSkillDirs {
         clone - it is left with one warning that names the fix. A link that cannot be
         made is a warning, never an ok line. Returns $false when a link failed.
 
-        -RetargetRetiredClone (default off; the operator decides) adds one more
-        recognised shape: a LIVE link whose target ends with
-        \agent-skills\skills\<this skill's name>, which is what the installer made
-        before .agents/skills became the only skills home (2026-09-25). Such a link
-        is moved to -Source; each old target is first appended to
-        <Destination>.autoos-backup-<stamp>, and the target itself is never touched.
-        The shape is a path suffix, not a known clone location: a link a user made
-        on purpose to their own ...\agent-skills\skills\<same name> checkout would
-        be moved too. That is why every move is recorded, and why setup can be
-        told not to (AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0).
+        -RetargetRetiredClone (setup passes it; operator Q-018) adds one more
+        recognised shape: a link, live or dangling, whose target is the retired
+        agent-skills clone's copy of this skill - <root>\<name> for a root in
+        -RetiredSkillRoots (default Get-AutoOSRetiredSkillRoots, the path the
+        installer used before .agents/skills became the only skills home,
+        2026-09-25). A known location, not a suffix: a user's own
+        ...\agent-skills\skills\<name> checkout elsewhere is theirs. The new link is
+        made under a temporary name first and swapped in; a failed swap puts the
+        old link back. Only a move that happened is appended to
+        <Destination>.autoos-backup-<stamp>; the target itself is never touched.
+        AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 turns it off here too.
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
-        [switch]$RetargetRetiredClone
+        [switch]$RetargetRetiredClone,
+        [string[]]$RetiredSkillRoots = (Get-AutoOSRetiredSkillRoots)
     )
+    if ($env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -eq '0') { $RetargetRetiredClone = $false }
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
         Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
         return $true
@@ -2576,8 +2592,9 @@ function Sync-AutoOSSkillDirs {
                 Write-AutoOSLine "linked $($skill.Name) into $Destination" -Level ok
             } else { $ok = $false }
         } elseif ($item.LinkType) {
-            # Target is a string[] in Windows PowerShell 5.1 and may be relative.
-            $raw = [string]@($item.Target)[0]
+            # Target is a string[] in Windows PowerShell 5.1 and may be relative;
+            # a junction can report its target with a \\?\ or \??\ prefix.
+            $raw = [string]@($item.Target)[0] -replace '^(\\\\\?\\|\\\?\?\\)', ''
             $have = ''
             if ($raw) {
                 if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
@@ -2600,27 +2617,42 @@ function Sync-AutoOSSkillDirs {
                 if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
                     Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
                 } else { $ok = $false }
-            } elseif ($RetargetRetiredClone -and $have -and $have.Replace('\', '/').EndsWith('/agent-skills/skills/' + $skill.Name, $comparison)) {
-                # Only when asked: a LIVE link into the retired agent-skills clone, in the
-                # exact shape the pre-2026-09-25 installer made for this skill. The
-                # old target is recorded before the link goes, and never touched.
+            } elseif ($RetargetRetiredClone -and $have -and @($RetiredSkillRoots | Where-Object { $_ } | Where-Object {
+                        [string]::Equals($have, [IO.Path]::GetFullPath((Join-Path $_ $skill.Name)).TrimEnd('\', '/'), $comparison)
+                    }).Count) {
+                # A link (live or dangling) into the retired agent-skills clone's
+                # copy of this skill. Make the new link under a temporary name
+                # first, so a link that cannot be made leaves the old one in place.
+                $staged = "$link.autoos-new-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+                if (-not (New-AutoOSSkillLink -Path $staged -Target $skill.FullName)) {
+                    Write-AutoOSLine "could not retarget ${link} - left as it was" -Level warn
+                    $ok = $false
+                    continue
+                }
+                try {
+                    $item.Delete()  # the link only - a reparse point is never recursed
+                    [IO.Directory]::Move($staged, $link)
+                } catch {
+                    $why = $_.Exception.Message
+                    if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
+                        $null = New-AutoOSSkillLink -Path $link -Target $raw
+                    }
+                    $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                    if ($left -and $left.LinkType) { $left.Delete() }
+                    Write-AutoOSLine "could not retarget ${link}: $why - old link put back" -Level warn
+                    $ok = $false
+                    continue
+                }
+                # Recorded only now, when the move has happened.
                 if (-not $record) {
                     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
                     $record = "$Destination.autoos-backup-$stamp"
                     $n = 0
                     while (Test-Path -LiteralPath $record) { $n++; $record = "$Destination.autoos-backup-$stamp-$n" }
                 }
-                try {
-                    Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8
-                    $item.Delete()
-                } catch {
-                    Write-AutoOSLine "could not retarget ${link}: $($_.Exception.Message) - left as it was" -Level warn
-                    $ok = $false
-                    continue
-                }
-                if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
-                    Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
-                } else { $ok = $false }
+                try { Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8 }
+                catch { Write-AutoOSLine "retargeted ${link} but could not write ${record}: was $raw" -Level warn }
+                Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
             } else {
                 Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
             }

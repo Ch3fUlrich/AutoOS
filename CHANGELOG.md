@@ -14,15 +14,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
   Linux, with the same rules: a user's own entry is never touched.
 - **Setup retargets links into the retired clone, on both platforms** (operator
-  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has *live* links
-  into `agent-skills/skills/<name>`, which the link rule treats as the user's.
-  Setup now moves only a link in exactly that shape for the same skill name,
-  records each old target in `<dir>.autoos-backup-<stamp>` first, and never
-  touches the target. Windows: `Sync-AutoOSAgentSkillTargets` passes
-  `-RetargetRetiredClone`. Linux/macOS: `install_agent_skill_links` passes
-  `retarget` to `link_skill_dirs`, and detection (`agent_skill_links_current`)
-  counts such a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0`
-  opts out. A second run is `skipped` and writes no second record.
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
 
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 
