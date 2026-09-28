@@ -595,6 +595,13 @@ if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/vibe_kanban_bridge.py: the board's missing dependency, capacity-pickup
+# and pause logic (FLEETSPEC §6.1, D-089/D-095). Pure/fake-driven; no live Vibe
+# Kanban is contacted.
+if it "vibe_kanban_bridge: dependencies, readiness, pause, poll loop (unit tests)"; then
+    out="$(python3 tests/test_vibe_kanban_bridge.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "resolver v2: measure() features and client_state (unit tests)"; then
     out="$(python3 tests/test_autoos_measure.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
@@ -631,6 +638,12 @@ fi
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy
+# fallback, locked merge-save) - temp dirs only, never the real state dir.
+if it "autoos_overlay: machine-wide overlay path, legacy fallback, locked merge-save (unit tests)"; then
+    out="$(python3 tests/test_autoos_overlay.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # catalog/ai-registry.json (routing v2 spec section 3): check rules.

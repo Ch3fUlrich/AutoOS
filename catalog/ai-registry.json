@@ -97,6 +97,46 @@
       "reasoning": false,
       "tool_calls": "proven"
     },
+    "claude-fable-5-1": {
+      "$comment": "AUTHORS (S1) 2026-09-28: an orchestrator model, registered so the review gate can resolve WHO wrote a lane record (tools/autoos_resolver.py author_family reads this table). An author, not a route: no provider names it, no leg serves it, and the resolver cannot send work here. Window is the 1M class policy.handoff_caps.claude-opus-1m states for 'fable'; the ladder, output_max and $0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)'), never read for a plan.",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-fable-5-1",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-haiku-4-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the orchestrator's cheap first-pass model, spelled as its own client reports it (policy.reviewers spells the same reviewer 'haiku'). Author-only: no provider names it and no leg serves it, so it can never be routed to - and an anthropic author keeps an anthropic reviewer out of the cross-family seat. Window/ladder/output are the 200k-class defaults of claude-opus-4-6; $0 marginal per docs/models.md 'Claude family'.",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-haiku-4-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "claude-opus-4-6": {
       "$comment": "cc (Claude Code subscription) overflow leg; same sourced $0 marginal cost and conservative ladder as claude-opus-4-6-thinking.",
       "context_advertised": 200000,
@@ -131,6 +171,46 @@
       ],
       "family": "anthropic",
       "id": "claude-opus-4-6-thinking",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-opus-5-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the L1/L2 orchestrator model this host actually runs, spelled as its own client reports it. Before it was registered, `ready` refused every record it wrote ('author claude-opus-5-5 is not a model, leg, route or reviewer the registry knows') and lanes borrowed claude-opus-4-6 - a false statement about who wrote the diff. Author-only: no provider names it, no leg serves it, nothing routes to it. Window is the 1M class policy.handoff_caps.claude-opus-1m states for 'opus'; ladder/output/$0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)').",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-opus-5-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-sonnet-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the final-checker model (R-orch-10, Q-003), and the author of the records it signs. Author-only - no provider names it, no leg serves it; `is_final_reviewer` matches its NAME and does not read this row. Window is the 1M class policy.handoff_caps.claude-sonnet-1m states for 'sonnet'; ladder/output/$0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)').",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-sonnet-5",
       "output_max": 32768,
       "price_in": 0.0,
       "price_out": 0.0,
@@ -2177,6 +2257,8 @@
       "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. BACK ON (DSBACK): operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK); GET /user/balance measured is_available=true. This reverses the 402 Insufficient Balance of 2026-09-27T16:4xZ, when the provider was switched off entirely (available: false) until topped up and the routes whose only served leg was deepseek/* (deepseek-v4.1-flash) failed closed like t1/spark. The per-leg operator flags are NOT reversed by this: opencode-zen/deepseek-v4.1-flash keeps its own route gate (measured 402/429 by tools/probe-toolcalls.py) and openrouter stays available: false.",
       "api_base": null,
       "available": true,
+      "monthly_cap_usd": 25,
+      "monthly_cap_source": "operator 2026-09-28T07:4xZ DeepSeek paid cap",
       "source": "operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK)",
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",

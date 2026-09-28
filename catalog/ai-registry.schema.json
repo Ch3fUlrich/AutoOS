@@ -138,6 +138,16 @@
           "$ref": "#/$defs/until_tag",
           "description": "Additive field, not in spec 3.1 (brief UNTIL 2026-09-26, skill rule R-gateway-12): time-bounded unavailability - the entry is unavailable until this UTC instant, then counts as available again on its own (the resolver's reason says 're-probe'; a multi-day quota reset never needs a hand edit to undo). Resolver-only: the renders and their CI drift gates never read it."
         },
+        "monthly_cap_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Hard monthly spend cap in USD for a paid provider (WS-DSCALL, 2026-09-28): a paid caller refuses at or above it, or when spend cannot be read. Distinct from autoos_usage.SPEND_WARN_USD, the warning line. Read through autoos_usage.monthly_cap_usd; tools/registry.py requires a positive number and a monthly_cap_source."
+        },
+        "monthly_cap_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who set monthly_cap_usd and when (e.g. an operator decision)."
+        },
         "trains_on_prompts": {
           "type": "boolean",
           "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices."

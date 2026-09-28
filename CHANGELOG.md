@@ -5,6 +5,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — memoised identical dry runs and split part 13 across two shards (WS-PART13)
+
+- **`tests/linux/13-end-to-end-dry-run-only.sh`**: identical `setup.sh` runs are
+  served from a memo (`memo_dry_run`, keyed on argv + every `AUTOOS_*` variable
+  + `PATH` + the e2e/real home mode), so the repeated `--profile ai-coding` and
+  `--check-catalog` runs happen once. Filesystem-asserting tests and the
+  determinism pair keep real runs; a guard test pins the keying.
+- **`tests/linux/41-end-to-end-retirement.sh`** (new): the four retirement tests
+  moved out of part 13 onto their own shard (`g 41` in `tests/ci-shards.txt`),
+  so the two halves run in parallel.
+
+### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
+
+- **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid
+  completion through the OmniRoute gateway, asked for the allowed registry leg
+  with `max_tokens` 4096; never local Ollama. Which served models count is
+  `catalog/ai-registry.json`'s call: exactly a leg of route `deepseek-v4.1-flash`
+  that `policy.leg_rules` allows, checked as served (via
+  `tools/registry.leg_denied`), so V4 Pro, a dated snapshot or another provider
+  never passes. Keys come from `configuration/api-keys.yml` in-process, never
+  argv, scrubbed from errors.
+- **Monthly DeepSeek cap, fail-closed:** `providers.deepseek.monthly_cap_usd: 25`
+  (with `monthly_cap_source`; schema entry; `tools/registry.py` requires a positive
+  number and a source) is read through the one reader
+  `autoos_usage.monthly_cap_usd`. `deepseek_call.py` is orchestrator-only: before
+  each call it reads this month's spend from the gateway's call logs and refuses
+  (exit 3) at or above the cap or when the spend cannot be read.
+  `SPEND_WARN_USD` (20) stays the warning line.
+- **OpenRouter dropped** from the helper: `providers.openrouter` has no credit
+  (BYOK answered 401), so there is nothing to fall back to.
+- **`deepseek_review.sh`, `deepseek_chunked_review.sh`** call it instead of
+  opencode in WSL, whose `--file` silently reviewed only the first ~1,000 lines
+  and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
+  Re-created from the operator's local work (2026-09-25) and reworked for the
+  DSBACK policy (2026-09-28).
+- **WS-DSCALL-LOW:** `main()` refuses `--max-tokens` below the 4096 floor (exit 2, before any key or network access); a truncated call-log walk is tested to refuse the cap.
+
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
+- **RESTART spec v3.6** (RSTAMEND5, 2026-09-28): **`docs/plans/2026-09-28-restart-spec.md`** resolves the Muse FIX-FIRST on v3.5 with one correction to §5's *mechanism*, its numbers untouched. v3.5 claimed hand-off caps are keyed by **(family, role)** and that `cap_for` reads a `role` field from §4's `run.json`; lane CAPD088 builds no such thing and none is planned. §5 now states what CAPD088 does: operator **D-088** (orchestration sessions 500k, workers min(40 % of window, 400k), supersedes D-085/CAPL2's interim 250k) is implemented as **model-family rows used as the role proxy** — opus, fable and sonnet **500k** (those families only run long sessions as orchestrators), spark and gemini **400k**, and the 200k class **80k** (the worker agents) — because `tools/autoos_context.py` `cap_for(model)` takes a model id and **no role argument**. `catalog/ai-registry.json` `policy.handoff_caps` is the one home for the numbers, and the comment at `DEFAULT_CAPS` (the unreadable-registry fallback) mirrors the same rows in the same order; §4's `role` field selects a §8 MCP document and nothing else, so it is no longer an input to any cap. What follows from that: the CAPD088 delivery row says family rows rather than a (family, role) key, the lane order drops CAPD088's dependency on R4, the Order and invariant bullets speak of families (tests pin each *family's* id resolving to its own number, not the wildcard; `validate`'s `cap_tokens == window × cap_fraction` invariant is stated per family row — 400000/0.4 on a 1M-window worker family, 80000/0.4 on a 200k-class family, 500000/0.5 on a 1M-window orchestration family), and the v2 D-044 row and the v3.4 CAPD088 row stop calling the cap "per role". The only `role` left in the spec is §4/§8's: the `run.json` field that selects `configuration/mcp/<role>.json`. The three §5 obligations that survive are the row **order** (`cap_for` is first-match-wins and strips a trailing `[1m]`, so every new row goes before the `*` row), the **invariant**, and **revisit** — §8's baseline protocol (the non-sidechain first assistant turn's `input + cache_creation + cache_read` on a fixed `Reply OK` probe, pinned model and role document, 3 runs, the median, reported per role to L0) is what measures what a session pays to start, D-085's ~15 min handoff and **55.5k** fresh sonnet start stand as *why* a cap is a number at all, and the 55.5k is §8's pre-R9 anchor, not a cap. v3.5's resolutions stand: a `ready <branch> <sha>` record is an open order until §7's one closing rule closes it, so an unanswered ready stays live whatever its position and counts in `kept N records: no covering done`; §7 is that rule's one home, §3's open-readies scan points at it; every inbox writer is locked, `append_inbox_line` holds the lock for every Python caller (`autoos-agent.py ready` already writes through it), a bare `echo … >> inbox` is forbidden and R8's grep reaches shell recipes only; rotate acquires exclusive with a 30 s timeout and exits 2 having moved nothing, an appender waits 10 s then appends anyway and reports `inbox: lock timeout`.
+### Added — the orchestrator's own models are known review authors (AUTHORS (S1), 2026-09-28)
+
+- **`catalog/ai-registry.json:models`**: `claude-opus-5-5`, `claude-sonnet-5`, `claude-fable-5-1`,
+  `claude-haiku-4-5`, each `family: anthropic`. Measured: `autoos-agent.py ready` and
+  `review-status` refused a lane record its own orchestrator wrote — *"author claude-opus-5-5 is
+  not a model, leg, route or reviewer the registry knows, and not a family it declares"* — so
+  records borrowed `claude-opus-4-6`, which is a false statement about who wrote the diff and
+  makes the gate's detail line useless in an audit. `author_family`
+  (`tools/autoos_resolver.py`) reads the `models` table first, so the smallest fix is data, not
+  code: an author row carries no provider and no route names it, so none of the four is a
+  routable leg (`test_an_orchestrator_author_is_not_a_leg_of_any_route` pins that, and
+  `policy.leg_rules` `deny-claude-paid-api` still keeps Claude off a paid API).
+- **`tools/registry.py` rule 13**: `validate` checks `policy.handoff_caps` — every row's
+  `cap_tokens == round(window * cap_fraction)`, and a `match: ["*"]` fallback row exists.
+  `tools/autoos_context.py` reads `cap_tokens` and never recomputes it, so a row whose pair
+  disagreed stated two caps at once and the lane handed off at the stale one; with no `*` row a
+  model no other row names silently got that tool's hand-maintained `DEFAULT_CAPS` instead of
+  the policy. Rule 13 red first in `HandoffCapsPolicyTests`.
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
@@ -259,6 +337,31 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
   harnesses.
 
+### Fixed — one machine-wide tool_calls overlay, and a loud reason when it is missing (OVERLAYHOME, 2026-09-28)
+
+The overlay lived at `<checkout>/logs/routing/measured.json`. At 12:5xZ the main
+checkout had none, so `route` skipped every agentic leg as `tool_calls: ...
+unproven` and returned `input_required` — it looked like a fleet-wide outage.
+
+- **`tools/autoos_overlay.py`** (new): the one path — `$AUTOOS_MEASURED_OVERLAY`,
+  else `${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+  `%LOCALAPPDATA%\autoos\measured.json`) — plus load with a read-only legacy
+  fallback (one stderr note; the old file is never deleted), an atomic mode-600
+  save, `status` and the missing-overlay reason.
+- **Readers**: `tools/autoos-agent.py` (`route`, `run`/`spawn` routing,
+  `propose_reprobe`) and `tools/autoos_agent_mcp.py` read through it. With no
+  overlay anywhere, an agentic card that fails on tool_calls says `no tool_calls
+  overlay found at <path> (run tools/probe-toolcalls.py or set
+  AUTOOS_MEASURED_OVERLAY)`. `heartbeat --json` gains `overlay: {path, present,
+  age_hours}`.
+- **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
+  `probe-effort`) default to the new path; the first run reads the legacy file so
+  its verdicts carry over (only when `--overlay` is not given). The
+  read-modify-write holds a lock on `<overlay>.lock` and merges only this run's
+  changes into the file as it is now, so probes running at once lose nothing.
+- `$AUTOOS_MEASURED_OVERLAY` is expanded (`~`, `$VAR`) and made absolute. The
+  loud reason is gated on the resolver's structured `unproven_toolcalls` flag,
+  not on reason text.
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
