@@ -284,6 +284,50 @@ def test_the_cli_exits_3_on_a_cap_refusal(gw, tmp_path, capsys):
     assert "refused" in capsys.readouterr().err
 
 
+# ── --max-tokens floor ─────────────────────────────────────────────────────────
+
+def test_max_tokens_below_the_floor_refuses_before_any_gateway_call(gw, tmp_path, capsys):
+    # Reasoning rungs answer an empty 502 below 4096, so main() refuses (exit 2)
+    # before any key or network access: the fake gateway sees nothing at all.
+    omni = gw()
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x\n", encoding="utf-8")
+    assert dc.main([str(prompt), "--max-tokens", "100"]) == 2
+    err = capsys.readouterr().err
+    assert "4096" in err
+    assert len(err.strip().splitlines()) == 1
+    assert omni.calls == [] and omni.gets == []
+
+
+@pytest.mark.parametrize("tokens", ["4096", "8192"])
+def test_max_tokens_at_or_above_the_floor_is_accepted(gw, tmp_path, tokens):
+    omni = gw()
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x\n", encoding="utf-8")
+    assert dc.main([str(prompt), "--max-tokens", tokens]) == 0
+    assert len(omni.calls) == 1
+    assert omni.calls[0]["body"]["max_tokens"] == int(tokens)
+
+
+def test_a_truncated_call_log_walk_makes_check_cap_refuse(gw, monkeypatch):
+    # A walk that stopped before the month's first row is a floor, not a total:
+    # check_cap refuses, so no model call is ever made.
+    import autoos_usage
+    omni = gw()
+
+    def truncated(fetch, gateway, key, cutoff):
+        return ([], autoos_usage.MAX_PAGES, True)
+
+    monkeypatch.setattr(autoos_usage, "fetch_window", truncated)
+    with pytest.raises(dc.CapError) as e:
+        dc.check_cap(POLICY)
+    assert "truncated" in str(e.value)
+    with pytest.raises(dc.CapError) as e2:
+        dc.complete("hello", timeout=10)
+    assert "truncated" in str(e2.value)
+    assert omni.calls == []
+
+
 # ── OpenRouter is gone ─────────────────────────────────────────────────────────
 
 def test_no_openrouter_url_is_ever_called(gw, monkeypatch):
