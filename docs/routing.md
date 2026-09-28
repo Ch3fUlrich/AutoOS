@@ -123,9 +123,10 @@ spec §0's other one-list rules, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUM
 `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
 is held` is an order wearing its own first clause as a speaker, not an acknowledgement
 (R2a4). The words that *stop the run* are the pause-class subset,
-`autoos_heartbeat.PAUSE_ORDER_WORDS` (`PAUSE`, `STOP`, `HOLD`, `HALT`, `ABORT` — the same
-exemption read over a narrower list, so `operator: STOP all lanes` holds the lane the way
-the PAUSE it means does; `FREEZE` and `RESUME` are not in it). What an acknowledgement may
+`autoos_heartbeat.PAUSE_ORDER_WORDS` (`PAUSE`, `STOP`, `HALT`, `ABORT`): PAUSE is read anywhere in an
+unmarked record, while STOP, HALT and ABORT stop only as the bare word at the head of the payload
+(`operator: STOP all lanes`), and `HOLD` and `FREEZE` are outside the class — capacity words with their
+own lift wording (`MEM HOLD LIFTED`, `freeze cleared`), never a stop (R2a10). What an acknowledgement may
 then exempt — `autoos_heartbeat.CLOSING_WORDS` and its 3-word window, the
 `autoos_heartbeat.NEGATION_WORDS` veto over the record's whole payload, the `RELEASE_ACK_WORDS`
 half of the `REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition, and the two record

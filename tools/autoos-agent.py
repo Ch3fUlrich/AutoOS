@@ -5925,7 +5925,9 @@ def _parser_heartbeat(sub):
     heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
                                  "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
     heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest "
-                             "stop (PAUSE/STOP/HOLD/HALT/ABORT) or release (RESUME)")
+                             "stop (PAUSE anywhere, or a bare leading STOP/HALT/ABORT; "
+                             "HOLD/FREEZE are capacity notes, not stops) "
+                             "or release (RESUME)")
     heartbeat_p.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     heartbeat_p.add_argument("--repo", dest="repos", action="append",
                              help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
