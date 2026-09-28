@@ -49,6 +49,19 @@ R-coord-08). Measured need (2026-09-05): a session polled a silent three-hour co
 run every 25 minutes; the controller had diagnosed the cause in five, and could only reach the
 session by appending to the log file it happened to be polling and killing the process.
 
+**OUT of a session is the same files, plus one batched message.** `inbox/L0.md` is the durable
+record and every question goes there; when a live L0 session exists it also gets one batched
+message — at most one per 10 min unless something is blocked (R-router-01). One question per line,
+always with a researched default, so L0 can forward it to the operator without more work:
+
+```
+Q: <lane> | <question> | options: (a)…(b)… | default: <x> because <why> | blocks: <what> | reversible: yes/no
+```
+
+A refused `inbox/L0.md` write (the `[Modify Shared Resources]` prompt, seen for L1-backlog) sends
+the same line to the parent's inbox instead — never a dialog, never a silent wait (source:
+inbox/L1-routing.md 2026-09-28T05:47:28Z, work/L1-routing/FOLD4.common.md "Questions").
+
 **The orchestrator may itself be an agent session.** A controller session that launched the
 runner in the background watches `<stateDir>/state.json` and `runner.log`, reads each DONE note
 as it lands, and adjudicates — it never edits the worktrees. What it cannot do is *answer* a
