@@ -8221,6 +8221,450 @@ Test-Case 'apply registers meta_api from the shared meta key and stays idempoten
     }
 }
 
+# ─── MUSEREG: a registry provider the CLI has no built-in for ───────────────
+# Live failure 2026-09-28 (routing-00 04:5xZ): apply printed
+#   ! meta-api registration failed - register it in the dashboard
+# and threw the CLI's stderr away, which is what said the real reason -
+# `providers add meta-api` has nothing to add, because "meta-api" is not in
+# `omniroute providers available` (measured against omniroute 3.8.51: openai,
+# meta-llama, free-ai, opencode-zen and 348 more). The gateway's own model for
+# such a provider is an OpenAI-compatible *provider node* with an API-key
+# connection bound to it - createProviderNodeSchema, omniroute
+# src/shared/validation/schemas/provider.ts:307-385, needs name, prefix,
+# baseUrl and (for type openai-compatible) an apiType; the CLI's own POST sends
+# no body at all (bin/cli/api-commands/provider-nodes.mjs:20-28), so the node is
+# a REST call with the manage key in a header, and only the connection goes back
+# through the CLI, with the vendor key in its environment. Twin of the bash
+# suite's provider-node tests; the last case pins the same contract in text on
+# every platform.
+function New-AutoOSNodeSandbox {
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_node_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path (Join-Path $d 'bin')
+    # adds.tsv / nodes.tsv are the stand-in stores: a row per connection the CLI
+    # was told to add, per node the gateway was told to create. argv.log records
+    # every argument the CLI and curl saw, so a leak is visible.
+    foreach ($f in @('calls.log', 'argv.log', 'adds.tsv', 'providers.txt', 'auth.log')) {
+        [IO.File]::WriteAllText((Join-Path $d $f), '')
+    }
+    # The ids `omniroute providers available` answers with (meta-api is
+    # deliberately absent - that absence is the whole bug).
+    [IO.File]::WriteAllLines((Join-Path $d 'builtins.txt'), @(
+        'openai', 'meta-llama', 'free-ai', 'opencode-zen', 'cheaperinference',
+        'groq', 'openrouter', 'sambanova', 'cerebras'))
+    [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "# each test writes its own`n")
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        $sh = @'
+#!/bin/sh
+d="$(dirname "$0")/.."
+printf '%s\n' "$*" >>"$d/argv.log"
+if [ "$1 $2" = "providers available" ]; then
+    # The real CLI prints a .env warning banner before the document.
+    printf '%s\n' 'WARN no .env found - continuing with the environment'
+    printf '%s' '{"count":0,"categories":{},"providers":['
+    first=1
+    while IFS= read -r id; do
+        [ -z "$id" ] && continue
+        [ $first -eq 1 ] || printf ','
+        first=0
+        printf '{"id":"%s","name":"%s","category":"custom"}' "$id" "$id"
+    done <"$d/builtins.txt"
+    printf ']}\n'
+    exit 0
+fi
+if [ "$1 $2" = "providers list" ]; then
+    cat "$d/providers.txt"
+    exit 0
+fi
+if [ "$1 $2" = "providers add" ]; then
+    shift 2
+    id="$1"; name=""; cred=""
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --credential-env) cred="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [ -z "$name" ] && name="$id"
+    key=''
+    [ -n "$cred" ] && eval "key=\${$cred:-}"
+    if [ -f "$d/fail_add" ]; then
+        # Both secrets on one line: what a CLI that quotes a credential prints,
+        # and what apply must never pass through to the log.
+        printf 'Error: no active credentials for %s (key %s, manage %s)\n' \
+            "$id" "$key" "${OMNIROUTE_API_KEY:-none}" >&2
+        exit 1
+    fi
+    printf '%s\t%s\t%s\n' "$id" "$name" "$cred" >>"$d/adds.tsv"
+    printf "Added provider connection '%s'.\n" "$name"
+    exit 0
+fi
+printf '%s\n' "$*" >>"$d/calls.log"
+exit 0
+'@
+        $fake = Join-Path $d 'bin/omniroute'
+        [IO.File]::WriteAllText($fake, ($sh -replace "`r", ''))
+        & chmod +x $fake
+    }
+    $d
+}
+
+# A POST-aware stand-in gateway (the static-file one answers 404 to everything
+# but GET). Rows live as TSV so the CLI stand-in and this server can share them
+# without a JSON library; the JSON is hand-built because PowerShell 5.1's
+# ConvertTo-Json turns a one-element array into a bare object.
+function Start-AutoOSNodeGateway {
+    param([Parameter(Mandatory)][string]$Directory)
+    $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_nodeport_' + [Guid]::NewGuid().ToString('N'))
+    $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
+        param($dir, $portFile)
+        function Q { param([string]$s) '"' + $s.Replace('\', '\\').Replace('"', '\"') + '"' }
+        function ReadRows { param([string]$file)
+            if (-not (Test-Path -LiteralPath $file)) { return @() }
+            @(Get-Content -LiteralPath $file | Where-Object { $_ })
+        }
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
+        while ($true) {
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                # The request is read as BYTES. A StreamReader buffers past the
+                # headers, so the body of a POST is swallowed by its buffer and a
+                # raw stream read afterwards waits for bytes that already came -
+                # the POST hung until the client timed out (found on this
+                # stand-in's first run).
+                $data = [byte[]]::new(0)
+                $buf = [byte[]]::new(1024)
+                $sep = -1
+                while ($sep -lt 0) {
+                    $n = $stream.Read($buf, 0, $buf.Length)
+                    if ($n -le 0) { break }
+                    $data = $data + [byte[]]($buf[0..($n - 1)])
+                    $sep = [Text.Encoding]::ASCII.GetString($data).IndexOf("`r`n`r`n")
+                }
+                if ($sep -lt 0) { continue }
+                $head = [Text.Encoding]::ASCII.GetString($data, 0, $sep)
+                $len = 0; $auth = ''
+                $lines = @($head -split "`r?`n")
+                foreach ($h in $lines) {
+                    if ($h -match '(?i)^content-length:\s*(\d+)') { $len = [int]$Matches[1] }
+                    if ($h -match '(?i)^authorization:') { $auth = $h }
+                }
+                $parts = @($lines[0] -split '\s+')
+                if ($parts.Count -lt 2) { continue }
+                $method = $parts[0]
+                $path = ($parts[1] -split '\?')[0]
+                $body = ''
+                if ($len -gt 0) {
+                    $start = $sep + 4
+                    while (($data.Length - $start) -lt $len) {
+                        $n = $stream.Read($buf, 0, $buf.Length)
+                        if ($n -le 0) { break }
+                        $data = $data + [byte[]]($buf[0..($n - 1)])
+                    }
+                    $take = [Math]::Min($len, ($data.Length - $start))
+                    if ($take -gt 0) { $body = [Text.Encoding]::UTF8.GetString($data, $start, $take) }
+                }
+                # The manage key must reach the gateway as a header and nowhere
+                # else, so the test can assert it appeared here.
+                if ($auth) { [IO.File]::AppendAllText((Join-Path $dir 'auth.log'), ($auth + "`n")) }
+                $status = '200 OK'; $text = '{}'
+                if ($path -eq '/api/health') {
+                    $text = '{"status":"ok"}'
+                } elseif ($path -eq '/api/provider-nodes' -and $method -eq 'GET') {
+                    $rows = ReadRows (Join-Path $dir 'nodes.tsv')
+                    $items = @(foreach ($r in $rows) {
+                        $c = $r -split "`t"
+                        '{"id":' + (Q $c[0]) + ',"type":' + (Q $c[1]) + ',"apiType":' + (Q $c[2]) +
+                            ',"name":' + (Q $c[3]) + ',"prefix":' + (Q $c[4]) + ',"baseUrl":' + (Q $c[5]) + '}'
+                    })
+                    $text = '{"nodes":[' + ($items -join ',') + '],"total":' + $items.Count +
+                        ',"ccCompatibleProviderEnabled":false}'
+                } elseif ($path -eq '/api/provider-nodes' -and $method -eq 'POST') {
+                    $node = $null
+                    try { $node = $body | ConvertFrom-Json } catch { $node = $null }
+                    [IO.File]::WriteAllText((Join-Path $dir 'last_body.json'), $body)
+                    $built = ReadRows (Join-Path $dir 'builtins.txt')
+                    $rows = ReadRows (Join-Path $dir 'nodes.tsv')
+                    if (-not $node -or -not $node.name -or -not $node.prefix -or -not $node.baseUrl) {
+                        $status = '400 Bad Request'
+                        $text = '{"error":{"message":"Missing name, prefix or baseUrl"}}'
+                    } elseif ($built -contains [string]$node.prefix) {
+                        # reservedProviderPrefixes.ts: the gateway refuses a node
+                        # whose prefix collides with a built-in or its alias.
+                        $status = '400 Bad Request'
+                        $text = '{"error":{"message":' + (Q ([string]$node.prefix + ' is a reserved provider prefix')) + '}}'
+                    } elseif ((-not $node.type -or $node.type -eq 'openai-compatible') -and -not $node.apiType) {
+                        $status = '400 Bad Request'
+                        $text = '{"error":{"message":"Invalid OpenAI compatible API type"}}'
+                    } else {
+                        $id = 'openai-compatible-chat-{0:d8}' -f ($rows.Count + 1)
+                        $type = if ($node.type) { [string]$node.type } else { 'openai-compatible' }
+                        [IO.File]::AppendAllText((Join-Path $dir 'nodes.tsv'),
+                            ($id + "`t" + $type + "`t" + [string]$node.apiType + "`t" +
+                             [string]$node.name + "`t" + [string]$node.prefix + "`t" +
+                             [string]$node.baseUrl + "`n"))
+                        $status = '201 Created'
+                        $text = '{"id":' + (Q $id) + ',"type":' + (Q $type) + ',"apiType":' +
+                            (Q ([string]$node.apiType)) + ',"name":' + (Q ([string]$node.name)) +
+                            ',"prefix":' + (Q ([string]$node.prefix)) + ',"baseUrl":' +
+                            (Q ([string]$node.baseUrl)) + '}'
+                    }
+                } elseif ($path -eq '/api/providers' -and $method -eq 'GET') {
+                    # The live shape carries each connection's stored key, which
+                    # is why apply must search this body and never print it.
+                    $adds = ReadRows (Join-Path $dir 'adds.tsv')
+                    $items = @(foreach ($r in $adds) {
+                        $c = $r -split "`t"
+                        '{"id":' + (Q ('c0' + $c[0])) + ',"provider":' + (Q $c[0]) +
+                            ',"name":' + (Q $c[1]) + ',"apiKey":"stored-key-NEVER-PRINT",' +
+                            '"isActive":true}'
+                    })
+                    $text = '{"connections":[' + ($items -join ',') + '],"total":' + $items.Count + '}'
+                } else {
+                    $status = '404 Not Found'
+                }
+                $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+                $head = [Text.Encoding]::ASCII.GetBytes(
+                    "HTTP/1.0 $status`r`nContent-Type: application/json`r`nContent-Length: " +
+                    "$($bytes.Length)`r`nConnection: close`r`n`r`n")
+                $stream.Write($head, 0, $head.Length)
+                if ($bytes.Length) { $stream.Write($bytes, 0, $bytes.Length) }
+                $stream.Flush()
+            } catch {
+                # A client that hangs up mid-request is not the server's problem.
+                Write-Verbose "node gateway: $($_.Exception.Message)"
+            } finally {
+                $client.Close()
+            }
+        }
+    }
+    $port = $null
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        if ((Test-Path -LiteralPath $portFile) -and (Get-Content -LiteralPath $portFile -Raw).Trim()) {
+            $port = [int](Get-Content -LiteralPath $portFile -Raw).Trim(); break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $srv = @{ Job = $job; Port = $port }
+    $ok = $false
+    try {
+        $ok = (Invoke-WebRequest -Uri "http://127.0.0.1:$port/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+    } catch { $ok = $false }
+    if (-not $ok) {
+        Stop-AutoOSTestHttpServer $srv
+        throw 'the provider-node stand-in gateway does not answer /api/health'
+    }
+    $srv
+}
+
+# apply.ps1 in a child of the suite's own shell, with the stand-in CLI first on
+# PATH, the manage key in the environment (never argv) and the fake provider key
+# it must never leak.
+function Invoke-AutoOSNodeApply {
+    param([string]$Dir, [string]$Gateway, [switch]$DryRun)
+    $ErrorActionPreference = 'Continue'
+    $saved = @{}
+    foreach ($k in @('PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE', 'OMNIROUTE_API_KEY')) {
+        $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+    }
+    try {
+        [Environment]::SetEnvironmentVariable('PATH', (Join-Path $Dir 'bin') + [IO.Path]::PathSeparator + $saved['PATH'])
+        [Environment]::SetEnvironmentVariable('AUTOOS_OMNIROUTE_URL', $Gateway)
+        [Environment]::SetEnvironmentVariable('AUTOOS_KEYS_FILE', (Join-Path $Dir 'keys.yml'))
+        [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY', 'fake-manage-key-MUSEREG')
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'apply.ps1'))
+        if ($DryRun) { $argList += '-DryRun' }
+        & (Get-Process -Id $PID).Path @argList 2>&1 | Out-String
+    } finally {
+        foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    }
+}
+
+function Get-AutoOSNodeText {
+    param([string]$Dir, [string]$Name)
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir $Name))) { return '' }
+    [IO.File]::ReadAllText((Join-Path $Dir $Name))
+}
+
+Test-Case "apply.ps1 surfaces the CLI's redacted stderr when a registration fails" {
+    # The stderr discard was the bug: "register it in the dashboard" is not a
+    # diagnosis. A key with glob characters proves the redaction is a literal
+    # replacement, not a pattern match.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI needs sh to echo an env var it was named; the text case below covers Windows'
+        return
+    }
+    $d = New-AutoOSNodeSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "free_ai: sk-1.[x]*?/Z`n")
+        [IO.File]::WriteAllText((Join-Path $d 'fail_add'), '')
+        $srv = Start-AutoOSNodeGateway $d
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*free-ai registration failed*') "no failure line: $out"
+        Assert-True ($out.Contains('no active credentials')) "the CLI's reason was swallowed: $out"
+        Assert-True ($out.Contains('[REDACTED]')) "no redaction marker: $out"
+        Assert-True (-not $out.Contains('sk-1')) 'the provider key was printed'
+        Assert-True (-not $out.Contains('fake-manage-key-MUSEREG')) 'the manage key was printed'
+        $argv = Get-AutoOSNodeText $d 'argv.log'
+        Assert-True (-not $argv.Contains('sk-1')) 'the provider key reached a command line'
+        Assert-True (-not $argv.Contains('fake-manage-key-MUSEREG')) 'the manage key reached a command line'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply.ps1 registers a built-in provider through the CLI alone, with no provider node' {
+    # The 352 providers the CLI does know must be untouched by this change -
+    # same argv, no REST write.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI needs sh; the text case below covers Windows'
+        return
+    }
+    $d = New-AutoOSNodeSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "free_ai: not-a-real-key-123`n")
+        $srv = Start-AutoOSNodeGateway $d
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  + free-ai registered*') "first run: $out"
+        $argv = Get-AutoOSNodeText $d 'argv.log'
+        Assert-True ($argv.Contains('providers add free-ai --credential-env AUTOOS_KEY_FREE_AI --yes')) `
+            "add call: $argv"
+        Assert-Equal (Get-AutoOSNodeText $d 'nodes.tsv') '' 'a node was created for a built-in'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply.ps1 creates a provider node for meta-api and binds the shared meta key to it' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI needs sh; the text case below covers Windows'
+        return
+    }
+    $d = New-AutoOSNodeSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
+        $srv = Start-AutoOSNodeGateway $d
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out.Contains('provider node created')) "no node line: $out"
+        Assert-True ($out -like '*  + meta-api registered*') "first run: $out"
+        $node = @((Get-AutoOSNodeText $d 'nodes.tsv') -split "`r?`n" | Where-Object { $_ })
+        Assert-Equal $node.Count 1 "nodes.tsv: $(Get-AutoOSNodeText $d 'nodes.tsv')"
+        $cols = $node[0] -split "`t"
+        Assert-Equal $cols[4] 'meta-api' "stored prefix: $($cols[4])"
+        Assert-Equal $cols[5] 'https://api.meta.ai/v1' "stored baseUrl: $($cols[5])"
+        # The body carries exactly what createProviderNodeSchema demands.
+        $body = (Get-AutoOSNodeText $d 'last_body.json') | ConvertFrom-Json
+        Assert-Equal ([string]$body.prefix) 'meta-api' "body prefix: $($body.prefix)"
+        Assert-Equal ([string]$body.type) 'openai-compatible' "body type: $($body.type)"
+        Assert-Equal ([string]$body.apiType) 'chat' "body apiType: $($body.apiType)"
+        Assert-Equal ([string]$body.baseUrl) 'https://api.meta.ai/v1' "body baseUrl: $($body.baseUrl)"
+        # The connection binds to the node and keeps the registry's name.
+        $adds = @((Get-AutoOSNodeText $d 'adds.tsv') -split "`r?`n" | Where-Object { $_ })
+        Assert-Equal $adds.Count 1 "adds.tsv: $(Get-AutoOSNodeText $d 'adds.tsv')"
+        $ac = $adds[0] -split "`t"
+        Assert-Equal $ac[0] $cols[0] "connection provider: $($ac[0])"
+        Assert-Equal $ac[1] 'meta-api' "connection name: $($ac[1])"
+        $argv = Get-AutoOSNodeText $d 'argv.log'
+        Assert-True ($argv.Contains("providers add $($cols[0]) --name meta-api --credential-env AUTOOS_KEY_META --yes")) `
+            "add call: $argv"
+        Assert-True (-not $argv.Contains('fake-manage-key-MUSEREG')) 'the manage key reached a command line'
+        Assert-True ((Get-AutoOSNodeText $d 'auth.log').Contains('Bearer fake-manage-key-MUSEREG')) `
+            'the manage key never reached the gateway as a header'
+        Assert-True (-not $out.Contains('stored-key-NEVER-PRINT')) 'the gateway body was echoed'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply.ps1 creates the meta-api node once and reports the connection as already registered' {
+    # Idempotence is the acceptance bar: the second run must neither add a
+    # second node nor re-add the connection.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI needs sh; the text case below covers Windows'
+        return
+    }
+    $d = New-AutoOSNodeSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
+        $srv = Start-AutoOSNodeGateway $d
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  + meta-api registered*') "first run: $out"
+        [IO.File]::WriteAllText((Join-Path $d 'argv.log'), '')
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  = meta-api already registered*') "second run: $out"
+        Assert-True ($out -notlike '*provider node created*') 'the second run claims a creation'
+        $argv = Get-AutoOSNodeText $d 'argv.log'
+        Assert-True (-not $argv.Contains('providers add')) "the connection was added twice: $argv"
+        Assert-Equal (@((Get-AutoOSNodeText $d 'nodes.tsv') -split "`r?`n" | Where-Object { $_ })).Count 1 `
+            "node store: $(Get-AutoOSNodeText $d 'nodes.tsv')"
+        Assert-Equal (@((Get-AutoOSNodeText $d 'adds.tsv') -split "`r?`n" | Where-Object { $_ })).Count 1 `
+            "connections: $(Get-AutoOSNodeText $d 'adds.tsv')"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply.ps1 --dry-run plans the meta-api provider node and creates or adds nothing' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI needs sh; the text case below covers Windows'
+        return
+    }
+    $d = New-AutoOSNodeSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
+        $srv = Start-AutoOSNodeGateway $d
+        $out = Invoke-AutoOSNodeApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
+        Assert-True ($out.Contains('would create its provider node')) "node plan: $out"
+        Assert-True ($out -like '*  - meta-api : would register (key from meta)*') "plan: $out"
+        Assert-True ($out.Contains("would refresh meta-api's models")) "catalog plan: $out"
+        Assert-Equal (Get-AutoOSNodeText $d 'nodes.tsv') '' 'the dry run created a node'
+        Assert-Equal (Get-AutoOSNodeText $d 'adds.tsv') '' 'the dry run added a connection'
+        Assert-True (-not (Get-AutoOSNodeText $d 'argv.log').Contains('providers add')) 'the dry run called the CLI'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply.ps1 keeps the provider-node path and the redaction, and captures the CLI stderr' {
+    # The platform-independent half: whatever the stand-ins can emulate, the
+    # script must still consult the CLI's catalog, make the node over REST with
+    # the manage key in a header, and keep the failed add's stderr instead of
+    # discarding it. Pinned in text so a Windows runner checks it too.
+    $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
+    Assert-True ($ps1.Contains('/api/provider-nodes')) 'no provider-node request'
+    Assert-True ($ps1.Contains('providers available')) "the CLI's built-in catalog is never consulted"
+    # An unreadable catalog says nothing about who is built-in; the safe reading
+    # is "everything is", never a licence to create provider nodes on a guess.
+    Assert-True ($ps1.Contains('treating every id as built-in')) 'no safe fallback for an unreadable catalog'
+    Assert-True ($ps1.Contains('[REDACTED]')) 'nothing redacts a key from the log'
+    $adds = @($ps1 -split "`r?`n" | Where-Object { $_ -match '& omniroute @addArgs' })
+    Assert-Equal $adds.Count 1 "add call sites: $($adds -join ' | ')"
+    Assert-True ($adds[0].Contains('2>&1')) 'the CLI stderr is discarded again'
+    Assert-True (-not $adds[0].Contains('*>')) 'the CLI stderr is discarded again'
+    # The manage key is a header and nothing else; the vendor key stays an env
+    # var, so neither may appear in a native command's arguments.
+    Assert-True ($ps1.Contains('Authorization = "Bearer $RestKey"')) 'the manage key is not a header'
+    $argvLines = @($ps1 -split "`r?`n" | Where-Object { $_ -match '\$addArgs' })
+    Assert-True (@($argvLines | Where-Object { $_ -match 'RestKey' }).Count -eq 0) `
+        "the manage key reaches argv: $($argvLines -join ' | ')"
+}
+
 # L0 2026-09-27T19:07:39Z, free-ai/qwen7b on a fresh machine: the leg appeared
 # in t3-driver-free-only only on the SECOND apply run, because the first read
 # /v1/models before the gateway had enumerated the connection it had just added
@@ -8287,7 +8731,7 @@ Test-Case 'apply scripts refresh the catalog between registering and reading /v1
            Read = '$resp = Invoke-RestMethod -Uri "$Gateway/v1/models'
            Write = '& omniroute combo create $combo.name' },
         @{ File = 'configuration/omniroute/apply.sh'
-           Add = 'omni providers add "$provider_id"'; Enum = 'omni models "$provider_id"'
+           Add = 'omni providers add "$add_id"'; Enum = 'omni models "$provider_id"'
            Read = '"$GATEWAY/v1/models"'; Write = 'omni combo create "$name"' }
     )
     foreach ($s in $steps) {

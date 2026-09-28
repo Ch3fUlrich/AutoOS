@@ -240,12 +240,28 @@ _prune_sandbox() {
     printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
     : >"$d/calls.log"
     : >"$d/providers.txt"
+    # The ids `omniroute providers available` really lists (measured 2026-09-28)
+    # for the providers these combos are built from, so apply's built-in check
+    # answers here instead of falling back.
+    printf '%s\n' free-ai opencode-zen openai groq openrouter sambanova cerebras \
+        >"$d/builtins.txt"
     cat >"$d/bin/omniroute" <<'SH'
 #!/usr/bin/env bash
 d="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ "${1:-} ${2:-}" == "combo list" ]]; then
     printf '%s\n' "$*" >>"$d/listed"
     cat "$d/list.txt"
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers available" ]]; then
+    printf '  Loaded env from /home/s/.omniroute/.env\n'
+    python3 - "$d/builtins.txt" <<'PY'
+import json, sys
+rows = [{"id": s, "name": s, "category": "api-key", "alias": s}
+        for s in (l.strip() for l in open(sys.argv[1], encoding="utf-8")) if s]
+print(json.dumps({"count": len(rows), "categories": ["api-key"], "providers": rows},
+                 indent=2))
+PY
     exit 0
 fi
 # apply.sh reads the live connection list before registering anything (the
@@ -444,24 +460,347 @@ if it "svc: apply registers meta_api from the shared 'meta' key, not a phantom '
     if (( ok )); then pass; else fail "apply did not read the shared 'meta' key for meta-api"; fi
 fi
 
-if it "svc: apply registers meta-api once and reports it as already registered on the next run"; then
-    d="$(_prune_sandbox)"
-    _prune_list "$d" t2-worker
+# ─── MUSEREG: a provider the gateway has no built-in connection for ──────────
+# routing-00 04:5xZ, live gateway: apply.sh printed
+#   ! meta-api registration failed — register it in the dashboard
+# and threw the CLI's stderr away (`>/dev/null 2>&1`, apply.sh:378), so the
+# reason could not be read. The reason: catalog/ai-registry.json gives meta_api
+# the omniroute_id 'meta-api' with its own api_base, and 'meta-api' is not one
+# of the built-ins `omniroute providers available` lists (352 measured
+# 2026-09-28 against omniroute 3.8.51 — openai, meta-llama, muse-code, free-ai,
+# opencode-zen are, meta-api is not), so `providers add meta-api` has nothing
+# to attach a key to. OmniRoute serves such an OpenAI-compatible endpoint as a
+# PROVIDER NODE (REST /api/provider-nodes) and the key then binds to that node:
+# omniroute src/lib/db/providers/nodes.ts:64-74 names the concrete node id
+# ("<type>-<uuid>") as "what the dashboard sends" for a new connection. The
+# create body is createProviderNodeSchema, omniroute
+# src/shared/validation/schemas/provider.ts:307-385 — name, prefix, baseUrl and,
+# for type "openai-compatible", an apiType:
+#   {"name":"meta-api","prefix":"meta-api","type":"openai-compatible",
+#    "apiType":"chat","baseUrl":"https://api.meta.ai/v1"}
+# The stand-ins reproduce that contract rather than a convenient fiction
+# (R-worker-04): the fake CLI refuses `providers add` for an id that is neither
+# a built-in nor a node in the store, and the fake curl answers the REST
+# surface from the same files and validates a create body the way the schema
+# does. Both log every argv, so a test can also show a key never reached a
+# command line, where `ps` could read it.
+_node_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    : >"$d/calls.log"
+    : >"$d/curl.log"
+    : >"$d/argv.log"
+    printf '[]\n' >"$d/nodes.json"
+    printf '[]\n' >"$d/connections.json"
+    printf '%s\n' openai meta-llama muse-code free-ai opencode-zen cheaperinference groq \
+        >"$d/builtins.txt"
+    cat >"$d/bin/omniroute" <<'NODECLI'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$*" >>"$d/calls.log"
+printf '%s\n' "$*" >>"$d/argv.log"
+if [[ "${1:-} ${2:-}" == "providers list" ]]; then
+    # The real columns (measured 2026-09-28): 8-char hex id, provider, name,
+    # status. A node-bound connection's provider is its node id, which is why
+    # apply.sh's own "already registered" scan cannot see it and the REST
+    # connection check has to.
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+for c in json.load(open(sys.argv[1], encoding="utf-8")):
+    print("  %s %-22s %-16s active"
+          % (str(c.get("id", ""))[:8], c.get("provider", ""), c.get("name", "")))
+PY
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers available" ]]; then
+    # The real CLI prints its .env banner, then the JSON document.
+    printf '  Loaded env from /home/s/.omniroute/.env\n'
+    # no_available: the banner with no document after it - what a CLI that
+    # cannot answer the question at all looks like.
+    [[ -f "$d/no_available" ]] && exit 0
+    python3 - "$d/builtins.txt" <<'PY'
+import json, sys
+rows = [{"id": s, "name": s, "category": "api-key", "alias": s}
+        for s in (l.strip() for l in open(sys.argv[1], encoding="utf-8")) if s]
+print(json.dumps({"count": len(rows), "categories": ["api-key"], "providers": rows},
+                 indent=2))
+PY
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers add" ]]; then
+    provider="${3:-}"
+    shift 3
+    name="$provider" cred=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="${2:-}"; shift 2 ;;
+            --credential-env) cred="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -f "$d/fail_add" ]]; then
+        key=""
+        [[ -n "$cred" ]] && key="${!cred:-}"
+        printf 'Error: no active credentials for %s (key %s)\n' "$provider" "$key" >&2
+        exit 1
+    fi
+    known=0
+    grep -qxF "$provider" "$d/builtins.txt" && known=1
+    if [[ $known -eq 0 ]] && python3 - "$d/nodes.json" "$provider" <<'PY'
+import json, sys
+ids = [n.get("id") for n in json.load(open(sys.argv[1], encoding="utf-8"))]
+sys.exit(0 if sys.argv[2] in ids else 1)
+PY
+    then known=1; fi
+    if [[ $known -eq 0 ]]; then
+        printf 'Error: Unknown provider: %s\n' "$provider" >&2
+        exit 1
+    fi
+    python3 - "$d/connections.json" "$provider" "$name" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+rows.append({"id": "%08x" % (len(rows) + 0xabcd), "provider": sys.argv[2],
+             "name": sys.argv[3], "apiKey": "***", "isActive": True})
+json.dump(rows, open(sys.argv[1], "w"), indent=1)
+PY
+    printf "Added provider connection '%s'.\n" "$name"
+    exit 0
+fi
+exit 0
+NODECLI
+    cat >"$d/bin/curl" <<'NODECURL'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$*" >>"$d/argv.log"
+method=GET url="" out="" fmt="" fail=0 has_body=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -X|--request) method="${2:-GET}"; shift 2 ;;
+        -o|--output) out="${2:-}"; shift 2 ;;
+        -w|--write-out) fmt="${2:-}"; shift 2 ;;
+        --config|-K) shift 2 ;;
+        --data|--data-raw|--data-binary|--data-urlencode) has_body=1; shift 2 ;;
+        -m|--max-time|-H|--header) shift 2 ;;
+        --fail) fail=1; shift ;;
+        -s|-S) shift ;;
+        -sf|-fs|-sS|-fsS) fail=1; shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s %s\n' "$method" "$url" >>"$d/curl.log"
+reply="" code=200
+case "$url" in
+    */api/health) reply='{"status":"ok"}' ;;
+    */v1/models)
+        if [[ -f "$d/models.json" ]]; then reply="$(cat "$d/models.json")"
+        else reply='{"data":[]}'; fi ;;
+    */api/provider-nodes*)
+        if [[ "$method" == "GET" ]]; then
+            # The live shape (measured 2026-09-28): {"nodes":[…],"total":N,
+            # "ccCompatibleProviderEnabled":false}.
+            reply="$(python3 - "$d/nodes.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({"nodes": rows, "total": len(rows),
+                  "ccCompatibleProviderEnabled": False}))
+PY
+)"
+        else
+            req=""
+            [[ $has_body -eq 1 ]] && req="$(cat)"
+            printf '%s' "$req" >"$d/last_body.json"
+            reply="$(python3 - "$d/nodes.json" "$d/builtins.txt" "$req" <<'PY'
+import json, sys
+try:
+    body = json.loads(sys.argv[3] or "{}")
+except ValueError:
+    print(json.dumps({"error": {"message": "request body is not JSON"}}))
+    sys.exit(1)
+built = {l.strip() for l in open(sys.argv[2], encoding="utf-8") if l.strip()}
+missing = [k for k in ("name", "prefix", "baseUrl") if not body.get(k)]
+if missing:
+    print(json.dumps({"error": {"message": "Missing " + ", ".join(missing)}}))
+    sys.exit(1)
+if body["prefix"] in built:
+    print(json.dumps({"error": {"message":
+          '"%s" is a reserved provider prefix' % body["prefix"]}}))
+    sys.exit(1)
+if body.get("type", "openai-compatible") == "openai-compatible" and not body.get("apiType"):
+    print(json.dumps({"error": {"message": "Invalid OpenAI compatible API type"}}))
+    sys.exit(1)
+nodes = json.load(open(sys.argv[1], encoding="utf-8"))
+node = {"id": "openai-compatible-chat-%08d" % (len(nodes) + 1),
+        "type": body.get("type", "openai-compatible"), "apiType": body["apiType"],
+        "name": body["name"], "prefix": body["prefix"], "baseUrl": body["baseUrl"]}
+nodes.append(node)
+json.dump(nodes, open(sys.argv[1], "w"), indent=1)
+print(json.dumps(node))
+PY
+)" && code=201 || code=400
+        fi ;;
+    */api/providers*)
+        # The live shape: {"connections":[…],"total":N}. The stored apiKey is a
+        # stand-in, never a real value, and apply.sh must not print this body.
+        reply="$(python3 - "$d/connections.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({"connections": rows, "total": len(rows)}))
+PY
+)" ;;
+    *) reply='{}' ;;
+esac
+if [[ -n "$out" ]]; then printf '%s' "$reply" >"$out"; else printf '%s' "$reply"; fi
+# -w is honoured for the one format apply.sh asks for, the status code.
+[[ -n "$fmt" ]] && printf '%s' "$code"
+[[ $fail -eq 1 && $code -ge 400 ]] && exit 22
+exit 0
+NODECURL
+    chmod +x "$d/bin/omniroute" "$d/bin/curl"
+    printf '%s\n' "$d"
+}
+# _node_apply <dir> [apply args] - apply.sh against the two stand-ins. The
+# manage key is the env var the CLI would inherit (OMNIROUTE_API_KEY), so the
+# test can grep every recorded argv for it and show it never went there. The
+# stand-in curl answers /api/health, so the gateway is "up" on a closed port.
+_node_apply() {
+    local d="$1"
+    shift
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
+}
+# _node_post_count <dir> - how many provider nodes the run created.
+_node_post_count() {
+    grep -c '^POST .*/api/provider-nodes' "$1/curl.log"
+}
+
+if it "svc: apply surfaces the CLI's redacted stderr when a registration fails"; then
+    d="$(_node_sandbox)"
+    # A key with glob and regex characters: a redaction that read it as a
+    # pattern would leave part of it in the log.
+    printf 'free_ai: sk-1.[x]*?/Z\n' >"$d/keys.yml"
+    touch "$d/fail_add"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"free-ai registration failed"* ]] || { ok=0; echo "no failure line: $out" >&2; }
+    [[ "$out" == *"no active credentials"* ]] || { ok=0; echo "the CLI's reason was swallowed: $out" >&2; }
+    [[ "$out" == *"[REDACTED]"* ]] || { ok=0; echo "no redaction marker: $out" >&2; }
+    [[ "$out" == *"sk-1"* ]] && { ok=0; echo "the provider key was printed: $out" >&2; }
+    [[ "$out" == *"fake-manage-key-MUSEREG"* ]] && { ok=0; echo "the manage key was printed" >&2; }
+    grep -q 'sk-1' "$d/argv.log" && { ok=0; echo "the key reached a command line" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line: $(cat "$d/argv.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed registration still hides, or leaks, what the CLI said"; fi
+fi
+
+if it "svc: apply registers a built-in provider through the CLI alone, with no provider node"; then
+    d="$(_node_sandbox)"
+    printf 'free_ai: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + free-ai registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    grep -qx 'providers add free-ai --credential-env AUTOOS_KEY_FREE_AI --yes' "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a node was created for a built-in: $(cat "$d/curl.log")" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a built-in provider's registration changed"; fi
+fi
+
+if it "svc: apply creates a provider node for meta-api and binds the shared meta key to it"; then
+    d="$(_node_sandbox)"
     printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
-    out="$(_prune_apply "$d")"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider node created"* ]] || { ok=0; echo "no node line: $out" >&2; }
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "1" ]] || { ok=0; echo "curl.log: $(cat "$d/curl.log")" >&2; }
+    node_id="$(python3 -c 'import json;print(json.load(open("'"$d"'/nodes.json"))[0]["id"])' 2>/dev/null)"
+    grep -qx "providers add $node_id --name meta-api --credential-env AUTOOS_KEY_META --yes" "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    python3 - "$d/nodes.json" "$d/last_body.json" "$d/connections.json" <<'PY' || ok=0
+import json, sys
+node = json.load(open(sys.argv[1]))[0]
+body = json.load(open(sys.argv[2]))
+conns = json.load(open(sys.argv[3]))
+checks = [
+    ("create body prefix", body.get("prefix"), "meta-api"),
+    ("create body type", body.get("type"), "openai-compatible"),
+    ("create body apiType", body.get("apiType"), "chat"),
+    ("create body baseUrl", body.get("baseUrl"), "https://api.meta.ai/v1"),
+    ("stored prefix", node.get("prefix"), "meta-api"),
+    ("connection provider", conns[0].get("provider") if conns else None, node["id"]),
+    ("connection name", conns[0].get("name") if conns else None, "meta-api"),
+]
+for name, got, want in checks:
+    if got != want:
+        print("%s: expected [%s] got [%s]" % (name, want, got))
+        sys.exit(1)
+PY
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "meta-api did not become an OpenAI-compatible provider node"; fi
+fi
+
+if it "svc: apply creates the meta-api node once and reports the connection as already registered"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d")"
     ok=1
     [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "first run: $out" >&2; }
-    grep -qx 'providers add meta-api --credential-env AUTOOS_KEY_META --yes' "$d/calls.log" \
-        || { ok=0; echo "add call: [$(grep '^providers add meta-api' "$d/calls.log")]" >&2; }
-    # The second run: the same store, now holding the connection. The call log
-    # is reset so "no add" below means this run added nothing, not the last one.
     : >"$d/calls.log"
-    printf '  a1b2c3d4 meta-api\n' >"$d/providers.txt"
-    out="$(_prune_apply "$d")"
+    : >"$d/curl.log"
+    out="$(_node_apply "$d")"
     [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "second run: $out" >&2; }
-    grep -q '^providers add meta-api' "$d/calls.log" && { ok=0; echo "a run re-added a live connection" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the node was created twice: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" && { ok=0; echo "a run re-added the connection" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/nodes.json'))))")" == "1" ]] \
+        || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
     rm -rf "$d"
-    if (( ok )); then pass; else fail "meta-api registration is not idempotent"; fi
+    if (( ok )); then pass; else fail "the provider-node path is not idempotent"; fi
+fi
+
+if it "svc: apply --dry-run plans the meta-api provider node and creates or adds nothing"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d" --dry-run)"
+    ok=1
+    [[ "$out" == *"would register (key from meta)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"would create its provider node"* ]] || { ok=0; echo "node plan: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] || { ok=0; echo "dry run wrote: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" && { ok=0; echo "dry run added a connection" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "the node store changed" >&2; }
+    [[ "$(cat "$d/connections.json")" == "[]" ]] || { ok=0; echo "the connection store changed" >&2; }
+    [[ "$out" == *"would refresh meta-api's models"* ]] || { ok=0; echo "catalog plan: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the provider-node dry run is not a dry run"; fi
+fi
+
+# A CLI that cannot answer `providers available` says nothing about who is
+# built-in. The safe reading is "everything is" - the behaviour this script had
+# before - because the other reading invents a provider node for every registry
+# entry on a machine where the CLI merely did not answer.
+if it "svc: apply treats every id as built-in when the CLI's catalog is unreadable"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    touch "$d/no_available"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider catalog is unreadable"* ]] || { ok=0; echo "no warning: $out" >&2; }
+    [[ "$out" == *"provider node created"* ]] && { ok=0; echo "a node was created on a guess" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the gateway was written to: $(cat "$d/curl.log")" >&2; }
+    grep -qx 'providers add meta-api --credential-env AUTOOS_KEY_META --yes' "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable catalog became a licence to create provider nodes"; fi
 fi
 
 # ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
