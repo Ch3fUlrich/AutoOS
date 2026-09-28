@@ -1252,38 +1252,9 @@ function Install-AutoOSAgentSkills {
 
     Set-AutoOSAntigravityMcp
 
-    # ── Wire skills into Antigravity and Claude Code global skills directories ──
-    $agySkills = Join-Path $env:USERPROFILE '.gemini\config\skills'
-    $claudeSkills = Join-Path $env:USERPROFILE '.claude\skills'
-    $skillsSrc = Join-Path $dest 'skills'
-    if (Test-Path $skillsSrc) {
-        if ($script:DryRun) {
-            Write-AutoOSLine "would link skills from $skillsSrc to $agySkills and $claudeSkills" -Level muted
-        } else {
-            foreach ($dir in @($agySkills, $claudeSkills)) {
-                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-            }
-            foreach ($s in Get-ChildItem -Path $skillsSrc -Directory) {
-                $agyTarget = Join-Path $agySkills $s.Name
-                $claudeTarget = Join-Path $claudeSkills $s.Name
-                if (-not (Test-Path $agyTarget)) {
-                    try {
-                        New-Item -ItemType Junction -Path $agyTarget -Target $s.FullName | Out-Null
-                    } catch {
-                        Copy-Item -Path $s.FullName -Destination $agyTarget -Recurse -Force
-                    }
-                }
-                if (-not (Test-Path $claudeTarget)) {
-                    try {
-                        New-Item -ItemType Junction -Path $claudeTarget -Target $s.FullName | Out-Null
-                    } catch {
-                        Copy-Item -Path $s.FullName -Destination $claudeTarget -Recurse -Force
-                    }
-                }
-            }
-            Write-AutoOSLine 'Agent skills registered with Antigravity and Claude Code' -Level ok
-        }
-    }
+    # Antigravity (~/.gemini/config/skills) and Claude Code (~/.claude/skills) are
+    # linked by Sync-AutoOSAgentSkillTargets below, from Get-AutoOSSkillsSource -
+    # never from this clone, which is kept for its MCP infra only (WS-SKILLWIN).
 
     # Repo skills into project .claude/skills (Claude Code reads only that dir).
     # Junctions, created at install time (never committed - see .gitignore), so a
@@ -2539,10 +2510,18 @@ function Sync-AutoOSSkillDirs {
         layout) is not written through - that would create links inside the repo or a
         clone - it is left with one warning that names the fix. A link that cannot be
         made is a warning, never an ok line. Returns $false when a link failed.
+
+        -RetargetRetiredClone (default off; the operator decides) adds one more
+        recognised shape: a LIVE link whose target ends with
+        \agent-skills\skills\<this skill's name>, which is what the installer made
+        before .agents/skills became the only skills home (2026-09-25). Such a link
+        is moved to -Source; each old target is first appended to
+        <Destination>.autoos-backup-<stamp>, and the target itself is never touched.
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        [switch]$RetargetRetiredClone
     )
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
         Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
@@ -2583,6 +2562,7 @@ function Sync-AutoOSSkillDirs {
 
     $ok = $true
     $skipped = 0
+    $record = $null
     foreach ($skill in $skills) {
         $link = Join-Path $Destination $skill.Name
         $want = [IO.Path]::GetFullPath($skill.FullName).TrimEnd('\', '/')
@@ -2616,6 +2596,27 @@ function Sync-AutoOSSkillDirs {
                 if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
                     Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
                 } else { $ok = $false }
+            } elseif ($RetargetRetiredClone -and $have -and $have.Replace('\', '/').EndsWith('/agent-skills/skills/' + $skill.Name, $comparison)) {
+                # Opt-in only: a LIVE link into the retired agent-skills clone, in the
+                # exact shape the pre-2026-09-25 installer made for this skill. The
+                # old target is recorded before the link goes, and never touched.
+                if (-not $record) {
+                    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                    $record = "$Destination.autoos-backup-$stamp"
+                    $n = 0
+                    while (Test-Path -LiteralPath $record) { $n++; $record = "$Destination.autoos-backup-$stamp-$n" }
+                }
+                try {
+                    Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8
+                    $item.Delete()
+                } catch {
+                    Write-AutoOSLine "could not retarget ${link}: $($_.Exception.Message) - left as it was" -Level warn
+                    $ok = $false
+                    continue
+                }
+                if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
+                    Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
+                } else { $ok = $false }
             } else {
                 Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
             }
@@ -2637,9 +2638,14 @@ function Sync-AutoOSAgentSkillTargets {
       .DESCRIPTION
         Clients that follow the Agent Skills convention read a user-scope
         directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
-        ~/.codex/skills. Each skill is linked individually by
+        ~/.codex/skills. Claude Code reads ~/.claude/skills and Antigravity
+        ~/.gemini/config/skills (the same list as agent_skill_link_dests on
+        Linux). Each skill is linked individually by
         Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
         never touched, and a second run is a no-op.
+
+        AUTOOS_RETARGET_RETIRED_SKILL_LINKS=1 passes -RetargetRetiredClone to
+        every destination (see Sync-AutoOSSkillDirs). Off unless set.
 
         ~/.codex/skills is only written when codex is actually there (its
         command is on PATH or its ~/.codex directory exists): creating the
@@ -2648,10 +2654,19 @@ function Sync-AutoOSAgentSkillTargets {
         convention directory, not one vendor's.
     #>
     param([Parameter(Mandatory)][string]$Source)
-    $ok = Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $HOME '.agents\skills')
+    $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -eq '1'
+    $dests = @(
+        (Join-Path $HOME '.agents\skills'),
+        (Join-Path $HOME '.claude\skills'),
+        (Join-Path $HOME '.gemini\config\skills')
+    )
     $codexHome = Join-Path $HOME '.codex'
     if ((Test-Path -LiteralPath $codexHome) -or (Get-Command codex -ErrorAction SilentlyContinue)) {
-        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $codexHome 'skills')) -and $ok
+        $dests += Join-Path $codexHome 'skills'
+    }
+    $ok = $true
+    foreach ($dest in $dests) {
+        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination $dest -RetargetRetiredClone:$retarget) -and $ok
     }
     return $ok
 }

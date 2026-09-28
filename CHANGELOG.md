@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Opt-in retarget, default off**: a machine set up before 2026-09-25 still has
+  *live* links into `agent-skills\skills\<name>`, which the link rule treats as the
+  user's. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=1` passes `-RetargetRetiredClone`
+  to `Sync-AutoOSSkillDirs`, which moves only a link in exactly that shape for the
+  same skill name, records each old target in `<dir>.autoos-backup-<stamp>` first,
+  and never touches the target. Whether it becomes the default is the operator's
+  call.
+
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 
 A7b retired the component's *work* and left a live row holding a pointer: the

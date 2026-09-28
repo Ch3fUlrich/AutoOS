@@ -1930,12 +1930,15 @@ Test-Case 'no bearer token is ever invented' {
 }
 
 Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
-    if ($installSource -notmatch 'agySkills = Join-Path \$env:USERPROFILE ''\.gemini\\config\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Antigravity skills'
+    # Since WS-SKILLWIN both directories are destinations of
+    # Sync-AutoOSAgentSkillTargets; the functional test "links into
+    # ~/.claude\skills and ~/.gemini\config\skills" proves the links.
+    if ((Get-Command Install-AutoOSAgentSkills).Definition -notmatch 'Sync-AutoOSAgentSkillTargets -Source') {
+        throw 'Install-AutoOSAgentSkills does not call Sync-AutoOSAgentSkillTargets'
     }
-    if ($installSource -notmatch 'claudeSkills = Join-Path \$env:USERPROFILE ''\.claude\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Claude Code skills'
-    }
+    $body = (Get-Command Sync-AutoOSAgentSkillTargets).Definition
+    if ($body -notmatch [regex]::Escape("'.gemini\config\skills'")) { throw 'Antigravity skills dir is not a destination' }
+    if ($body -notmatch [regex]::Escape("'.claude\skills'")) { throw 'Claude Code skills dir is not a destination' }
     Pass
 }
 
@@ -5693,6 +5696,82 @@ Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
             if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md is unreadable through the link" }
         }
         if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links into ~/.claude\skills and ~/.gemini\config\skills (WS-SKILLWIN)' {
+    # Before WS-SKILLWIN these two were linked from the retired agent-skills
+    # clone by Install-AutoOSAgentSkills, so edits to .agents/skills never
+    # reached Claude Code or Antigravity on Windows. Linux already lists both
+    # in agent_skill_link_dests.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dests = @((Join-Path $homeDir '.claude\skills'), (Join-Path $homeDir '.gemini\config\skills'))
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        foreach ($dest in $dests) {
+            foreach ($n in @('alpha', 'beta')) {
+                $want = [IO.Path]::GetFullPath((Join-Path $repo ".agents\skills\$n")).TrimEnd('\', '/')
+                $got = Get-TestLinkTarget -Path (Join-Path $dest $n)
+                if ($got -ne $want) { throw "$dest\$n points at [$got], expected [$want]" }
+            }
+        }
+    } finally {
+        foreach ($dest in $dests) { Remove-TestDirLinks -Directory $dest }
+        Remove-TestDirLinks -Directory (Join-Path $homeDir '.agents\skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Install-AutoOSAgentSkills no longer links global skills from the agent-skills clone' {
+    $body = (Get-Command Install-AutoOSAgentSkills).Definition
+    if ($body -match "Join-Path \`$dest 'skills'") { throw 'global skills still link from the agent-skills clone' }
+    Pass
+}
+
+Test-Case 'retired agent-skills links: kept by default, retargeted with a backup record only when switched on' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $src = Join-Path $repo '.agents\skills'
+    $clone = Join-Path $scratch 'Code\agent-skills\skills'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        foreach ($n in @('alpha', 'beta', 'other')) { $null = New-Item -ItemType Directory -Path (Join-Path $clone $n) -Force }
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # alpha: the exact shape the old installer made -> recognised.
+        # beta: a live link into the clone under ANOTHER name -> the user's.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dest 'alpha') -Target (Join-Path $clone 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dest 'beta') -Target (Join-Path $clone 'other')
+        $cloneAlpha = [IO.Path]::GetFullPath((Join-Path $clone 'alpha')).TrimEnd('\', '/')
+        $cloneOther = [IO.Path]::GetFullPath((Join-Path $clone 'other')).TrimEnd('\', '/')
+        $wantAlpha = [IO.Path]::GetFullPath((Join-Path $src 'alpha')).TrimEnd('\', '/')
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'alpha')) -ne $cloneAlpha) { throw 'default run moved a live agent-skills link' }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*').Count) { throw 'default run wrote a backup record' }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest -RetargetRetiredClone
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'alpha')) -ne $wantAlpha) { throw 'switched run did not retarget the recognised link' }
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $cloneOther) { throw 'switched run moved a link it does not recognise' }
+        if (-not (Test-Path -LiteralPath (Join-Path $clone 'alpha'))) { throw 'the old link target was deleted' }
+        $records = @(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*')
+        if ($records.Count -ne 1) { throw "expected one backup record, found $($records.Count)" }
+        $text = Get-Content -LiteralPath $records[0].FullName -Raw
+        if ($text -notmatch [regex]::Escape($cloneAlpha)) { throw 'backup record does not name the old target' }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest -RetargetRetiredClone
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter 'dest.autoos-backup-*').Count -ne 1) { throw 'a second switched run wrote another backup record' }
     } finally {
         Remove-TestDirLinks -Directory $dest
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
