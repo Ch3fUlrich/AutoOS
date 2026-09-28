@@ -101,9 +101,14 @@ the acknowledgement markers the same spec §0 names one list are
 `autoos_heartbeat.ACK_MARKERS` (`lesson:`, `→ done`, `→ ack`, `→ relaunched`,
 `→ operator`, `→ main`), which is what keeps an acknowledgement of a finished
 order from reading as a new PAUSE — the filter counts a marker only at the head
-of a record, after its timestamp and at most one speaker prefix
-(`from <name>:`, `from <name> (<note>):`, `<name>:`), so an order that names a
-marker mid-sentence still stops the run.
+of a record, after its timestamp (and after any leading BOM, space or CR), and
+only as a whole marker: what follows it must be `:`, whitespace or the end of
+the text, so `→ mainline PAUSE all lanes` still stops the run while
+`→ main: merged` does not. At most one speaker prefix may stand in front of the
+marker — `<name>:` (up to 3 words, colon required), `from <name>` (colon
+optional) or `from <words> (<note>):` — and a speaker word never contains `:`,
+`→` or parentheses, so a prefix cannot eat the marker it precedes and an order
+that only names a marker mid-sentence still stops the run.
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;

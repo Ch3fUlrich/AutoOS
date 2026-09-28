@@ -5,6 +5,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — an ack marker needs a boundary, a speaker may be 3 words, the body head is normalised (RESTART R2a3, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a2, 1 MEDIUM + 3 LOWs,
+  safety): the head-anchored marker still matched as a bare *prefix*, so
+  `→ mainline PAUSE all lanes`, `→ maintenance: PAUSE` (both start with `→ main`)
+  and `→ operators` / `→ doneX` were swallowed as acknowledgements of a stop that
+  was never taken. `_MARKER_AT_HEAD_RE` now requires a boundary — `:`, whitespace
+  or the end of the text (`(?=[:\s]|$)`) — while `→ main: merged` and
+  `→ done 12:00 …` stay acks. A speaker prefix of more than one word
+  (`operator on duty: → done: PAUSE lifted`, `from L1-main relay (x): → done: …`)
+  was not stripped, so a PAUSE quoted inside an ack read as a fresh order and
+  paused a running lane: `_SPEAKER_PREFIX_RE` takes up to 3 words for the colon-
+  required `<name>:` shape and any words for `from <name>` **only** when its own
+  `(<note>)` or `:` delimits it, still at most one prefix. A speaker word excludes
+  `:`, `→` and parentheses, so a prefix can never eat the marker after it and a
+  bare first word without a colon is never a speaker. `_acknowledgement` strips a
+  BOM, spaces, tabs and CR remnants at the body head (a `  → done: PAUSE lifted`
+  or a BOM-headed line read as an order), `parse_inbox_line` strips them at the
+  line head so a BOM does not silently drop the record — an *order* lost is as
+  unsafe as an ack missed — and a line with no timestamp is no record at all
+  (§0), so it is never scanned.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, 1878 records, 7 of them naming PAUSE): **4 orders before and 4 after,
+  3 marker-headed PAUSE mentions before and after, 0 records parsed or classified
+  differently**, and `pause_state` agrees on every one of the 7 files. The census
+  says why: 799 records are acknowledgements under the new rules, but **0** open
+  with a marker-as-prefix (the `→ mainline` class), **0** carry a BOM/space/CR at
+  the head and **0** files use CRLF — all three defects were latent, reachable only
+  from writers the corpus has not produced yet, which is exactly the case a fixture
+  suite has to cover (AGENTS.md §5: a fix with no test that failed before it
+  proves nothing).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 now states the
+  prefix grammar exactly as implemented — boundary rule, colon optional only for
+  the `from` form, up to 3 words for `<name>:`, the speaker-word character class,
+  the head normalisation and the no-timestamp rule; `docs/routing.md` cites the
+  same shapes instead of the old three-item list.
+- **Tests** (red before the code: 5 failed): `tests/test_autoos_heartbeat.py`
+  60 → 70 — boundary pairs per marker (`→ mainline` order vs `→ main: merged`
+  ack, `→ operators` vs `→ operator:`, `→ doneX` vs `→ done 12:00`), both
+  two-word speaker shapes as acks and the same prefixes carrying a bare PAUSE as
+  orders, `from L0 (operator): → done 12:00 PAUSE lifted` ack vs
+  `from L0 (operator): PAUSE NOW` order, a bounded `from` prefix that keeps a
+  mid-sentence marker an order, a bare word without a colon never a speaker, the
+  head normalisation (space/BOM/CR/CRLF file/BOM'd order) and the no-timestamp
+  record. Green: 194 passed over `test_autoos_card.py test_autoos_inbox.py
+  test_autoos_heartbeat.py test_suite_wiring.py` (184 at the branch point), 746
+  passed over `test_autoos_report.py test_autoos_spawner.py
+  test_agent_harness.py test_autoos_track.py`.
+
 ### Fixed — a marker counts only at the head of a record, so a PAUSE naming one still stops the run (RESTART R2a2, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a, MEDIUM, safety): the

@@ -222,6 +222,91 @@ class PauseStateTests(unittest.TestCase):
             self.assertTrue(hb._acknowledgement("from L1-main: %s PAUSE acknowledged"
                                                  % head), marker)
 
+    # R2a3 (the Muse review of R2a2) — three ways the head rule still mis-read
+    # a line, each reproduced against the shipped code before it was fixed:
+    # a marker matched as a bare prefix, a two-word speaker prefix not stripped,
+    # and a body head that was never normalised.
+
+    def test_a_marker_that_is_the_prefix_of_a_longer_word_is_an_order(self):
+        for text in ("→ mainline PAUSE all lanes",
+                     "→ maintenance: PAUSE every lane",
+                     "→ operators PAUSE the pack lane",
+                     "→ doneX PAUSE now",
+                     "→ acknowledged PAUSE now",
+                     "→ relaunching PAUSE now"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_head_marker_needs_a_colon_space_or_the_end_of_the_text(self):
+        # §0's boundary rule: the marker is a whole word, not a prefix.
+        self.assertTrue(hb._acknowledgement("→ main: merged before the PAUSE landed"))
+        self.assertTrue(hb._acknowledgement("→ done 12:00 PAUSE lifted"))
+        self.assertTrue(hb._acknowledgement("→ ack PAUSE lifted"))
+        self.assertTrue(hb._acknowledgement("lesson: the PAUSE was late"))
+        self.assertTrue(hb._acknowledgement("→ done"))
+        self.assertFalse(hb._acknowledgement("→ mainline PAUSE all lanes"))
+        self.assertFalse(hb._acknowledgement("→ doneX PAUSE now"))
+
+    def test_a_quoted_pause_after_a_two_word_speaker_is_not_an_order(self):
+        for text in ("operator on duty: → done: PAUSE lifted",
+                     "from L1-main relay (x): → done: PAUSE lifted",
+                     "from L0 (operator): → done 12:00 PAUSE lifted"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertFalse(state["active"], "%s: %s" % (text, state))
+
+    def test_a_pause_after_a_two_word_speaker_is_still_an_order(self):
+        for text in ("from L0 (operator): PAUSE NOW",
+                     "operator on duty: PAUSE every lane",
+                     "from L1-main relay (x): PAUSE the pack build"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_bare_first_word_without_a_colon_is_never_a_speaker(self):
+        self.assertFalse(hb._acknowledgement("notes → done: PAUSE lifted"))
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z notes → done: PAUSE lifted")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_from_prefix_is_bounded_by_its_colon_note_or_one_word(self):
+        # A clause after `from <name>` is the body, never more speaker words, so
+        # a marker that only appears mid-sentence keeps the line an order.
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z from L1-main PAUSE all lanes, → main when done")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_the_body_head_is_normalised_before_the_marker_check(self):
+        # Leading spaces, a BOM or a CR remnant made an ack read as an order.
+        for text in ("  → done: PAUSE lifted",
+                     "\ufeff→ done: PAUSE lifted",
+                     "\r→ done: PAUSE lifted",
+                     "\ufeff  → main: PAUSE lifted",
+                     "\r\n\t→ ack: PAUSE lifted"):
+            self.assertTrue(hb._acknowledgement(text), repr(text))
+
+    def test_a_bom_does_not_swallow_the_record_whole(self):
+        # Stripping the head must not lose an *order* either.
+        with io.open(self.inbox, "w", encoding="utf-8") as fh:
+            fh.write("\ufeff2026-09-28T10:00:00Z operator: PAUSE NOW\n")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertEqual(state["at"], "2026-09-28T10:00:00Z")
+    def test_a_crlf_inbox_line_is_still_an_ack(self):
+        with io.open(self.inbox, "w", encoding="utf-8", newline="") as fh:
+            fh.write("2026-09-28T10:00:00Z → done: PAUSE lifted\r\n"
+                     "2026-09-28T10:01:00Z → main: merged, PAUSE lifted\r\n")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_body_with_no_timestamp_is_not_a_record(self):
+        # §0: a record opens with its ISO timestamp; a bare line (a
+        # continuation) is never scanned for an order, marker or no marker.
+        self.assertIsNone(hb.parse_inbox_line("PAUSE NOW"))
+        self.assertIsNone(hb.parse_inbox_line("→ done: PAUSE lifted"))
+        self.assertIsNone(hb.parse_inbox_line("2026-09-28T10:00:00Z"))
+        write_inbox(self.inbox, "PAUSE NOW", "→ done: PAUSE lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
     def test_session_start_is_the_first_transcript_timestamp(self):
         path = os.path.join(self._tmp.name, "t.jsonl")
         with io.open(path, "w", encoding="utf-8") as fh:

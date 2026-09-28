@@ -47,11 +47,28 @@ code from state the session keeps small at every wave. Then the context cap drop
 - **Acknowledgement markers:** one list, `ACK_MARKERS` in `tools/autoos_heartbeat.py`
   (`lesson:`, `→ done`, `→ ack`, `→ relaunched`, `→ operator`, `→ main`); the shipped
   `_MARKER_AT_HEAD_RE` is built from it, never restated. Lane R2a extended the old
-  `lesson:|→ done` pair to the markers in use, with a test per marker. **A marker counts
-  only at the head of the record body** — the text after the leading ISO timestamp and, at
-  most, after one speaker prefix (`from <name>:`, `from <name> (<note>):`, `<name>:`, the
-  shapes in the real inboxes) — so `operator: PAUSE all lanes; nothing merges → main until I
-  say so` is still an order (R2a review, MEDIUM). §1 and §3 cite that one list.
+  `lesson:|→ done` pair to the markers in use, with a test per marker.
+  **A marker counts only at the head of the record body, and only as a whole marker.**
+  The record body is the text after the leading ISO timestamp — a line with no timestamp
+  is not a record and is not scanned at all (same rule as above) — with any leading BOM,
+  space, tab or CR stripped first, at the line head for the timestamp and at the body head
+  for the marker check. **Boundary:** what follows the marker is `:`, whitespace or the end
+  of the text, so `→ mainline PAUSE all lanes`, `→ maintenance: PAUSE`, `→ operators PAUSE`
+  and `→ doneX PAUSE` are orders, while `→ main: merged` and `→ done 12:00 …` are
+  acknowledgements (R2a3 review, MEDIUM: a bare prefix match swallowed the first two).
+  **Speaker prefix:** at most one, and only what its own delimiter allows. A speaker word
+  contains no `:`, no `→` and no parentheses — so a prefix always ends at its colon or at
+  its `(<note>)`, and can never eat the marker that follows it. The shapes: `<name>:` with
+  up to **3** words, colon required (a bare first word without a colon is never a speaker,
+  so `notes → done: PAUSE lifted` stays an order); `from <name>` with one word and the colon
+  optional (the real inboxes write `from <name>` 254 times with no colon); `from <words…>`
+  with any number of words **only** when the prefix is delimited by `(<note>)` or its own
+  `:`. So `operator on duty: → done: PAUSE lifted` and `from L1-main relay (x): → done: PAUSE
+  lifted` are acknowledgements (R2a3 review, LOW: a two-word speaker was not stripped, so a
+  quoted PAUSE read as a fresh stop), `from L0 (operator): → done 12:00 PAUSE lifted` is one,
+  and `from L0 (operator): PAUSE NOW` is an order. Elsewhere in the line a marker is
+  vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say so` is still an
+  order (R2a review, MEDIUM). §1 and §3 cite that one list.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that
   has no trailing newline (a torn append): it is not a record and not a continuation, and the next
   read sees it whole. Writers append one complete line per write (`append_inbox_line` already does,

@@ -37,8 +37,12 @@ _RESUME_RE = re.compile(r"\bRESUME\b")
 # until lane R2a added the other markers in use — a `→ main` reply quoting a
 # PAUSE read as a fresh stop.
 ACK_MARKERS = ("lesson:", "→ done", "→ ack", "→ relaunched", "→ operator", "→ main")
-# the same markers, head-anchored: mid-sentence a marker is only vocabulary
-_MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)"
+# the same markers, head-anchored *with a boundary*: mid-sentence a marker is
+# only vocabulary, and a marker that is merely the prefix of a longer word
+# (`→ mainline`, `→ operators`, `→ doneX`) is vocabulary too — so a marker counts
+# only when what follows it is `:`, whitespace or the end of the text
+# (R2a3 review, MEDIUM: `→ mainline PAUSE all lanes` was swallowed as an ack).
+_MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)(?=[:\s]|$)"
                                 % "|".join(re.escape(marker) for marker in ACK_MARKERS))
 # The speaker prefix an inbox writer puts in front of its own line, at most one
 # per record. The shapes are what the real inboxes actually contain
@@ -47,17 +51,38 @@ _MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)"
 # `from L0 (operator) PAUSE NOW`. The `from` form therefore takes the colon
 # optionally; a bare `<name>` needs it, so an ordinary first word is not read as
 # a speaker.
-_SPEAKER_PREFIX_RE = re.compile(r"\A(?:from\s+\S+(?:\s*\([^)]*\))?\s*:?|"
-                                r"\S+(?:\s*\([^)]*\))?\s*:)\s+")
+# A speaker word excludes `:` (so a prefix always ends at its colon), `→` (so the
+# prefix can never swallow the marker that follows it) and parentheses (so a
+# `(<note>)` delimits the name rather than being eaten as one more word).
+_SPEAKER_WORD = r"[^\s→:()]+"
+# More than one word is allowed only while the prefix is still delimited by its own
+# `(<note>)` or colon, and at most 3 words for the bare `<name>:` shape — so
+# `operator on duty: → done: …` and `from L1-main relay (x): → done: …` are both
+# acknowledgements (R2a3 review, LOW), while `from L1-main PAUSE all lanes, → main
+# when done` is still an order: the clause after the name is the body, not speaker
+# words. The `from` form keeps its colon optional, as the real inboxes write
+# `from <name>` 254 times with no colon.
+_SPEAKER_WORDS = _SPEAKER_WORD + r"(?:\s+" + _SPEAKER_WORD + r")*"
+_SPEAKER_PAREN = r"(?:\s*\([^)]*\))?"
+_SPEAKER_PREFIX_RE = re.compile(r"\A(?:from\s+%s%s\s*:|from\s+%s\s*\([^)]*\)|from\s+%s"
+                                r"|(?:%s\s+){0,2}%s%s\s*:)\s+"
+                                % (_SPEAKER_WORDS, _SPEAKER_PAREN, _SPEAKER_WORDS,
+                                   _SPEAKER_WORD, _SPEAKER_WORD, _SPEAKER_WORD,
+                                   _SPEAKER_PAREN))
+# What an acknowledgement check ignores at the head of a body: a BOM a writer left
+# there, and any space, tab or CR remnant before the marker (R2a3 review, LOW —
+# `  → done: PAUSE lifted` read as a fresh order).
+_HEAD_JUNK = "\ufeff\u200b \t\r\n"
 
 
 def _acknowledgement(text: str) -> bool:
     """True when `text` (a record body, timestamp already removed) opens with an
-    acknowledgement marker — at its head, or at the head after one
-    `_SPEAKER_PREFIX_RE` prefix. Anywhere else in the line a marker is only
-    vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say
+    acknowledgement marker — at its head (after any `_HEAD_JUNK`), or at the head
+    after one `_SPEAKER_PREFIX_RE` prefix. Anywhere else in the line a marker is
+    only vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say
     so` is an order that happens to name `→ main` (R2a review, MEDIUM).
     """
+    text = text.lstrip(_HEAD_JUNK)
     if _MARKER_AT_HEAD_RE.match(text):
         return True
     prefix = _SPEAKER_PREFIX_RE.match(text)
@@ -106,7 +131,7 @@ def parse_inbox_line(line: str):
     scanned for PAUSE/RESUME below, since an operator may write either word
     inside a reply.
     """
-    line = line.rstrip("\n").rstrip("\r")
+    line = line.lstrip(_HEAD_JUNK).rstrip("\n").rstrip("\r")
     if not line.strip():
         return None
     parts = line.split(None, 1)
