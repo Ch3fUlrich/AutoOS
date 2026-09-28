@@ -101,7 +101,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 - R-coord-01: Cut lanes from main; merge main before spawn and CI, not between green CI and ready; lane→orch→main no-ff; one merger, mutex, freeze parent. (why: ready needs tested tip; source: 2c3e4f7)
 - R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
-- R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`; the budget is a ration, not a fence: a worker that re-exports `AUTOOS_CLAUDE_*` in its own shell can still declare itself (accepted residual, CLAUDEBUDGET-h). (why: a Claude limit stops the run; source: common.md)
+- R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`. (why: a Claude limit stops the run; source: common.md)
 - R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
