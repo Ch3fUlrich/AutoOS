@@ -84,7 +84,7 @@
 - D1.1 Add `autoos-agent.py inbox <name> --follow --actionable`.
 - D1.2 Support optional `[--since-card CARD]`.
 - D1.3 Support optional `[--exit-on-first]`.
-- D1.4 Support optional `[--include-units PREFIX]`.
+- D1.4 `[--include-units PREFIX]` is the lane monitor's prefix switch, not a follower flag: the follower takes no unit-watch flag and never watches units directly; unit events arrive only as monitor-written inbox lines (D5.1).
 - D1.5 Support optional `[--include-ci BRANCHES]`.
 - D1.6 The command blocks instead of dumping and exiting.
 - D1.7 It prints one line per ACTIONABLE event.
@@ -97,7 +97,7 @@
 - D1.14 Rationale: no copy prevents order-semantics drift.
 - D1.15 Rationale: one line per event keeps wakes auditable.
 - D1.16 Rationale: blocking follower enables 0-turn quiet wait.
-- D1.17 The follower reads by byte offset, not by timestamp: append order is the truth. A late-stamped record (stamp older than records already read) is still surfaced once in append position; it is never skipped and never reorders already-read records (see D2.6).
+- D1.22 The follower reads by byte offset, not by timestamp: append order is the truth. A late-stamped record (stamp older than records already read) is still surfaced once in append position; it is never skipped and never reorders already-read records (see D2.6).
 
 | Actionable | Not actionable |
 |---|---|
@@ -107,10 +107,10 @@
 | Review request | Non-matching chatter |
 | Ready | Already-acked orders |
 | Any `from <parent>` line addressed to this reader | — |
-| Opt-in lane unit with prefix going inactive | Unit still active |
+| Lane-monitor unit event line (`exit ok`, `exit failed`, `stall` for a tracked prefix, D5.1) | Duplicate `lane@run-id@event-type` or unit active with fresh output |
 | Opt-in CI conclusion for tracked branch | CI for untracked branch |
 
-- D1.17 Lane-unit watch is opt-in by prefix.
+- D1.17 Lane-unit events arrive only as lane-monitor inbox lines (D5.1); tracking is opt-in by prefix on the monitor.
 - D1.18 CI watch is opt-in by branch list.
 - D1.19 Default follower watches inbox only.
 - D1.20 Edge: malformed lines do not crash the follower.
@@ -122,7 +122,7 @@
 - D2.3 Explicit `--since` overrides card when provided for repair.
 - D2.4 Order of effects per handled event (safety asymmetry: a missed order/ping/ready is HIGH, a spurious wake is fine, so a crash must re-deliver, never drop): (1) perform the side effect idempotently, keyed by the record's inbox offset/position (repeating the same offset is a no-op, e.g. ack already present); (2) advance the cursor by writing the new position into the card `last-event`; (3) re-arm the follower from that card. Re-arming before the card write would self-wake on the same event; writing the card before an idempotent side effect would drop the event on a crash between the two steps.
 - D2.5 A restart therefore replays (re-delivers) at most the one event whose card write never landed, and never misses a handled event. Replays are spurious wakes (acceptable); skips are lost orders (HIGH).
-- D2.6 Malformed/late lines are reported once as one event, in append (byte-offset) order, not timestamp order.
+- D2.6 Malformed/late lines are reported once as one event, in append (byte-offset) order, not timestamp order (D1.22).
 - D2.7 They do not advance past unprocessed good records.
 - D2.8 Rationale: card is already the durable per-reader cursor.
 - D2.9 Edge: missing card falls back as in D2.2; a replayed already-handled event is a spurious wake (acceptable), a skipped one is a lost order (HIGH).
@@ -158,7 +158,7 @@
 - D4.3 The follower touches (rewrites) `RUN/state/<name>.follow` with `{pid, started, session_id}` at least every 60 s in BOTH `inotify` and poll modes - the file mtime IS the heartbeat.
 - D4.4 Single liveness/takeover rule (exactly one rule - it reconciles the former mtime-only and lock-only wordings; D4.5, D4.6 and D4.15a are pointers to it, not second rules): the follower is DEAD when ANY of (a) the lock pid is gone or its start time differs from the recorded start time (pid gone or recycled), OR (b) the heartbeat file `RUN/state/<name>.follow` mtime is > 2 min stale (covers a SIGSTOPped or hung follower whose pid is alive but makes no progress), OR (c) the heartbeat file is missing (missing = stale). The dead-man never judges by a `last_poll` content field (a dead follower's last-written content looks fresh forever). Takeover: verify the lock's recorded start time against the live pid FIRST; if the start-time check FAILS (the pid was recycled), send NO signal to that pid - treat the lock as dead and take it over (start the replacement and log the TAKEOVER line without signalling the recycled pid). Only when the start time MATCHES, SIGTERM the old pid, then SIGKILL if it is still alive after a grace period, then start the replacement and log a loud TAKEOVER line to the wake log. A second starter against a FRESH follower (pid alive with matching start time AND heartbeat file present with mtime <= 2 min stale) exits nonzero with one loud stderr line and starts no second reader.
 - D4.5 Pointer to D4.4, not a second rule: a missing heartbeat file is case (c) of the DEAD rule (missing = stale) and is re-armed via the D4.4 takeover procedure.
-- D4.6 Pointer to D4.4, not a second rule: dead pid, pid gone, or pid start time differing from the recorded start time means re-arm via the D4.4 takeover procedure (condition (a)); stale heartbeat mtime means re-arm the same way (condition (b)).
+- D4.6 Pointer to D4.4, not a second rule.
 - D4.7 Otherwise the beat ends the turn with no output.
 - D4.8 What keeps the session alive: each dead-man `CronCreate` firing IS a model turn, and a turn counts as session activity against the 8 h idle-retirement rule - phase-0 probe 5.10 is a GATE, not a measurement: phase 1 is NOT built until 5.10 passes. If dead-man fires do not count as activity (FAIL), the spec STOPS at phase 0 and returns to L1-routing with the measurement; the D4.1 interval table is void and there is no hedged "re-decided" inside this spec. While the gate is unpassed, both intervals are <= the idle limit minus a margin (30 min and 3 h are both < 8 h), so the session never idles out even if every inbox event is missed.
 - D4.9 ORCH-C1 REVIVE covers actual session death, not this beat.
@@ -174,16 +174,16 @@
 - D4.18 Edge: dead-man itself must not do polling work when follower is healthy.
 
 ### D5 Lane and CI watch
-- D5.1 While lanes run, follower also watches unit exits when `--include-units` is set.
+- D5.1 The inbox is the ONLY event source. The follower never watches units directly; while lanes run, the lane monitor writes EVERY unit event (exit ok, exit failed, stall) as an inbox line keyed `lane@run-id@event-type`, and the follower surfaces those lines like any other actionable event. `--include-units` is the monitor's prefix switch, not a follower watch.
 - D5.2 It also watches CI conclusions when `--include-ci` is set.
 - D5.3 No separate polling beat is needed for `is my worker done`.
-- D5.4 Hung-but-alive workers (unit active but stuck) are detected by the lane monitor, NOT the dead-man: the lane monitor watches each worker's output file `work/<lane>/<name>.out` and emits a `stall <lane>/<name>` event line into the session inbox when the unit is active and the output file shows no new bytes for N min (default N = 20) or the unit exits unexpectedly; the follower surfaces that line like any other actionable event. The dead-man only guards the follower itself (D4.2-D4.6) and never classifies worker stalls.
+- D5.4 All unit events are detected by the lane monitor, NOT the dead-man and NOT the follower: the lane monitor watches each tracked unit and its output file `work/<lane>/<name>.out` and emits an inbox event line for EVERY unit event - exit ok, exit failed, and stall (unit active but output file shows no new bytes for N min, default N = 20); the follower surfaces each line like any other actionable event. On every (re)start the monitor reconciles: it compares each tracked unit's current state with the lines already written and writes any missing ones, so an exit that happened while the follower (or monitor) was down is still delivered once via the inbox. The dead-man only guards the follower itself (D4.2-D4.6) and never classifies worker events.
 - D5.5 Stall classification is unchanged.
 - D5.6 Rationale: unit exit is an event, not a polled state.
 - D5.7 Edge: unit flapping inactive/active must coalesce like inbox storms.
 - D5.8 Edge: CI branch list must be explicit; no wildcard watch.
 - D5.9 CI polling mechanism itself must stay quiet-turn-free or be disabled.
-- D5.10 Each unit-exit/stall event carries its own id `lane@run-id` (unit name + systemd invocation/run id, recorded by the lane monitor at spawn). The follower dedupes unit events on the key `lane@run-id@event-type` (stall, exit, ready are DISTINCT types), NOT on the inbox offset: the same `lane@run-id@exit` twice (flap) emits one wake; a `stall` followed by an `exit` for the same run-id emits TWO wakes (the exit is new information even after the stall); two different run-ids of the same lane emit two wakes.
+- D5.10 The lane monitor writes each unit event as an inbox line carrying id `lane@run-id` (unit name + systemd invocation/run id, recorded by the monitor at spawn) plus event type. The follower dedupes unit events on the key `lane@run-id@event-type` (exit ok, exit failed, stall, ready are DISTINCT types), NOT on the inbox offset: the same `lane@run-id@exit` twice (flap) emits one wake; a `stall` followed by an `exit` for the same run-id emits TWO wakes (the exit is new information even after the stall); two different run-ids of the same lane emit two wakes.
 
 ### D6 Skill rewrite
 - D6.1 Rewrite R-coord-07 to `Wake on events`.
@@ -249,9 +249,10 @@
 - 6.7 Replay test covers own lines that must not self-wake.
 - 6.8 Offset resume replays at most the one event whose card write never landed, and never skips a handled event (D2.5).
 - 6.8a Effects-before-cursor kill test (finding 1): scripted harness delivers one order, then SIGKILLs the follower (a) after the side effect but before the card write, and (b) after the card write but before re-arm. In both cases the order is re-delivered on restart (spurious wake accepted) and never dropped; the side effect applied exactly once (idempotent key verified by record offset). Case (c) crash-after-spawn-before-card: the order triggers a spawn, the follower is SIGKILLed before the card write, the restart re-delivers the order and the spawner refuses the duplicate `lane@offset` title - the test asserts exactly one worker exists for that title. Case (c) also covers a worker with the same title still RUNNING after 24 h: a restart re-delivers the order and spawns nothing (the running refusal has no time limit, D2.12).
-- 6.8b Byte-offset read test (finding 8): scripted inbox appends a record with a backdated stamp AFTER newer records were read; the follower surfaces it once in append position and does not reorder or skip.
+- 6.8b Byte-offset read test (finding 8, D1.22): scripted inbox appends a record with a backdated stamp AFTER newer records were read; the follower surfaces it once in append position and does not reorder or skip.
 - 6.8c Cursor-fallback test (finding 3): with the card missing, the follower resumes after this session's newest `→ done:` line; with no `→ done:` line either, from the START OF THE FILE. The test inbox includes a pre-today unhandled order (no ack) and asserts it is delivered; it asserts no "last 30 records" cutoff exists and no order is skipped.
 - 6.8d Unit-id dedupe test (finding 12): the same `lane@run-id@exit` twice (flap) emits one wake; two run-ids of the same lane emit two wakes; a `stall` followed by an `exit` for the SAME run-id emits two wakes (distinct event types, D5.10); inbox-offset dedupe alone would fail this test.
+- 6.8e Follower-downtime unit-exit test (D5.1/D5.4): stop the follower, let a tracked unit exit, restart the follower (monitor reconciliation having written the missing exit line) -> exactly one wake for that exit, no loss and no duplicate.
 - 6.9 Dead-man beat re-arms a dead follower within one tick of the D4.1 table (30 min while lanes run, 3 h idle). Heartbeat test (finding 2): follower heartbeat mtime advances at least every 60 s in BOTH inotify and poll modes; dead-man re-arms when and only when the single D4.4 rule says DEAD (mtime > 2 min stale, heartbeat file missing per case (c), OR pid gone/recycled - a test that stops the follower but leaves a fresh `last_poll` content field must still re-arm). Missing-file case: deleting `RUN/state/<name>.follow` makes the next dead-man check report DEAD per D4.4 case (c) and re-arm. Agrees with 6.9a: both tests assert the same D4.4 rule, one via the heartbeat leg, one via the lock leg.
 - 6.9a Lock test (finding 4): a stale lock (pid gone, pid start time differs, OR heartbeat > 2 min stale per the single D4.4 rule) is taken over - SIGTERM then SIGKILL after start-time verification, loud TAKEOVER line in the wake log; a second starter against a live lock AND fresh heartbeat exits nonzero with one loud stderr line and starts no reader. Recycled-pid case: a decoy process holding the old pid with a different start time receives NO signal during takeover (it survives) - the test asserts the decoy is still alive after the takeover. SIGSTOP test: SIGSTOP the follower (pid stays alive, so the pid leg alone passes) -> heartbeat goes > 2 min stale -> the dead-man check replaces it (SIGTERM then SIGKILL the stopped pid, loud log line); a replay harness driving the dead-man check directly asserts replacement within 3 min of the staleness threshold.
 - 6.10 Storm input collapses instead of emitting one wake per record: sustained > 20 events/min emits at most one wake per 60 s until the rate drops (finding 9).
@@ -268,7 +269,7 @@
 - 7.5 Two followers run on one inbox.
 - 7.6 Mitigation is `RUN/state/<name>.follow.lock` holding `{pid, start_time, session_id}` under the single D4.4 rule: one reader per inbox by design; a stale lock (pid gone/recycled OR heartbeat > 2 min stale) is taken over via SIGTERM-then-SIGKILL after start-time verification with a loud log line, a second starter against a fresh heartbeat exits nonzero with one loud stderr line, never a silent starve (D4.15a).
 - 7.7 Clock skew produces out-of-order stamps.
-- 7.8 Mitigation is byte-offset order (append order is the truth) plus report-late-once (D1.17, D2.6).
+- 7.8 Mitigation is byte-offset order (append order is the truth) plus report-late-once (D1.22, D2.6).
 - 7.9 Late-stamped lines are reported once, not silently dropped.
 - 7.10 Session is compacted and forgets to re-arm.
 - 7.11 Mitigation is dead-man beat plus launch/clear checklist in skill.
@@ -284,7 +285,7 @@
 - 7.21 `Monitor` fallback would reintroduce >= 2 turns/h if chosen.
 - 7.22 Therefore fallback requires explicit phase-0 justification.
 - 7.23 Unit-exit signal may race inbox `ready`.
-- 7.24 Mitigation is treat either as wake; dedupe unit events by `lane@run-id@event-type` (D5.10), inbox events by card offset.
+- 7.24 Mitigation is treat either as wake; the inbox is the only event source (D5.1) so a unit exit and its inbox `ready` both arrive as inbox lines and either wakes, with monitor (re)start reconciliation (D5.4) covering follower downtime; dedupe unit events by `lane@run-id@event-type` (D5.10), inbox events by card offset.
 
 ## 8. Open questions
 - Q1 Does 8 h retirement count background-task wakes as activity?
@@ -310,7 +311,7 @@
 - 10.3 Follower state: `RUN/state/<name>.follow` (content `{pid, started, session_id}`, mtime is the heartbeat, touched every <= 60 s in both modes).
 - 10.3a Follower lock: `RUN/state/<name>.follow.lock` (content `{pid, start_time, session_id}`; stale takeover logged, live contention exits nonzero with one stderr line).
 - 10.4 Wake log: `RUN/state/<name>.wakes`.
-- 10.5 CLI: `autoos-agent.py inbox <name> --follow --actionable [--since-card CARD] [--exit-on-first] [--include-units PREFIX] [--include-ci BRANCHES]`.
+- 10.5 CLI: `autoos-agent.py inbox <name> --follow --actionable [--since-card CARD] [--exit-on-first] [--include-ci BRANCHES]` (no `--include-units` on the follower; that prefix switch lives on the lane monitor per D5.1).
 - 10.6 Exit code 0 on `--exit-on-first` event batch.
 - 10.7 Nonzero with one stderr line on lock contention.
 - 10.8 Stdout contract is one line per actionable event batch, nothing else.
@@ -324,7 +325,7 @@
 - 5 HIGH hung-but-alive stall path -> D5.4 (lane monitor watches `work/<lane>/<name>.out`, emits `stall` inbox event; dead-man guards only the follower), D4.15; test 6.11.
 - 6 HIGH idle-session lifetime -> D4.8 (dead-man fire = a turn; intervals <= limit minus margin), 5.10 (phase-0 PASS/FAIL probe), 8 Q1; test 6.14.
 - 7 HIGH harness lifetime -> 5.10a (dead-man-alone fallback: 30 min lanes-running, 3 h idle, honest budget); test 6.14.
-- 8 MED byte offset -> D1.17, D2.6; test 6.8b.
+- 8 MED byte offset -> D1.22, D2.6; test 6.8b.
 - 9 MED storm backoff -> D3.7 (one wake per 60 s sustained after 20/min); test 6.10.
 - 10 MED measurable 6.12 -> 6.12 (replay-harness recreation assertions, no 7-day wait).
 - 11 MED interval contradiction -> D4.1 (single table), D4.15, D6.3, D6.13 pointing at it; check 6.13.
@@ -348,5 +349,13 @@
 - 1 MED missing heartbeat file -> folded into D4.4 as DEAD case (c) (missing = stale); D4.5 reduced to a pointer to D4.4, not a second rule; test 6.9 adds the missing-file case (deleted heartbeat file reports DEAD and re-arms).
 - 2 MED recycled-pid signal safety -> D4.4 states explicitly: if the start-time check FAILS (the pid was recycled), send NO signal to that pid; treat the lock as dead and take it over (replacement starts and the TAKEOVER line is logged without signalling the recycled pid); test 6.9a asserts a decoy process with the old pid but a different start time receives no signal and survives the takeover.
 - 3 MED running-title refusal -> D2.12: a spawn whose same-title worker is still RUNNING is refused for as long as it runs (no time limit); the 24 h window applies only to a completed/done title; test 6.8a case (c) adds a worker still running after 24 h -> a restart spawns nothing (exactly one worker).
+- Rejected: none.
+- Open: none in this round - all three findings carry their spec decision plus acceptance test above.
+
+### Review round 6 (fix-first)
+- All 3 findings resolved in the spec above; none rejected.
+- 1 HIGH lost unit-exit/ready during follower downtime -> D5.1 (inbox is the ONLY event source; lane monitor writes EVERY unit event - exit ok, exit failed, stall - as an inbox line keyed `lane@run-id@event-type`; follower never watches units directly; `--include-units` is the monitor's prefix switch), D5.4 (monitor (re)start reconciliation: compare every tracked unit's current state with the lines already written, write any missing ones), D5.10 (monitor-written lines plus `lane@run-id@event-type` dedupe), D1 table row (lane-monitor event line actionable), D1.4/D1.17/10.5 (follower takes no unit flag), 7.24; test 6.8e (stop follower, exit unit, restart -> exactly one wake).
+- 2 MED duplicate id D1.17 -> byte-offset decision renumbered to D1.22 (lane-unit D1.17 keeps its id); citations updated in D2.6, 7.8, 6.8b, and the round-3 changelog line.
+- 3 LOW D4.6 restatement -> reduced to a pure pointer to D4.4 (no (a)/(b) restatement).
 - Rejected: none.
 - Open: none in this round - all three findings carry their spec decision plus acceptance test above.
