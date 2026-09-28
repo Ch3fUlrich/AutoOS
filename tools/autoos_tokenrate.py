@@ -17,15 +17,20 @@ one file per session (ADR 0001). Sessions are selected by the record's `cwd`
 field, so a lane sandbox deep under the orchestrator's directory still counts
 while a sibling directory with a shared string prefix does not.
 
-Router D-045: an `isSidechain` record (an in-session subagent turn) is
-orchestrator cost and stays in the numerator; the subagent columns report how
-large that part of it is. `discover_transcripts` scans the session files at the
-top of a project dir, so the share is over the records that are in the
-numerator — measured 2026-09-28, this host's client writes sidechain usage to
-`<project>/<session>/subagents/*.jsonl` instead, which is a separate discovery
-scope, not a filter.
+Router D-045 and the R5A3 answer: an `isSidechain` record (an in-session
+subagent turn) is orchestrator cost and stays in the numerator; the subagent
+columns report how large that part of it is. This host's client writes those
+turns to `<project>/<session>/subagents/*.jsonl`, one level below the session
+files, so `discover_transcripts` reads both depths — a record belongs to the
+subagent view when its own `isSidechain` flag is set *or* it was read out of a
+`subagents/` file. A turn written to both depths is still one turn's cost:
+`Totals.add` dedups by transcript `uuid` (else `message.id`) and counts it once,
+into the subagent view if any copy claims a subagent.
 
-Stdlib only; read-only over the transcripts and `git log`.
+Stdlib only; read-only over the transcripts and `git log`. `--json` prints
+`default` rather than the resolved `--projects-dir` when the user did not name
+one — that path carries the operator's username, and a transcript root is not
+part of the answer.
 """
 from __future__ import annotations
 
@@ -64,7 +69,12 @@ class UsageRecord:
     `sidechain` is the transcript's own `isSidechain` flag: the turn belongs to
     an in-session subagent rather than to the orchestrator's own reasoning.
     Router D-045 keeps those turns in the numerator — the parent session pays
-    for them — and reports their share instead of filtering them.
+    for them — and reports their share instead of filtering them; `measure` sets
+    the flag on records read out of a `subagents/` file too, because there the
+    directory is the client's claim and the flag is only the record's.
+
+    `identity` is what makes a record the same *one* in two files: the
+    transcript `uuid`, or the `message.id` of a record that carries no uuid.
     """
 
     input_tokens: int = 0
@@ -75,6 +85,7 @@ class UsageRecord:
     cwd: str = ""
     session: str = ""
     sidechain: bool = False
+    identity: str = ""
 
     def weighted(self) -> float:
         return (self.input_tokens + self.output_tokens
@@ -93,6 +104,10 @@ class Totals:
     The `subagent_*` fields are a *view onto* the same records the plain fields
     sum, never a subtraction from them: `weighted` already includes
     `subagent_weighted` (D-045).
+
+    `counted` maps a record `identity` to whether the copy that got counted
+    claimed a subagent, which is what lets a turn written to both a session file
+    and a `subagents/` file count once.
     """
 
     records: int = 0
@@ -102,11 +117,32 @@ class Totals:
     subagent_weighted: float = 0.0
     subagent_naive: int = 0
     session_ids: set = field(default_factory=set)
+    counted: dict = field(default_factory=dict)
 
     def add(self, record: UsageRecord, session_fallback: str = "") -> None:
-        """Count one record once, in the totals and in the subagent view."""
+        """Count one record once, in the totals and in the subagent view.
+
+        A record whose identity was already counted is the same turn read out of
+        a second file, so it adds nothing to `records`/`weighted`/`naive`; the
+        one direction it can still move is *into* the subagent view, so a turn
+        mirrored into a `subagents/` file is reported as one there, too.
+        """
         weighted = record.weighted()
         naive = record.naive()
+        session = record.session or session_fallback
+        if session:
+            self.session_ids.add(session)
+        key = record.identity
+        if key:
+            claimed = self.counted.get(key)
+            if claimed is not None:
+                if record.sidechain and not claimed:
+                    self.subagent_records += 1
+                    self.subagent_weighted += weighted
+                    self.subagent_naive += naive
+                    self.counted[key] = True
+                return
+            self.counted[key] = record.sidechain
         self.records += 1
         self.weighted += weighted
         self.naive += naive
@@ -114,9 +150,6 @@ class Totals:
             self.subagent_records += 1
             self.subagent_weighted += weighted
             self.subagent_naive += naive
-        session = record.session or session_fallback
-        if session:
-            self.session_ids.add(session)
 
     def summary(self) -> "Summary":
         return Summary(records=self.records, weighted=round(self.weighted, 1),
@@ -233,6 +266,7 @@ def parse_record(line):
         cwd=str(obj.get("cwd") or ""),
         session=str(obj.get("sessionId") or obj.get("session_id") or ""),
         sidechain=bool(obj.get("isSidechain")),
+        identity=str(obj.get("uuid") or "") or str(message.get("id") or ""),
     )
 
 
@@ -278,6 +312,12 @@ def discover_transcripts(projects_dir, cwd_prefixes) -> list[Path]:
     prefix lands in a dir whose name starts with that prefix's slug — this
     prunes the scan without missing a session. The record's own `cwd` is still
     what decides membership.
+
+    Two depths of the same project dir count: the session file
+    `<project>/<session>.jsonl` and the in-session subagent files
+    `<project>/<session>/subagents/*.jsonl`. Session files sort ahead of their
+    own `subagents/` dir, which is what makes the dedup in `Totals.add` see the
+    parent's copy first.
     """
     files = []
     try:
@@ -289,9 +329,11 @@ def discover_transcripts(projects_dir, cwd_prefixes) -> list[Path]:
         if not any(directory.name.startswith(slug) for slug in slugs):
             continue
         try:
-            files.extend(p for p in directory.glob("*.jsonl") if p.is_file())
+            found = [p for p in directory.glob("*.jsonl") if p.is_file()]
+            found += [p for p in directory.glob("*/subagents/*.jsonl") if p.is_file()]
         except OSError:
             continue
+        files.extend(sorted(found, key=str))
     return files
 
 
@@ -300,10 +342,18 @@ def measure(projects_dir, cwd_prefixes, since, until, now=None) -> Summary:
     start, end = resolve_window(since, until, now=now)
     totals = Totals()
     for path in discover_transcripts(projects_dir, cwd_prefixes):
+        # A subagent file is named after the agent, not after the session that
+        # paid for it: its records carry the parent's `sessionId`, and for the
+        # ones that carry none the session directory — never `agent-x` — is the
+        # fallback, so an agent cannot invent a session.
+        subagent_file = path.parent.name == "subagents"
+        session = path.parent.parent.name if subagent_file else path.stem
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for record in iter_usage_records(fh, cwd_prefixes, start, end):
-                    totals.add(record, path.stem)
+                    if subagent_file:
+                        record.sidechain = True
+                    totals.add(record, session)
         except OSError:
             continue
     return totals.summary()
@@ -349,7 +399,8 @@ def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
            branch_prefixes=(), since="48h", until=None, now=None) -> dict:
     """The §5 numbers: numerator, denominator, both rates, the subagent split,
     and the stated bias."""
-    projects_dir = Path(projects_dir) if projects_dir else (
+    projects_dir_named = projects_dir is not None
+    projects_dir = Path(projects_dir) if projects_dir_named else (
         Path.home() / ".claude" / "projects")
     start, end = resolve_window(since, until, now=now)
     totals = measure(projects_dir, list(cwd_prefixes), _fmt(start), _fmt(end), now=now)
@@ -373,7 +424,7 @@ def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
         "cache_read_weight": CACHE_READ_WEIGHT,
         "cwd_prefixes": list(cwd_prefixes),
         "branch_prefixes": list(branch_prefixes),
-        "projects_dir": str(projects_dir),
+        "projects_dir": str(projects_dir) if projects_dir_named else "default",
         "repo": str(repo) if repo else None,
         "branch": branch,
     }

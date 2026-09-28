@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `token-rate` discovery reaches `<session>/subagents/*.jsonl` (RESTART R5A3, the router's answer to D-045's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: D-045 kept an in-session subagent turn in the
+  numerator and reported its share, but all three measured rows printed `0.0%`
+  because this host's client writes those turns one level below the session
+  files `discover_transcripts` scanned. Discovery reads both depths now, so the
+  subagent records are in `records`/`weighted`/`naive` *and* in the subagent
+  columns: a record is a subagent turn when its own `isSidechain` flag is set
+  **or** it was read out of a `subagents/` file — the flag is the record's claim,
+  the directory is the client's. A turn written to both depths is still one cost:
+  `Totals.add` dedups by transcript `uuid`, falling back to `message.id` for a
+  record that carries none, counts it once, and lets the second copy move it
+  *into* the subagent view only. Measured over the R5a window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`): L1-routing 5,462 → 9,745
+  records / 148,504,022.4 → 202,093,981.4 weighted / share 26.5 %, L1-backlog
+  4,907 → 12,060 / 138,537,540.9 → 262,700,682.6 / 47.3 %, L1-main 2,959 → 7,089
+  / 104,906,139.8 → 190,405,176.5 / 44.9 %. The before-numbers still reproduce to
+  the token and nothing deduped on this host — parent and subagent files share
+  neither uuid nor message id, so the dedup is defensive. That corrects the third
+  row of the R5a caveat (417 records / 4.6 %): that probe counted only
+  `subagents/` dirs sitting beside a same-named session file in the *same*
+  project dir, and an L1-main subagent turn routinely runs in a worktree under
+  the main checkout while its parent session is filed under a lane's dir — its
+  records belong to the main row by `cwd`, and the real figure is 4,130.
+- **`--json`**: an unnamed `--projects-dir` prints `"default"` instead of the
+  resolved transcript root. That path carries the operator's username, and the
+  repository is public (hard rule 1); an explicit flag is echoed as it was given.
+- **`tests/test_autoos_tokenrate.py`**: `SubagentFileDiscoveryTests` (new, 11
+  cases) plus 3 CLI cases, on a fixture tree holding a session file and its
+  `subagents/` dir — both depths in the numerator, provenance alone counts as a
+  subagent turn, a shared uuid (or message id, without a uuid) counts once and
+  lands in the subagent view, the blocks of one turn keep their own uuids, an
+  agent file invents no session of its own, the window and `cwd` filters still
+  apply one level down, and `--json` says `default`. Fixtures now give every
+  record its own uuid, as the real transcript does; they had keyed the uuid off
+  the token count, which is exactly what the dedup now collapses. 9 red before
+  the change, 50 green after.
+
 ### Added — `token-rate`: orchestrator tokens per merged change (RESTART R5a, 2026-09-28)
 
 - **`tools/autoos_tokenrate.py`** (new, stdlib, read-only): the §5 metric the
