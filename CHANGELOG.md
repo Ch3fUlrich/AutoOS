@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed - `omnigraph-client` joins the Linux `server` profile (Q-001, 2026-09-28)
+
+- **`catalog/linux.json`**: the operator lifted the Q-001 hold at 04:50Z, so a
+  headless server pre-ticks the Omnigraph bridge like every other profile. The
+  component still skips with a hint when the `omnigraph_url` answer or the
+  `omnigraph_token` key is missing, so a server with no graph configured gains a
+  `skipped` line and nothing else — no failure, no file written. `catalog/macos.json`
+  is untouched: the macOS catalog has no `server` profile.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the catalog case asserted the
+  opposite ("the server profile is on hold") and now asserts the exact profile
+  list per catalog, so the Linux/macOS difference is stated rather than implied;
+  one new end-to-end case runs `--profile server --dry-run --yes` with no URL
+  configured and requires the plan to carry the component, the skip-with-hint line
+  to appear, and exit 0.
+- Docs: `docs/omnigraph.md` names the four Linux profiles and says why macOS has
+  three; the open question in `docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md`
+  is marked resolved with its reasoning.
+
 ### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
 
 - **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides
