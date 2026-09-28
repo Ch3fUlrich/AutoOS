@@ -57,7 +57,7 @@ _RECORD_IDS = itertools.count(1)
 def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
                ts="2026-09-27T12:00:00.000Z", cwd=PREFIX, session="sess-1",
                with_iterations=True, sidechain=False, uuid=None, mid=None,
-               no_uuid=False, model="claude-opus-4-6[1m]"):
+               no_uuid=False, rid=None, model="claude-opus-4-6[1m]"):
     """One assistant record, key-for-key as the real transcript writes it.
 
     `sidechain=True` is the in-session subagent turn (router D-045): the same
@@ -75,6 +75,15 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
     the dedup has to collapse, `no_uuid=True` to leave it out so `mid` is the
     only identity, and `session=""` for a file whose records carry no
     `sessionId` at all.
+
+    `requestId` is the top-level key naming the API *response* a record belongs
+    to (measured 2026-09-28: present on all 9,745 in-window records of the
+    L1-routing row and on all but one of L1-main's 7,089, and never varying
+    within one `message.id`). A fixture with a `mid` therefore gets a requestId
+    derived from it — two records that share a message id share a response id,
+    which is what the real transcript does. Pass `rid=` to write the requestId,
+    `rid=""` to leave the key out, and `rid=` together with `mid=None` for a
+    record that has a response id but no message id.
     """
     usage = {
         "input_tokens": input_tokens,
@@ -118,6 +127,10 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
                           else "rec-%d" % next(_RECORD_IDS))
     if mid is not None:
         record["message"]["id"] = mid
+        if rid is None:
+            rid = "req-%s" % mid
+    if rid:
+        record["requestId"] = rid
     if sidechain:
         record["agentId"] = "agent-%s" % session
     return json.dumps(record)
@@ -391,18 +404,21 @@ class SubagentFileDiscoveryTests(unittest.TestCase):
         self.assertAlmostEqual(res.weighted, 400.0)
         self.assertEqual(res.subagent_records, 1)
 
-    def test_the_blocks_of_one_turn_are_not_deduped_because_each_has_its_own_uuid(self):
-        """Identity is the *record*, not the turn: a real transcript writes one
-        record per content block, sharing `message.id` and each carrying the
-        turn's usage, and the numerator counts what the client wrote."""
+    def test_the_blocks_of_one_turn_count_once_because_they_are_one_response(self):
+        """R5A4 reverses the identity: the numerator counts the API *response*,
+        and one response is written as one record per content block, all sharing
+        `message.id` and each carrying the same turn usage. Deduped by uuid (as
+        R5A3 did) those blocks were `turns x blocks`; keyed on the message id
+        they are one turn."""
         one_turn = [usage_line(**self.PARENT, mid="msg-one-turn"),
                     usage_line(**self.PARENT, mid="msg-one-turn")]
         with tempfile.TemporaryDirectory() as tmp:
             projects = Path(tmp)
             self.tree(projects, parent_lines=one_turn, child_lines=[])
             res = self.measure(projects)
-        self.assertEqual(res.records, 2)
-        self.assertAlmostEqual(res.weighted, 800.0)
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.naive, 1300)
 
     def test_a_subagent_file_adds_no_session_of_its_own(self):
         """Its records carry the parent's `sessionId`; when they carry none, the
@@ -436,6 +452,137 @@ class SubagentFileDiscoveryTests(unittest.TestCase):
         self.assertEqual(res["weighted"], 500.0)
         self.assertEqual(res["subagent_weighted"], 100.0)
         self.assertEqual(res["subagent_share_pct"], 20.0)
+
+
+class ResponseDedupTests(unittest.TestCase):
+    """The R5A4 decision: one API response in the numerator, never one per block.
+
+    R5A3 measured the shape this closes — Claude Code writes one transcript
+    record per content block, each repeating the same `message.id`, the same
+    `requestId` and the same usage (1,901 of 3,553 message ids in the L1-routing
+    parent files appear on more than one record) — so with a uuid as the only
+    identity the numerator counted *turns x blocks*. Identity is now the
+    response: `message.id` plus `requestId` when the record carries one, and the
+    uuid is the fallback for a record with no message id at all. The first
+    record of a message wins; a later duplicate may only move it into the
+    subagent view.
+    """
+
+    BLOCK = dict(input_tokens=100, output_tokens=100, cache_creation=100,
+                 cache_read=1000)             # weighted 400, naive 1300
+
+    def sum(self, lines):
+        return tr.sum_records(tr.iter_usage_records(lines))
+
+    def test_parse_record_keys_the_identity_on_the_response_not_the_record(self):
+        a = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-1"))
+        b = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-2"))
+        self.assertEqual(a.identity, b.identity)
+        self.assertIn("msg-1", a.identity)
+        self.assertIn("req-msg-1", a.identity)
+        self.assertNotIn("u-1", a.identity)
+
+    def test_three_records_sharing_a_message_id_and_usage_count_once(self):
+        lines = [usage_line(**self.BLOCK, mid="msg-blocks") for _ in range(3)]
+        total = self.sum(lines)
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)
+        self.assertEqual(total.naive, 1300)
+
+    def test_different_message_ids_count_separately(self):
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-a"),
+                          usage_line(**self.BLOCK, mid="msg-b")])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_same_message_id_under_another_request_id_is_two_responses(self):
+        """A retried response repeats the message id but is billed again, so the
+        request id is part of the identity."""
+        total = self.sum([
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-2"),
+        ])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_a_record_without_a_message_id_falls_back_to_its_uuid(self):
+        same = [usage_line(**self.BLOCK, uuid="uuid-only"),
+                usage_line(**self.BLOCK, uuid="uuid-only")]
+        self.assertEqual(self.sum(same).records, 1)
+        both = [usage_line(**self.BLOCK, uuid="uuid-one"),
+                usage_line(**self.BLOCK, uuid="uuid-two")]
+        self.assertEqual(self.sum(both).records, 2)
+
+    def test_a_record_with_neither_a_message_id_nor_a_uuid_is_its_own_response(self):
+        total = self.sum([usage_line(**self.BLOCK, no_uuid=True),
+                          usage_line(**self.BLOCK, no_uuid=True)])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_first_record_of_a_message_wins_and_a_duplicate_adds_no_usage(self):
+        """Measured on this host: 242 of the 4,964 in-window L1-routing message
+        ids do *not* repeat the usage — the client writes the growing partial
+        usage as the blocks land, so the last record of a message carries the
+        most. The rule is still first-wins, so a duplicate never adds usage."""
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-grow"),
+                          usage_line(input_tokens=100, output_tokens=300,
+                                     cache_creation=100, cache_read=1000,
+                                     mid="msg-grow")])
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)   # not 500, not 900
+        self.assertEqual(total.naive, 1300)
+
+    def test_a_subagent_copy_of_a_parent_message_counts_once_in_the_subagent_view(self):
+        """Across files: the same response written at both depths is one turn's
+        cost, reported as a subagent turn because a subagent file claims it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            parent = [usage_line(**self.BLOCK, mid="msg-mirror"),
+                      usage_line(**self.BLOCK, mid="msg-mirror")]
+            child = [usage_line(**self.BLOCK, mid="msg-mirror", sidechain=True)]
+            write_transcript(projects, PREFIX, "sess-1.jsonl", parent)
+            write_subagents(projects, PREFIX, "sess-1", "agent-a", child)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)
+        self.assertAlmostEqual(res.subagent_share_pct(), 100.0)
+
+    def test_a_deduped_subagent_duplicate_never_moves_a_record_out_of_the_view(self):
+        """The subagent file's own blocks of one response collapse too, and the
+        first copy to arrive (the parent's) decides the usage — the move is
+        one-way into the subagent view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-both")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True),
+                             usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)   # not 800
+
+    def test_the_report_and_the_cli_count_each_response_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli")])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["records"], 1)
+        self.assertEqual(res["weighted"], 400.0)
+        self.assertEqual(res["naive"], 1300)
 
 
 class ProjectsDirEchoTests(unittest.TestCase):

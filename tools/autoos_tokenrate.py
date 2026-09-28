@@ -3,8 +3,9 @@
 The metric compares one orchestrator before and after the context-cap change, so
 it needs both halves of the same actor's work:
 
-    numerator   every usage record of the orchestrator's Claude Code transcripts,
-                weighted input + output + cache_creation + 0.1 * cache_read
+    numerator   one weight per API *response* in the orchestrator's Claude Code
+                transcripts, weighted input + output + cache_creation +
+                0.1 * cache_read
     denominator first-parent merges into `main` whose subject names the
                 orchestrator's branch prefix, by committer date
 
@@ -23,9 +24,13 @@ columns report how large that part of it is. This host's client writes those
 turns to `<project>/<session>/subagents/*.jsonl`, one level below the session
 files, so `discover_transcripts` reads both depths — a record belongs to the
 subagent view when its own `isSidechain` flag is set *or* it was read out of a
-`subagents/` file. A turn written to both depths is still one turn's cost:
-`Totals.add` dedups by transcript `uuid` (else `message.id`) and counts it once,
-into the subagent view if any copy claims a subagent.
+`subagents/` file. The R5A4 decision is what makes a record one *response*: the
+client writes one record per content block, all repeating the same `message.id`,
+the same `requestId` and the same usage, so `Totals.add` keys on
+`response_identity` (the message id and request id, else the uuid), counts the
+first record of a response, and lets a later duplicate only move it into the
+subagent view — never add usage. A turn mirrored into a `subagents/` file is
+still one turn's cost.
 
 Stdlib only; read-only over the transcripts and `git log`. `--json` prints
 `default` rather than the resolved `--projects-dir` when the user did not name
@@ -73,8 +78,11 @@ class UsageRecord:
     the flag on records read out of a `subagents/` file too, because there the
     directory is the client's claim and the flag is only the record's.
 
-    `identity` is what makes a record the same *one* in two files: the
-    transcript `uuid`, or the `message.id` of a record that carries no uuid.
+    `identity` is the API response the record is a piece of, as
+    `response_identity` names it: the client writes one record per content
+    block, so several records of one file — and one record mirrored into a
+    `subagents/` file — share it and are one turn's cost. Empty means the
+    transcript named no response at all, and such a record is its own.
     """
 
     input_tokens: int = 0
@@ -120,12 +128,13 @@ class Totals:
     counted: dict = field(default_factory=dict)
 
     def add(self, record: UsageRecord, session_fallback: str = "") -> None:
-        """Count one record once, in the totals and in the subagent view.
+        """Count one response once, in the totals and in the subagent view.
 
-        A record whose identity was already counted is the same turn read out of
-        a second file, so it adds nothing to `records`/`weighted`/`naive`; the
-        one direction it can still move is *into* the subagent view, so a turn
-        mirrored into a `subagents/` file is reported as one there, too.
+        A record whose identity was already counted is another content block of
+        the same response, or the same turn read out of a second file, so it adds
+        nothing to `records`/`weighted`/`naive`; the one direction it can still
+        move is *into* the subagent view, so a turn mirrored into a `subagents/`
+        file is reported as one there, too.
         """
         weighted = record.weighted()
         naive = record.naive()
@@ -161,7 +170,11 @@ class Totals:
 
 @dataclass
 class Summary:
-    """The numerator: sessions, records, weighted, naive, plus the subagent split."""
+    """The numerator: sessions, responses, weighted, naive, plus the subagent split.
+
+    `records` counts API responses, not transcript lines: the client's habit of
+    writing one line per content block is collapsed by `Totals.add`.
+    """
 
     records: int = 0
     weighted: float = 0.0
@@ -226,6 +239,32 @@ def _int(value) -> int:
     return int(value)
 
 
+def response_identity(obj, message) -> str:
+    """The identity of the API *response* a record is a piece of.
+
+    R5A4's decision: the numerator counts each response once, so the key is the
+    response's own name — `message.id`, plus the top-level `requestId` when the
+    record carries one, because a retried response repeats the message id and is
+    billed again. Measured 2026-09-28 over the R5a window, the L1-routing row's
+    9,745 records are 4,964 responses: every one carries both keys, no message id
+    ever spans two request ids, and the blocks of one response repeat its usage —
+    242 of those responses carry the growing partial usage the client writes as
+    blocks land, and the first record wins there too. A record with no
+    `message.id` falls back to its `uuid`, so a transcript that names no response
+    still counts each record once — and one that names neither is its own
+    response (empty key, never deduped). The namespaces are prefixed so a uuid
+    can never collide with a message id.
+    """
+    message_id = str(message.get("id") or "")
+    if not message_id:
+        uuid = str(obj.get("uuid") or "")
+        return "uuid:%s" % uuid if uuid else ""
+    request_id = str(obj.get("requestId") or "")
+    if not request_id:
+        return "msg:%s" % message_id
+    return "msg:%s|%s" % (message_id, request_id)
+
+
 def parse_record(line):
     """A JSONL line -> UsageRecord, or None unless it carries a usage object.
 
@@ -266,7 +305,7 @@ def parse_record(line):
         cwd=str(obj.get("cwd") or ""),
         session=str(obj.get("sessionId") or obj.get("session_id") or ""),
         sidechain=bool(obj.get("isSidechain")),
-        identity=str(obj.get("uuid") or "") or str(message.get("id") or ""),
+        identity=response_identity(obj, message),
     )
 
 

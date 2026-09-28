@@ -5,6 +5,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `token-rate` counts each API response once (RESTART R5A4, the metric owner's answer to R5A3's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: R5A3 left the numerator counting *turns x
+  content blocks*, because a record's identity was its transcript `uuid` and this
+  client writes one record per content block, each repeating the same
+  `message.id`, the same top-level `requestId` and (usually) the same usage. The
+  decision — the metric counts one **API response** — moves identity into a new
+  `response_identity`: `message.id` plus `requestId` when the record carries one
+  (a retried response repeats the message id and is billed again), falling back
+  to the `uuid` only when there is no `message.id`, and to no identity at all
+  (never deduped) when there is neither. The first record of a response wins and
+  a later duplicate may only move it *into* the subagent view, which is unchanged
+  from R5A3: `isSidechain` or `subagents/`-file provenance still decides
+  membership, and `weighted` still contains `subagent_weighted`. Measured over
+  the R5a window (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`, same
+  `--repo`/`--branch`/prefixes as R5A3; every response id is unique to one
+  session and no response id ever spans two files, so the collapse is entirely
+  same-file blocks — 1.96 / 1.94 / 1.76 records per response — and the
+  cross-file dedup stays defensive):
+
+  | row | records (before → after) | weighted (before → after) | naive (before → after) | subagent weighted (before → after) | share | merges | weighted-per-merge |
+  |---|---|---|---|---|---|---|---|
+  | L1-routing | 9,745 → **4,964** | 202,093,981.4 → **104,768,807.8** | 1,748,832,653 → 932,606,194 | 53,589,959.0 → 24,380,131.1 | 26.5 % → **23.3 %** | 28 | 7,217,642.2 → **3,741,743.1** |
+  | L1-backlog | 12,060 → **6,205** | 262,700,682.6 → **135,999,291.6** | 2,279,918,775 → 1,201,840,938 | 124,163,141.7 → 62,663,439.9 | 47.3 % → **46.1 %** | 34 | 7,726,490.7 → **3,999,979.2** |
+  | L1-main | 7,089 → **4,034** | 190,405,176.5 → **107,119,446.4** | 1,733,132,396 → 989,705,170 | 85,499,036.7 → 45,288,117.6 | 44.9 % → **42.3 %** | 76 | 2,505,331.3 → **1,409,466.4** |
+
+  The denominators are untouched, so every row drops ~43–49 % and R5b must
+  compare against these numbers, not R5A3's. L1-backlog's subagent weighted
+  tokens grouped by `message.model` (counts only, never message text):
+  3,343 responses / 61,138,502.0 weighted = **97.6 %** `claude-sonnet-5` plus
+  212 / 1,524,937.9 = 2.4 % `claude-haiku-4-5` — R5A3's reading survives the
+  re-key: the share is the Sonnet reviewer legs, not Haiku first passes.
+- **first-wins, measured**: 242 of the 4,964 L1-routing responses do *not*
+  repeat their usage — the client writes the growing partial usage as blocks
+  land, so the last record of a message carries the most. The rule stays
+  first-wins (a duplicate never adds usage); keying on the largest copy instead
+  would move the L1-routing numerator by 132,582.0 weighted, 0.13 %.
+- **`tests/test_autoos_tokenrate.py`**: `ResponseDedupTests` (new, 10 cases) and
+  R5A3's `test_the_blocks_of_one_turn_are_not_deduped…` reversed to pin the new
+  rule. Covers three records sharing a message id counting once, distinct message
+  ids counting separately, the same message id under another request id being
+  *two* responses, the uuid fallback, a record with neither id staying its own
+  response, first-wins against a growing duplicate, and a subagent copy of a
+  parent message counting once and landing in the subagent view. The fixture
+  `usage_line` now writes a `requestId` (derived from the message id, as the real
+  transcript always agrees; `rid=` sets it explicitly) — 8 red before the change,
+  **60 green** after.
+
 ### Changed — `token-rate` discovery reaches `<session>/subagents/*.jsonl` (RESTART R5A3, the router's answer to D-045's open caveat, 2026-09-28)
 
 - **`tools/autoos_tokenrate.py`**: D-045 kept an in-session subagent turn in the
