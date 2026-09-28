@@ -1,0 +1,11 @@
+# CI shards for the Linux suite (WS-CIPAR, 2026-09-28): one line per shard,
+# `<name> <comma-separated tests/linux part numbers>`. Every part must appear in
+# exactly one shard - tests/ci-shards.py checks it before any shard runs, so a
+# part cannot be dropped (or run twice) silently. Balanced by measured per-part
+# time; the slowest parts sit alone.
+a 13
+b 33
+c 17,07,01,02,03,04,05
+d 22,14,21,20,06,08,09,10,11,12
+e 34,38,15,16,19,23,24,25
+f 36,18,28,39,35,30,29,32,31,26,27,37

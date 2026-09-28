@@ -16,6 +16,10 @@
 #                                 "shellcheck is clean" cases (default: a loud skip)
 #   AUTOOS_MEMINFO=<file>         meminfo that sizes shellcheck's memory limit
 #                                 (default /proc/meminfo; unreadable = no limit)
+#   AUTOOS_TEST_PARTS=34,18       run only these tests/linux/NN-*.sh parts (CI
+#                                 shards the suite across parallel jobs this way);
+#                                 a number that names no part is an error, so a
+#                                 shard cannot pass by running nothing
 #
 # No test installs anything. Providers are asserted on the PLANNED command,
 # never on system state.
@@ -38,7 +42,7 @@ for arg in "$@"; do
     case "$arg" in
         --wsl)
             wslpath_root="$(wslpath -a "$ROOT" 2>/dev/null || echo "$ROOT")"
-            exec wsl.exe -- env AUTOOS_FULL_SUITE="${AUTOOS_FULL_SUITE:-}" bash "$wslpath_root/tests/run-tests.sh"
+            exec wsl.exe -- env AUTOOS_FULL_SUITE="${AUTOOS_FULL_SUITE:-}" AUTOOS_TEST_PARTS="${AUTOOS_TEST_PARTS:-}" bash "$wslpath_root/tests/run-tests.sh"
             ;;
         --filter) shift; FILTER="${1:-}" ;;
         --filter=*) FILTER="${arg#--filter=}" ;;
@@ -73,6 +77,7 @@ describe() {
 
 it() {
     CURRENT="$1"
+    if [[ "${PART_SELECTED:-1}" != 1 ]]; then CURRENT=""; return 1; fi
     if [[ -n "$FILTER" ]]; then
         # Comma-separated OR: --filter usb,catalog runs the union, so shards
         # can be disjoint partitions executed in parallel worktrees.
@@ -278,8 +283,44 @@ printf '%sAutoOS Linux test suite%s  (%s)\n' "$DIM" "$RESET" "$ROOT"
 
 
 # ─── Split test parts ────────────────────────────────────────
+# AUTOOS_TEST_PARTS selects parts by their two-digit number; empty = all. Every
+# part is still sourced - later parts use helpers earlier ones define - but a
+# test outside the selected parts is skipped at its `it` line (PART_SELECTED).
+PART_SELECTED=1
+__selected=""
+# Read once, then unset: a test that starts run-tests.sh itself (tests/linux/01)
+# must get a whole-suite child, not this shard's selection.
+__parts_env="${AUTOOS_TEST_PARTS:-}"
+unset AUTOOS_TEST_PARTS
+if [[ -n "$__parts_env" ]]; then
+    IFS=',' read -ra __wanted <<< "$__parts_env"
+    for __n in "${__wanted[@]}"; do
+        __n="${__n// /}"
+        [[ -n "$__n" ]] || continue
+        # Exactly two digits: a glob such as `*` or `?3` would pass the -f check
+        # below yet match no selection, and the shard would run nothing and pass.
+        __match=("$ROOT"/tests/linux/"$__n"-*.sh)
+        if [[ ! "$__n" =~ ^[0-9]{2}$ || ! -f "${__match[0]}" ]]; then
+            printf 'run-tests.sh: AUTOOS_TEST_PARTS names no part %s\n' "$__n" >&2
+            SUMMARY_PRINTED=1
+            exit 2
+        fi
+        __selected+=" $__n "
+    done
+    printf '%sparts: %s%s\n' "$DIM" "$__parts_env" "$RESET"
+fi
+# __part_selected <part path>: prints 1 when the part is in the selection (or
+# there is none), else 0 - the value PART_SELECTED takes while it is sourced.
+__part_selected() {
+    local n="${1##*/}"
+    n="${n:0:2}"
+    if [[ -z "$__selected" || "$__selected" == *" $n "* ]]; then echo 1; else echo 0; fi
+}
 # shellcheck source=/dev/null
-for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh; do . "$__part"; done
+# One line on purpose: tests/linux/01 stubs the parts out by rewriting the line
+# that starts `for __part in`, so the whole loop must live on it.
+for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh; do PART_SELECTED="$(__part_selected "$__part")"; . "$__part"; done
+PART_SELECTED=1
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 printf '\n%s%s%s\n' "$DIM" "$(printf '─%.0s' $(seq 1 56))" "$RESET"
