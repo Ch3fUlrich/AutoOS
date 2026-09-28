@@ -30,10 +30,12 @@ the same server in both scopes.
 Cheap detector — the graph must know itself as this repo:
 
 ```gq
-query whoami() { match { $p: Project } return { $p.slug, $p.repository } }
+query whoami() { match { $p: Project  $d: Decision  $d.slug = "autoos-adr-0006-launch-time-routing-resolver"  $d decidedIn $p } return { $p.slug, $d.slug } }
 ```
 
-`repository` must equal `git remote get-url origin`. If a recall looks empty
+Exactly one row (`autoos`, `autoos-adr-0006-...`) means the bridge serves this repo's graph;
+0 rows means it is serving another graph. (`Project` has no `repository` property in the
+live schema, so the check keys on a decision that only this repo's graph holds.) If a recall looks empty
 (`0 rows except 2 Preferences`), suspect the trap before suspecting a wipe.
 
 ## Skills
