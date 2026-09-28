@@ -201,6 +201,14 @@ only skips when neither that nor the binary is available. Install them where you
 - `.ps1`/`.psm1` files keep the UTF-8 BOM **and CRLF** line endings in the working copy;
   `.gitattributes` normalises them to LF in git's own storage, so the diff you read and
   the bytes on disk legitimately differ.
+- `pkill -f <pattern>` and `pgrep -f <pattern>` run from a shell tool call match the **calling
+  shell's own command line** — the pattern is literally in it — so the call kills itself: exit 144
+  and no output. Filter `grep -v $$`, or resolve the pids first and kill by pid. (observed
+  2026-09-27 by L2-general; no repo test)
+- Derive an argv **head** verbatim from the token list; never drop the tokens that start with `-`.
+  A discarded `--` before a wrapper's positional reads as *no child process*, and *no child* is an
+  unaudited **allow**. Deny unknown heads instead of walking past them (fix 978dd09,
+  `tools/hostexec/policy.py`).
 
 ## 7. Definition of done
 

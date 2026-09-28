@@ -248,8 +248,8 @@ Rules:
 1. **Max fan-out 2+2+2** (1 t1 → ≤2 t2 → ≤2 t3 each). Prevents
    quota collapse and keeps reviews reconcilable.
 2. **Different lenses per t3 pair**: the combo picks them (registry order,
-   `route --explain`); the *why* — same family repeats writer blind spots — is
-   rule R-orch-13, and R-orch-14 keeps Haiku an extra pass only.
+   `route --explain`); the *why* is rule R-orch-13 and Haiku's place is R-orch-14
+   (both in `SKILL.md` — not restated here).
 3. **Rate-limit hygiene**: probes are `Reply with exactly: ack` +
    ONE focused review question each, small output budget. Reasoning
    models (spark) need a real budget (≥2048 tokens) or they return
