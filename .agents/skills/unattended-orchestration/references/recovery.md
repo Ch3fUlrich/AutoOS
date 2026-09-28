@@ -67,11 +67,22 @@ distinguishes a hung child from a busy one.
 2026-09-12: an agy turn that completed every task, made 7 commits and wrote its DONE note still
 reported `"status":"ERROR"` (`Your previous response contained an improperly formatted function
 call`). The runner reads that JSON in exactly two places — the preflight probe, and recovering a
-session id — and in neither does it decide whether a session succeeded.
+session id — and in neither does it decide whether a session succeeded. The rule runs the other way
+too, and is the more expensive direction: **exit 0 with no REPORT is not success** (R-coord-02).
+Measured 2026-09-27 21:44:47Z — a qoder worker exited rc 0 mid-task with `let me write it tightly`
+as its last message, and the run looked green (`work/L1-routing/REDACTFIX.out`). A turn whose final
+message promises more work than it delivered is an early stop: treat it as `other` + no DONE note,
+resume from its WIP, and never merge it. The spawner should say so itself (exit non-zero,
+`INCOMPLETE`) instead of leaving it to the coordinator's judgement.
 
 **Resume, never restart.** The runner keeps one live session per handoff: it stops the finished
 one before resuming, so retries never accumulate background sessions holding the same
-conversation. Nothing a session committed is ever lost.
+conversation. Nothing a session committed is ever lost. A resumed (or relaunched-onto-a-WIP)
+session **runs the existing suite before writing new tests** (R-orch-06): the WIP it inherited was
+never run, so it is not a partial fix but a new defect set — measured in `REDACTFIX2.out`, where an
+inherited redaction WIP carried a regex that matched nothing (a silent leak) and a call to a
+function that was never written (32 crashes), both of which the existing suite caught the moment it
+ran.
 
 **A resumed session is told why, when, and that its subagents are gone.** The nudge names the
 reason (limit reset, transient failure, session-hours cap, host or runner restart, early stop),

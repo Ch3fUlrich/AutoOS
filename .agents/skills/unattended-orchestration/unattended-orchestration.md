@@ -188,8 +188,9 @@ Only spawning roles list the server (orchestrator, suborchestrator).
 
 ## Stuck-agent watchdog (t1 probes, never waits forever)
 
-T1 owns liveness (the session-side rules for the same job: R-coord-08 watches children,
-R-orch-06 relaunches a quiet one). Every background t2 gets a heartbeat line in
+T1 owns liveness (the session-side rules for the same job: R-coord-08 watches children and
+relaunches one quiet past 25 min — it binds L2 too; R-orch-06 says relaunch, never resume).
+Every background t2 gets a heartbeat line in
 `logs/orch-<date>.log`; t1 re-checks on a fixed interval and treats
 silence as stuck — with one exception for rate limits (below):
 
