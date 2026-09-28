@@ -1484,6 +1484,54 @@ if it "agent-skill-links: a moved checkout leaves a dangling link and detection 
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
+if it "agent-skill-links: links into the retired agent-skills clone are retargeted, live or dangling, with a record; =0, foreign and failed cases keep the link (Q-018)"; then
+    # Operator Q-018 (2026-09-28): setup moves links into the retired clone -
+    # exactly $SYS_HOME/Documents/{Code,code}/agent-skills/skills/<name>, the path
+    # autoos_skills_source used - live or dangling (the clone is what gets
+    # deleted). The record is written only after a successful move and names the
+    # literal readlink value; the target is never touched. A user's own checkout
+    # that merely ends in agent-skills/skills/<name> is theirs. =0 opts out.
+    problems=""
+    for mode in live dangling optout foreign lnfail; do
+        tmp="$(mktemp -d)"
+        home="$tmp/home"
+        oh_skill_repo "$tmp/repo"
+        old="$home/Documents/code/agent-skills/skills/alpha"
+        [[ "$mode" == foreign ]] && old="$home/my/agent-skills/skills/alpha"
+        mkdir -p "$old" "$home/.claude/skills"
+        ln -s "$old" "$home/.claude/skills/alpha"
+        [[ "$mode" == dangling ]] && rm -rf "$home/Documents/code/agent-skills"
+        [[ "$mode" == lnfail ]] && chmod 555 "$home/.claude/skills"
+        (
+            unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+            [[ "$mode" == optout ]] && export AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0
+            asl_run "$home" "$tmp/repo" >/dev/null
+            got="$(readlink "$home/.claude/skills/alpha")"
+            records=("$home"/.claude/skills.autoos-backup-*)
+            case "$mode" in
+                live|dangling)
+                    [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[$mode: alpha points at $got]"
+                    [[ -f "${records[0]}" ]] && grep -qxF "$home/.claude/skills/alpha -> $old" "${records[0]}" \
+                        || echo "[$mode: no record naming the literal old target]"
+                    asl_gate "$home" "$tmp/repo" || echo "[$mode: not installed after the retarget]"
+                    asl_run "$home" "$tmp/repo" >/dev/null
+                    n=$(ls -d "$home"/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
+                    [[ "$n" == 1 ]] || echo "[$mode: second run left $n records]"
+                    ;;
+                *)
+                    [[ "$got" == "$old" ]] || echo "[$mode: alpha was moved to $got]"
+                    [[ ! -e "${records[0]}" ]] || echo "[$mode: a record was written]"
+                    ;;
+            esac
+            if [[ "$mode" != dangling && ! -d "$old" ]]; then echo "[$mode: the old target was deleted]"; fi
+        ) >"$tmp/out" 2>&1
+        problems+="$(grep '^\[' "$tmp/out")"
+        chmod 755 "$home/.claude/skills" 2>/dev/null
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
 if it "agent-skill-links: the linker and detection read one destination list"; then
     # One fact, one home: the gate must check exactly what the writer writes, or
     # a machine is told it is finished while a client directory is still empty.

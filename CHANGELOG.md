@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
