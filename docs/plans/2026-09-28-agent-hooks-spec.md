@@ -22,19 +22,21 @@ manual D-080 practice and change no existing subcommand.
 
 ## 2. Claude Code hooks inventory
 
-Exact vendor JSON schemas, exit-code contracts and matcher syntax below are
-(unverified - no web access); the lifecycle points and capabilities follow the
-brief, corrected where the checkout contradicts it. Every AutoOS use cites a
-real file.
+Exact vendor JSON schemas, exit-code contracts and matcher syntax were
+(unverified - no web access) at write time; the Sonnet final (this pass)
+checked the 9 hooks below against `code.claude.com/docs/en/hooks` and
+corrected two rows (PreToolUse/Stop exit-code contracts now confirmed;
+PreCompact's context-injection claim corrected — see its row). Every AutoOS
+use cites a real file.
 
 | Hook | Fires on / can do | AutoOS use or no use |
 |---|---|---|
 | SessionStart | Session begins (incl. resume/clear, per matcher). Can inject context (additional context JSON) and run setup commands; cannot block anything (session already started). | USE (P1): inject the D-080 restart bundle — brief + state-card NEXT/threads + shared-context tail + inbox tail. Today's closest checked-in artifact is the RESTART pack: card `<RUN>/status/<name>.card.md` (`docs/plans/2026-09-28-restart-spec.md:132-163`), pack order prefix/snapshot/memory/brief/card/events (`docs/plans/2026-09-28-restart-spec.md:172-211`). The hook renders "run `pack --since-card`, print it" instead of trusting the relaunched session to remember. |
 | UserPromptSubmit | Every user prompt, before the model sees it. Can inject context or block/redirect. | NO USE for an unattended orchestrator — stated explicitly: there is no interactive user; prompts arrive as briefs, inbox records and heartbeat beats, none of which pass through this hook. A prompt-time guard would fire on the orchestrator's own machinery, not on operator intent. Revisit only for attended workstation sessions. |
-| PreToolUse | Before a tool call; matcher per tool. Can block (exit 2, unverified - no web access) or modify. | USE (P1): the three §6 guards — git-push-to-main block; secret-path bash deny; self-spawn depth block. See §6 for what is new vs already code-enforced. |
+| PreToolUse | Before a tool call; matcher per tool. Can block via `exit 2` or `hookSpecificOutput.permissionDecision: "deny"` (both confirmed, Sonnet final vs vendor docs); either also carries `hookSpecificOutput.additionalContext`. | USE (P1): the three §6 guards — git-push-to-main block; secret-path bash deny; self-spawn depth block. See §6 for what is new vs already code-enforced. |
 | PostToolUse | After a tool call completes. Observe/inject only; cannot undo. | USE (P1, lint tier only): `shellcheck` after a `.sh` edit, `python3 -m py_compile` after a `.py` edit. Observe-only feedback, never a block: a failing lint is injected as context for the next turn, matching the repo rule that shell must be `shellcheck` clean (`AGENTS.md:100-102`). |
-| PreCompact | Before context compaction summarizes history away. Can run a command and inject its output into the compaction record. | USE (P1): write/refresh the state card before it is summarized away — the card at `docs/plans/2026-09-28-restart-spec.md:132-163` plus the `RUN/status/<name>.md` wave-rewrite procedure (`.agents/skills/unattended-orchestration/references/state-file.md:38-44`). Last chance to persist `threads`/`traps` as facts, not as summary prose. |
-| Stop | The session's main loop ends (agent finished). Can block stop (force continuation, unverified - no web access) or run exit capture. | USE (P1): same state-card write as an exit-time safety net. Cheaper than a WIP commit, needs no git, covers the case the session never hits its context cap (`R-coord-06`, `.agents/skills/unattended-orchestration/SKILL.md:106`). |
+| PreCompact | Before context compaction summarizes history away. Observational: runs a command as a side effect; no documented context-injection field for this hook (Sonnet final, verified against vendor docs — corrects the brief's "inject its output" phrasing). | USE (P1): write/refresh the state card before it is summarized away — the card at `docs/plans/2026-09-28-restart-spec.md:132-163` plus the `RUN/status/<name>.md` wave-rewrite procedure (`.agents/skills/unattended-orchestration/references/state-file.md:38-44`). The P1 use only needs the run-a-command side effect (writing the card file), not injection, so this correction does not change the design. Last chance to persist `threads`/`traps` as facts, not as summary prose. |
+| Stop | The session's main loop ends (agent finished). Can block via `exit 2` (forces continuation, confirmed Sonnet final vs vendor docs) or run exit capture. | USE (P1): same state-card write as an exit-time safety net. Cheaper than a WIP commit, needs no git, covers the case the session never hits its context cap (`R-coord-06`, `.agents/skills/unattended-orchestration/SKILL.md:106`). |
 | SubagentStop | A subagent (dispatched worker) ends. Runs in the parent context; can inject the child's closing state. | USE (P2, not P1): a dispatched worker's exit point could feed the card/log write workers never get today — they only get `job.json`/`output.log`/`exit.json` (the run-dir layout `tools/autoos_agent_mcp.py` documents for spawned runs). P2 because leaf output contracts already exist (`catalog/agent-harness.json:9`, `docs/agents/leaf-contract.md` via `rules.leaf_contract`), so this is a nicer capture path, not a missing one. |
 | SessionEnd | Session fully ends/cleanup. Observe/cleanup only. | MARGINAL: cleanup, e.g. release a future fleet-node lease (forward hook only; this spec does not design fleet-node). No other AutoOS use: heartbeats already own liveness (`R-coord-07`, `.agents/skills/unattended-orchestration/SKILL.md:107`), and run state lives in git-ignored `logs/` (`tools/autoos_clients.py:393-402`), which needs no session-scoped cleanup. |
 | Notification | The harness surfaces a blocked/waiting state (permission prompt, long wait). Observe/notify only. | COMPLEMENT, not duplicate, of `tools/autoos-ask.py`: the ask-back writes `question.json` (`{"text", "asked"}`, `tools/autoos-ask.py:19-24`) and blocks until `respond()` writes `answer.json`, with exit codes 0/2/3/5 (`tools/autoos-ask.py:39-44`). That is worker→orchestrator signalling with a persisted, auditable artifact. Notification is harness→human surfacing with no artifact. Wire Notification to *announce* a pending `question.json` (nudge the operator), never to replace it: the file is the state, the notification is the bell. |
@@ -55,10 +57,18 @@ opencode project `.agents/skills`). Everything beyond these two citations in
 this section is (unverified - no web access) — field names, file names and
 hook points are sketched from the brief, not from vendor docs.
 
-- opencode: brief asserts plugin hooks `tool.execute.before` /
-  `tool.execute.after` plus session-lifecycle events (unverified - no web
-  access; do not guess field names — the P-lane below verifies against the
-  installed opencode before rendering). What IS verified: the existing single
+- opencode: `tool.execute.before` / `tool.execute.after` confirmed (Sonnet
+  final vs `opencode.ai/docs/plugins/`), plus real session-lifecycle events
+  `session.created`, `session.updated`, `session.compacted`, `session.idle`,
+  `session.status`, `session.error`, `session.deleted`, `session.diff` (same
+  source) — `session.compacted` is opencode's PreCompact-equivalent hook
+  point, `session.idle`/`session.created` cover Stop/SessionStart-equivalent
+  timing. Message-level (`message.updated`, `message.part.*`) and
+  `shell.env` hooks also exist but have no P1 AutoOS use. Still to confirm in
+  the P-lane: exact payload shapes for each event (this pass verified event
+  *names* only, not full field schemas) and how a plugin's guard denies a
+  tool call (docs list the hook points but this pass did not fetch the deny
+  contract). What IS also verified: the existing single
   source is `catalog/agent-harness.json` (`rules` `catalog/agent-harness.json:4-10`,
   `fences` `catalog/agent-harness.json:11-73`, `mcp_servers`
   `catalog/agent-harness.json:74-119`, `roles` `catalog/agent-harness.json:120-199`),
