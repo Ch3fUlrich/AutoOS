@@ -141,9 +141,9 @@ tracked task):
 
 **Host fences (OpenCode config).**
 - `external_directory: deny`;
-- `read` denies for `.env*`, `auth.json`, `api_keys*`, `.claude.json*`, `patterns.txt`;
-- 28 bash denies: git history changes, `rm -rf` of / and ~, sudo, docker compose/rm,
-  `/mnt/c`, the opencode config and auth paths, `env`/`printenv`/`export`.
+- every `read` and `bash` deny/allow pattern is `catalog/agent-harness.json`'s
+  `read_deny_all` / `read_allow_all` / `bash_deny_all` / `bash_deny_leaf` / `bash_allow_all`,
+  rendered by `lib/agent_harness.py` and asserted by both suites — read them there, not here.
 - The only permission rule that lets a Claude session start a leaf is
   `Bash(wsl -e bash -lc *run-leaf.sh *)`. The classifier refuses raw `opencode run` ("Create
   Unsafe Agents", measured).

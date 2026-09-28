@@ -152,6 +152,22 @@ carrier. All of them are in `tools/autoos-agent.py` unless named.
   Opus 500k (was 600k), Fable 500k (was 600k), Sonnet 500k (was CAPL2's interim 250k) - orchestration
   sessions, 1M window; Muse Spark 400k (was 300k), Gemini 400k (was 200k), the 200k class 80k (was
   150k) - worker agents. Rows key on model family as the role proxy (comment at `DEFAULT_CAPS`).
+### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
+
+`catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is
+`configuration/api-keys.yml`, and the gateway keys `~/.config/autoos/ai-stack/client.key` /
+`manage.key` were not fenced at all — a spawned leaf could `Read` and `cat` all three; they are
+now denied for read and shell everywhere (with `*api-keys.example*` allowed through the same
+deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
+allowed every `read`, carries the `read_deny_all` patterns as denies.
+
+- KEYDENY2 (2026-09-28, same lane): that shell **allow** was matched against the whole command
+  line, not a path, so `cat configuration/api-keys.yml configuration/api-keys.example.yml`,
+  `cp configuration/api-keys.yml /tmp/api-keys.example/x` and `cat /tmp/api-keys.example/stolen`
+  all resolved to `allow` — a substring allow can never fence a command line. Both shell allows
+  are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
+  the template with the read tool, and the read allow is narrowed to the exact suffix
+  `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
 
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
