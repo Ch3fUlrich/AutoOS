@@ -19,7 +19,16 @@
     "operator top-up (router balance 19.99 USD), so deepseek/deepseek-flash",
     "heads t2-worker-clean/t3-driver-clean again and deepseek-v4.1-flash is",
     "no longer omitted. t1-orchestrator-clean and samba/* still omitted",
-    "(contributor-only, paid, or provider-off)."
+    "(contributor-only, paid, or provider-off).",
+    "MISTRALFIX 2026-09-28: mistral/mistral-small-latest left the last routes",
+    "it was a leg of (t3-driver L11, t2-worker-clean, t3-driver-clean) - a",
+    "direct probe of api.mistral.ai with this key measured 429 at 0",
+    "requests/minute for it on this plan and the gateway's own 7-day log failed",
+    "51 of 51 calls on it. Both -clean twins keep the live",
+    "deepseek/deepseek-flash head, so neither is marked unavailable;",
+    "mistral/mistral-code-latest (measured 200, 125 rpm) stays t3-driver's",
+    "head. The numbers live on providers.mistral.limits, read by",
+    "tools/registry.py plan_dead_reasons() - never restated here."
   ],
   "retired": [
     "tier1",
@@ -125,8 +134,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "deepseek/deepseek-flash",
-        "mistral/mistral-small-latest"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -146,7 +154,6 @@
       "models": [
         "mistral/mistral-code-latest",
         "deepseek/deepseek-flash",
-        "mistral/mistral-small-latest",
         "meta-api/muse-spark-1.3-contributor"
       ]
     },
@@ -155,8 +162,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "deepseek/deepseek-flash",
-        "mistral/mistral-small-latest"
+        "deepseek/deepseek-flash"
       ]
     },
     {

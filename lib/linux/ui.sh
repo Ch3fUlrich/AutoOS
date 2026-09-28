@@ -321,7 +321,9 @@ ui_menu() {
     if ! ui_is_interactive; then
         local out=""
         for ((i = 0; i < total; i++)); do
-            if (( MENU_SEL[i] )); then out+="${MENU_ID[i]} "; fi
+            # A disabled row is not a choice, keyboard or not — the fallback reads
+            # the same flag every key handler above honours.
+            if (( MENU_SEL[i] && ! ${MENU_DISABLED[i]:-0} )); then out+="${MENU_ID[i]} "; fi
         done
         MENU_RESULT="${out% }"
         return 0

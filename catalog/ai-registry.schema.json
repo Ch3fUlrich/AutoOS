@@ -95,7 +95,7 @@
     },
     "provider_limits": {
       "type": "object",
-      "description": "providers.<id>.limits entry (brief R4, 2026-09-27): one per model spelling. rpm/rpd/tpm/tpd are each optional non-negative ints (the resolver reads only tpm today); source is required (D20).",
+      "description": "providers.<id>.limits entry (brief R4, 2026-09-27): one per model spelling. rpm/rpd/tpm/tpd are each optional non-negative ints; source is required (D20). MISTRALFIX (2026-09-28): the resolver reads rpm and plan_available too, not only tpm - `rpm: 0` (a zero request quota, measured 429) and `plan_available: false` (the model is not on this plan, measured 403) both mean the leg cannot serve, and tools/registry.py plan_dead_reasons() skips such a leg. plan_available must be a real boolean: the string 'false' is truthy at the gate, so rule 10 rejects a non-bool.",
       "required": ["source"],
       "additionalProperties": false,
       "properties": {
@@ -103,6 +103,7 @@
         "rpd": { "type": "integer", "minimum": 0 },
         "tpm": { "type": "integer", "minimum": 0 },
         "tpd": { "type": "integer", "minimum": 0 },
+        "plan_available": { "type": "boolean" },
         "source": { "type": "string" }
       }
     },

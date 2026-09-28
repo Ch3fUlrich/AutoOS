@@ -96,6 +96,479 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
   harnesses.
 
+### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
+  **`tools/autoos_context.py`** `DEFAULT_CAPS`: a sonnet L2 no longer falls into the 200k-class row.
+  Measured: L1-backlog handed off every ~15 min at 150k with a 55.5k fresh-session baseline. Temporary
+  until the RESTART packs land; lowered again if a measured relaunch costs < ~20k. Haiku and unknown
+  models keep 150k.
+### Fixed — `codestral-latest` counts as training until a source says otherwise (MISTRALFIX3, Muse review of MISTRALFIX2, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `models.codestral-latest.trains_on_prompts: true` (operator 12:0xZ
+  "Mistral trains -> never in -clean tiers"), so `private_safe()` keeps it out of every `-clean`
+  route; its limits row names both sources (10:5xZ direct headers for rpm/tpm, 11:5xZ gateway
+  answers); the Mistral provider note counts three limits rows. Guard tests in `MistralReplaceTests`.
+
+### Fixed — the codestral pair replaces `mistral-small`; the `-clean` twins stay non-training (MISTRALFIX2, 2026-09-28)
+
+- **Operator brief (via L1-main 11:5xZ)**: `mistral-small` does not work — replace it
+  with Mistral Codestral wherever it was a leg, and where both codestral siblings
+  answer, take `mistral-code-latest`. Measured through the gateway (3 calls each,
+  `max_tokens 4096`, `work/L1-routing/MISTRALREPL.probe.jsonl`):
+  `mistral/mistral-code-latest` 3/3 200 p50 0.3 s, `mistral/codestral-latest` 3/3 200
+  p50 0.3 s, `mistral/mistral-small-latest` 0/3 (429) — the gateway agrees with the
+  10:5xZ direct probe (MISTRALFIX).
+- **`catalog/ai-registry.json:models.codestral-latest` +
+  `providers.mistral.limits.codestral-latest`**: registered with the measured 125 rpm /
+  625k tpm row and the gateway-probe source, and **not** made a leg of any route — it is
+  the tested alternative, which is what the brief's tie-break left it. `context_advertised`
+  / `output_max` / `reasoning` are inherited from the provider's other records, not
+  measured here, and the `$comment` says so; `trains_on_prompts` stays unset (inherits
+  `providers.mistral`, the shape `mistral-small-latest` carried) because nobody has
+  measured whether codestral trains. `mistral-code-latest` already had its measured row.
+- **The requested `-clean` swap was measured and refused, not skipped**: putting
+  `mistral/mistral-code-latest` in `t2-worker-clean` / `t3-driver-clean` (the position
+  `mistral-small` held, which would have given each twin two live legs) makes
+  `tools/registry.py validate` exit 1 twice — `privacy: <route> leg
+  mistral/mistral-code-latest model trains on prompts` (spec 3.1 rule 3, `private_safe()`).
+  Those are the routes a `privacy=sensitive` card lands on
+  (`tests/test_autoos_spawner.py`), and `tests/linux/33-documentation.sh` independently
+  bans `mistral/mistral-code` in any `-clean` combo, so the leg would have routed private
+  prompts into a training pool. The twins keep MISTRALFIX's legs and their one live leg,
+  the native `deepseek/deepseek-flash` head, which satisfies the route-liveness invariant.
+- **`t3-driver`** needed no change and no new leg: `mistral/mistral-code-latest` was
+  already its head, so the dead model's slot is covered without duplicating the leg
+  (`MistralReplaceTests` pins the count at 1).
+- **Tests, `tests/test_registry.py:MistralReplaceTests` (written first, red, then made
+  green)**: codestral's measured row and source, codestral in no route, the probe recorded
+  in the registry, `mistral-small` in no route, `t3-driver`'s single mistral-code leg — and
+  the guard that the `-clean` twins carry no training leg and exactly one live leg, so a
+  later lane cannot "finish" this swap by adding it. The route-liveness invariant now reads
+  through the new `live_legs()` helper, shared with the count tests instead of restating the
+  filter.
+- **Docs**: `docs/models.md` records the gateway probe and the refused swap next to the
+  MISTRALFIX plan-limits table; `docs/models-proposed.md`'s three rows for the affected
+  combos stop listing `mistral-small` as a leg and name the reason. All five `render
+  --check` surfaces pass unchanged — no route's legs moved and a route-less model renders
+  nowhere, so `combos.json`, the litellm block, `ide-models.json` and the OpenHands
+  profiles had nothing to re-derive.
+
+### Fixed — Mistral plan limits are measured and gate the route; no route routes into a dead leg (MISTRALFIX, 2026-09-28)
+
+- **`catalog/ai-registry.json:providers.mistral.limits`**: the plan itself, not the
+  provider's uptime, is what killed `mistral-small-latest` — a direct probe
+  (2026-09-28T10:5xZ, `x-ratelimit` headers on `api.mistral.ai`) returns 429 at
+  **0 req/min** for it while `mistral-code-latest` serves 125 rpm / 625k tpm on the
+  same key. The measured rows now live in the registry's one home for plan caps
+  (`rpm`/`tpm`/`source`), and the bare-spelling models that were never registered
+  (`devstral-latest`, `mistral-medium-latest`, `magistral-medium-latest`,
+  `codestral-latest`, `open-mistral-nemo`, `ministral-8b-latest`, and
+  `mistral-large-latest` at 403) are recorded in the provider `$comment` only —
+  rule 10 rejects a limits key that does not resolve to a model of that provider.
+  The gateway agrees: `mistral-small-latest` failed 51/51 calls over 7 days.
+- **`tools/registry.py:plan_dead_reasons()`** (new, alongside
+  `provider_plan_limits()`): a leg is plan-dead when its row says `rpm: 0` or
+  `plan_available: false`; no row is never a deny. `plan_available` joined
+  `$defs.provider_limits` in the schema and `_LIMITS_ENTRY_KEYS`, so rule 10 now
+  rejects a non-boolean (a string would read as available).
+- **`tools/autoos_resolver.py:usable_legs()`** had no plan gate at all — only a
+  request-size `tpm` check — so a 0-rpm leg survived every filter and got served.
+  `plan_dead_reasons` now runs immediately after the availability hard check,
+  naming the reason `"plan: 0 rpm"`. The stale "rpm/rpd/tpd are data only" claims
+  in that module are corrected: `rpm` gates, but only for its zero.
+- **`routes.t3-driver` / `t2-worker-clean` / `t3-driver-clean`**: `mistral/
+  mistral-small-latest` is out of all three (13→12, 4→3, 3→2 legs). The `-clean`
+  twins do not need marking unavailable — after DSBACK they head on native
+  `deepseek/deepseek-flash`, which is live and plan-ungated, so each keeps a
+  serving leg. `t3-driver` keeps its paid `mistral/mistral-code-latest` leg.
+- **Invariant, `tests/test_registry.py:MistralPlanLimitsTests`**: every route that
+  serves traffic (`servable_route_ids`) keeps at least one leg that is
+  gateway-servable *and* plan-alive, over the real registry — the check that would
+  have caught this on the day the leg was added. A route with zero servable legs
+  renders no combo and so serves nothing, which is why `t1-orchestrator-clean` is
+  correctly outside the rule rather than exempt from it.
+- **Renders** re-derived from the registry: `sync-router-tiers.py` rewrote the
+  litellm managed block, `docs/models.md`'s managed block plus its mermaid chains
+  and provider table, `configuration/omniroute/combos.json` by minimal hand-edit
+  of the three leg arrays (its hand-written `$comment` is an intentional equality
+  exception and stays); `validate` and all five `render --check` surfaces pass.
+- **Stale pins re-derived, not loosened (R-worker-01)**: `RuleThreePrivacyTests`
+  read the live head leg from the registry instead of hard-coding mistral-small,
+  and three resolver tests that called it "the proven leg" now use
+  `test_autoos_resolver.py:clean_head_leg()`; `PlanLimitsGateTests` seeds the dead
+  plan inline so the gate is tested without `measured.json`.
+
+### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (HIGH): R5A4's `Totals.add` lets a second copy
+  of one response add no usage and still move it *into* the subagent view — and
+  the move carried the **duplicate's** numbers. The two are only equal while every
+  copy of a response repeats the same usage, which this client does not do:
+  measured over the R5a window, 872 of the 13,691 collapsed duplicates carry a
+  different usage than the record that got counted (the growing partial usage of
+  a streaming response, R5A4's own "first-wins, measured" note), so a promotion
+  could put more into `subagent_weighted` than `weighted` holds for that response
+  and break D-045's rule that the subagent columns are a *view onto* the
+  numerator. `counted` now stores what was summed beside the claim —
+  `(sidechain, weighted, naive)` per identity — and a promotion re-uses exactly
+  those. **Latent on this host**: 0 promotions occur over the whole R5a window
+  (parent and `subagents/` files share no response id, as R5A3 measured), so all
+  three rows re-ran to R5A4's numbers to the token — L1-routing 4,964 records /
+  104,768,807.8 weighted / 24,380,131.1 subagent / 23.3 % / 28 merges /
+  3,741,743.1 per merge, L1-backlog 6,205 / 135,999,291.6 / 62,663,439.9 /
+  46.1 % / 34 / 3,999,979.2, L1-main 4,034 / 107,119,446.4 / 45,288,117.6 /
+  42.3 % / 76 / 1,409,466.4. No before-number moved; R5b still compares against
+  the R5A4 table.
+- **`--json`**: an unnamed `--repo` prints `"default"` instead of the resolved
+  current directory. That was the same leak R5A3 closed for `--projects-dir`
+  (hard rule 1 — the path carries the operator's username), reached by a
+  different flag; a named `--repo` is still echoed as given, and `--no-git` still
+  reports no repo at all.
+- **`tests/test_autoos_tokenrate.py`**: 6 new cases — the promotion across the two
+  depths with a deliberately *larger* duplicate (the streaming shape), a property
+  sweep over the fixture usages at both depths asserting
+  `subagent_weighted <= weighted` and `subagent_naive <= naive` for every
+  ordering, and four `--json` repo cases (report-level and CLI-level, defaulted
+  and named). 15 red before the fix (the promotion case, 12 of its sweep
+  subtests, and the two repo echoes), **66 green + 32 subtests** after;
+  `python3 -m pytest -q tests/` 2,245 passed / 4 skipped,
+  `bash tests/run-tests.sh --filter token-rate` 1 passed / 0 failed.
+
+### Changed — `token-rate` counts each API response once (RESTART R5A4, the metric owner's answer to R5A3's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: R5A3 left the numerator counting *turns x
+  content blocks*, because a record's identity was its transcript `uuid` and this
+  client writes one record per content block, each repeating the same
+  `message.id`, the same top-level `requestId` and (usually) the same usage. The
+  decision — the metric counts one **API response** — moves identity into a new
+  `response_identity`: `message.id` plus `requestId` when the record carries one
+  (a retried response repeats the message id and is billed again), falling back
+  to the `uuid` only when there is no `message.id`, and to no identity at all
+  (never deduped) when there is neither. The first record of a response wins and
+  a later duplicate may only move it *into* the subagent view, which is unchanged
+  from R5A3: `isSidechain` or `subagents/`-file provenance still decides
+  membership, and `weighted` still contains `subagent_weighted`. Measured over
+  the R5a window (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`, same
+  `--repo`/`--branch`/prefixes as R5A3; every response id is unique to one
+  session and no response id ever spans two files, so the collapse is entirely
+  same-file blocks — 1.96 / 1.94 / 1.76 records per response — and the
+  cross-file dedup stays defensive):
+
+  | row | records (before → after) | weighted (before → after) | naive (before → after) | subagent weighted (before → after) | share | merges | weighted-per-merge |
+  |---|---|---|---|---|---|---|---|
+  | L1-routing | 9,745 → **4,964** | 202,093,981.4 → **104,768,807.8** | 1,748,832,653 → 932,606,194 | 53,589,959.0 → 24,380,131.1 | 26.5 % → **23.3 %** | 28 | 7,217,642.2 → **3,741,743.1** |
+  | L1-backlog | 12,060 → **6,205** | 262,700,682.6 → **135,999,291.6** | 2,279,918,775 → 1,201,840,938 | 124,163,141.7 → 62,663,439.9 | 47.3 % → **46.1 %** | 34 | 7,726,490.7 → **3,999,979.2** |
+  | L1-main | 7,089 → **4,034** | 190,405,176.5 → **107,119,446.4** | 1,733,132,396 → 989,705,170 | 85,499,036.7 → 45,288,117.6 | 44.9 % → **42.3 %** | 76 | 2,505,331.3 → **1,409,466.4** |
+
+  The denominators are untouched, so every row drops ~43–49 % and R5b must
+  compare against these numbers, not R5A3's. L1-backlog's subagent weighted
+  tokens grouped by `message.model` (counts only, never message text):
+  3,343 responses / 61,138,502.0 weighted = **97.6 %** `claude-sonnet-5` plus
+  212 / 1,524,937.9 = 2.4 % `claude-haiku-4-5` — R5A3's reading survives the
+  re-key: the share is the Sonnet reviewer legs, not Haiku first passes.
+- **first-wins, measured**: 242 of the 4,964 L1-routing responses do *not*
+  repeat their usage — the client writes the growing partial usage as blocks
+  land, so the last record of a message carries the most. The rule stays
+  first-wins (a duplicate never adds usage); keying on the largest copy instead
+  would move the L1-routing numerator by 132,582.0 weighted, 0.13 %.
+- **`tests/test_autoos_tokenrate.py`**: `ResponseDedupTests` (new, 10 cases) and
+  R5A3's `test_the_blocks_of_one_turn_are_not_deduped…` reversed to pin the new
+  rule. Covers three records sharing a message id counting once, distinct message
+  ids counting separately, the same message id under another request id being
+  *two* responses, the uuid fallback, a record with neither id staying its own
+  response, first-wins against a growing duplicate, and a subagent copy of a
+  parent message counting once and landing in the subagent view. The fixture
+  `usage_line` now writes a `requestId` (derived from the message id, as the real
+  transcript always agrees; `rid=` sets it explicitly) — 8 red before the change,
+  **60 green** after.
+
+### Changed — `token-rate` discovery reaches `<session>/subagents/*.jsonl` (RESTART R5A3, the router's answer to D-045's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: D-045 kept an in-session subagent turn in the
+  numerator and reported its share, but all three measured rows printed `0.0%`
+  because this host's client writes those turns one level below the session
+  files `discover_transcripts` scanned. Discovery reads both depths now, so the
+  subagent records are in `records`/`weighted`/`naive` *and* in the subagent
+  columns: a record is a subagent turn when its own `isSidechain` flag is set
+  **or** it was read out of a `subagents/` file — the flag is the record's claim,
+  the directory is the client's. A turn written to both depths is still one cost:
+  `Totals.add` dedups by transcript `uuid`, falling back to `message.id` for a
+  record that carries none, counts it once, and lets the second copy move it
+  *into* the subagent view only. Measured over the R5a window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`): L1-routing 5,462 → 9,745
+  records / 148,504,022.4 → 202,093,981.4 weighted / share 26.5 %, L1-backlog
+  4,907 → 12,060 / 138,537,540.9 → 262,700,682.6 / 47.3 %, L1-main 2,959 → 7,089
+  / 104,906,139.8 → 190,405,176.5 / 44.9 %. The before-numbers still reproduce to
+  the token and nothing deduped on this host — parent and subagent files share
+  neither uuid nor message id, so the dedup is defensive. That corrects the third
+  row of the R5a caveat (417 records / 4.6 %): that probe counted only
+  `subagents/` dirs sitting beside a same-named session file in the *same*
+  project dir, and an L1-main subagent turn routinely runs in a worktree under
+  the main checkout while its parent session is filed under a lane's dir — its
+  records belong to the main row by `cwd`, and the real figure is 4,130.
+- **`--json`**: an unnamed `--projects-dir` prints `"default"` instead of the
+  resolved transcript root. That path carries the operator's username, and the
+  repository is public (hard rule 1); an explicit flag is echoed as it was given.
+- **`tests/test_autoos_tokenrate.py`**: `SubagentFileDiscoveryTests` (new, 11
+  cases) plus 3 CLI cases, on a fixture tree holding a session file and its
+  `subagents/` dir — both depths in the numerator, provenance alone counts as a
+  subagent turn, a shared uuid (or message id, without a uuid) counts once and
+  lands in the subagent view, the blocks of one turn keep their own uuids, an
+  agent file invents no session of its own, the window and `cwd` filters still
+  apply one level down, and `--json` says `default`. Fixtures now give every
+  record its own uuid, as the real transcript does; they had keyed the uuid off
+  the token count, which is exactly what the dedup now collapses. 9 red before
+  the change, 50 green after.
+### Fixed — OpenCode no longer loads a managed skill twice (WS-HARNESS)
+
+- **`lib/agent_harness.py`**: `desired_opencode` drops a managed skill's
+  `SKILL.md` entry that still points into an `agent-skills` clone (the skills
+  home before `.agents/skills`, retired 2026-09-25) when it writes the
+  replacement entry. Before, the merge appended the new entry and kept the old
+  one, so OpenCode loaded two diverged copies of the same skill. Only the
+  harness's own skills are touched: a user's other `agent-skills` paths, and any
+  entry at all when there is no skills source to replace it, are kept.
+
+### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
+
+A7b retired the component's *work* and left a live row holding a pointer: the
+catalog entry still named a `postInstall`, still sat in two profiles, and still
+answered "installed" from a hand-written detection branch. A7a shipped the
+mechanism that says all three from data, so the last step is to stop saying them
+in code. Windows (`catalog/windows.json`, `lib/windows`) is untouched — its entry
+still clones, and its retirement is a later lane.
+
+- **`catalog/linux.json`, `catalog/macos.json`**: `agent-skills` is
+  `"tombstone": true` with the note *its work moved to agent-skill-links,
+  omnigraph-client and the mcp-\* components* and `replaced_by` naming the six ids
+  that took it (`agent-skill-links`, `omnigraph-client`, `mcp-graphify`,
+  `mcp-serena`, `mcp-playwright`, `mcp-context7` — all present in both catalogs).
+  It is dropped from `workstation` and `ai-coding`: a profile pre-selects what
+  should get *installed*. `postInstall` goes with the installer, and the long
+  `notes` line goes because `note` now carries the same fact — one home per fact.
+  The `uv` entry's note named `agent-skills` as its consumer; it names the
+  `mcp-*` components, which is what actually runs `uv`.
+- **`lib/linux/install.sh`**: `install_agent_skills` deleted (setup.sh reports a
+  retired row before it ever asks the provider, so nothing could call it), and the
+  `agent-skills` branch of `custom_is_installed` deleted with it
+  (`catalog_probe_installed` answers *not installed* for a tombstone before it
+  probes, so the branch was unreachable too). Leaving either would have kept a
+  second owner for a fact the catalog holds.
+- **Behaviour**, on the paths A7's verify row names: a `--profile workstation` /
+  `ai-coding` dry run plans no `agent-skills` row at all and still plans the
+  successors (they are profile members in their own right); `--only
+  agent-skills` announces `agent-skills is retired: replaced by …`, plans the six
+  beside the retired row, and the row reports `skipped: retired (its work moved
+  to …)`. A state file saved before the retirement replays the same way. The
+  retired row is no longer in the "Installed apps" line, no longer prints
+  "✓ Already installed", and no longer hunted for a launcher in the landing
+  report.
+- **Tests** (all five red before the catalogs flipped, for exactly those
+  reasons): `tests/linux/13-end-to-end-dry-run-only.sh` drives the real entry
+  point over the shipped catalogs — `--only` expands, a profile plans no retired
+  id, `--from-state` replays a hand-authored pre-retirement file to its
+  successors — and its three scratch-home cases now share one `e2e_setup` helper
+  instead of restating the trick. `tests/linux/18-mcp-wiring.sh` asserts the
+  catalog shape (the boolean flag, the note, the exact successor set, no profile,
+  no `postInstall`/`prompt`/`requires`/`verify`), that the retirement leaves no
+  installer or detection branch behind, and — with detection stubbed to "everything
+  is here" — that the retired id is never reported installed while its
+  successors are. The two A7b cases that drove `install_agent_skills` and
+  `custom_is_installed agent-skills` directly are gone: the function they tested
+  no longer exists, and what replaces them is reached the way a run reaches it.
+- **`docs/catalog.md`**: the field table and the retirement section say what a
+  tombstone now *is* in this repo — no profile, no installer, the note and the
+  successors as the only prose — with the shipped `agent-skills` entry as the
+  `replaced_by` example. `docs/plans/2026-09-27-omnigraph-mcp-catalog-plan.md`
+  marks A7 done on Linux and macOS.
+
+Verified: `bash tests/run-tests.sh --filter='agent-skills,tombstone,skill,catalog,end-to-end,from-state'`
+121 passed / 0 failed; `bash setup.sh --check-catalog` exits 0; shellcheck clean
+on the touched `.sh`; `python3 -m pytest -q tests/` green.
+
+### Fixed — a retired row is locked in both terminal menus, and every selection path expands it (A7a review 2, 2026-09-28)
+
+Muse's re-check found the `replaced_by` expansion sitting behind the wrong
+condition. It ran only for a selection named by ids (`--from-state`, `--only`, and
+the browser payload that arrives as `--only`), while **neither terminal menu locked
+a retired row**: `setup.sh` set `MENU_DISABLED` for the `manual` provider only, and
+`New-AutoOSMenuItem` set `Locked` for the `manual` provider only. So a person who
+highlighted a retired row and pressed space got exactly the failure the previous
+commit was meant to close — a plan holding the `skipped: retired` row and none of
+the work that replaced it — and the row's `(retired)` label said nothing about
+where the work had gone.
+
+Both halves, because either one alone leaves a hole:
+
+- **The row**: `catalog_menu_rows` (new in `lib/linux/catalog.sh`, the twin of
+  `New-AutoOSMenuItem`, which the menu now calls instead of building its own arrays)
+  locks a retired row and labels it `(retired: replaced by <ids>)`, naming only the
+  successors this machine offers, the way the announcement line does. On Windows
+  `New-AutoOSMenuItem` gained `-OfferedIds` and the same lock and label, plus a
+  `Reason`. `ui_menu`'s and `Show-AutoOSMenu`'s non-interactive fallback read only
+  the tick, so a locked row could still leave the selector with nobody at a
+  keyboard; both now honour the lock, the same rule the key handlers apply.
+- **The selection**: `setup.sh` and `setup.ps1` expand on the way to the plan,
+  unconditionally, so no path — menu, profile, replay, `--only`, browser, or one
+  added later — can plan a tombstone without its replacements.
+- **Guard order** (the review's LOW): resolve asked whether AutoOS could install
+  the *provider* before it asked whether the row had *retired*, so a retired
+  `manual` component failed the whole run with "use its vendor link". Retirement is
+  now asked first, the row resolves and reports `skipped: retired`, and the plan no
+  longer prints its stale homepage as an "Action required" step.
+
+Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`) covers the row flags
+and label, the real `ui_menu` key handlers, the locked row against the
+non-interactive fallback, the retired-`manual` resolve, and — over a `script(1)`
+pty, skipped where none exists — the reviewer's own scenario through the real
+`setup.sh`: highlight a retired row, press space, and see that it never reaches the
+plan. The PowerShell suite (`tests/run-tests.ps1 -Filter tombstone`) covers the same
+row through `New-AutoOSMenuItem`, the same lock through `Show-AutoOSMenu`, the same
+guard order in `Resolve-AutoOSPlan`, and `-Only` of a retired `manual` id through
+`setup.ps1`. `docs/catalog.md` said a hand-chosen retired id "is still planned"; it
+no longer is, and the document says so where it describes the row.
+
+### Fixed — a tombstone names what replaced it, so a replayed state keeps the work (A7a)
+
+Sonnet's final review of the A7b lane found the retirement mechanism keeping the
+id and losing the job. A state file saved **before** a component was retired names
+the retired id and cannot name the ids that inherited its work, and `--from-state`
+took the selection verbatim: the tombstone was known, skipped, and nothing else was
+planned. The machine came back without that work and the run reported `skipped`,
+which reads like success.
+
+- **`replaced_by`** (catalog field, tombstone only): the ids that took the retired
+  component's work on. Both validators reject one that is empty, that sits on a live
+  entry, or that names an unknown id or another tombstone — a successor that installs
+  nothing would replay into a second `skipped` row, the same defect one step later.
+- **`lib/linux/catalog.sh`** (`catalog_expand_replacements`) and
+  **`lib/windows/AutoOS.Catalog.psm1`** (`Expand-AutoOSTombstoneReplacements`):
+  expand a retired id into its successors, once per id, and are asked by every
+  selection built from explicit ids — `--from-state` / `-FromState`, `--only` /
+  `-Only`, and a browser run, whose payload the server passes in as `--only`. The
+  retired row stays (it is still what reports `skipped: retired`), a successor the
+  selection already lists is not added twice, a successor this machine does not
+  offer is left out of both the plan and the announcement, and a successor retired
+  since is expanded in turn. Profiles never name a tombstone, so they never expand.
+- **`setup.sh` / `setup.ps1`**: one muted line per expanded tombstone — `agent-skills
+  is retired: replaced by agent-skill-links, omnigraph-client` — before the plan, so
+  nothing is substituted silently.
+- **`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`, `web/index.html`**: the
+  payload carries `replaced_by` and the retired row shows it, the way it shows the
+  note. The page displays the successors; the installer is the one that plans them.
+- **`docs/catalog.md`**: the field and the replay rules.
+- Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`), the PowerShell
+  suite (`tests/run-tests.ps1 -Filter tombstone`) and the page checks
+  (`tests/test-web-progress.js`) cover the validator, the loader column, the
+  expansion (dedupe, unoffered successor, chain), a hand-written pre-retirement
+  state file replayed to a plan that installs the successors, and `-Only` /
+  `--only` of a retired id.
+
+### Fixed — tombstones reach the browser, and a requirement on a retired id fails out loud (A7a review, 2026-09-28)
+
+Muse's review of the A7a commits found the retirement mechanism stopping at the
+terminal: the served payload never carried the flag, so the page — which resolves
+dependencies, pre-ticks profiles and collects prompts **in the browser** — did the
+opposite of `setup.sh` with the same catalog. And the rule "no entry may require a
+retired id" lived only in the validators, which a normal run never calls.
+
+- **`lib/linux/serve.py`**: `build_state`'s inline projection became a module-level
+  pure `state_components(catalog, platform, platforms, arch, headless, installed)`
+  that adds `tombstone` and `note`, so a test can ask the server's own function
+  without a server; `installed names` is derived from the same rows now instead of
+  being collected beside them.
+- **`lib/windows/AutoOS.Serve.psm1`** (`Get-AutoOSServeState`): the same two fields,
+  read from the projection's `Tombstone` / `RetireNote`.
+- **`web/index.html`**: retirement is one answer in one place — `canInstall()` —
+  which the profile pre-tick, the dependency closure, the questions card, the
+  quick-install button and the tick box all already ask. A retired row is **shown,
+  disabled and labelled**, not hidden: hiding it removes the only place a reader
+  learns the id went away and what replaced it, which is the reason the catalog
+  still carries it. `retiredChip` and the `(retired)` description match the terminal
+  wording, `installedChip` never says `✓ Installed` for something AutoOS no longer
+  installs, and the Configure button for a prompt the page will never ask is gone.
+- **`lib/linux/catalog.sh` + `setup.sh`**, **`lib/windows/AutoOS.Catalog.psm1` +
+  `setup.ps1`**: resolve now records a refusal (`PLAN_BLOCKED` /
+  `catalog_resolve_blocked` on Linux, `BlockedReason` on Windows) for an entry whose
+  `requires` names a tombstone, and spreads it to that entry's own dependents until
+  the set stops growing. The plan warns, the questions loop asks nothing, execution
+  records the component as failed, and the run exits 1 — the retired row stays in
+  the plan so the report can point at it. Nothing is installed without a dependency
+  it asked for.
+- **`setup.ps1`** plan tag: `(dependency)` and `(retired)` are two independent tags,
+  as in `setup.sh`; the `elseif` hid the retirement the moment a tombstone arrived
+  as a dependency rather than a hand-pick.
+- Tests (`tests/linux/39-catalog-tombstone.sh` +8, `tests/run-tests.ps1` +7,
+  `tests/test-web-progress.js` +1 block): the serve projection through
+  `state_components` itself, refusal and cascade at resolve, the ordinary resolve
+  recording nothing, `setup.sh`/`setup.ps1` end-to-end over the fixture tree
+  (non-zero exit, `Failed 1`, no prompt asked, both tags on one row), and the
+  shipped page functions run in node — `canInstall`, `closure`,
+  `profileClosureDirect` and `itemHtml` — so a page that merely stops drawing the
+  row cannot pass.
+- Docs: `docs/catalog.md`'s retirement section states the resolve-time refusal and
+  the browser's shown/disabled/labelled choice.
+
+### Added — a retired component keeps its id and installs nothing (A7a, 2026-09-28)
+
+An `id` is a contract (AGENTS.md §3): saved state files, `--only` / `-Only` flags
+and a user's last selection all name it. Deleting a component that stops being
+installable turned all of those into "Unknown component id" and a red run, and
+there was no way to say "this used to be a thing, here is what replaced it". The
+catalog can now mark one instead: `"tombstone": true` with an optional `"note"`.
+**Mechanism only — no real component is retired by this change**; deciding which
+ids become tombstones is a separate, catalog-only edit.
+
+- **`lib/linux/catalog.sh`**: the field is read in one place — `catalog_is_tombstone`
+  — which the profile expansion, the dependency walk, the loader and the installed
+  probe all ask rather than each re-deriving it. `catalog_load` carries
+  `CAT_TOMBSTONE` / `CAT_RETIRE_NOTE` beside the other columns;
+  `catalog_profile_defaults` never pre-ticks a retired id; `catalog_resolve` keeps
+  the id in the plan but drags nothing in behind it; `catalog_detect_installed`
+  reports a tombstone as not installed. `catalog_validate` accepts the field (a
+  tombstone may omit `postInstall`, `prompt`, `requires` and `verify` — they only
+  mean something for something that installs) and rejects `"tombstone"` that is
+  not the boolean `true`, an empty `note`, a `note` on a live entry, and any entry
+  that `requires` a tombstone.
+- **`lib/linux/install.sh`** (`catalog_probe_installed`): skipped for a retired id,
+  so the `✓` and the "Installed apps" line cannot answer for a product AutoOS no
+  longer offers — the same reason the cache in Detect is gated on Windows.
+- **`setup.sh`**: `--list` and the menu mark the row `(retired)`, the plan row is
+  tagged, the questions loop asks a tombstone nothing, and execution prints
+  `skipped: retired (<note>)` and counts it as already present — never installed,
+  never failed, identical on the second run. A retired component is not in the
+  post-run "where to find them" hunt, because for it "no launcher found yet" would
+  be a wrong answer rather than a blank one.
+- **`lib/windows/AutoOS.Catalog.psm1`** — the twin: `Test-AutoOSTombstone` (reads
+  the raw JSON field and the flattened projection's, and tests the type because
+  PowerShell would coerce `'1'` to `$true`), `Format-AutoOSTombstoneSkip` (one home
+  for the skip wording, so `setup.ps1` and the suite cannot drift),
+  `Test-AutoOSProfileDefault` + `Get-AutoOSProfileDefaults` (the profile rule the
+  menu row and the `-Yes` expansion shared by copy-paste now share as code), plus
+  the same four validator rules, the `Tombstone`/`RetireNote` projection fields,
+  the menu's `(retired)` label, and the dependency walk that expands nothing behind
+  a retired id.
+- **`lib/windows/AutoOS.Detect.psm1`** (`Get-AutoOSInstalledStatus`): returns
+  `not-detected` for a tombstone before the cache and before any probe — one gate
+  that `Set-AutoOSInstalledStatus`, `Test-AutoOSInstalled`,
+  `Get-AutoOSInstalledComponents`, `-Installed`, `-ListComponents` and the
+  installer's own skip check all read through.
+- **`setup.ps1`**: `-ListComponents` marks `(retired)`, the plan row is tagged, the
+  prompt collection and the `-Yes` expansion skip retired ids, execution prints the
+  skip line into `results.skipped`, and the "Where to find them" report excludes them.
+- Tests (**`tests/fixtures/catalog-tombstone.json`** — a fixture, so no real catalog
+  was touched — `tests/linux/39-catalog-tombstone.sh` 18 cases, 21 cases in
+  `tests/run-tests.ps1`'s `catalog tombstone` group): validator accepts and rejects,
+  projection keeps the facts, profile expansion and menu tick leave it alone, a
+  retired id is never detected as installed *while an ordinary id with the same
+  package still is*, the plan keeps the known id and pulls no dependency, the skip
+  line is pinned with and without a note, and the Linux side runs `setup.sh` itself
+  against a scratch tree — `--only`, a state file written by a real run replayed
+  with `--from-state`, `--list`, the summary counts and a second run.
+- Docs: **`docs/catalog.md`** gained the two Fields rows and a
+  *Retiring a component (tombstone)* section — the rules above, and why `note` and
+  `notes` are different fields.
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the

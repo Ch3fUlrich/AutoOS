@@ -659,6 +659,535 @@ Test-Case 'the git post-install step exists and is callable' {
         "post-install '$($git.PostInstall)' is not a loaded function"
 }
 
+
+# ─── Catalog tombstone (a retired id stays known, installs nothing) ─────────
+Describe-Group 'catalog tombstone'
+
+$tombstoneFixture = Join-Path $Root 'tests\fixtures\catalog-tombstone.json'
+
+function New-TombstoneCatalog {
+    # The fixture, never a real catalog: this lane builds the mechanism, another
+    # lane decides which components are retired (AGENTS.md: catalog is data).
+    param([scriptblock]$Mutate = $null)
+    $cat = (Get-Content -Path $tombstoneFixture -Raw -Encoding UTF8) | ConvertFrom-Json
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat
+}
+
+function Set-TombstoneField {
+    param($Catalog, [string]$Id, [string]$Field, $Value)
+    $target = @($Catalog.categories.components | Where-Object { $_.id -eq $Id })[0]
+    $null = $target | Add-Member -NotePropertyName $Field -NotePropertyValue $Value -Force
+    $Catalog
+}
+
+$tombAvailable = @(Get-AutoOSAvailableComponents -Catalog (New-TombstoneCatalog) -SystemInfo (New-FakeSystem))
+
+Test-Case 'tombstone: a catalog with a tombstone validates' {
+    # Also the case that a tombstone may omit postInstall, prompt, requires and
+    # verify: the fixture entry does, and it must still pass.
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: a non-boolean tombstone is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'tombstone' 'yes'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'boolean') "expected a boolean complaint, got: $joined"
+}
+
+Test-Case 'tombstone: a note on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'note' 'orphan note'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'only meaningful on a tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty note is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' ''
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match "'note' is present but empty") "got: $joined"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'requires' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'tombstone that installs nothing') "got: $joined"
+}
+
+Test-Case 'tombstone: projection carries the flag and the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $t) -and ($t.RetireNote -eq 'wired by keep-demo now')) `
+        "projection lost the flag or the note: [$($t.Tombstone)] [$($t.RetireNote)]"
+}
+
+Test-Case 'tombstone: a component that never declares the field is not a tombstone' {
+    # Set-StrictMode -Version Latest throws on a missing property, and the suite
+    # hands Resolve-AutoOSPlan hand-built components that have no such field.
+    $plain = [pscustomobject]@{ Id = 'plain'; Name = 'Plain'; Provider = 'winget'; Package = 'Contoso.Plain' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $plain)) 'a component with no tombstone field read as retired'
+}
+
+Test-Case 'tombstone: a truthy string is not the boolean true' {
+    # PowerShell coerces '1' -eq $true, so the predicate must test the type, not
+    # the truthiness — otherwise a typo'd catalog silently retires a live id.
+    $fake = [pscustomobject]@{ Id = 'x'; tombstone = '1' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $fake)) "'1' was accepted as a tombstone"
+}
+
+Test-Case 'tombstone: a raw catalog entry is recognised too' {
+    # -Installed and -ListComponents iterate the raw JSON (lower-case field);
+    # the plan iterates the flattened projection (upper-case). Both must read it.
+    $raw = @(New-TombstoneCatalog).categories.components | Where-Object { $_.id -eq 'retired-demo' }
+    Assert-True (Test-AutoOSTombstone -Component $raw) 'the lower-case JSON field was missed'
+}
+
+Test-Case 'tombstone: a retired id is never detected as installed' {
+    $retired = New-FakeComponent -Package 'Contoso.Widget'
+    $null = $retired | Add-Member -NotePropertyName Tombstone -NotePropertyValue $true -Force
+    $status = Get-AutoOSInstalledStatus -Component $retired -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-True ($status -ne 'installed') "a tombstone was detected as [$status]"
+}
+
+Test-Case 'tombstone: an ordinary id with the same package is still detected' {
+    # The guard above must not be paid for by breaking real detection.
+    $live = New-FakeComponent -Package 'Contoso.Widget'
+    Assert-Equal (Get-AutoOSInstalledStatus -Component $live -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))) 'installed'
+}
+
+Test-Case 'tombstone: a retired entry is not pre-ticked by its profile' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True (-not $item.Selected) 'a tombstone was ticked by the workstation profile'
+}
+
+Test-Case 'tombstone: an ordinary entry beside it is still pre-ticked' {
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $item = New-AutoOSMenuItem -Component $k -ProfileName 'workstation'
+    Assert-True $item.Selected 'keep-demo should still be ticked'
+}
+
+Test-Case 'tombstone: the menu labels a retired entry' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True ($item.Description -match '\(retired\)') "description was: [$($item.Description)]"
+}
+
+Test-Case 'tombstone: profile expansion leaves retired ids out' {
+    $ids = @(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'workstation')
+    Assert-True (($ids -contains 'keep-demo') -and ($ids -notcontains 'retired-demo')) "expansion was: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the custom profile expands to nothing still' {
+    Assert-Equal (@(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'custom').Count) 0
+}
+
+Test-Case 'tombstone: a retired id is still a known id in the plan' {
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-Contains $ids 'retired-demo'
+}
+
+Test-Case 'tombstone: a retired id pulls no dependency' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'requires' @('pulled-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-True ($ids -notcontains 'pulled-demo') "a tombstone pulled in: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the plan node keeps the retirement facts' {
+    # setup.ps1 prints the row and decides to skip from the plan node alone.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $node = $plan | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $node) -and ($node.RetireNote -eq 'wired by keep-demo now')) `
+        "the plan node lost the retirement facts: [$($node.RetireNote)]"
+}
+
+Test-Case 'tombstone: the skip line names the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired (wired by keep-demo now)'
+}
+
+Test-Case 'tombstone: the skip line without a note' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' $null
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $t = $avail | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired'
+}
+
+Test-Case 'tombstone: the serve payload carries the retirement facts' {
+    # The browser page resolves dependencies itself, so it can only honour a
+    # retired id if the payload says which ids are retired and why.
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'retired-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-True ($t.Contains('tombstone') -and $t.tombstone -eq $true) `
+        "the tombstone row says nothing about being retired: $($t | ConvertTo-Json -Compress)"
+    Assert-Equal $t.note 'wired by keep-demo now'
+    Assert-True ($k.Contains('tombstone') -and -not $k.tombstone) 'an ordinary entry is marked retired'
+    Assert-True $k.Contains('note') 'an ordinary entry has no note key at all'
+}
+
+Test-Case 'tombstone: the serve payload survives JSON round-tripping the retirement facts' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $back = ($state | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+    $t = @($back.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+    Assert-True ($t.tombstone -and $t.note -eq 'wired by keep-demo now') `
+        "after the JSON trip: $($t | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is refused at resolve' {
+    # Test-AutoOSCatalogSchema rejects this, but a normal run never validates:
+    # resolving had to refuse the dependent out loud rather than drop its
+    # requirement and install it green.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'prompted-demo' 'requires' @('retired-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('prompted-demo'))
+    $node = @($plan | Where-Object { $_.Id -eq 'prompted-demo' })[0]
+    Assert-True ($node.BlockedReason -match 'requires retired retired-demo') `
+        "no refusal recorded: [$($node.BlockedReason)]"
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).Count -eq 1) `
+        'the refused row must stay in the plan; what execution refuses is never silently absent'
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).AutoAdded) 'the tombstone is not marked a dependency'
+}
+
+Test-Case 'tombstone: a dependent of a refused component is refused too' {
+    $cat = New-TombstoneCatalog
+    $null = Set-TombstoneField $cat 'prompted-demo' 'requires' @('retired-demo')
+    $null = Set-TombstoneField $cat 'pulled-demo' 'requires' @('prompted-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('pulled-demo'))
+    $byId = @{}
+    foreach ($n in $plan) { $byId[$n.Id] = $n }
+    Assert-True ($byId['prompted-demo'].BlockedReason -match 'requires retired retired-demo') `
+        "the direct dependent was not refused: [$($byId['prompted-demo'].BlockedReason)]"
+    Assert-True ($byId['pulled-demo'].BlockedReason -match 'requires prompted-demo') `
+        "the dependent of the refused id was not refused: [$($byId['pulled-demo'].BlockedReason)]"
+}
+
+Test-Case 'tombstone: an ordinary resolve records no refusal' {
+    # The guard must not fire on the normal path.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('keep-demo', 'retired-demo'))
+    $blocked = @($plan | Where-Object { Get-AutoOSComponentProperty $_ 'BlockedReason' '' })
+    Assert-Equal $blocked.Count 0 "refusals on a clean plan: $(@($blocked | ForEach-Object { $_.BlockedReason }) -join '; ')"
+}
+
+
+# ─── the same gates through the real setup.ps1 ─────────────────────────────
+function Invoke-TombstoneSetup {
+    <#
+      .SYNOPSIS
+        Run the real setup.ps1, with -DryRun, against the fixture in a throwaway
+        tree. The module cases above prove the rules; these prove the entry point
+        applies them - a re-implementation here would pass without setup.ps1 ever
+        calling the gate (Principle 9: verify through the path production takes).
+    #>
+    param([string[]]$SetupArgs = @(), [scriptblock]$Mutate = $null)
+    $psExe = if (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' }
+             elseif (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' }
+             else { return $null }
+    # Not $env:TEMP: Linux and macOS pwsh does not define it, and Join-Path then
+    # throws on the null before the case has proved anything.
+    $tree = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-$([Guid]::NewGuid().ToString('N'))"
+    $null = New-Item -ItemType Directory -Path (Join-Path $tree 'catalog'), (Join-Path $tree 'logs'), (Join-Path $tree 'lib') -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'setup.ps1') -Destination (Join-Path $tree 'setup.ps1')
+    # $Lib is already lib\windows; the tree needs it under lib\windows.    Copy-Item -LiteralPath $Lib -Destination (Join-Path $tree 'lib') -Recurse
+    $cat = Get-AutoOSCatalog -Path $tombstoneFixture
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath (Join-Path $tree 'catalog\windows.json') -Encoding UTF8
+    # On a non-Windows host none of the special folders exist and detection hands
+    # them straight to Join-Path, which throws on $null; point them into the tree.
+    $saved = @{}
+    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        foreach ($n in @('ProgramData', 'LOCALAPPDATA', 'APPDATA', 'ProgramFiles', 'USERPROFILE', 'SystemRoot')) {
+            $saved[$n] = [Environment]::GetEnvironmentVariable($n)
+            [Environment]::SetEnvironmentVariable($n, $tree)
+        }
+    }
+    try {
+        # Local, and restored when this returns: 5.1 turns a native command's
+        # stderr into a terminating error under 'Stop', and the child warns on
+        # stderr (no winget, not elevated) on every run.
+        $ErrorActionPreference = 'Continue'
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $tree 'setup.ps1') @SetupArgs 2>&1
+        [pscustomobject]@{ Rc = $LASTEXITCODE; Out = ($out -join "`n") }
+    } finally {
+        foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Remove-Item -LiteralPath $tree -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'tombstone: setup.ps1 -ListComponents marks the retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-ListComponents', '-NoColor')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'retired-demo.*\(retired\)' `
+                 -and $r.Out -notmatch 'keep-demo.*\(retired\)') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired \(wired by keep-demo now\)' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 profile run never plans a retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Profile', 'workstation', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Kept Component' -and $r.Out -notmatch 'Retired Component') `
+        "the profile planned a tombstone: rc=$($r.Rc)"
+}
+
+Test-Case 'tombstone: setup.ps1 asks a retired id nothing and runs no post-install' {
+    # The fixture tombstone given back the prompt and the post-install step it is
+    # allowed to omit: neither may fire for something that installs nothing.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'prompt' -NotePropertyValue 'demo_url' -Force
+        $null = $t | Add-Member -NotePropertyName 'postInstall' -NotePropertyValue 'Invoke-TombstoneMustNotRun' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Out -notmatch 'A few questions' -and $r.Out -notmatch 'DEMO PROMPT' `
+                 -and $r.Out -notmatch 'Invoke-TombstoneMustNotRun' -and $r.Out -match 'skipped: retired') `
+        "a tombstone asked or ran something: $($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 refuses an entry that requires a retired id' {
+    # The validator is not in a normal run's path, so -Only of such a component
+    # used to install it green with its requirement quietly dropped.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 1 -and $r.Out -match 'requires retired retired-demo' `
+                 -and $r.Out -match 'Failed +1' -and $r.Out -notmatch 'Asks A Question done') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 plan row that is both dependency and retired shows both tags' {
+    # setup.sh prints both; the Windows twin had an elseif that hid "(retired)"
+    # the moment the tombstone arrived as a dependency rather than by hand.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $row = @(($r.Out -split "`n") | Where-Object { $_ -match 'Retired Component' })[0]
+    Assert-True ($row -match '\(dependency\).*\(retired\)') "the plan row reads: [$row]"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a retired id without a warning' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-state-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('retired-demo', 'keep-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('retired-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -notmatch 'not available on this machine' `
+                 -and $r.Out -match 'skipped: retired') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(500, $r.Out.Length)))"
+}
+
+# ─── replaced_by: a replayed retirement keeps its work ─────────────────────
+# A state file saved before a retirement names the retired id and none of the ids
+# that inherited its work, so the replay booked the retirement and installed
+# nothing. `replaced-demo` is the fixture's retired-with-successors row;
+# `retired-demo` stays the retired-without-successors one.
+Test-Case 'tombstone: replaced_by naming an unknown id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('never-existed-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'unknown') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by naming a tombstone is rejected' {
+    # A successor has to install something, or the replay loses the work one
+    # step later on another row that can only report skipped.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'replaced_by' @('successor-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty replaced_by is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @()
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: a valid replaced_by does not make the catalog fail' {
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: the projection carries replaced_by' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $r = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (@($t.ReplacedBy) -join ',') 'keep-demo,successor-demo' `
+        "the row lost its successors: [$(Get-AutoOSComponentProperty $t 'ReplacedBy' '<missing>' | Out-String)]"
+    Assert-Equal (@($r.ReplacedBy).Count) 0 'a tombstone with no replaced_by loaded one'
+    Assert-Equal (@($k.ReplacedBy).Count) 0 'an ordinary entry loaded a replaced_by'
+}
+
+Test-Case 'tombstone: expansion replays a tombstone as the ids that replaced it' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo successor-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion adds nothing twice and keeps the order' {
+    # A state written by a replay already lists the successors; replaying it
+    # must not plan them a second time.
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('keep-demo', 'replaced-demo', 'successor-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'keep-demo replaced-demo successor-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 1 "lines: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion leaves an id with no replacement alone' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('retired-demo', 'keep-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'retired-demo keep-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 0 "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion names only successors this machine offers' {
+    # A Windows-only successor on a Pi: promising it in the line and then
+    # planning nothing would be the same defect wearing better manners.
+    $avail = @($tombAvailable | Where-Object { $_.Id -ne 'successor-demo' })
+    $x = Expand-AutoOSTombstoneReplacements -Available $avail -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo' "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: the serve payload carries replaced_by' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'replaced-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-Equal (@($t.replaced_by) -join ',') 'keep-demo,successor-demo' `
+        "payload row: $($t | ConvertTo-Json -Compress)"
+    Assert-True $k.Contains('replaced_by') 'an ordinary entry has no replaced_by key at all'
+    Assert-Equal (@($k.replaced_by).Count) 0 'an ordinary entry carries successors'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a tombstone plans its replacements' {
+    # -Serve passes the browser's selection through as -Only, so the served
+    # replay takes this path too; a profile never names a tombstone.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'replaced-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 `
+                 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $r.Out -notmatch 'Unknown component') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a tombstone as its replacements' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-old-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('replaced-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('replaced-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $rows = @(($r.Out -split "`n") | Where-Object { $_ -match '^\s+\d+\.\s' })
+    $retiredRow = @($rows | Where-Object { $_ -match 'Replaced Component' })[0]
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $retiredRow -match '\(retired\)' -and $r.Out -match 'Successor Component.*done' `
+                 -and $r.Out -notmatch 'not available on this machine') `
+        "rc=$($r.Rc) rows=$($rows -join ' | ') out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: the menu row for a retired id is locked and names its replacements' {
+    # The row is shown - the id is public, someone may remember the product - but
+    # it cannot be chosen, and it says in the same breath what took the work over.
+    $offered = @($tombAvailable.Id)
+    $replaced = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $retired  = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $kept     = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $i1 = New-AutoOSMenuItem -Component $replaced -ProfileName 'workstation' -OfferedIds $offered
+    $i2 = New-AutoOSMenuItem -Component $retired -ProfileName 'workstation' -OfferedIds $offered
+    $i3 = New-AutoOSMenuItem -Component $kept -ProfileName 'workstation' -OfferedIds $offered
+    Assert-True ($i1.Locked -and -not $i1.Selected) 'a retired row could be chosen'
+    Assert-True ($i1.Description -like '*(retired: replaced by keep-demo, successor-demo)*') `
+        "the row reads [$($i1.Description)]"
+    Assert-True ($i2.Locked) 'a retired row with no replacements could be chosen'
+    Assert-True ($i2.Description -like '*(retired)*') "the row reads [$($i2.Description)]"
+    Assert-True ($i2.Reason -like '*retired*') "the locked row explains itself as [$($i2.Reason)]"
+    # The lock is not a blanket: an ordinary row of the same profile stays tickable.
+    Assert-True (-not $i3.Locked -and $i3.Selected) "an ordinary row reads locked=$($i3.Locked) selected=$($i3.Selected)"
+}
+
+Test-Case 'tombstone: a locked row cannot leave the menu' {
+    # Space, 'a', 'g' and 'i' all respect Locked; the selector's non-interactive
+    # fallback read only Selected, so a ticked retired row still reached the plan
+    # when nobody was at a keyboard. One contract, both branches.
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        $items = @($tombAvailable | ForEach-Object {
+            New-AutoOSMenuItem -Component $_ -ProfileName 'workstation' -OfferedIds @($tombAvailable.Id)
+        })
+        $leaked = $items | Where-Object { $_.Id -eq 'replaced-demo' }
+        $leaked.Selected = $true
+        $res = @(Show-AutoOSMenu -Items $items -Title 'Choose what to install')
+        Assert-True (($res -contains 'keep-demo') -and -not ($res -contains 'replaced-demo') `
+                     -and -not ($res -contains 'retired-demo')) "the menu returned: $($res -join ', ')"
+    } finally { Remove-Item Env:AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'tombstone: a retired manual-provider id resolves instead of refusing' {
+    # The guard order the review calls LOW: resolve asked whether AutoOS can
+    # install the *provider* before it asked whether the row had retired, so a
+    # retired manual entry aborted the run over a component that installs nothing.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'provider' 'manual'
+    $null = Set-TombstoneField $cat 'retired-demo' 'notes' 'Fixture manual provider; nothing to download.'
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $threw = ''; $plan = @()
+    try { $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo')) }
+    catch { $threw = $_.Exception.Message }
+    Assert-True (-not $threw) "resolve refused a retired id: $threw"
+    $row = @($plan | Where-Object { $_.Id -eq 'retired-demo' })
+    Assert-Equal $row.Count 1 "the retired row is not in the plan: $(@($plan.Id) -join ', ')"
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $row[0]) 'skipped: retired (wired by keep-demo now)' `
+        'the row has no skip line to report'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired manual-provider id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'provider' -NotePropertyValue 'manual' -Force
+        $null = $t | Add-Member -NotePropertyName 'notes' -NotePropertyValue 'Fixture manual provider.' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired' `
+                 -and $r.Out -notmatch 'AutoOS cannot install' `
+                 -and $r.Out -notmatch 'Action required: \S+ - http' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 

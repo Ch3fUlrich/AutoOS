@@ -54,7 +54,9 @@ Three subcommands:
        ONE-ROUTER 2026-09-27.
     10. every providers.<id>.limits key resolves to one of that provider's
         models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
-        2026-09-27);
+        2026-09-27); plan_available, when present, is a boolean (MISTRALFIX
+        2026-09-28 - rpm 0 and plan_available false are the two recorded shapes
+        of "this plan cannot answer", read by plan_dead_reasons());
     11. policy.reviewers is a non-empty ordered list, each entry carrying a
         client that exists in ``clients``, a non-empty model/family, a boolean
         paid and -- when it names one -- a ``leg`` that resolves and whose
@@ -1827,6 +1829,56 @@ def gateway_legs(route: dict, registry: dict) -> list:
     return out
 
 
+def provider_plan_limits(provider_id: str, model_id: str, registry: dict):
+    """The measured `providers.<provider_id>.limits.<model_id>` row, or None.
+
+    Brief R4 (2026-09-27) keyed that table by the provider's own model spelling,
+    which is exactly `model_id` as `resolve_leg` returns it. None means "no
+    measurement on record" -- never a deny: an unmeasured leg stays plannable.
+    """
+    provider = (_section(registry, "providers").get(provider_id) or {})
+    if not isinstance(provider, dict):
+        return None
+    limits = provider.get("limits")
+    if not isinstance(limits, dict):
+        return None
+    entry = limits.get(model_id)
+    return entry if isinstance(entry, dict) else None
+
+
+def plan_dead_reasons(provider_id: str, model_id: str, registry: dict) -> list:
+    """MISTRALFIX (2026-09-28) -- why this plan cannot answer `provider_id`'s
+    `model_id` at all; [] means the plan carries no veto.
+
+    Measured directly against api.mistral.ai with the operator's key: the
+    x-ratelimit headers said four of its models get **0 requests/minute** on
+    this plan (HTTP 429 on every call, 51/51 in the gateway's own 7-day log)
+    and a fifth answers 403 because the plan does not carry it. Before this
+    predicate nothing read `rpm`, so the resolver planned such a leg as if it
+    served and the fall-through burned the request.
+
+      - ``rpm: 0`` -> ``plan: 0 rpm`` (a zero request quota);
+      - ``plan_available: false`` -> ``plan: plan_available false`` (not on the
+        plan; the 403 shape). Only an explicit boolean false denies -- a string,
+        a null or a missing key is "not measured", and rule 10 rejects a
+        non-boolean rather than let one read as truthy here.
+
+    A small-but-real quota (rpm 10, rpm 125) is NOT dead: this is about a model
+    that cannot answer, not one that answers slowly. Time-independent and pure,
+    like every other predicate here -- it reads the recorded plan, no clock and
+    no counters.
+    """
+    entry = provider_plan_limits(provider_id, model_id, registry)
+    if entry is None:
+        return []
+    reasons = []
+    if entry.get("rpm") == 0:
+        reasons.append("plan: 0 rpm")
+    if entry.get("plan_available") is False:
+        reasons.append("plan: plan_available false")
+    return reasons
+
+
 # A declared context is a PROMISE the gateway hands the client ("a request this
 # big gets answered"), and a priority combo keeps falling to its next leg while
 # that promise stands. So the promise may only be as big as the smallest window
@@ -2227,9 +2279,10 @@ def _check_leg_rules(registry) -> list:
 
 # The allowed keys of a providers.<id>.limits.<model> entry, exactly the
 # properties of catalog/ai-registry.schema.json's $defs.provider_limits
-# (rpm/rpd/tpm/tpd + the D20 source tag). Kept as a module constant next to
-# _check_provider_limits rather than read from the schema at check time.
-_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "source")
+# (rpm/rpd/tpm/tpd + the MISTRALFIX plan_available flag + the D20 source tag).
+# Kept as a module constant next to _check_provider_limits rather than read from
+# the schema at check time.
+_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "plan_available", "source")
 
 
 def _check_provider_limits(registry) -> list:
@@ -2240,14 +2293,19 @@ def _check_provider_limits(registry) -> list:
     part of a leg after its '<provider>/' prefix). Reusing resolve_leg -- the
     same one-leg rule the validator and the resolver share -- means an unknown
     model spelling fails closed here exactly as it would at route time. The
-    tpm/rpm/rpd/tpd values are each optional, but when present must be
-    non-negative ints; the resolver reads only tpm today (a request-size
-    filter), the rest are data only.
+    rpm/rpd/tpm/tpd values are each optional, but when present must be
+    non-negative ints; the resolver reads tpm as a request-size filter (brief
+    R4) and, since MISTRALFIX (2026-09-28), rpm and plan_available as a
+    cannot-serve gate via plan_dead_reasons().
 
     Review R4FIX (2026-09-27): a limits entry may carry only the keys of the
     schema's provider_limits def -- an unknown key (measured: a 'tmp' key
     passed this check) is a malformed entry and is reported naming the
     provider, the model and the key.
+
+    MISTRALFIX: `plan_available` must be a boolean. The gate tests
+    `is False`, and a recorded string "false" would read truthy there -- so the
+    type is checked here, where the malformed value can still be named.
     """
     problems = []
     for provider_id, provider in sorted(_section(registry, "providers").items()):
@@ -2281,6 +2339,12 @@ def _check_provider_limits(registry) -> list:
                     problems.append(
                         "limits: %s.%s must be a non-negative int (got %r)"
                         % (label, field, value))
+            if "plan_available" in entry \
+                    and not isinstance(entry["plan_available"], bool):
+                problems.append(
+                    "limits: %s.plan_available must be a boolean (got %r) - "
+                    "plan_dead_reasons() tests `is False`, so a string would "
+                    "read as available" % (label, entry["plan_available"]))
     return problems
 
 
