@@ -56,6 +56,9 @@ services:
       # last --max-old-space-size flag wins - do NOT add NODE_OPTIONS here).
       OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: ${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:-6}
       OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}
+      # Muse's first byte: 3-32 s at minimal/low/medium, 4-58 s straight to the
+      # provider (measured 2026-09-28). Unset ships 30000 ms, which 504'd high.
+      OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: ${OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS:-180000}
       # Per-call log artifacts: each chat call writes files under /app/data/call_logs
       # (831 MB in 3905 files in one day, largest ~510 KB; measured 2026-09-27).
       # That page cache counts toward the gateway's own pressure guard (it answers
