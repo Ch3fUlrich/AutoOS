@@ -1,10 +1,10 @@
-# RESTART — cheap relaunches: state card + context pack (spec v3.5)
+# RESTART — cheap relaunches: state card + context pack (spec v3.6)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
 Status: SPEC v3 (v2 Sonnet FIX-FIRST resolved, table under Delivery). v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
 `work/L1-routing/review-restart-spec.out`: 7 blockers, 11 high); v2 resolves every finding (§R at
-the end). Next: the lanes (v3.5's Sonnet FIX-FIRST is resolved, table under Delivery).
+the end). Next: the lanes (v3.6's Muse FIX-FIRST is resolved, table under Delivery).
 v3.2 (RSTAMEND, 2026-09-28): new §7 size limits, crash recovery through the pack (§4), the L2 cap
 decision (§5), and two delivery lanes (R2c, R8).
 v3.3 (RSTAMEND2, 2026-09-28, Sonnet FIX-FIRST on 86da423): §7 rotate now archives only what a
@@ -27,6 +27,13 @@ writer already covered by the lock inside `append_inbox_line`, and says plainly 
 grep only reaches shell recipes. §5 takes the L2 cap from the operator's D-088 (orchestration 500k,
 workers min(40 %, 400k), lane CAPD088), which supersedes D-085's interim 250k, and §8 keeps only the
 baseline work.
+v3.6 (RSTAMEND5, 2026-09-28, Muse FIX-FIRST on 42297a6): §5's cap *mechanism* is corrected, its numbers
+untouched. Hand-off caps are model-*family* rows and the family is the role proxy — opus, fable and
+sonnet 500k, spark and gemini 400k, the 200k class 80k — because `cap_for(model)` takes no role argument
+and CAPD088 builds none; `catalog/ai-registry.json` `policy.handoff_caps` is the one home and the comment
+at `tools/autoos_context.py` `DEFAULT_CAPS` mirrors it row for row. The (family, role) keying, the read
+of §4's `role` field, and CAPD088's place after R4 are gone — §4/§8's `role`, the MCP document selector,
+is the only role the spec still names.
 
 ## Why (measured)
 
@@ -222,9 +229,9 @@ printed. The order is:
 
 ## 5. Context cap and the metric
 
-- **Cap:** per orchestrator role, not per model (router D-044): the shared registry row
-  `claude-opus-1m` (`["opus","fable"]`) goes to `cap_tokens` 350000 / `cap_fraction` 0.35 (source
-  D-040, D-044). If Fable's before/after numbers show a quality loss, the row is split then. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
+- **Cap:** the orchestrator's cap, held as a model-family row like every other (router D-044): the
+  shared registry row `claude-opus-1m` (`["opus","fable"]`) goes to `cap_tokens` 350000 /
+  `cap_fraction` 0.35 (source D-040, D-044). If Fable's before/after numbers show a quality loss, the row is split then. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
   pinned tests change in the same lane. `tools/registry.py validate` asserts
   `cap_tokens == window × cap_fraction`.
 - **L2 cap: operator D-088 (2026-09-28)** — orchestration sessions **500k**, workers **min(40 % of
@@ -233,24 +240,23 @@ printed. The order is:
   untouched: L1-backlog was handing off every ~15 min against a fresh sonnet L2 start cost of **55.5k**
   (system prompt + MCP tools + CLAUDE.md, session 967be39d's first turn), so the handoffs, not the work,
   were what cost. That 55.5k is §8's pre-R9 anchor, not a cap. The cap numbers live in the registry,
-  never in prose, and CAPD088 inherits three obligations from the row format.
-  - **The split is per role, and `cap_for` is per model today.** `tools/autoos_context.py` `cap_for`
-    takes a model id and no role, so the two D-088 numbers cannot both come from one row: CAPD088 keys
-    rows by (family, role), reads the role from §4's run.json `role` field (§8's three stems —
-    `l2-orchestrator` is an orchestration session, `l3-worker` and `l3-reviewer` are workers), and only
-    lets the role select among rows that *name* a role — a family with a single row resolves exactly as
-    it does today. That keeps D-088's scope to what it decided: these are the L2 numbers, and the
-    `claude-opus-1m` row above stays D-044's, not reopened here. A caller with no role to name takes the
-    orchestration row, so an existing `context`/`heartbeat` call never changes meaning.
+  never in prose, and CAPD088 inherits its obligations from the row format.
+  - **How the two D-088 numbers become rows.** CAPD088 implements D-088 as model-*family* rows and uses
+    the family as the role proxy — opus, fable and sonnet 500k (those families only run long sessions as
+    orchestrators), spark and gemini 400k, and the 200k class 80k (the worker agents) — because
+    `tools/autoos_context.py` `cap_for(model)` takes a model id and no role argument, and none is
+    planned. `catalog/ai-registry.json` `policy.handoff_caps` is the one home for these numbers, and the
+    comment at `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) mirrors the
+    same rows in the same order; §4's run.json `role` field selects a §8 MCP document and nothing else.
   - **Order.** `cap_for` matches by substring and the FIRST row wins, and a trailing `[1m]` is stripped
     before matching, so every new row goes **before** the `*` 200k-class row — appended after it, the
-    model silently keeps matching `*`. A test pins each role's id resolving to its own number and not to
+    model silently keeps matching `*`. A test pins each family's id resolving to its own number and not to
     the wildcard.
   - **The invariant.** `tools/registry.py validate` asserts `cap_tokens == window × cap_fraction`, and a
     `min()` cap satisfies it only where the written-down `cap_fraction` is the ratio that reproduces the
-    token number (1M-window worker: 400000 / 0.4; a 200k-class worker: 80000 / 0.4). Where the `min()`
-    binds, `cap_fraction` records the resulting ratio, and `DEFAULT_CAPS` mirrors the same rows in the
-    same order.
+    token number (a 1M-window family on the worker number: 400000 / 0.4; a 200k-class family:
+    80000 / 0.4; a 1M-window family on the orchestration number: 500000 / 0.5). Where the `min()` binds,
+    `cap_fraction` records the resulting ratio.
   - **Revisit.** §8's protocol is what measures what a session pays to start; its before/after numbers
     go to the L0 router, and revisiting D-088 is the operator's call — this spec sets no trigger for it
     (v3.3's "lower it again once a relaunch costs < ~20k" went with the row it gated).
@@ -469,14 +475,14 @@ ours; the other two are, and both are cut per role, not per model.
 | R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
 | R5b cap | shared opus/fable row 350k (D-044), DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
 | CAPL2 (retired, 2026-09-28) | §5's interim `claude-sonnet-1m` 250k row, superseded by D-088 before it was built — the lane number is not reused. CAPD088 carries the ordering and pinned-test obligations named there | — |
-| CAPD088 | §5 D-088 numbers in `policy.handoff_caps`: orchestration 500k, workers min(40 % of window, 400k); the (family, role) row key + `cap_for`'s role argument read from R4's `role` field, a single-row family resolving unchanged; every new row **before** the `*` row, `cap_fraction` the ratio that reproduces `cap_tokens` so `validate`'s invariant holds, + the same rows in the same order in DEFAULT_CAPS; tests pin each role resolving to its own number, not the wildcard | catalog/ai-registry.json, tools/autoos_context.py, tests |
+| CAPD088 | §5 D-088 numbers in `policy.handoff_caps` as model-*family* rows used as the role proxy — opus/fable/sonnet 500k, spark/gemini 400k, the 200k class 80k — `cap_for(model)` keeps its signature and takes no role argument, and no row reads §4's `role` field; every new row **before** the `*` row, `cap_fraction` the ratio that reproduces `cap_tokens` so `validate`'s invariant holds, + the same rows in the same order in DEFAULT_CAPS; tests pin each family resolving to its own number, not the wildcard | catalog/ai-registry.json, tools/autoos_context.py, tests |
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources; the rule line telling a session to append with §0's `inbox append` (§0 owns the fact, R6 only words the rule) | SKILL.md, references/ |
 | R9 baseline | §8: the three named strict `--mcp-config` role documents, the pinned `--mcp-config … --strict-mcp-config` argv (claude/qoder only, `MCP_STRICT_CLIENTS`) passed by `relaunch-line` and `run --client claude` from R4's `role` field, the always-loaded trim, and the `baseline` protocol (probe `Reply OK`, pinned model + role document, 3 runs, median, non-sidechain first assistant turn) | configuration/mcp/ — `l2-orchestrator.json.example`, `l3-worker.json.example`, `l3-reviewer.json.example` (new, plus the ignore rule for the un-suffixed runtime documents), tools/autoos-agent.py (relaunch-line, run), tools/autoos_tokenrate.py, AGENTS.md, CLAUDE.md, tests |
 
 Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
 dispatch-table line each), then R2b. Then R2c and R8, right after R2b and before R3. Then R3, R7 (after
 REDACTMERGE is on main), R4, R5b (after the before-number), CAPD088 (after R5b — the same registry and
-fallback files, one writer at a time — and after R4, since it reads R4's `role` field), R9 (after R4,
+fallback files, one writer at a time), R9 (after R4,
 since it adds a flag to `relaunch-line`, and after R5a, since it extends the token-rate module), and
 R6. Every lane after R1 merges main
 before it starts. Each lane is at most three items per worker run.
@@ -489,7 +495,7 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 | v2 Sonnet finding | v3 resolution |
 |---|---|
 | blobs store raw inbox/brief text | §6 Redaction through autoos_redact; R7 after REDACTMERGE |
-| opus row also matches fable | §5 router D-044: cap is per role, row stays shared, both 350k |
+| opus row also matches fable | §5 router D-044: the row is the orchestrator's cap, row stays shared, both 350k |
 | `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it, test per marker |
 | torn appends by concurrent writers | §0 last line without newline ignored; malformed reported |
 | R2/R5 over 3 items | R2a/R2b, R5a/R5b |
@@ -520,7 +526,11 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 |---|---|
 | HIGH: §0 classes a `ready` line as a non-order, so §7's rule (a) archives it **unanswered** — and §3's open-readies scan reads `--since-card`, which never opens the archive, so the successor loses the only reminder that a lane is unmerged | §7 adds the `ready` exception as the rule's one home: a ready is archivable only once a later record in the same inbox closes it, either a `→ done:` naming it exactly as rule (b) names an order or a line pairing `main=` with the first 7 hex of its `<sha>`; until then it is an open order, stays live whatever its position, and rotate counts it in `kept N records: no covering done`. §3 and §0's marker bullet point at §7 instead of defining a closer, §R's "open readies" row follows the move, and the R8 lane scope names the exception so it is built, not discovered |
 | MEDIUM: §0 named only the two future appenders, so a reader could not see that the `ready` line already in every real inbox is written by a locked path — nor that the grep would never catch an unlocked Python writer | §0 states where the lock lives (`append_inbox_line`) and names `autoos-agent.py ready` (`cmd_ready`) as a covered caller that needs no lane of its own; it says plainly that R8's bare-`>>` grep reaches **shell recipes only**, and that a new Python writer's obligation is to call `append_inbox_line`, not to survive a text search |
-| §5 still presented D-085's interim 250k as the L2 cap | §5 leads with operator D-088 (orchestration 500k, workers min(40 % of window, 400k), lane CAPD088) and keeps only what is still true from D-085 — the ~15 min handoff and 55.5k measurements, which are §8's anchor. CAPL2 is retired unbuilt, the ordering trap moves to CAPD088 with the (family, role) keying `cap_for` needs, §8's lead and the v3.3 table row stop naming 150k/250k as current, and only §8's baseline work is left open |
+| §5 still presented D-085's interim 250k as the L2 cap | §5 leads with operator D-088 (orchestration 500k, workers min(40 % of window, 400k), lane CAPD088) and keeps only what is still true from D-085 — the ~15 min handoff and 55.5k measurements, which are §8's anchor. CAPL2 is retired unbuilt, the ordering trap moves to CAPD088 (v3.5 named the keying there as (family, role) with a `cap_for` role argument; that was wrong and v3.6 restates it as family rows used as the role proxy), §8's lead and the v3.3 table row stop naming 150k/250k as current, and only §8's baseline work is left open |
+
+| v3.5 Muse finding (on 42297a6) | v3.6 resolution |
+|---|---|
+| HIGH: §5 and the CAPD088 delivery row said hand-off caps are keyed by (family, role) and that `cap_for` reads a `role` field from §4 — a mechanism CAPD088 neither builds nor plans, and it made R4's `role` field an input to a cap it does not touch | §5 states what CAPD088 does: D-088 as model-*family* rows used as the role proxy (opus/fable/sonnet 500k — those families only run long sessions as orchestrators — spark/gemini 400k, the 200k class 80k for worker agents), `cap_for(model)` keeps its signature and takes no role argument, and `catalog/ai-registry.json` `policy.handoff_caps` is the one home with the comment at `tools/autoos_context.py` `DEFAULT_CAPS` mirroring the same rows in the same order. The row's R4 dependency goes out of the lane order, the Order and invariant bullets and the v2 and v3.4 table rows speak of families instead of roles, and the only `role` left is §4/§8's MCP document selector |
 
 ## §R. v1 review findings → v2 resolution
 
