@@ -2670,3 +2670,74 @@ if it "graphify registration runs on the gate that decides it"; then
             grep -q "install_graphify_tool"; then pass
     else fail "install_mcp_graphify no longer gates registration on install_graphify_tool"; fi
 fi
+
+# ─── A4 CI fix: a dry run on a machine that has no uv yet ───────────────────
+# The pipeline plans uv and mcp-graphify in the same run, so on a fresh host — and
+# on every CI runner — a dry run reaches this step with uv only *planned*, never
+# installed. Refusing there made the plan itself exit 1 (CI 36360904338: "a dry run
+# executes no commands at all"), while the run it described would have succeeded.
+# The dry run must therefore announce the tool it would install; the live run keeps
+# refusing, because then the absence is real.
+#
+# gfy_nouv_run <tmp> <dry>: install_mcp_graphify with no uv anywhere. has_cmd is
+# stubbed rather than the PATH trimmed, so a runner image that happens to ship uv
+# still exercises the missing-uv branch, and every other command — the claude stub
+# below, python3 — is found as usual.
+gfy_nouv_run() {
+    local tmp="$1" dry="$2"
+    local log="$tmp/claude.log" cfg="$tmp/.claude.json"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
+        unset CLAUDE_CONFIG_DIR
+        has_cmd() {
+            if [[ "$1" == uv ]]; then return 1; fi
+            command -v -- "$1" >/dev/null 2>&1
+        }
+        claude() { gfy_claude "$log" "$cfg" "$@"; }
+        install_mcp_graphify 2>&1
+        printf 'RC=%s\n' "$?"
+    )
+}
+
+if it "graphify dry run with no uv plans the tool and exits 0, the live run still refuses"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    dry="$(gfy_nouv_run "$tmp" 1)"
+    problems=""
+    [[ "$dry" == *RC=0* ]] || problems+="[the dry run failed the plan: $(tail -n 1 <<<"$dry")] "
+    [[ "$dry" == *"would install the pinned graphify tool"* ]] \
+        || problems+="[no plan for the tool: $dry] "
+    [[ "$dry" == *"uv component"* ]] \
+        || problems+="[nothing said where uv comes from: $dry] "
+    # The rest of the plan is unchanged: the clients still hear what they would get.
+    [[ "$dry" == *"would run: claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json"* ]] \
+        || problems+="[the claude plan is missing: $dry] "
+    [[ "$dry" == *"would merge 'graphify' into Antigravity"* ]] \
+        || problems+="[the Antigravity plan is missing: $dry] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[the dry run registered a client: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[the dry run wrote the user config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[the dry run wrote the Antigravity config] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the dry run installed the tool] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify with no uv still fails the live run and registers nothing"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    live="$(gfy_nouv_run "$tmp" 0)"
+    problems=""
+    [[ "$live" == *RC=1* ]] || problems+="[a live run with no uv reported success: $(tail -n 1 <<<"$live")] "
+    [[ "$live" == *"uv"* ]] || problems+="[nothing named the missing uv: $live] "
+    [[ "$live" == *"not registered"* ]] || problems+="[nothing named the refusal: $live] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[registered a command with no binary: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[touched the user claude config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the step created the tool path itself] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
