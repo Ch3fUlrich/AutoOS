@@ -6485,6 +6485,34 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertFalse(report["final"]["ok"])
         self.assertIn("sonnet", report["final"]["detail"].lower())
 
+    def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
+        # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
+        # model that is not the final checker — signed the lane off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                report = self.status("AutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY" % spelling)
+                self.assertFalse(report["ready"], report)
+                self.assertFalse(report["final"]["ok"])
+
+    def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
+        # The NAME, case-insensitive, or the vendor's full model id — not a
+        # substring of either.
+        for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                self.assertTrue(report["ready"], report)
+
+    def test_the_final_match_ignores_surrounding_space(self):
+        # A record written by hand can pad the value; padding is not a
+        # different model. Fed straight to _final_review because the line
+        # parser splits on whitespace and can never carry it.
+        for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
+            with self.subTest(reviewer=spelling):
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
+                self.assertTrue(self.agent._final_review([entry])["ok"])
+
     def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
         report = self.status(FINAL_LINE)
         self.assertFalse(report["ready"])
@@ -6764,6 +6792,36 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("same family", out)
         self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_final_reviewer_that_only_contains_sonnet_is_refused(self):
+        # REVGATE2 (HIGH): the substring match let "notsonnet" carry the final
+        # sign-off, so `ready` appended the line for a lane nobody signed off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 1)
+                self.assertIn("not sonnet", out)
+                self.assertEqual(self.read_inbox(inbox),
+                                 "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_final_reviewer_naming_sonnet_appends_the_line(self):
+        for spelling in ("Sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
     def test_the_review_gate_is_checked_before_the_sha(self):
         # A record that never got its review is not "unpushed work waiting on a

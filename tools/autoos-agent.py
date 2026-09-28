@@ -891,6 +891,11 @@ READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "l
 # registry route -- it is the orchestrator's own interactive model -- so this one
 # matches the NAME, while the cross-family half is decided by registry families.
 FINAL_REVIEWER = "sonnet"
+# REVGATE2: the final checker is recognized by its NAME, never as a substring of
+# one -- "notsonnet" contains "sonnet" and is not a sign-off. The vendor's full
+# model id (claude-sonnet-5, claude-sonnet-4-6) is the same checker spelled by
+# the client, so it counts too; anything else does not.
+FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> verdict=<ready|pass|lgtm|...>")
 
@@ -924,6 +929,16 @@ def reviewer_family(spelling, registry):
         if isinstance(entry, dict):
             return resolver.family_key(entry.get("family"))
     return None
+
+
+def is_final_reviewer(spelling):
+    """True when ``spelling`` NAMES the final checker, stripped and lower-cased.
+
+    One helper owns the answer so the gate and any future caller agree on what
+    "Sonnet signed this off" means. A substring is not a name: matching
+    ``FINAL_REVIEWER in reviewer`` let ``notsonnet`` pass (REVGATE2, HIGH)."""
+    name = (spelling or "").strip().lower()
+    return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
 
 
 def _review_entry_verdict(entry):
@@ -973,7 +988,7 @@ def _final_review(entries):
     if not wanted:
         return {"ok": False,
                 "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
-    named = [e for e in wanted if FINAL_REVIEWER in e["reviewer"].lower()]
+    named = [e for e in wanted if is_final_reviewer(e["reviewer"])]
     if not named:
         return {"ok": False,
                 "detail": "the final entries name %s, not %s"
