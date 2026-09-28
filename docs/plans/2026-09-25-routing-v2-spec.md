@@ -267,7 +267,10 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   from the client that hit them: a stop line that states its own reset ("Individual quota reached …
   resets in ~83h", "cooling down (reset after 51s)") is recorded by the spawner in
   `logs/routing/provider-state.json` — git-ignored, transient, the machine's observation beside
-  `measured.json`, never a registry edit. The provider is the one the line names (or, when it names
+  `measured.json`, never a registry edit. The `reason` it stores is that line **redacted**
+  (REDACTFIX3): the spawner classifies on the child's raw text, because masking can eat the marker
+  (REDACTFIX item 2), but the copy written to disk leaves the process and outlives the run.
+  The provider is the one the line names (or, when it names
   none, the first leg of the route that ran that is still up), the window is the one it stated, a
   window over 7 days is refused as the operator's call, and a later stop for the same provider keeps
   the later window. Every *routing* read (`route`, `run`, the reviewer walk) merges that file into the

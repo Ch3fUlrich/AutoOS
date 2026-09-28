@@ -5,6 +5,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - the raw provider-stop line stops being recorded (REDACTFIX3, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: `record_reset_stop` stored the stop line it is
+  handed as the `reason` of a `logs/routing/provider-state.json` row. Since
+  REDACTFIX item 2 that line is the child's **raw** text — deliberately, because
+  redaction can mask the very marker the classification reads — so a worker that
+  echoed an injected key on its stop line wrote that key, verbatim, into a file
+  that outlives the run. The classification (`parse_reset`, `stop_provider_id`)
+  still reads the raw line; the stored dict is redacted, like every other copy
+  that leaves the process. The four other sinks of the same string (the
+  `PROVIDER-STOP` and `HEADLESS-REFUSAL` prints, the WIP commit message, the
+  fall-through line) already redacted and are unchanged.
+- **`tests/test_autoos_spawner.py`**:
+  `ProviderResetStateTests.test_a_stop_line_carrying_a_secret_records_a_redacted_reason`
+  (fails first: the key was in the stored JSON) and `REDACT_SAMPLES` now builds
+  its three `sk-`/`sk-or-`/`sk-ant-` fakes by concatenation, like the `ghp_`/
+  `gho_`/`github_pat_` samples already did, so the shared-pattern table holds no
+  contiguous token-shaped literal.
+
+### Fixed - one home for the secret patterns survives the merge to main (REDACTMERGE, 2026-09-28)
+
+- **`tools/autoos_redact.py`**: `origin/main` hardened hostexec's stored-argv
+  redaction while this lane moved the same pattern set out of `audit.py`, so the
+  two sides met in conflict. The resolution keeps one home: main's
+  `_argv_text` (a non-str argv element — MCP JSON can carry a number/bool/null,
+  and a *refused* call is still recorded, so redaction may never raise on one —
+  renders through `json.dumps`, falling back to `repr`) moved into the shared
+  module and is what `redact_argv` runs per element, so the spawner's argv view
+  gets the same guarantee instead of only the audit's. The module's docstring
+  no longer claims the digest is over the raw argv: main's item 5 is correct and
+  kept — `audit.hash_argv` hashes the **redacted** form, because a digest of a
+  raw secret is offline-guessable.
+- **`tools/hostexec/audit.py`**: keeps only what is audit-specific — the `"***"`
+  mask its own tests pin, and `argv_sha256` — and imports the carriers
+  (`sanitize_text`, `redact_argv`) from the shared module. Nothing main tightened
+  was dropped: the widened `*KEY*`/`*TOKEN*` name rule, `Bearer` separate and
+  inside one token, `x-api-key:`, `user:pass@`, mysql `-pSECRET` / `-uUSER:PASS`,
+  the `--token`/`--password`/… flag list, LF/CR stripping, the redacted-form hash
+  and the non-str rendering all reach the audit path, and the audit path
+  additionally gains this lane's wider prefix set — `github_pat_`/`AIza`,
+  case-insensitive (REDACTFIX item 3), which is a widening and never a
+  narrowing.
+- **`tools/autoos-agent.py`**: both sides kept. The provider-stop classification
+  stays on the **raw** tail (`raw_tail`, falling back to the redacted tail) — a
+  stop line whose secret was masked must still be recognised (SPAWNREDACT item 2)
+  — and main's REVROUTE reset-window recording (`record_reset_stop`) now runs on
+  that same classification. The LEAK line's payload goes through `redact_output`
+  (worker text) and keeps main's LEAKFP2 procedural note.
+- Tests: no test on `origin/main` was changed. `tests/test_autoos_spawner.py`
+  gains **`SharedRedactPatternTests.test_non_string_argv_elements_render_from_the_shared_module`**
+  and **`test_audit_holds_no_pattern_set_of_its_own`** (the one-home guard:
+  `audit.redact_argv is autoos_redact.redact_argv`, plus a source scan that no
+  pattern constant reappears in `audit.py`); both were mutation-checked against a
+  scratch copy that redefined `redact_argv` in `audit.py` — they fail there and
+  pass here. No test that exists on `origin/main` was edited to make this merge
+  pass; the only hostexec-test edits are the lane's own pre-merge fixture splits
+  (`"gh" "p_abc123"` is the same string as `"ghp_abc123"`, written so GitHub push
+  protection sees no literal). Verified on a fresh clone of the merged lane
+  (`set -o pipefail`, each job under `systemd-run --user --scope -p
+  MemoryMax=2G`): the targeted set (`tests/test_autoos_spawner.py tests/ -k
+  'hostexec or redact or audit'`) 197 passed / 3 skipped / 4402 subtests,
+  `tests/test_autoos_spawner.py` 557 passed + 73 subtests, and the whole python
+  suite `2060 passed, 4 skipped, 4596 subtests passed`, exit 0.
+
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
@@ -413,6 +477,77 @@ Follow-up findings on the PROV review (`logs/handoff-sessions/20260925/work/L1-r
 - **`docs/api-keys.md`**, **`docs/models.md`**, **`configuration/omniroute/combos.json`**, **`configuration/litellm/config.yaml`**, **`catalog/ide-models.json`**, **`opencode.jsonc`**, **`configuration/openhands/tier-profiles.json`**: the `meta_api` row, the managed blocks re-rendered for the new legs and aliases, and the contributor's training/terms in prose.
 - **`tests/`**: `svc: apply registers meta_api from the shared meta key` + `… and stays idempotent` (stubbed CLI, asserts `providers add meta-api --credential-env AUTOOS_KEY_META --yes` and then `= meta-api already registered`), the Windows `apply registers meta_api from the shared meta key and stays idempotent`, `SharedKeyNameTests`/`EnvSharingContractTests`/`ModelPrefixContractTests` in `tests/test_mirror_litellm_env_registry.py`, `CostTests` in `tests/test_autoos_usage.py`, and `tests/helpers/check-provider-registry.py` grew two data rules (`litellm_env_problems()`, `model_prefix_problems()`) in place of a hardcoded `meta`/`meta_api` allowlist. Re-pinned to the post-MUSEAPI state: the combos name lists (14, `t1-orchestrator-paid` now servable with a declared 1M context), `provider data JSON survives both PowerShell generations` (`Map['meta'] == 'meta-api'`, no `meta_api` key), the render suites' legless-route cases (a synthesized legless route keeps the rule that a legless route has no `effort_ladder`), and `docs/models.md`'s models-doc check.
 - Lesson: a third spelling of a provider's name (`model_prefix`) is as much a namespace as `omniroute_id` — the collision was invisible to every registry-sourced check because that path never reads the gateway spelling, and only the explicit `--combos` escape hatch did.
+### Fixed — the redactor's matching cost, the classification tail, the prefix scope (REDACTFIX, 2026-09-27)
+
+S2 fix round on SPAWNREDACT (findings S1/S2/S3 of
+`logs/handoff-sessions/20260925/work/L1-routing/review-spawnredact.md`).
+
+- **`tools/autoos_redact.py`** (S1, HIGH — matching cost): the
+  `key|token|secret… = value` carrier is no longer one regex. Its two unbounded
+  quantifiers overlapped the keyword literals, so a line of 200 KB of
+  `keytokensecretpasswordcredential` with no `:`/`=` backtracked for **104 s** —
+  in `run_client`'s output pump, one call per line of a stream whose line length
+  *the worker* chooses, so the run hung rather than finished. One charset scan
+  now finds the separators, the name run in front of each is walked back over
+  characters that cannot themselves be a separator (the walks of one line never
+  overlap, so they sum to its length) and Python decides keyword membership:
+  the same line costs **3.7 ms**, a 1 MB line streams in ~20 ms.
+  `ASSIGNMENT_SCAN_CAP` (4 MiB) bounds what one line can cost at all; above it
+  only that line's assignment carriers are skipped — the bearer/URL/prefix/PEM
+  and injected-literal patterns still run over the whole line.
+- **`tools/autoos-agent.py`** (S2, MEDIUM — classification was blind):
+  `run_client` keeps the last `TAIL_LIMIT` bytes *twice*. `ClientExit.tail`
+  stays redacted (the caller's stream, the record, the commit message); the new
+  `ClientExit.raw_tail` holds the child's own text and is read by nothing but
+  the headless-refusal and provider-stop checks — never printed, never recorded,
+  never committed. Redaction can mask the very marker a check looks for
+  (`error: retry_key = 429` is a stop line and a secret carrier at once), and
+  while the docstring and the entry below promised classification on raw text,
+  the code passed the redacted tail. The announced `PROVIDER-STOP` line and the
+  WIP commit message redact it as before.
+- **prefix scope** (S3/H1, LOW — behaviour change, previously unpinned):
+  `_SECRET_PREFIX_RE`, shared with hostexec's stored argv since SPAWNREDACT,
+  masks an argv token that *starts* with a known prefix, **case-insensitively**,
+  and the set is `sk-`/`ghp_`/`gho_`/`github_pat_`/`aiza`/`xox`/`glpat-` — so a
+  `gcloud AIzaSy…` line is now masked whole where hostexec used to store it
+  verbatim. Pinned by
+  `test_hostexec_log.py::RedactionTests::test_the_shared_prefix_set_masks_any_case_and_starts_a_token`.
+  Its deliberate asymmetry with the text stream (`AIza` stays case-exact there —
+  Google's own keys always are, review H1) is pinned by
+  `test_autoos_spawner.py::SharedRedactPatternTests::test_the_text_prefix_rule_stays_case_exact_on_aiza`.
+
+### Fixed — the spawner redacts its worker's output (SPAWNREDACT, 2026-09-27)
+
+- **`tools/autoos_redact.py`** (new): one home for the secret patterns. hostexec's
+  set (bearer, `api_key:`/`KEY=value` carriers, `user:pass@` URLs, key prefixes,
+  the control-character strip) plus what a worker's report actually contains —
+  vendor prefixes (`sk-`, `sk-or-`, `sk-ant-`, `ghp_`/`gho_`/`github_pat_`,
+  `AIza`, `xox[bp]-`, `glpat-`), `key|token|secret|password = value`
+  assignments, PEM private-key blocks (masked across streamed lines), and the
+  exact values of secret-named variables the spawner injects into the child env
+  (`AUTOOS_OMNIROUTE_KEY` and friends, ≥ 12 chars). `Redactor` is line-oriented
+  so a stream can be masked as it arrives; `redact_argv` keeps hostexec's `***`.
+- **`tools/hostexec/audit.py`**: deletes its private copy of the patterns and
+  aliases `sanitize_text`/`redact_argv` to the shared module — stored-argv
+  behaviour and its tests unchanged, now with `github_pat_`/`AIza`/`sk-or-`
+  prefixes recognised too.
+- **`tools/autoos-agent.py`**: every stream the spawner writes of a worker's
+  output goes through it — the live pass-through and the captured tail in
+  `run_client` (a line is classified for refusal while still the child's own
+  text, so redaction can never blind the check), the `HEADLESS-REFUSAL`,
+  `PROVIDER-STOP` and fall-through lines, the sandbox `changed`/`commits`/`LEAK`
+  summary, the worker registry record, every track entry (`record_run`, the one
+  choke point) and the WIP commit message. Prints
+  `autoos-agent: redacted N secret(s) from worker output` once when N > 0, so a
+  masked report does not read as the worker's own words.
+- **`tests/test_autoos_spawner.py`**: 14 tests — each pattern class masked in
+  text and in argv, PEM across lines, ordinary output untouched, injected env
+  values by exact match, and through `run_client` that the caller's stream and
+  tail carry none of the samples while `provider_stop` still reads
+  "Rate limit exceeded" next to a redacted line and the refusal still exits 6.
+
+Evidence: lesson inbox 2026-09-27T18:58:28Z — a worker's REPORT printed a secret
+it had found, verbatim, despite its brief naming the file it came from.
 ### Fixed — hostexec policy/runner/audit hardening (HX, 2026-09-27)
 
 - **`tools/hostexec/policy.py`**, **`tools/hostexec/server.py`**, **`tools/hostexec/runner.py`**, **`tools/hostexec/audit.py`**, **`configuration/hostexec/install.sh`**, **`configuration/hostexec/README.md`**, **`tests/`**: deny `env -S`/`--split-string` (the shebang split-string form re-splits an argument string into argv; new `no-inline-shell` rule). `policy.decide` now refuses a non-str argv element (`argv-caps`) instead of crashing, and `server.host_run` wraps `decide()` so a raise is audited as a `policy-error` denial rather than escaping as an unhandled error. Remote `ssh` executes in the audited cwd via a `cd` prefix (the local ssh process runs in `/`, so a remote-only path no longer breaks local spawn). `audit.hash_argv` hashes the redacted argv, so a secret no longer changes the fingerprint, and non-str audit tokens are rendered via `json.dumps` instead of crashing `audit.write`. Dead `_strip_wrappers`/`_WRAPPERS` deleted; the residual check-then-exec race in `_path_hijack_problem` is documented. `install.sh` stages the unit and client configs through `mktemp` in the destination directory (unpredictable, exclusively created), not a guessable `.<name>.tmp.$$`.
