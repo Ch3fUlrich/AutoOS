@@ -2031,7 +2031,11 @@ def _leg_provider_model(leg, registry):
 # "gemini-3.7-flash" and "openai/gpt-oss-120b" from "gpt-oss-120b" (R6STOP
 # review, SPAWNFIX3 item 7). Git's own `\b` treats '-' '/' '.' as breaks, which
 # matched the shorter id inside the longer one and benched the wrong provider.
+# A '.' is only part of an id when something id-like follows it: the gateway
+# ends its sentences with one ("... model gpt-oss-120b."), and treating that as
+# a continuation would attribute the stop to no provider at all.
 _MODEL_ID_TOKEN = r"[0-9A-Za-z._/-]"
+_MODEL_ID_NEXT = r"[0-9A-Za-z_/-]|\.[0-9A-Za-z]"
 
 
 def _line_names_model(line, model_id) -> bool:
@@ -2045,7 +2049,7 @@ def _line_names_model(line, model_id) -> bool:
         return False
     pattern = (r"(?<!%s)%s(?!%s)" % (_MODEL_ID_TOKEN,
                                      re.escape(str(model_id).lower()),
-                                     _MODEL_ID_TOKEN))
+                                     _MODEL_ID_NEXT))
     return re.search(pattern, line) is not None
 
 

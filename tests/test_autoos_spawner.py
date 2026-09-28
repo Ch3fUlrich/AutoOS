@@ -7034,9 +7034,12 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # may be benched on a 50/50 guess (and picking one silently starves it).
         pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
         self.assertIsNone(pid)
+        # The names are the registry's own provider ids — the spelling every
+        # other read of this registry keys on, so a message is never the only
+        # place a made-up lowercase name appears.
         self.assertEqual(printed.strip(),
                          "ambiguous stop: gpt-oss-120b served by cerebras, "
-                         "sambanova - not benched")
+                         "SambaNova - not benched")
 
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
         with contextlib.redirect_stdout(io.StringIO()):
