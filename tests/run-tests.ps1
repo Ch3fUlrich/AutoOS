@@ -5833,6 +5833,74 @@ Test-Case 'retired agent-skills links: only the known clone path, live or dangli
     Pass
 }
 
+Test-Case 'retired agent-skills links: a failed swap keeps a link, and the record keeps the literal target (WS-SKILLWIN2)' {
+    # WS-SKILLWIN2: the old link is deleted before the staged link is moved in,
+    # so a Move that throws must put the old link back, or move the staged
+    # (already new) link in when the old target is gone. The record names the
+    # target exactly as Get-Item reported it. Retired roots are passed
+    # explicitly: never the real ones.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $src = Join-Path $repo '.agents\skills'
+    $clone = Join-Path $scratch 'Documents\Code\agent-skills\skills'
+    $dests = @{}
+    foreach ($d in @('livefail', 'retry', 'literal')) { $dests[$d] = Join-Path $scratch "dest-$d" }
+    $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
+    $records = { param($d) @(Get-ChildItem -LiteralPath $scratch -Filter "$(Split-Path $d -Leaf).autoos-backup-*") }
+    $savedEnv = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    $mod = Get-Module AutoOS.Install
+    $realMove = & $mod { ${function:script:Move-AutoOSSkillLinkItem} }
+    try {
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        New-TestSkillRepo -Repo $repo
+        foreach ($n in @('alpha', 'beta')) { $null = New-Item -ItemType Directory -Path (Join-Path $clone $n) -Force }
+        foreach ($d in $dests.Values) { $null = New-Item -ItemType Directory -Path $d -Force }
+        # livefail: alpha live into the clone. retry: beta dangling into the
+        # clone (the clone's beta is deleted after the link is made - junctions
+        # need a target to exist). literal: alpha live into the clone.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.livefail 'alpha') -Target (Join-Path $clone 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.retry 'beta') -Target (Join-Path $clone 'beta')
+        Remove-Item -LiteralPath (Join-Path $clone 'beta') -Recurse -Force
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.literal 'alpha') -Target (Join-Path $clone 'alpha')
+        $reported = [string]@((Get-Item -LiteralPath (Join-Path $dests.literal 'alpha') -Force).Target)[0]
+
+        # A Move that always throws, with a live old target: the old link is put
+        # back, the staged link is removed, and no record is written.
+        & $mod { Set-Item function:script:Move-AutoOSSkillLinkItem { param($From, $To) throw 'boom' } }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.livefail -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:Move-AutoOSSkillLinkItem $f } $realMove
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.livefail 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'livefail: the old link was not put back' }
+        if (@(Get-ChildItem -LiteralPath $dests.livefail -Filter '*.autoos-new-*' -Force).Count) { throw 'livefail: a staged link was left behind' }
+        if (@(& $records $dests.livefail).Count) { throw 'livefail: a record was written for a swap that did not happen' }
+
+        # A Move that throws once, with a dangling old target: the old link
+        # cannot be put back, so the staged (already new) link is moved in.
+        & $mod {
+            Set-Variable -Name AutoOSTestMoveCalls -Value 0 -Scope Script
+            Set-Item function:script:Move-AutoOSSkillLinkItem { param($From, $To) $script:AutoOSTestMoveCalls += 1; if ($script:AutoOSTestMoveCalls -eq 1) { throw 'boom' }; [IO.Directory]::Move($From, $To) }
+        }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.retry -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:Move-AutoOSSkillLinkItem $f } $realMove
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.retry 'beta')) -ne (& $full (Join-Path $src 'beta'))) { throw 'retry: the new link is not in place' }
+        if (@(Get-ChildItem -LiteralPath $dests.retry -Filter '*.autoos-new-*' -Force).Count) { throw 'retry: a staged link was left behind' }
+
+        # The record names the target as Get-Item reported it, not stripped.
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.literal -RetargetRetiredClone -RetiredSkillRoots $clone
+        $rec = @(& $records $dests.literal)
+        if ($rec.Count -ne 1) { throw "literal: expected one record, found $($rec.Count)" }
+        $text = Get-Content -LiteralPath $rec[0].FullName -Raw
+        if ($text -notmatch [regex]::Escape($reported)) { throw "literal: the record does not name [$reported] as reported" }
+    } finally {
+        & $mod { param($f) Set-Item function:script:Move-AutoOSSkillLinkItem $f } $realMove
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $savedEnv
+        foreach ($d in $dests.Values) { Remove-TestDirLinks -Directory $d }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by default; =0 keeps it (Q-018)' {
     # Operator Q-018 (2026-09-28): setup moves recognised links into the retired
     # clone, with a backup record. AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.

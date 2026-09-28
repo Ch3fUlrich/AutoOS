@@ -27,6 +27,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
   a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
   both, inside the functions too. A second run is `skipped` with no second record.
+- WS-SKILLWIN2: a failed swap moves the staged link into place when the old one cannot be put back, and the backup record keeps the junction target literally.
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in

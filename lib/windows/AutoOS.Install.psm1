@@ -2488,6 +2488,13 @@ function New-AutoOSSkillLink {
     return $true
 }
 
+function Move-AutoOSSkillLinkItem {
+    # One move in one place, so the swap-failure tests can override it in
+    # module scope the same way they override New-AutoOSSkillLink.
+    param([string]$From, [string]$To)
+    [IO.Directory]::Move($From, $To)
+}
+
 function Get-AutoOSRetiredSkillRoots {
     <#
       .SYNOPSIS
@@ -2594,7 +2601,10 @@ function Sync-AutoOSSkillDirs {
         } elseif ($item.LinkType) {
             # Target is a string[] in Windows PowerShell 5.1 and may be relative;
             # a junction can report its target with a \\?\ or \??\ prefix.
-            $raw = [string]@($item.Target)[0] -replace '^(\\\\\?\\|\\\?\?\\)', ''
+            # $rawLiteral is the target exactly as reported (record, rollback);
+            # $raw is stripped, only for GetFullPath and comparisons.
+            $rawLiteral = [string]@($item.Target)[0]
+            $raw = $rawLiteral -replace '^(\\\\\?\\|\\\?\?\\)', ''
             $have = ''
             if ($raw) {
                 if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
@@ -2615,7 +2625,7 @@ function Sync-AutoOSSkillDirs {
                     continue
                 }
                 if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
-                    Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
+                    Write-AutoOSLine "repointed $($skill.Name) (was $rawLiteral)" -Level ok
                 } else { $ok = $false }
             } elseif ($RetargetRetiredClone -and $have -and @($RetiredSkillRoots | Where-Object { $_ } | Where-Object {
                         [string]::Equals($have, [IO.Path]::GetFullPath((Join-Path $_ $skill.Name)).TrimEnd('\', '/'), $comparison)
@@ -2631,18 +2641,33 @@ function Sync-AutoOSSkillDirs {
                 }
                 try {
                     $item.Delete()  # the link only - a reparse point is never recursed
-                    [IO.Directory]::Move($staged, $link)
+                    Move-AutoOSSkillLinkItem -From $staged -To $link
                 } catch {
                     $why = $_.Exception.Message
                     $state = 'old link left in place'
                     if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
-                        # A junction needs its target: a dangling old link cannot be
-                        # recreated, and the next run links the skill afresh.
-                        $state = if (New-AutoOSSkillLink -Path $link -Target $raw) { 'old link put back' }
-                                 else { 'old link could not be put back (its target is gone); the next run links it' }
+                        # The staged link already points at the new target: when the
+                        # old one cannot be put back (a junction needs its target,
+                        # so a dangling old link cannot be recreated), move the new
+                        # link into place instead of leaving no link at all.
+                        if (New-AutoOSSkillLink -Path $link -Target $rawLiteral) {
+                            $state = 'old link put back'
+                            $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                            if ($left -and $left.LinkType) { $left.Delete() }
+                        } else {
+                            try {
+                                Move-AutoOSSkillLinkItem -From $staged -To $link
+                                $state = 'new link put in place'
+                            } catch {
+                                $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                                if ($left -and $left.LinkType) { $left.Delete() }
+                                $state = 'no link left; the next run links it'
+                            }
+                        }
+                    } else {
+                        $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                        if ($left -and $left.LinkType) { $left.Delete() }
                     }
-                    $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-                    if ($left -and $left.LinkType) { $left.Delete() }
                     Write-AutoOSLine "could not retarget ${link}: $why - $state" -Level warn
                     $ok = $false
                     continue
@@ -2654,9 +2679,9 @@ function Sync-AutoOSSkillDirs {
                     $n = 0
                     while (Test-Path -LiteralPath $record) { $n++; $record = "$Destination.autoos-backup-$stamp-$n" }
                 }
-                try { Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8 }
-                catch { Write-AutoOSLine "retargeted ${link} but could not write ${record}: was $raw" -Level warn }
-                Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
+                try { Add-Content -LiteralPath $record -Value "$link -> $rawLiteral" -Encoding utf8 }
+                catch { Write-AutoOSLine "retargeted ${link} but could not write ${record}: was $rawLiteral" -Level warn }
+                Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $rawLiteral; recorded in $record)" -Level ok
             } else {
                 Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
             }
