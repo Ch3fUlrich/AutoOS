@@ -6562,9 +6562,11 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
         }
         Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
     } finally {
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        # Restores first: a throw from Initialize-AutoOSInstaller must not leave
+        # the run with a scratch USERPROFILE or without the host's PAT.
         $env:QODER_PERSONAL_ACCESS_TOKEN = $realPat
         $env:USERPROFILE = $realHome
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
