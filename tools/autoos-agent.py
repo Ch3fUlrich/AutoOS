@@ -1857,6 +1857,12 @@ PROVIDER_STOP_MARKERS = (
     # FUP form of the qoder credits stop above; other clients word it without
     # "your personal".
     "credits exhausted",
+    # R6STOP (measured 2026-09-27T19:0x-19:1xZ, work/L1-routing/R6RES.out): the
+    # gateway's per-credential cooldown - "Error: [429] All credentials for
+    # model gemini-3.8-flash are cooling down (reset after 37s)". It carries no
+    # " 429" (the digits sit inside brackets) and no rate-limit wording, so a
+    # cooled leg was not a stop at all and its stated window was never read.
+    "are cooling down",
 )
 
 # SPAWNCAP (S2): how many times a provider-stopped resolver-routed --isolate
@@ -1930,8 +1936,14 @@ def provider_stop(tail: str) -> str | None:
 # registry, with the evidence quoted next to it.
 MAX_AUTO_RESET_SECONDS = 7 * 86400
 
+# R6STOP: Google counts its own cooldown down in fractional seconds
+# ("Please retry in 59.250991496s."), and words it "retry in" as well as
+# "retry after". The number group is the whole part and the fraction is
+# skipped, so 59.25... reads as 59 -- the window the run was told, to the
+# second it stated it.
 _RESET_RE = re.compile(
-    r"(?:resets? in|reset after|try again in|retry after)\s*~?\s*(\d+)\s*([a-z]+)")
+    r"(?:resets? in|reset after|try again in|retry (?:after|in))"
+    r"\s*~?\s*(\d+)(?:\.\d+)?\s*([a-z]+)")
 _RESET_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
                 "m": 60, "min": 60, "minute": 60, "minutes": 60,
                 "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
@@ -1958,19 +1970,54 @@ def parse_reset(text: str) -> int | None:
     return int(m.group(1)) * unit if unit else None
 
 
+def _leg_provider_model(leg, registry):
+    """A route leg as ``(provider_id, model_id)``, or None if it does not resolve.
+
+    `registry.resolve_leg` is the one place that knows a leg's prefix may be
+    spelled either as the provider's key or as its ``omniroute_id`` (25 such
+    legs in the real registry, ``gemini/gemini-3.8-flash`` among them); a leg
+    that names no provider or no model is None here and reported by
+    `registry.py check`, not by a routing read.
+    """
+    try:
+        return resolve_leg(leg, registry)
+    except ValueError:
+        return None
+
+
+def _line_names_model(line, model_id) -> bool:
+    """True when the stop line quotes `model_id` as a word of its own.
+
+    The gateway says "All credentials for model gemini-3.8-flash ...", so the
+    model it had already chosen is in the text. Whole-word so a model id that
+    is a fragment of another one's spelling cannot drag in the wrong provider.
+    """
+    if not model_id:
+        return False
+    return re.search(r"\b%s\b" % re.escape(str(model_id).lower()), line) is not None
+
+
 def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
     """Which provider took the stop, as the registry's own id, or None.
 
     A line that names its provider wins -- including the gateway's spelling of
     it (providers.<id>.omniroute_id), which is the same connection, not a new
-    one. Otherwise the gateway works down a route's legs in order, so the one
-    that took the traffic is the first leg whose provider is up right now; a
-    line that names nothing and has no live leg to choose from is attributed to
-    no provider (recording a guess would bench the wrong one).
+    one. Next a line that names the MODEL it tried (R6STOP: "All credentials
+    for model gemini-3.8-flash are cooling down"): the gateway is telling us
+    who served it, and the provider of the leg heading that model is benched
+    whatever else the route happens to hold. Only an unnamed line falls back
+    to the gateway working down the route's legs in order, so the one that took
+    the traffic is the first leg whose provider is up right now. Both read legs
+    through `resolve_leg`, so a leg spelled with a gateway alias attributes to
+    its provider rather than being skipped (measured: a t2-worker gemini
+    cooldown benched antigravity). A line that names nothing and has no live leg
+    to choose from is attributed to no provider (recording a guess would bench
+    the wrong one).
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     providers = registry.get("providers") or {}
-    m = _STOP_PROVIDER_RE.search(line or "")
+    line = line or ""
+    m = _STOP_PROVIDER_RE.search(line)
     if m:
         named = m.group(1)
         for pid, provider in providers.items():
@@ -1978,8 +2025,20 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
                                 and provider.get("omniroute_id") == named):
                 return pid
         return None
+    low = line.lower()
+    served = None
     for leg in legs or []:
-        pid = str(leg).partition("/")[0]
+        resolved = _leg_provider_model(leg, registry)
+        if resolved is None:
+            continue
+        pid, model_id = resolved
+        if _line_names_model(low, model_id) and (
+                served is None or len(model_id) > len(served[1])):
+            served = (pid, model_id)
+    if served:
+        return served[0]
+    for leg in legs or []:
+        pid, _model_id = _leg_provider_model(leg, registry) or (None, None)
         provider = providers.get(pid)
         if isinstance(provider, dict) and not unavailable_now(provider, now):
             return pid

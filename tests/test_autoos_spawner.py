@@ -6721,6 +6721,184 @@ class ProviderResetStateTests(unittest.TestCase):
         self.assertIs(live["providers"]["cheap-p"]["available"], False)
 
 
+class GatewayCooldownStopTests(unittest.TestCase):
+    """R6STOP (2026-09-28): the OmniRoute gateway's per-credential cooldown --
+    the stop a t2-worker run actually gets when google_ai_studio's free tier is
+    spent -- was invisible to the REVROUTE recorder, measured in
+    work/L1-routing/R6RES.out section 2:
+
+    - ``PROVIDER_STOP_MARKERS`` matched nothing in
+      ``"Error: [429] All credentials for model gemini-3.8-flash are cooling
+      down (reset after 37s)"``, so the run was not a provider stop at all and
+      the window was never read;
+    - ``_RESET_RE`` had no ``retry in`` and no fractional number, so Google's
+      own ``Please retry in 59.250991496s.`` parsed to None;
+    - ``stop_provider_id`` attributed an unnamed stop by splitting the leg at
+      ``/`` and looking that prefix up in ``providers``, which every
+      ``omniroute_id``-spelled leg (``gemini/...``, 25 such prefixes in the
+      real registry) fails -- so a recorded reset benched ``antigravity``, the
+      next live leg, instead of the provider that actually served the model the
+      line names.
+
+    These run against the real ``catalog/ai-registry.json`` -- the wrongness is
+    a property of the real leg spellings, and a fixture whose legs all used
+    provider keys would test nothing (R-worker-04).
+    """
+
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    # Verbatim from the call log R6RES section 1 quotes (t2-worker-free-only,
+    # 12 rows, 0 tokens), with the seconds R6RES section 2 tested against.
+    GEMINI_COOLDOWN = ("Error: [429] All credentials for model gemini-3.8-flash "
+                       "are cooling down (reset after 37s)")
+    # Verbatim from the same log: the upstream (Google) line behind the
+    # gateway's wrapper.
+    GOOGLE_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
+                    "exceeded for metric: generate_content_free_tier_requests, "
+                    "limit: 20, model: gemini-3.8-flash "
+                    "Please retry in 59.250991496s.")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state_path = os.path.join(self.tmp, "provider-state.json")
+        self.registry = self.agent.load_registry(self.agent.REGISTRY_PATH)
+
+    def state(self):
+        with io.open(self.state_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- 1: the cooldown line IS a provider stop -----------------------------
+
+    def test_the_gateway_cooldown_line_is_a_provider_stop(self):
+        self.assertEqual(
+            self.agent.provider_stop("working\n" + self.GEMINI_COOLDOWN + "\n"),
+            self.GEMINI_COOLDOWN,
+            "a cooled credential cut the run off; not reading it means the next "
+            "task is handed to the same provider")
+
+    def test_the_gateway_wrapper_of_the_upstream_retry_is_a_stop(self):
+        # What the client actually prints: the gateway's own cooldown line
+        # wrapping Google's window.
+        line = ("Error: [429] All credentials for model gemini-3.8-flash are "
+                "cooling down. Please retry in 59.250991496s.")
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+        self.assertEqual(self.agent.parse_reset(line), 59)
+
+    def test_a_line_that_is_not_a_stop_is_still_not_a_stop(self):
+        # The marker must not become so broad that ordinary output matches.
+        for line in ("Done. Wrote the cooldown handler.",
+                     "Error: the tests failed",
+                     'print("all credentials are cooling down")'):
+            with self.subTest(line=line):
+                self.assertIsNone(self.agent.provider_stop("working\n" + line + "\n"))
+
+    # --- 2: the window the cooldown states is the window it gets -------------
+
+    def test_a_retry_in_window_with_a_fraction_is_whole_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.GOOGLE_RETRY), 59,
+                         "'59.250991496s' is 59 seconds; the run was told 60")
+
+    def test_a_retry_in_window_in_seconds_is_seconds(self):
+        self.assertEqual(
+            self.agent.parse_reset("Error: 429 Please retry in 30s."), 30)
+
+    def test_a_rate_limit_line_with_no_window_still_parses_to_none(self):
+        self.assertIsNone(
+            self.agent.parse_reset("Error: [429]: Rate limit exceeded"))
+
+    def test_the_reset_windows_the_spawner_already_read_are_unchanged(self):
+        for text, want in (
+                ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                 "Quota resets in ~83h", 83 * 3600),
+                ("Error: 429 cooling down (reset after 51s)", 51),
+                ("Error: 429 quota reached, try again in 15 minutes", 15 * 60),
+                ("Error: 429 quota resets in ~2d", 2 * 86400),
+                ("Error: 429 retry after 45 seconds", 45),
+                (self.GEMINI_COOLDOWN, 37)):
+            with self.subTest(text=text):
+                self.assertEqual(self.agent.parse_reset(text), want)
+
+    # --- 3: the provider benched is the provider that served ------------------
+
+    def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
+        # 'gemini' is google_ai_studio's omniroute_id and how the route declares
+        # the leg; 'opencode-zen' is zen's. A raw prefix lookup finds neither.
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: 429 rate limit exceeded, resets in ~5m",
+                self.registry, ["gemini/gemini-3.8-flash"]),
+            "google_ai_studio")
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: 429 rate limit exceeded, resets in ~5m",
+                self.registry, ["opencode-zen/deepseek-v4.1-flash"]),
+            "zen")
+
+    def test_a_t2_worker_gemini_cooldown_benches_google_ai_studio(self):
+        # The measured wrong answer was antigravity (the next live leg of
+        # t2-worker); mistral is what a t2-worker-clean stop benched.
+        recorded = self.agent.record_reset_stop(
+            self.GEMINI_COOLDOWN, "t2-worker", self.registry,
+            now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("google_ai_studio", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"],
+                         "the cooldown benches the provider that served the model "
+                         "the line names, and nobody else")
+        self.assertNotIn("antigravity", self.state()["providers"])
+        self.assertNotIn("mistral", self.state()["providers"])
+
+    def test_a_t2_worker_free_only_gemini_cooldown_benches_google_ai_studio(self):
+        self.assertEqual(
+            self.agent.record_reset_stop(self.GOOGLE_RETRY, "t2-worker-free-only",
+                                         self.registry, now=self.NOW,
+                                         path=self.state_path),
+            ("google_ai_studio", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"])
+
+    def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
+        # t2-worker-clean has no gemini leg; naming a model the route does not
+        # serve falls back to the first servable leg, as an unnamed stop does.
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: [429] All credentials for model gemini-3.8-flash are "
+                "cooling down (reset after 37s)",
+                self.registry,
+                self.registry["routes"]["t2-worker-clean"]["legs"]),
+            "zen")
+
+    def test_a_cooldown_that_states_no_window_records_no_bench(self):
+        # No window, no record: a permanent-looking bench on a guess is worse
+        # than the retry the client will do itself.
+        self.assertIsNone(self.agent.record_reset_stop(
+            "Error: [429] All credentials for model gemini-3.8-flash are "
+            "cooling down", "t2-worker", self.registry,
+            now=self.NOW, path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
+        # The whole point of the recorder: the next `route`/`run` read merges
+        # this file in and skips the leg.
+        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "t2-worker",
+                                     self.registry, now=self.NOW,
+                                     path=self.state_path)
+        merged = self.agent.apply_provider_state(
+            self.registry, self.agent.load_provider_state(self.state_path),
+            now=self.NOW + datetime.timedelta(seconds=1))
+        cooled = merged["providers"]["google_ai_studio"]
+        self.assertIs(cooled["available"], False)
+        self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
+        self.assertTrue(self.agent.unavailable_now(cooled,
+                        self.NOW + datetime.timedelta(seconds=1)))
+        expired = self.agent.apply_provider_state(
+            self.registry, self.agent.load_provider_state(self.state_path),
+            now=self.NOW + datetime.timedelta(seconds=60))
+        self.assertFalse(
+            self.agent.unavailable_now(expired["providers"]["google_ai_studio"],
+                                       self.NOW + datetime.timedelta(seconds=60)),
+            "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
+
+
 class ReviewerSpawnabilityTests(unittest.TestCase):
     """REVROUTE (S2) item 4: the reviewer a card resolves to must be a model this
     host can actually START. A reviewer list that names an undeclared heading is
