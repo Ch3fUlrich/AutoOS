@@ -5,6 +5,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the release is strict by construction and the negation veto spans the sentence (RESTART R2a8, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7
+  widened the negation veto to the whole *window* and gated the RESUME half like a PAUSE —
+  both were still wide enough to lose a stop. **(1) The veto outran its window.**
+  `→ done: PAUSE lifted but it was never really confirmed by ops` closed the stop because
+  the negation sat five words out, past `_CLOSING_WINDOW`. The unit is now the **sentence**:
+  `_sentence_span` splits on `.` `;` `!` `?` and newline, and `_order_word_is_negated` reads
+  it whole, so a sentence that keeps talking after its closing word cannot close the order
+  (`PAUSE lifted and the record is unconfirmed by ops`,
+  `PAUSE released, and ops never signed that off`, `PAUSE ended but that was not the
+  operator's call` all stay in force). The same rule is what makes the veto *narrower* where
+  a negation belongs to a different claim: `→ done: no merges today. PAUSE lifted` and
+  `→ main: nothing was agreed; PAUSE acknowledged` close — the negation never reaches in
+  across a sentence boundary. No word joined `NEGATION_WORDS`; the round's point is that the
+  structure, not the vocabulary, carries this.
+  **(2) A mention of RESUME lifted the stop.** R2a7's gate vetoed a *negated* and an
+  *undone* RESUME, so `→ done: we should RESUME tomorrow`, `→ done: considering RESUME
+  options`, `→ done: RESUME pending` and `→ done: discussed RESUME` each un-stopped a run
+  nobody released. `_resumes` is now strict by construction and counts exactly two shapes:
+  **(a)** a record with **no** acknowledgement marker, where `RESUME` is the first word of
+  its payload or of its sentence — the imperative the operator writes (`operator: RESUME all
+  lanes`, `from L0 (operator) RESUME now`, `work done. RESUME every lane`) — unnegated in
+  that sentence and un-undone within the window; **(b)** an acknowledgement whose sentence
+  says nothing but the landing — `RESUME` plus a `RELEASE_ACK_WORDS` word (`acknowledged`,
+  `acked`, the release half of `REPORTING_CLOSING_WORDS`, named once and asserted as a
+  subset), optionally followed by punctuation or a time (`→ done: RESUME acknowledged at
+  12:00`), and by no prose (`→ done: RESUME acknowledged but ops still holding` lifts
+  nothing). `lesson:` lifts nothing, as before. Both shapes read the shared `_ack_head`
+  (the marker *and* where the payload starts), `_sentence_span`, `_order_word_is_negated`
+  and `_order_word_is_closed` — the rule has one home, no second copy.
+- **Recorded, not redesigned (the brief's follow-up probe):** `→ main: PAUSE lifted. STOP
+  all lanes` — `_gives_order` reports the record as an active order (the closed PAUSE half
+  does not exempt the open STOP half), and `pause_state` therefore calls the inbox active
+  *through* the PAUSE word in it. `pause_state`'s filter is `_PAUSE_RE` alone, so a bare
+  `operator: STOP all lanes` — or `HOLD every merge` — reports `active: False` while
+  `_gives_order` says it is an order. Both are pinned by tests as the exact behaviour.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2220
+  records**, 921 acknowledgements, 186 quoting an order word, 8 quoting `PAUSE`, **0 quoting
+  `RESUME`**): **0** records change `_gives_order`, **0** change `_resumes`, and
+  `pause_state` is identical on all 10 files (**3 active** both ways). The corpus is again
+  no evidence for either fix — it has never written a RESUME line and its PAUSE lines are
+  short, so the release half and the far-flung negation are covered only by the unit tests.
+- **Docs:** RESTART spec §0 holds the rule (sentence-span veto, the two release shapes, the
+  derived `RELEASE_ACK_WORDS` subset); `docs/routing.md` and the docstrings cite §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_sentence_span` instead of restating it.
+
 ### Fixed — a RESUME is gated the way a PAUSE is, and a negation anywhere in the closing window keeps the order open (RESTART R2a7, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a6, S1, safety): two HIGHs,

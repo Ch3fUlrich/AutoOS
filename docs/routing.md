@@ -114,16 +114,20 @@ spec §0's other one-list rules, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUM
 `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
 is held` is an order wearing its own first clause as a speaker, not an acknowledgement
 (R2a4). What an acknowledgement may then exempt — `autoos_heartbeat.CLOSING_WORDS` and
-its 3-word window, the `autoos_heartbeat.NEGATION_WORDS` veto, and the way a `RESUME`
-reads that same window the other way round through the
-`REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition of the closing list — is
+its 3-word window, the `autoos_heartbeat.NEGATION_WORDS` veto over the order word's whole
+sentence, the `RELEASE_ACK_WORDS` half of the
+`REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition, and the two record shapes a
+`RESUME` is allowed to lift through — is
 RESTART spec §0's rule (`docs/plans/2026-09-28-restart-spec.md`), which is its one home
 and is not restated here; in code it is `autoos_heartbeat._gives_order` for a stop word
-and `_resumes` for a release, both reading `_order_word_is_negated` and
-`_order_word_is_closed`. So `→ done: PAUSE lifted` and `→ done: RESUME acknowledged`
+and `_resumes` for a release, both reading `_ack_head`, `_sentence_span`,
+`_order_word_is_negated` and `_order_word_is_closed`. So `→ done: PAUSE lifted` and
+`→ done: RESUME acknowledged`
 report what already happened, while `→ done: PAUSE lifted but not confirmed`,
-`→ done: noted. PAUSE over the weekend` and
-`→ done: applied the fix already; RESUME was never issued, still holding` are still in
+`→ done: PAUSE lifted but it was never really confirmed by ops`,
+`→ done: noted. PAUSE over the weekend`,
+`→ done: applied the fix already; RESUME was never issued, still holding` and
+`→ done: we should RESUME tomorrow` are still in
 force (R2a5, the Sonnet review of R2a4; R2a6, the Muse review of R2a5; R2a7, the Sonnet
 review of R2a6) — and `lesson:` is the
 one marker that exempts a whole record, because a lesson reports on the code and never

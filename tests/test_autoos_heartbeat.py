@@ -598,6 +598,121 @@ class PauseStateTests(unittest.TestCase):
                          set(hb.UNDOING_CLOSING_WORDS) | set(hb.REPORTING_CLOSING_WORDS))
         self.assertIn("|".join(hb.UNDOING_CLOSING_WORDS), hb._UNDOING_CLOSING_RE.pattern)
 
+    # R2a8 (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7 made the *window*
+    # safe and the release *loose*, and both are still wrong. (1) A negation past the
+    # 3-word window closed the order anyway — `PAUSE lifted but it was never really
+    # confirmed by ops` — because the veto only ever looked at the window. The veto now
+    # spans the order word's whole sentence (`.` `;` `!` `?` and newline are the
+    # boundaries), so the negation is read wherever it stands in the sentence that made
+    # the claim, and a negation in a *different* sentence no longer reaches in.
+    # (2) `pause_state` lifted on any mention of a unnegated, un-undone RESUME, so
+    # `→ done: we should RESUME tomorrow`, `considering RESUME options`,
+    # `RESUME pending` and `discussed RESUME` each un-stopped a run the operator never
+    # released. The release is strict by construction now: an unmarked record lifts only
+    # when RESUME opens the payload or its sentence (the imperative — `RESUME all lanes`),
+    # an acknowledgement lifts only when its sentence says nothing but
+    # `RESUME acknowledged`/`RESUME acked` (punctuation and a time allowed), and a
+    # `lesson:` record lifts nothing. The asymmetry is unchanged and this is the side it
+    # points at: a refused release costs one wasted heartbeat and a re-issued RESUME, a
+    # release nobody gave is the lost stop.
+
+    def test_a_negation_anywhere_in_the_sentence_keeps_the_order_open(self):
+        for text in ("→ done: PAUSE lifted but it was never really confirmed by ops",
+                     "→ done: PAUSE lifted and the record is unconfirmed by ops",
+                     "→ main: PAUSE released, and ops never signed that off",
+                     "→ ack: PAUSE ended but that was not the operator's call"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_the_negation_veto_stops_at_the_sentence_boundary(self):
+        # The sentence is the unit, not the record: a negation belongs to the sentence
+        # that made the claim, so a closed order in its own sentence still closes.
+        for text in ("→ done: no merges today. PAUSE lifted",
+                     "→ main: nothing was agreed; PAUSE acknowledged",
+                     "→ done: ops saw no issue. PAUSE cleared at 12:00"):
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_mention_of_resume_does_not_lift_the_stop(self):
+        # HIGH-2: every one of these matched a bare unnegated `RESUME` at R2a7.
+        for text in ("→ done: we should RESUME tomorrow",
+                     "→ done: considering RESUME options",
+                     "→ done: RESUME pending",
+                     "→ done: discussed RESUME",
+                     "→ main: RESUME still holding, ops to confirm",
+                     "noting that RESUME is due later",
+                     "operator: they may RESUME the run tomorrow"):
+            self.assertFalse(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_imperative_resume_still_lifts_the_stop(self):
+        # The other half of the strict rule: what the operator actually *orders*
+        # releases, at the head of the payload or of a sentence, marked or not.
+        for text in ("operator: RESUME all lanes",
+                     "RESUME",
+                     "from L0 (operator) RESUME now",
+                     "note the fix landed. RESUME every lane",
+                     "operator: work done. RESUME all lanes"):
+            self.assertTrue(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_acknowledgement_lifts_only_on_a_bare_release_acknowledgement(self):
+        # Rule (b): the ack record lifts when its sentence says nothing but the
+        # acknowledgement — punctuation and a time are allowed, prose is not.
+        for text in ("→ done: RESUME acknowledged",
+                     "→ ack: RESUME acked",
+                     "L1: → done: RESUME acknowledged.",
+                     "→ done: RESUME acknowledged at 12:00",
+                     "→ main: RESUME acknowledged 2026-09-26T12:00:00Z"):
+            self.assertTrue(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+        for text in ("→ done: RESUME acknowledged but ops still holding",
+                     "→ done: RESUME acknowledged by no one",
+                     "→ done: RESUME cancelled"):
+            self.assertFalse(hb._resumes(text), text)
+
+    def test_the_release_acknowledgement_words_are_derived_not_rehand_copied(self):
+        # §0 one home: the exact-ack words are a subset of the reporting partition, and
+        # the matcher is built from the list.
+        self.assertTrue(set(hb.RELEASE_ACK_WORDS) <= set(hb.REPORTING_CLOSING_WORDS))
+        self.assertIn("|".join(hb.RELEASE_ACK_WORDS), hb._RELEASE_ACK_RE.pattern)
+        for word in ("acknowledged", "acked"):
+            self.assertIn(word, hb.RELEASE_ACK_WORDS, word)
+
+    def test_a_stop_in_a_later_sentence_of_a_closed_pause_is_still_an_order(self):
+        # The read-only probe R2a8's brief asked for: `→ main: PAUSE lifted. STOP all
+        # lanes`. `_gives_order` reports the STOP as an active order (the PAUSE half of
+        # the record is closed, the STOP half is not), and `pause_state` calls the
+        # record active — but it keys on the PAUSE word alone, so it reports a STOP only
+        # through a record that also contains PAUSE. See `test_a_bare_stop_order_is_
+        # invisible_to_pause_state`, which pins the exact behaviour and is the `open:`
+        # entry, not a redesign.
+        text = "→ main: PAUSE lifted. STOP all lanes"
+        self.assertTrue(hb._gives_order(text), text)
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+        self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_bare_stop_order_is_invisible_to_pause_state(self):
+        # The exact behaviour, recorded rather than redesigned: pause_state's filter is
+        # `_PAUSE_RE`, so an order word from `ORDER_WORDS` that is not PAUSE never
+        # activates a pause on its own — `STOP all lanes` reports `active: False`.
+        for text in ("operator: STOP all lanes",
+                     "from L0 (operator) HOLD every merge"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a
         # continuation) is never scanned for an order, marker or no marker.
