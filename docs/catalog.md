@@ -99,16 +99,26 @@ every one of those into "Unknown component id", so a retired component is
 What that changes, on both platforms:
 
 - The id stays accepted everywhere it was accepted before — `--only`,
-  `--from-state` / `-FromState`, the menu.
+  `--from-state` / `-FromState` — and it stays *visible* in the menu, which is
+  where a reader learns it went away; only the choosing left.
 - Selecting it does nothing: the run reports `skipped: retired (<note>)`, asks no
   prompt, runs no post-install step, and never counts it as installed or as
   failed. An old state file replays clean instead of failing.
-- Profiles never pre-tick it, so a fresh profile run does not plan it at all.
-  Something chosen by hand is still planned, with the row marked `(retired)` —
-  `--list` / `-ListComponents` and the menu say the same thing.
+- Profiles never pre-tick it, and no menu can tick it: a retired row is drawn
+  **locked** in the terminal menu — `[-]` / `[=]`, muted, ignored by space, `a`,
+  `g`, `i` and the non-interactive fallback alike — and labelled
+  `(retired: replaced by <ids>)`, so the row itself answers why choosing it does
+  nothing. `--list` / `-ListComponents` still marks the row `(retired)`. A
+  selection that does name a retired id is expanded before the plan (below), so
+  no path can plan a tombstone without the ids that took its work.
 - It is never *detected* as installed either: the `✓` on a retired id would
   answer for a product AutoOS no longer offers, and the cache that report comes
   from is the one the rest of the run reads.
+- A retired entry keeps the `provider` it had, and retirement is asked **before**
+  the provider is: a retired `manual` component resolves to a plan row reporting
+  `skipped: retired`, where the provider guard would have failed the whole run
+  over a row that installs nothing — and the plan no longer prints its stale
+  vendor link as an "Action required" step.
 - `postInstall`, `prompt`, `requires` and `verify` may all be absent — they only
   mean something for something that installs. No other entry may `require` a
   tombstone: that dependency could never be satisfied. The validator rejects it,
@@ -151,9 +161,10 @@ which reads like success.
 { "id": "agent-skills", "tombstone": true, "replaced_by": ["agent-skill-links", "omnigraph-client"] }
 ```
 
-Wherever a selection is built from **explicit ids** — `--from-state` /
-`-FromState`, `--only` / `-Only`, and a browser run, whose payload the server
-passes in as `--only` — a retired id expands to its replacements:
+Every selection the entry point produces is expanded before the plan, whichever
+path made it — `--from-state` / `-FromState`, `--only` / `-Only`, a browser run
+(whose payload the server passes in as `--only`), the interactive menu, and the
+profile a `-Yes` run takes:
 
 - One muted line announces it: `agent-skills is retired: replaced by
   agent-skill-links, omnigraph-client`. Nothing is substituted silently.
@@ -168,8 +179,11 @@ passes in as `--only` — a retired id expands to its replacements:
   same defect with better manners.
 - A successor that has itself been retired since is expanded in turn, so a second
   retirement of the same work still lands.
-- Profiles are unaffected: a profile never pre-ticks a tombstone, so a profile run
-  never names one and never expands one. The menu cannot tick one either.
+- A profile never pre-ticks a tombstone and no menu row can tick one, so a run
+  that came from either names no retired id to expand. That is the second guard,
+  not the only one: the expansion above runs unconditionally, so a retired id that
+  reaches the selection by any route — including one added later — still brings
+  its successors with it.
 
 The validators on both platforms reject a `replaced_by` that is empty, that sits
 on an entry which is not a tombstone, or that names an id which does not exist or

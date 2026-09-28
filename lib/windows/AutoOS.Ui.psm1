@@ -381,7 +381,8 @@ function Show-AutoOSMenu {
         Arrow-key checkbox selector over grouped items.
     .PARAMETER Items
         Objects with: Id, Name, Description, Group, Selected, Locked, Reason.
-        A Locked item is shown but cannot be toggled (dependency of something else).
+        A Locked item is shown but cannot be chosen, at a keyboard or not:
+        AutoOS installs nothing for it (a manual provider, or a retired entry).
     .OUTPUTS
         String[] of selected Ids, or $null if the user cancelled.
     #>
@@ -392,7 +393,9 @@ function Show-AutoOSMenu {
     )
 
     if (-not (Test-AutoOSInteractive)) {
-        return @($Items | Where-Object { $_.Selected } | ForEach-Object { $_.Id })
+        # A locked row is not a choice, keyboard or not: the fallback reads the
+        # same flag every key handler below honours.
+        return @($Items | Where-Object { $_.Selected -and -not $_.Locked } | ForEach-Object { $_.Id })
     }
 
     # Build a flat render list: group headers interleaved with their items.

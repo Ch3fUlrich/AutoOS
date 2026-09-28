@@ -731,3 +731,173 @@ PY
 )"
     assert_eq "$failures" ""
 fi
+
+# ─── the terminal menu: a retired row is shown, locked, and explains itself ──
+# The row decision has one home on each platform: catalog_menu_rows here,
+# New-AutoOSMenuItem on Windows. The cases below ask it directly, then through
+# the real ui_menu key handlers, then through setup.sh driving a menu on a pty —
+# the path production takes, and the only one that can prove a hand-ticked
+# tombstone never reaches a plan without the ids that took its work over.
+
+# manual_tombstone_py — source for a fixture variant that retires an entry which
+# also carries the manual provider. That shape is what the guard order gets
+# wrong: the provider guard answers "AutoOS cannot install this" about a row that
+# is retired and installs nothing by design, so the run fails where it should
+# report a skip.
+manual_tombstone_py='
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "retired-demo":
+            c["provider"] = "manual"
+            c["notes"] = "Fixture manual provider; nothing to download."
+json.dump(d, open(p, "w"))
+'
+
+if it "catalog tombstone: a menu row for a retired id is locked and names its replacements"; then
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    catalog_menu_rows keep-demo
+    r="$(catalog_index_of replaced-demo)"
+    t="$(catalog_index_of retired-demo)"
+    k="$(catalog_index_of keep-demo)"
+    problems=""
+    # A retired row is shown — the id is public and someone may remember the
+    # product — but it cannot be chosen, and it says why in the same breath.
+    [[ "${MENU_DISABLED[r]:-<missing>}" == 1 ]] || problems+="[a retired row can be ticked] "
+    [[ "${MENU_DESC[r]:-}" == *"(retired: replaced by keep-demo, successor-demo)"* ]] \
+        || problems+="[the row reads [${MENU_DESC[r]:-<missing>}]] "
+    [[ "${MENU_DISABLED[t]:-<missing>}" == 1 ]] || problems+="[a retired row with no replacements can be ticked] "
+    [[ "${MENU_DESC[t]:-}" == *"(retired)"* ]] || problems+="[the row reads [${MENU_DESC[t]:-<missing>}]] "
+    # The guard that the new lock is not a blanket: an ordinary row stays tickable
+    # and keeps the pre-tick list the caller handed in.
+    [[ "${MENU_DISABLED[k]:-<missing>}" == 0 ]] || problems+="[an ordinary row was disabled] "
+    [[ "${MENU_SEL[k]:-<missing>}" == 1 ]] || problems+="[the pre-tick list was not honoured] "
+    [[ "${MENU_SEL[r]:-<missing>}" == 0 ]] || problems+="[a retired row was pre-ticked] "
+    [[ "${#MENU_ID[@]}" == "${#CAT_ID[@]}" && "${#MENU_DISABLED[@]}" == "${#MENU_ID[@]}" \
+       && "${#MENU_SEL[@]}" == "${#MENU_ID[@]}" ]] \
+        || problems+="[rows and flags came apart: ${#MENU_ID[@]} ids, ${#MENU_DISABLED[@]} flags, ${#MENU_SEL[@]} selections] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog tombstone: the menu's own key handlers cannot tick a retired row"; then
+    # ui_menu decides what a key does; the row arrays decide what is tickable.
+    # Both are the real code, run in a subshell so the shared arrays stay clean.
+    (
+        ui_is_interactive() { return 0; }
+        catalog_load "$TOMBSTONE_FIXTURE" x64 0
+        catalog_menu_rows ""
+        ui_menu "Choose what to install" "" < <(printf 'a\n') >/dev/null 2>&1 || exit 1
+        [[ "$MENU_RESULT" == *keep-demo* && "$MENU_RESULT" == *prompted-demo* ]] || exit 2
+        [[ "$MENU_RESULT" != *replaced-demo* ]] || exit 3
+        [[ "$MENU_RESULT" != *retired-demo* ]] || exit 4
+        exit 0
+    ); rc=$?
+    case "$rc" in
+        0) pass ;;
+        1) fail "ui_menu cancelled instead of returning a selection" ;;
+        2) fail "select-all skipped an ordinary row: [$MENU_RESULT]" ;;
+        3|4) fail "select-all handed a retired id to the selection: [$MENU_RESULT]" ;;
+        *) fail "ui_menu or the row builder exited rc=$rc" ;;
+    esac
+fi
+
+if it "catalog tombstone: the interactive menu never hands a retired id to the plan"; then
+    # The review finding, end to end: a person who highlights the retired row and
+    # presses space used to get a plan with the skip row and none of the work that
+    # replaced it. Nothing about this is reachable without a terminal, so the case
+    # opens one; where the host has no script(1) it is a skip, never a pass.
+    if ! command -v script >/dev/null 2>&1; then skip "no script(1) to open a pty"
+    else
+        tree="$(tombstone_tree)"
+        # Park the cursor on the row the fixture places fourth, tick it, confirm
+        # the menu, then accept the plan. Counted from the catalog, so a row added
+        # in front of it moves the keystrokes with it rather than breaking them.
+        catalog_load "$TOMBSTONE_FIXTURE" x64 0
+        keys=""
+        for ((j = 0; j < "$(catalog_index_of replaced-demo)"; j++)); do keys+="j"; done
+        out="$(printf '%s \ny\n' "$keys" | HOME="$tree/home" timeout 90 script -qec \
+              "bash '$tree/setup.sh' --profile custom --no-color --dry-run" /dev/null 2>&1)"; rc=$?
+        plain="$(printf '%s' "$out" | tr -d '\r' | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g')"
+        rm -rf "$tree"
+        if [[ "$plain" != *"Choose what to install"* ]]; then
+            # The terminal was opened but nothing drew the menu in it — a host
+            # limitation, not a verdict on the code.
+            skip "the pty run never reached the menu (rc=$rc): $(printf '%s\n' "$plain" | tail -2)"
+        else
+            planned="$(printf '%s\n' "$plain" | grep -E '^ +[0-9]+\. ' || true)"
+            problems=""
+            # Locked and labelled, exactly as the review asked the row to read.
+            [[ "$plain" == *"[-] Replaced Component"* ]] \
+                || problems+="[the retired row is not shown locked: $(printf '%s\n' "$plain" | grep 'Replaced Component' | head -1 | sed 's/^ *//')] "
+            [[ "$plain" == *"(retired: replaced by keep-demo, successor-demo)"* ]] \
+                || problems+="[the retired row does not name its replacements] "
+            (( rc == 0 )) || problems+="[rc=$rc: $(printf '%s\n' "$plain" | tail -3)] "
+            [[ "$planned" != *"Replaced Component"* ]] \
+                || problems+="[the menu planned a retired id with nothing to take its work: $planned] "
+            [[ -z "$problems" ]] && pass || fail "$problems"
+        fi
+    fi
+fi
+
+if it "catalog tombstone: a retired manual-provider id resolves rather than refusing"; then
+    # The guard order the review calls LOW: resolve asks "can AutoOS install this
+    # provider?" before "is this row retired?", so a retired manual entry aborts
+    # the whole run over a component that installs nothing either way.
+    f="$(fixture_variant "$manual_tombstone_py")"
+    catalog_load "$f" x64 0
+    out="$(catalog_resolve retired-demo 2>&1)"; rc=$?
+    problems=""
+    (( rc == 0 )) || problems+="[resolve refused a retired id: $out] "
+    [[ " $PLAN_IDS " == *" retired-demo "* ]] || problems+="[the retired row is not in the plan: [$PLAN_IDS]] "
+    [[ -z "$(catalog_resolve_blocked retired-demo)" ]] \
+        || problems+="[it was refused instead: $(catalog_resolve_blocked retired-demo)] "
+    rm -f "$f"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog tombstone: --only a retired manual-provider id reports skipped retired"; then
+    # Through the entry point, because it is the run the user sees: the retired
+    # row is skipped, the vendor instruction never fires for a row that retired,
+    # and the report has no failure to explain.
+    tree="$(tombstone_tree "$manual_tombstone_py")"
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only retired-demo --yes --no-color --dry-run 2>&1)"; rc=$?
+    rm -rf "$tree"
+    problems=""
+    (( rc == 0 )) || problems+="[rc=$rc: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$out" == *"skipped: retired"* ]] || problems+="[no skip line: $(printf '%s\n' "$out" | tail -6)] "
+    [[ "$out" != *"AutoOS cannot install"* ]] || problems+="[the provider guard fired for a retired id]"
+    # The report always carries an "Action required" count; what must not appear is
+    # the instruction itself, naming the vendor link of a row that retired.
+    [[ "$out" != *"Action required: http"* ]] || problems+="[the plan asked the user to install the retired row by hand]"
+    failed="$(printf '%s\n' "$out" | grep -E '^ +Failed' | head -1 | awk '{print $2}')"
+    [[ "$failed" == "0" ]] || problems+="[the report counts ${failed:-no} failure(s): $(printf '%s\n' "$out" | tail -4)] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog tombstone: a locked row cannot leave the menu, terminal or not"; then
+    # The key handlers honour MENU_DISABLED; the selector's non-interactive
+    # fallback used to read only MENU_SEL, so a row the caller marked unchosen
+    # could still reach the plan when nobody was at a keyboard. Same contract,
+    # both branches.
+    (
+        ui_is_interactive() { return 1; }
+        catalog_load "$TOMBSTONE_FIXTURE" x64 0
+        catalog_menu_rows keep-demo
+        # Simulate any route that handed the selector a ticked retired row — the
+        # lock is what has to stop it, not the tick.
+        r="$(catalog_index_of replaced-demo)"
+        MENU_SEL[r]=1
+        ui_menu "Choose what to install" "" >/dev/null 2>&1 || exit 1
+        [[ "$MENU_RESULT" == *keep-demo* ]] || exit 2
+        [[ "$MENU_RESULT" != *replaced-demo* ]] || exit 3
+        exit 0
+    ); rc=$?
+    case "$rc" in
+        0) pass ;;
+        1) fail "the fallback selector returned an error" ;;
+        2) fail "the fallback lost the pre-ticked row: [$MENU_RESULT]" ;;
+        3) fail "a locked row reached the selection: [$MENU_RESULT]" ;;
+        *) fail "the fallback selector exited rc=$rc" ;;
+    esac
+fi

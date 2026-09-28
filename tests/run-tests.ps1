@@ -1118,6 +1118,76 @@ Test-Case 'tombstone: setup.ps1 -FromState replays a tombstone as its replacemen
         "rc=$($r.Rc) rows=$($rows -join ' | ') out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
 }
 
+Test-Case 'tombstone: the menu row for a retired id is locked and names its replacements' {
+    # The row is shown - the id is public, someone may remember the product - but
+    # it cannot be chosen, and it says in the same breath what took the work over.
+    $offered = @($tombAvailable.Id)
+    $replaced = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $retired  = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $kept     = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $i1 = New-AutoOSMenuItem -Component $replaced -ProfileName 'workstation' -OfferedIds $offered
+    $i2 = New-AutoOSMenuItem -Component $retired -ProfileName 'workstation' -OfferedIds $offered
+    $i3 = New-AutoOSMenuItem -Component $kept -ProfileName 'workstation' -OfferedIds $offered
+    Assert-True ($i1.Locked -and -not $i1.Selected) 'a retired row could be chosen'
+    Assert-True ($i1.Description -like '*(retired: replaced by keep-demo, successor-demo)*') `
+        "the row reads [$($i1.Description)]"
+    Assert-True ($i2.Locked) 'a retired row with no replacements could be chosen'
+    Assert-True ($i2.Description -like '*(retired)*') "the row reads [$($i2.Description)]"
+    Assert-True ($i2.Reason -like '*retired*') "the locked row explains itself as [$($i2.Reason)]"
+    # The lock is not a blanket: an ordinary row of the same profile stays tickable.
+    Assert-True (-not $i3.Locked -and $i3.Selected) "an ordinary row reads locked=$($i3.Locked) selected=$($i3.Selected)"
+}
+
+Test-Case 'tombstone: a locked row cannot leave the menu' {
+    # Space, 'a', 'g' and 'i' all respect Locked; the selector's non-interactive
+    # fallback read only Selected, so a ticked retired row still reached the plan
+    # when nobody was at a keyboard. One contract, both branches.
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        $items = @($tombAvailable | ForEach-Object {
+            New-AutoOSMenuItem -Component $_ -ProfileName 'workstation' -OfferedIds @($tombAvailable.Id)
+        })
+        $leaked = $items | Where-Object { $_.Id -eq 'replaced-demo' }
+        $leaked.Selected = $true
+        $res = @(Show-AutoOSMenu -Items $items -Title 'Choose what to install')
+        Assert-True (($res -contains 'keep-demo') -and -not ($res -contains 'replaced-demo') `
+                     -and -not ($res -contains 'retired-demo')) "the menu returned: $($res -join ', ')"
+    } finally { Remove-Item Env:AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'tombstone: a retired manual-provider id resolves instead of refusing' {
+    # The guard order the review calls LOW: resolve asked whether AutoOS can
+    # install the *provider* before it asked whether the row had retired, so a
+    # retired manual entry aborted the run over a component that installs nothing.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'provider' 'manual'
+    $null = Set-TombstoneField $cat 'retired-demo' 'notes' 'Fixture manual provider; nothing to download.'
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $threw = ''; $plan = @()
+    try { $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo')) }
+    catch { $threw = $_.Exception.Message }
+    Assert-True (-not $threw) "resolve refused a retired id: $threw"
+    $row = @($plan | Where-Object { $_.Id -eq 'retired-demo' })
+    Assert-Equal $row.Count 1 "the retired row is not in the plan: $(@($plan.Id) -join ', ')"
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $row[0]) 'skipped: retired (wired by keep-demo now)' `
+        'the row has no skip line to report'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired manual-provider id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'provider' -NotePropertyValue 'manual' -Force
+        $null = $t | Add-Member -NotePropertyName 'notes' -NotePropertyValue 'Fixture manual provider.' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired' `
+                 -and $r.Out -notmatch 'AutoOS cannot install' `
+                 -and $r.Out -notmatch 'Action required: \S+ - http' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 

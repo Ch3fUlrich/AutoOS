@@ -5,6 +5,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a retired row is locked in both terminal menus, and every selection path expands it (A7a review 2, 2026-09-28)
+
+Muse's re-check found the `replaced_by` expansion sitting behind the wrong
+condition. It ran only for a selection named by ids (`--from-state`, `--only`, and
+the browser payload that arrives as `--only`), while **neither terminal menu locked
+a retired row**: `setup.sh` set `MENU_DISABLED` for the `manual` provider only, and
+`New-AutoOSMenuItem` set `Locked` for the `manual` provider only. So a person who
+highlighted a retired row and pressed space got exactly the failure the previous
+commit was meant to close — a plan holding the `skipped: retired` row and none of
+the work that replaced it — and the row's `(retired)` label said nothing about
+where the work had gone.
+
+Both halves, because either one alone leaves a hole:
+
+- **The row**: `catalog_menu_rows` (new in `lib/linux/catalog.sh`, the twin of
+  `New-AutoOSMenuItem`, which the menu now calls instead of building its own arrays)
+  locks a retired row and labels it `(retired: replaced by <ids>)`, naming only the
+  successors this machine offers, the way the announcement line does. On Windows
+  `New-AutoOSMenuItem` gained `-OfferedIds` and the same lock and label, plus a
+  `Reason`. `ui_menu`'s and `Show-AutoOSMenu`'s non-interactive fallback read only
+  the tick, so a locked row could still leave the selector with nobody at a
+  keyboard; both now honour the lock, the same rule the key handlers apply.
+- **The selection**: `setup.sh` and `setup.ps1` expand on the way to the plan,
+  unconditionally, so no path — menu, profile, replay, `--only`, browser, or one
+  added later — can plan a tombstone without its replacements.
+- **Guard order** (the review's LOW): resolve asked whether AutoOS could install
+  the *provider* before it asked whether the row had *retired*, so a retired
+  `manual` component failed the whole run with "use its vendor link". Retirement is
+  now asked first, the row resolves and reports `skipped: retired`, and the plan no
+  longer prints its stale homepage as an "Action required" step.
+
+Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`) covers the row flags
+and label, the real `ui_menu` key handlers, the locked row against the
+non-interactive fallback, the retired-`manual` resolve, and — over a `script(1)`
+pty, skipped where none exists — the reviewer's own scenario through the real
+`setup.sh`: highlight a retired row, press space, and see that it never reaches the
+plan. The PowerShell suite (`tests/run-tests.ps1 -Filter tombstone`) covers the same
+row through `New-AutoOSMenuItem`, the same lock through `Show-AutoOSMenu`, the same
+guard order in `Resolve-AutoOSPlan`, and `-Only` of a retired `manual` id through
+`setup.ps1`. `docs/catalog.md` said a hand-chosen retired id "is still planned"; it
+no longer is, and the document says so where it describes the row.
+
 ### Fixed — a tombstone names what replaced it, so a replayed state keeps the work (A7a)
 
 Sonnet's final review of the A7b lane found the retirement mechanism keeping the

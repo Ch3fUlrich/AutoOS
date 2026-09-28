@@ -229,9 +229,11 @@ function Expand-AutoOSTombstoneReplacements {
         A state file saved before a component was retired names the retired id and
         none of its successors, so replaying it booked the retirement and installed
         nothing - the work the user had simply stopped happening. Every selection
-        built from explicit ids is expanded here: -FromState, -Only, and a browser
-        run, whose -Serve passes the selection through as -Only. A profile never
-        names a tombstone, so a profile run never comes through.
+        the entry point produces is expanded here, whichever path made it:
+        -FromState, -Only, a browser run (whose -Serve passes the selection through
+        as -Only), the interactive menu, and a profile. The menu and the profile
+        already keep a tombstone out of the selection; that is the second guard,
+        not the only one.
 
         Returns @{ Ids; Lines }. The retired row stays in Ids - it is what still
         reports 'skipped: retired' - and Lines is one announcement per retired id
@@ -368,29 +370,60 @@ function Get-AutoOSProfileDefaults {
       ForEach-Object { $_.Id })
 }
 
+function Format-AutoOSTombstoneRowLabel {
+    <#
+      .SYNOPSIS
+        What a retired row says about the work it left behind.
+      .DESCRIPTION
+        '(retired: replaced by <ids>)', or a bare '(retired)' when the retirement
+        moved nothing this machine offers. Only offered successors are named, the
+        way the replay announcement does, so a row can never promise an id the plan
+        then leaves out. One home for the wording, as with the skip line.
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Component,
+        [AllowEmptyCollection()][AllowEmptyString()][string[]]$OfferedIds = @()
+    )
+    $named = @(Get-AutoOSTombstoneReplacements -Component $Component |
+               Where-Object { $_ -in $OfferedIds })
+    if ($named.Count) { "(retired: replaced by $($named -join ', '))" } else { '(retired)' }
+}
+
 function New-AutoOSMenuItem {
     <#
       .SYNOPSIS Shape an available component into a row the menu understands.
+      .DESCRIPTION
+        Two kinds of row are shown but cannot be chosen: a manual-provider one,
+        because AutoOS cannot install it, and a retired one, because it installs
+        nothing at all - and a retired row names its replacements on the same line,
+        because someone who remembers the product deserves to learn from the row why
+        ticking it does nothing, rather than ticking it and watching.
     #>
     param(
         [Parameter(Mandatory)][psobject]$Component,
         # Not $Profile: that is a PowerShell automatic variable ($PROFILE).
         [Alias('Profile')][string]$ProfileName = 'custom',
-        [bool]$Installed = $false
+        [bool]$Installed = $false,
+        # The ids this machine offers, so the row can name only successors the plan
+        # will really include.
+        [AllowEmptyCollection()][AllowEmptyString()][string[]]$OfferedIds = @()
     )
+    $retired = Test-AutoOSTombstone -Component $Component
     [pscustomobject]@{
         Id          = $Component.Id
         Name        = $Component.Name
-        Description = $(if (Test-AutoOSTombstone -Component $Component) {
-                           # The row is still offered - a user who remembers this
-                           # product should learn from the row itself why picking
-                           # it does nothing.
-                           "$($Component.Description) (retired)"
+        Description = $(if ($retired) {
+                           "$($Component.Description) " +
+                               (Format-AutoOSTombstoneRowLabel -Component $Component -OfferedIds $OfferedIds)
+                       } elseif ($Component.Provider -eq 'manual') {
+                           "$($Component.Description) (vendor setup required)"
                        } else { $Component.Description })
         Group       = $Component.Category
         Selected    = (Test-AutoOSProfileDefault -Component $Component -ProfileName $ProfileName)
-        Locked      = ($Component.Provider -eq 'manual')
-        Reason      = $(if ($Component.Provider -eq 'manual') { 'Vendor setup required; AutoOS cannot install this application.' } else { '' })
+        Locked      = ($Component.Provider -eq 'manual') -or $retired
+        Reason      = $(if ($retired) { 'Retired: AutoOS installs nothing for this entry.' }
+                        elseif ($Component.Provider -eq 'manual') { 'Vendor setup required; AutoOS cannot install this application.' }
+                        else { '' })
         Installed   = $Installed
     }
 }
@@ -425,11 +458,16 @@ function Resolve-AutoOSPlan {
     foreach ($id in $SelectedIds) { if ($byId.ContainsKey($id)) { [void]$queue.Enqueue($id) } }
     while ($queue.Count -gt 0) {
         $id = $queue.Dequeue()
+        # Retired is asked before the provider is. A retired entry keeps the
+        # provider it had, and the provider guard answers 'AutoOS cannot install
+        # this, use the vendor link' - a hard failure about a row that installs
+        # nothing either way, and a vendor instruction for work that moved on. The
+        # row belongs in the plan so it can report 'skipped: retired'.
+        if (Test-AutoOSTombstone -Component $byId[$id]) { [void]$wanted.Add($id); continue }
         if ($byId[$id].Provider -eq 'manual') { throw "AutoOS cannot install '$id'; use its vendor link for manual setup." }
         if (-not $wanted.Add($id)) { continue }
         # A retired id is chosen or replayed, never expanded: what it used to
         # require belongs to whatever replaced it, not to this row.
-        if (Test-AutoOSTombstone -Component $byId[$id]) { continue }
         foreach ($dep in $byId[$id].Requires) {
             if ($byId.ContainsKey($dep)) {
                 # The dependent is refused, but the retired row stays in the plan:
@@ -501,4 +539,5 @@ Export-ModuleMember -Function `
     New-AutoOSMenuItem, Resolve-AutoOSPlan, Get-AutoOSComponentProperty,
     Test-AutoOSTombstone, Get-AutoOSTombstoneNote, Format-AutoOSTombstoneSkip,
     Get-AutoOSTombstoneReplacements, Format-AutoOSTombstoneReplacement,
-    Expand-AutoOSTombstoneReplacements, Get-AutoOSProfileDefaults
+    Format-AutoOSTombstoneRowLabel, Expand-AutoOSTombstoneReplacements,
+    Get-AutoOSProfileDefaults

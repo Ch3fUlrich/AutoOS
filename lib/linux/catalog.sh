@@ -268,10 +268,11 @@ declare -a EXPANDED_LINES=()
 #
 # A state file saved before a component was retired names the retired id and
 # none of its successors, so replaying it booked the retirement and installed
-# nothing: the work the user had simply stopped happening. Every selection built
-# from explicit ids asks this first — --from-state, --only, and a browser run,
-# which --serve passes in as --only. A profile never names a tombstone, so a
-# profile run never comes here.
+# nothing: the work the user had simply stopped happening. The entry point asks
+# this of *every* selection — --from-state, --only, a browser run, which --serve
+# passes in as --only, the interactive menu, and a profile — so no path can hand
+# a retired id to the plan on its own. A profile and a menu row already keep a
+# tombstone out of the selection; that is the second guard, not the only one.
 #
 # The retired row stays in the list: it is what still reports "skipped: retired",
 # and the added ids are what do the work. A successor this machine does not offer
@@ -332,6 +333,59 @@ catalog_profile_defaults() {
     echo "${out% }"
 }
 
+# catalog_tombstone_row_label <index> — what a retired row says about the work it
+# left behind: "(retired: replaced by <ids>)", or a bare "(retired)" when the
+# retirement moved nothing this machine offers.
+#
+# Only the successors that are actually offered are named, the way the replay
+# announcement does, so a row can never promise an id the plan then leaves out.
+catalog_tombstone_row_label() {
+    local idx="${1:-0}" r out=""
+    local -a repl=()
+    IFS=',' read -ra repl <<<"${CAT_REPLACED_BY[idx]:-}"
+    for r in "${repl[@]}"; do
+        [[ -n "$r" ]] || continue
+        catalog_index_of "$r" >/dev/null 2>&1 || continue
+        [[ -n "$out" ]] && out+=", "
+        out+="$r"
+    done
+    if [[ -n "$out" ]]; then
+        printf '(retired: replaced by %s)' "$out"
+    else
+        printf '(retired)'
+    fi
+}
+
+# catalog_menu_rows [<id>...] — fill the parallel MENU_* arrays ui_menu draws,
+# pre-ticking the ids handed in. The Windows twin is New-AutoOSMenuItem.
+#
+# Two kinds of row are shown but cannot be chosen. A manual-provider row is
+# locked because AutoOS cannot install it. A retired row is locked because it
+# installs nothing at all — and it names its replacements on the same line,
+# because someone who remembers the product deserves to learn from the row why
+# ticking it does nothing, rather than ticking it and watching. Locking is not
+# enough on its own: the entry point expands whatever the selection turns out to
+# hold, so a retired id that reaches it by any route arrives with its successors.
+catalog_menu_rows() {
+    local defaults=" $* " i
+    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=()
+    MENU_SEL=(); MENU_INSTALLED=(); MENU_DISABLED=()
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
+        MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
+        MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
+        MENU_DISABLED+=(0); MENU_SEL+=(0)
+        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then
+            MENU_DISABLED[i]=1; MENU_DESC[i]+=" (vendor setup required)"
+        fi
+        if catalog_is_tombstone "$i"; then
+            MENU_DISABLED[i]=1; MENU_DESC[i]+=" $(catalog_tombstone_row_label "$i")"
+        elif [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then
+            MENU_SEL[i]=1
+        fi
+    done
+}
+
 # catalog_resolve <id...> — echoes a dependency-complete, topologically sorted
 # id list. Dependencies always precede the components that need them.
 PLAN_IDS=""
@@ -359,12 +413,21 @@ catalog_resolve() {
         id="${queue[0]}"; queue=("${queue[@]:1}")
         [[ " ${wanted[*]} " == *" $id "* ]] && continue
         i="$(catalog_index_of "$id")" || continue
+        # Retired is asked before the provider is. A retired entry keeps the
+        # provider it had, and the provider guard answers "AutoOS cannot install
+        # this, use the vendor link" — a hard failure about a row that installs
+        # nothing either way, and a vendor instruction for work that moved on.
+        # The row belongs in the plan so it can report "skipped: retired".
+        if catalog_is_tombstone "$i"; then
+            wanted+=("$id")
+            continue
+        fi
         if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_err "AutoOS cannot install $id; use its vendor link for manual setup."; return 1; fi
         wanted+=("$id")
         # A retired entry keeps whatever `requires` it had; pulling those in for
         # a component that installs nothing would only add work the user never
         # asked for.
-        if [[ -n "${CAT_REQUIRES[i]}" ]] && ! catalog_is_tombstone "$i"; then
+        if [[ -n "${CAT_REQUIRES[i]}" ]]; then
             IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
             for dep in "${deps[@]}"; do
                 [[ -n "$dep" ]] || continue

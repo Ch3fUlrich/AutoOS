@@ -558,19 +558,9 @@ elif [[ -n "$ONLY" ]]; then
 elif (( ASSUME_YES )); then
     SELECTED="$(catalog_profile_defaults "$PROFILE")"
 else
-    defaults=" $(catalog_profile_defaults "$PROFILE") "
-    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=(); MENU_INSTALLED=(); MENU_DISABLED=()
-    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
-        MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
-        MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
-        MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
-        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then MENU_DISABLED+=(1); MENU_DESC[i]+=" (vendor setup required)"; else MENU_DISABLED+=(0); fi
-        if catalog_is_tombstone "$i"; then
-            MENU_DESC[i]+=" (retired)"
-            MENU_SEL+=(0); continue
-        fi
-        if [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then MENU_SEL+=(1); else MENU_SEL+=(0); fi
-    done
+    menu_pre="$(catalog_profile_defaults "$PROFILE")"
+    # shellcheck disable=SC2086  # the pre-tick list is a deliberate word list
+    catalog_menu_rows $menu_pre
     if ! ui_menu "Choose what to install" "Dependencies are added automatically."; then
         ui_warn "Cancelled — nothing was changed."
         exit 0
@@ -583,17 +573,17 @@ if [[ -z "${SELECTED// /}" ]]; then
     exit 0
 fi
 
-# A selection named by ids — a replayed state file, --only, or the browser's
-# payload arriving as --only — may still name a retired id, and the ids that
-# took its work over cannot be in a file written before the retirement. Expand
-# once here so the plan, the run and the saved state all read the same list.
-if [[ -n "$FROM_STATE" || -n "$ONLY" ]]; then
-    # shellcheck disable=SC2086  # SELECTED is a deliberate word list
-    catalog_expand_replacements $SELECTED >/dev/null
-    SELECTED="$EXPANDED_IDS"
-    if (( ${#EXPANDED_LINES[@]} )); then
-        for _line in "${EXPANDED_LINES[@]}"; do ui_muted "$_line"; done
-    fi
+# Any of the paths above may still name a retired id — a state file written
+# before the retirement, --only, the browser's payload arriving as --only, a menu
+# whose rows the lock failed to keep out — and the ids that took its work over
+# cannot be in a selection made before they existed. Expand on the way to the
+# plan, unconditionally, so the plan, the run and the saved state all read the
+# same list and no path can plan a tombstone without its replacements.
+# shellcheck disable=SC2086  # SELECTED is a deliberate word list
+catalog_expand_replacements $SELECTED >/dev/null
+SELECTED="$EXPANDED_IDS"
+if (( ${#EXPANDED_LINES[@]} )); then
+    for _line in "${EXPANDED_LINES[@]}"; do ui_muted "$_line"; done
 fi
 
 # ─── 4. Plan ────────────────────────────────────────────────────────────────
@@ -622,7 +612,12 @@ for id in $PLAN_IDS; do
             ui_ok "✓ Already installed - package will be skipped"
         fi
     fi
-    if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_warn "Action required: ${CAT_HOMEPAGE[i]}"; fi
+    # A retired entry keeps the provider it had, and its vendor link is stale
+    # with its work: telling the user to go and install it by hand asks for a
+    # step nobody needs, for a row that reports "skipped: retired" two stages on.
+    if [[ "${CAT_PROVIDER[i]}" == manual ]] && ! catalog_is_tombstone "$i"; then
+        ui_warn "Action required: ${CAT_HOMEPAGE[i]}"
+    fi
     if [[ -n "${CAT_NOTES[i]}" ]]; then ui_muted "      ${CAT_NOTES[i]}"; fi
 done
 auto_count=0

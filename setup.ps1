@@ -519,7 +519,8 @@ if ($statePayload) {
         $installedMap[$inst.Id] = $true
     }
     $items = @($available | ForEach-Object {
-        New-AutoOSMenuItem -Component $_ -Profile $InstallProfile -Installed ([bool]$installedMap.ContainsKey($_.Id))
+        New-AutoOSMenuItem -Component $_ -Profile $InstallProfile -Installed ([bool]$installedMap.ContainsKey($_.Id)) `
+                           -OfferedIds @($available.Id)
     })
     $menuResult = Show-AutoOSMenu -Items $items -Title 'Choose what to install' `
                    -Footer 'Dependencies are added automatically.'
@@ -535,15 +536,15 @@ if (-not $selectedIds -or @($selectedIds).Count -eq 0) {
     exit 0
 }
 
-# A selection named by ids - a replayed state file, -Only, or the browser's
-# payload arriving as -Only - may still name a retired id, and the ids that took
-# its work over cannot be in a file written before the retirement. Expand once
-# here, so the plan, the run and the saved state all read the same list.
-if ($statePayload -or $Only) {
-    $expanded = Expand-AutoOSTombstoneReplacements -Available $available -SelectedIds $selectedIds
-    foreach ($line in @($expanded.Lines)) { Write-AutoOSLine $line -Level muted }
-    $selectedIds = @($expanded.Ids)
-}
+# Any of the paths above may still name a retired id - a state file written before
+# the retirement, -Only, the browser's payload arriving as -Only, a menu whose rows
+# the lock failed to keep out - and the ids that took its work over cannot be in a
+# selection made before they existed. Expand on the way to the plan,
+# unconditionally, so the plan, the run and the saved state all read the same list
+# and no path can plan a tombstone without its replacements.
+$expanded = Expand-AutoOSTombstoneReplacements -Available $available -SelectedIds $selectedIds
+foreach ($line in @($expanded.Lines)) { Write-AutoOSLine $line -Level muted }
+$selectedIds = @($expanded.Ids)
 
 # ─── 4. Plan ────────────────────────────────────────────────────────────────
 $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds $selectedIds)
