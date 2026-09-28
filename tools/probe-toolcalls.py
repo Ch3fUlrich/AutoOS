@@ -41,6 +41,7 @@ is the status, plus the one fact read out of a 400's body (see
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -55,6 +56,7 @@ sys.path.insert(0, HERE)
 from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     DEFAULT_GATEWAY,
     DEFAULT_OVERLAY,
+    overlay_target,
     DEFAULT_REGISTRY,
     RETRY_DELAYS_S,  # re-exported: tests read it on this module
     _skip_reason,  # re-exported: tests read the shared leg selection here
@@ -317,7 +319,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="list legs and skip reasons; make no request")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY)
-    ap.add_argument("--overlay", default=DEFAULT_OVERLAY)
+    ap.add_argument("--overlay", default=None,
+                    help="overlay file (default: the machine-wide one, %s)" % DEFAULT_OVERLAY)
     ap.add_argument("--gateway", default=DEFAULT_GATEWAY)
     args = ap.parse_args(argv)
 
@@ -351,7 +354,9 @@ def main(argv=None) -> int:
         return 3
 
     post = make_post(args.gateway, key)
-    overlay = load_overlay(args.overlay)
+    overlay_path, legacy = overlay_target(args.overlay)
+    overlay = load_overlay(overlay_path, legacy)
+    base = copy.deepcopy(overlay)  # save_overlay merges only this run's changes
     for leg, skip in todo:
         if skip:
             print("%s\tskip\t-/%d\t%s" % (leg, args.trials, skip))
@@ -361,7 +366,7 @@ def main(argv=None) -> int:
         value, detail = classify(trials)
         overlay = record_verdict(overlay, leg, value, detail, trials, passes, _now_iso())
         print("%s\t%s\t%d/%d\t%s" % (leg, value or "no-verdict", passes, args.trials, detail))
-    save_overlay(args.overlay, overlay)
+    save_overlay(overlay_path, overlay, base, legacy)
     return 0
 
 

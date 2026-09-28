@@ -18,6 +18,8 @@ Path, first match wins:
 """
 from __future__ import annotations
 
+import contextlib
+import copy
 import io
 import json
 import os
@@ -33,7 +35,9 @@ def default_path(environ=None, osname=None) -> str:
     env = os.environ if environ is None else environ
     name = os.name if osname is None else osname
     if env.get(ENV_VAR):
-        return env[ENV_VAR]
+        # Expanded and made absolute: a raw "~/x" would create a literal "~"
+        # directory, and a relative value a file wherever the caller stood.
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(env[ENV_VAR])))
     if name == "nt":
         base = env.get("LOCALAPPDATA") or os.path.join(
             env.get("USERPROFILE") or os.path.expanduser("~"), "AppData", "Local")
@@ -86,6 +90,70 @@ def save(path: str, overlay: dict) -> None:
         except OSError:
             pass
         raise
+
+
+@contextlib.contextmanager
+def locked(path: str):
+    """Exclusive lock on <path>.lock for one read-modify-write (POSIX flock,
+    Windows msvcrt byte lock). Never nest it for one path in one process."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(path + ".lock", "a+b") as fh:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:  # LK_LOCK gives up after ~10 s; keep waiting
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+_MISSING = object()
+
+
+def _apply_delta(current: dict, base: dict, updated: dict) -> None:
+    """Replay into `current` what changed from `base` to `updated`, key by key,
+    descending into dicts all three share - so two probes that each changed a
+    different leg (or a different field of one model) both keep their change."""
+    for key, value in updated.items():
+        before = base.get(key, _MISSING)
+        if value == before:
+            continue
+        now = current.get(key)
+        if before is _MISSING and isinstance(value, dict):
+            before = {}  # new to this writer: merge into what is there, if a dict
+        if isinstance(value, dict) and isinstance(before, dict) and isinstance(now, dict):
+            _apply_delta(now, before, value)
+        else:
+            current[key] = copy.deepcopy(value)
+    for key in base:
+        if key not in updated:
+            current.pop(key, None)
+
+
+def merge_save(path: str, updated: dict, base: dict, legacy: str | None = None,
+               stream=None) -> None:
+    """Locked read-modify-write: re-read the overlay (`legacy` seeds a first
+    write, as in `load`), apply this writer's changes from `base` to `updated`,
+    save atomically. Writers that ran at the same time lose nothing."""
+    with locked(path):
+        current = load(path, legacy, stream)
+        _apply_delta(current, base or {}, updated)
+        save(path, current)
 
 
 def status(path: str, legacy: str | None, now: float | None = None) -> dict:

@@ -168,17 +168,33 @@ def post_with_retry(post, body, sleep):
 # Overlay: read-modify-write, atomic, keyed by model id.
 # ---------------------------------------------------------------------------
 
-def load_overlay(path):
-    """Read-modify-write start. The default path falls back to the legacy
-    per-checkout overlay, so the first probe after OVERLAYHOME carries the old
-    verdicts over instead of starting empty; an explicit --overlay never does."""
-    legacy = LEGACY_OVERLAY if path == DEFAULT_OVERLAY else None
+def overlay_target(arg):
+    """(path, legacy) for a probe's --overlay argument (argparse default None).
+
+    No argument means the machine-wide overlay, seeded from the legacy
+    per-checkout file on a first run so old verdicts carry over. An explicit
+    --overlay never reads legacy - decided by whether the flag was given, not
+    by comparing it with the import-time default (Muse review, OVERLAYHOME)."""
+    if arg is None:
+        return DEFAULT_OVERLAY, LEGACY_OVERLAY
+    return arg, None
+
+
+def load_overlay(path, legacy=None):
+    """Read-modify-write start (see overlay_target for `legacy`)."""
     return autoos_overlay.load(path, legacy)
 
 
-def save_overlay(path, overlay):
-    """Atomic write, mode 600 (autoos_overlay.save)."""
-    autoos_overlay.save(path, overlay)
+def save_overlay(path, overlay, base=None, legacy=None):
+    """Atomic, mode 600, under <path>.lock. With `base` (what load_overlay
+    returned, copied before any change) only this probe's changes are merged
+    into the file as it is now, so probes running at once lose nothing;
+    without it the whole document is written."""
+    if base is None:
+        with autoos_overlay.locked(path):
+            autoos_overlay.save(path, overlay)
+    else:
+        autoos_overlay.merge_save(path, overlay, base, legacy)
 
 
 # ---------------------------------------------------------------------------

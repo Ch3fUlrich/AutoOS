@@ -24,7 +24,12 @@ unproven` and returned `input_required` — it looked like a fleet-wide outage.
   age_hours}`.
 - **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
   `probe-effort`) default to the new path; the first run reads the legacy file so
-  its verdicts carry over.
+  its verdicts carry over (only when `--overlay` is not given). The
+  read-modify-write holds a lock on `<overlay>.lock` and merges only this run's
+  changes into the file as it is now, so probes running at once lose nothing.
+- `$AUTOOS_MEASURED_OVERLAY` is expanded (`~`, `$VAR`) and made absolute. The
+  loud reason is gated on the resolver's structured `unproven_toolcalls` flag,
+  not on reason text.
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and

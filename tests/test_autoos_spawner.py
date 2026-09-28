@@ -4450,7 +4450,7 @@ class RunCardV2PrivacyTests(unittest.TestCase):
         agent = load_agent()
         registry = json.loads((ROOT / "catalog" / "ai-registry.json")
                               .read_text(encoding="utf-8"))
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, _ = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         result = agent.route_plan_for(
             "kind=review,paths=tools/registry.py,privacy=sensitive", "", str(ROOT),
@@ -9157,6 +9157,36 @@ class OverlayHomeTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("overlay: using legacy %s" % self.agent.LEGACY_OVERLAY_PATH, err)
         self.assertTrue(os.path.isfile(self.agent.LEGACY_OVERLAY_PATH))
+
+    def test_the_only_overlay_loader_is_the_one_that_knows_legacy(self):
+        # Muse review (LOW): a single-argument load_overlay dropped the fallback.
+        self.assertFalse(hasattr(self.agent, "load_overlay"))
+
+    def test_the_resolver_flags_a_route_lost_to_tool_calls(self):
+        # Muse review (LOW): gate the loud reason on a structured flag, not a
+        # substring of the reason text.
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        lost = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                         str(ROOT), "orch", now, self._unproven_registry(),
+                                         {}, [], _fake_client_state())
+        self.assertIs(lost.get("unproven_toolcalls"), True)
+        ready = self.agent.route_plan_for("kind=review,paths=tools/registry.py", "",
+                                          str(ROOT), "orch", now, _small_route_registry(),
+                                          {}, [], _fake_client_state())
+        self.assertFalse(ready.get("unproven_toolcalls"))
+
+    def test_the_loud_reason_follows_the_flag_not_the_text(self):
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        path = self.agent.MEASURED_OVERLAY_PATH
+        for flag, loud in ((False, False), (True, True)):
+            fake = {"route": None, "state": "input_required",
+                    "reason": "override r: tool_calls: mentioned in text", "unproven_toolcalls": flag}
+            with mock.patch.object(self.agent.resolver, "plan", lambda *a, **k: dict(fake)):
+                got = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                                str(ROOT), "orch", now, self._unproven_registry(),
+                                                {}, [], _fake_client_state(),
+                                                overlay_missing_at=path)
+            self.assertEqual("no tool_calls overlay found" in got["reason"], loud, flag)
 
     def test_heartbeat_json_carries_the_overlay_state(self):
         data, _ = self.agent.heartbeat_state(None, None, [self.tmp], None)

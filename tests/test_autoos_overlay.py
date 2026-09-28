@@ -15,8 +15,10 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
 sys.path.insert(0, TOOLS)
@@ -27,8 +29,21 @@ class PathTests(unittest.TestCase):
     def test_the_env_var_wins_over_everything(self):
         env = {"AUTOOS_MEASURED_OVERLAY": "/x/over.json", "XDG_STATE_HOME": "/xdg",
                "LOCALAPPDATA": "C:\\L", "HOME": "/h"}
-        self.assertEqual(ov.default_path(env, "posix"), "/x/over.json")
-        self.assertEqual(ov.default_path(env, "nt"), "/x/over.json")
+        self.assertEqual(ov.default_path(env, "posix"), os.path.abspath("/x/over.json"))
+        self.assertEqual(ov.default_path(env, "nt"), os.path.abspath("/x/over.json"))
+
+    def test_the_env_value_expands_home_vars_and_relative_paths(self):
+        # Muse review (HIGH): a raw `~/x` made a literal "~" directory and a
+        # relative value a cwd-relative file.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp, "OVDIR": tmp}):
+            self.assertEqual(ov.default_path({ov.ENV_VAR: "~/o.json"}),
+                             os.path.join(os.path.abspath(tmp), "o.json"))
+            self.assertEqual(ov.default_path({ov.ENV_VAR: "$OVDIR/v.json"}),
+                             os.path.join(os.path.abspath(tmp), "v.json"))
+        self.assertEqual(ov.default_path({ov.ENV_VAR: os.path.join("rel", "o.json")}),
+                         os.path.join(os.getcwd(), "rel", "o.json"))
 
     def test_xdg_state_home_on_posix(self):
         path = ov.default_path({"XDG_STATE_HOME": "/xdg", "HOME": "/h"}, "posix")
@@ -106,6 +121,85 @@ class SaveTests(unittest.TestCase):
         path = os.path.join(self.tmp, "measured.json")
         ov.save(path, {})
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+
+class MergeSaveTests(unittest.TestCase):
+    """Muse review (MEDIUM): the probes' read-modify-write was unlocked, so two
+    probes at once lost one verdict even with the atomic replace."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = os.path.join(self.tmp, "measured.json")
+
+    def _read(self):
+        with io.open(self.path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_two_writers_from_one_base_keep_both_legs(self):
+        base = {"legs": {"old": {"tool_calls": {"value": "proven"}}}}
+        ov.save(self.path, base)
+        one = {"legs": dict(base["legs"], a={"tool_calls": {"value": "proven"}})}
+        two = {"legs": dict(base["legs"], b={"tool_calls": {"value": "broken"}})}
+        ov.merge_save(self.path, one, base)
+        ov.merge_save(self.path, two, base)
+        self.assertEqual(sorted(self._read()["legs"]), ["a", "b", "old"])
+
+    def test_two_probes_writing_one_model_keep_both_fields(self):
+        base = {"models": {"m": {}}}
+        ov.merge_save(self.path, {"models": {"m": {"effort": {"low": 1}}}}, base)
+        ov.merge_save(self.path, {"models": {"m": {"context_usable": 9}}}, base)
+        self.assertEqual(self._read()["models"]["m"], {"effort": {"low": 1}, "context_usable": 9})
+
+    def test_a_key_the_writer_removed_is_removed(self):
+        base = {"legs": {"a": {"x": 1}, "b": {"x": 2}}}
+        ov.save(self.path, base)
+        ov.merge_save(self.path, {"legs": {"a": {"x": 1}}}, base)
+        self.assertEqual(self._read(), {"legs": {"a": {"x": 1}}})
+
+    def test_concurrent_writers_lose_nothing(self):
+        base = {}
+        errors = []
+
+        def write(n):
+            try:
+                ov.merge_save(self.path, {"legs": {"leg%d" % n: {"v": n}}}, base)
+            except Exception as exc:  # noqa: BLE001 - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(self._read()["legs"]), ["leg%d" % n for n in range(8)])
+
+    def test_the_legacy_file_seeds_a_first_merge_only_when_asked(self):
+        legacy = os.path.join(self.tmp, "legacy.json")
+        ov.save(legacy, {"legs": {"old": {"v": 0}}})
+        ov.merge_save(self.path, {"legs": {"new": {"v": 1}}}, {}, legacy)
+        self.assertEqual(sorted(self._read()["legs"]), ["new", "old"])
+        other = os.path.join(self.tmp, "other.json")
+        ov.merge_save(other, {"legs": {"new": {"v": 1}}}, {})
+        with io.open(other, encoding="utf-8") as fh:
+            self.assertEqual(sorted(json.load(fh)["legs"]), ["new"])
+
+
+class ProbeTargetTests(unittest.TestCase):
+    """Muse review (MEDIUM): an explicit --overlay was detected by comparing it
+    with the import-time default, so another spelling of the same path, or an
+    env change after import, flipped the legacy fallback."""
+
+    def test_no_overlay_argument_is_the_default_with_legacy(self):
+        import probe_common
+        self.assertEqual(probe_common.overlay_target(None),
+                         (probe_common.DEFAULT_OVERLAY, probe_common.LEGACY_OVERLAY))
+
+    def test_an_explicit_overlay_never_reads_legacy_even_when_it_names_the_default(self):
+        import probe_common
+        self.assertEqual(probe_common.overlay_target(probe_common.DEFAULT_OVERLAY),
+                         (probe_common.DEFAULT_OVERLAY, None))
 
 
 class StatusTests(unittest.TestCase):

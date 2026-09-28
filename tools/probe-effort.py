@@ -52,6 +52,7 @@ Never prints or logs the gateway key.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -64,6 +65,7 @@ from registry import resolve_leg  # noqa: E402 - tools/ is on sys.path above
 from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     DEFAULT_GATEWAY,
     DEFAULT_OVERLAY,
+    overlay_target,
     DEFAULT_REGISTRY,
     RETRY_DELAYS_S,  # re-exported: tests read it on this module
     gateway_up,
@@ -389,7 +391,8 @@ def main(argv=None) -> int:
                     help="print the plan (legs, rungs, trial count, estimated "
                          "token budget); make no request")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY)
-    ap.add_argument("--overlay", default=DEFAULT_OVERLAY)
+    ap.add_argument("--overlay", default=None,
+                    help="overlay file (default: the machine-wide one, %s)" % DEFAULT_OVERLAY)
     ap.add_argument("--gateway", default=DEFAULT_GATEWAY)
     args = ap.parse_args(argv)
 
@@ -435,7 +438,9 @@ def main(argv=None) -> int:
         return 3
 
     post = make_post(args.gateway, key)
-    overlay = load_overlay(args.overlay)
+    overlay_path, legacy = overlay_target(args.overlay)
+    overlay = load_overlay(overlay_path, legacy)
+    base = copy.deepcopy(overlay)  # save_overlay merges only this run's changes
     total_prompt = 0
     total_completion = 0
     total_reasoning = 0
@@ -477,7 +482,7 @@ def main(argv=None) -> int:
         else:
             print("%s\teffort\t0/%d rungs measured; overlay untouched"
                   % (leg, len(ladder)))
-    save_overlay(args.overlay, overlay)
+    save_overlay(overlay_path, overlay, base, legacy)
     print_total(total_prompt, total_completion, total_reasoning)
     return 0
 

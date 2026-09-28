@@ -1944,11 +1944,6 @@ def load_registry(path: str) -> dict:
         return json.load(fh)
 
 
-def load_overlay(path: str) -> dict:
-    """The overlay at `path` if present, else {} (spec 3.1: never in git)."""
-    return overlay_mod.load(path)
-
-
 def load_measured_overlay() -> tuple:
     """(overlay, missing_at): the machine-wide overlay, else the legacy per-checkout
     one (with a stderr note), else ({}, MEASURED_OVERLAY_PATH) so `route` can say
@@ -1986,7 +1981,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"
-            and "tool_calls:" in (result.get("reason") or "")):
+            and result.get("unproven_toolcalls")):
         result = dict(result)
         result["reason"] = "%s; %s" % (overlay_mod.missing_reason(overlay_missing_at),
                                        result["reason"])
