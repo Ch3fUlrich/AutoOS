@@ -42,7 +42,7 @@ for arg in "$@"; do
     case "$arg" in
         --wsl)
             wslpath_root="$(wslpath -a "$ROOT" 2>/dev/null || echo "$ROOT")"
-            exec wsl.exe -- env AUTOOS_FULL_SUITE="${AUTOOS_FULL_SUITE:-}" bash "$wslpath_root/tests/run-tests.sh"
+            exec wsl.exe -- env AUTOOS_FULL_SUITE="${AUTOOS_FULL_SUITE:-}" AUTOOS_TEST_PARTS="${AUTOOS_TEST_PARTS:-}" bash "$wslpath_root/tests/run-tests.sh"
             ;;
         --filter) shift; FILTER="${1:-}" ;;
         --filter=*) FILTER="${arg#--filter=}" ;;

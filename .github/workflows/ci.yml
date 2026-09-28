@@ -56,7 +56,10 @@ jobs:
       # change cannot quietly turn this back into an ordinary run.
       # AUTOOS_TEST_PARTS picks this shard's parts; AUTOOS_FULL_SUITE=1 keeps
       # its meaning (the opt-in to an unfiltered run of the selected parts).
+      # The parts reach the script through env, never spliced into its text.
       - name: Test suite shard ${{ matrix.shard }} (loopback-only network)
+        env:
+          SHARD_PARTS: ${{ matrix.parts }}
         run: |
           sudo unshare --net -- bash -c '
             set -e
@@ -68,7 +71,7 @@ jobs:
             echo "network isolated: loopback only"
             exec setpriv --reuid="$1" --regid="$2" --init-groups \
               env AUTOOS_FULL_SUITE=1 AUTOOS_TEST_PARTS="$6" HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
-          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH" "${{ matrix.parts }}"
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH" "$SHARD_PARTS"
 
   linux-lint:
     name: Linux suite lint
