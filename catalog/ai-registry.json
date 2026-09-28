@@ -470,7 +470,7 @@
       "tool_calls": "unproven"
     },
     "gpt-oss-120b": {
-      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run.",
+      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run. FREEKEYS-1b (2026-09-28, item 1 confirmation): the reused row is NOT `tool_calls: proven` - it is `unproven`, and the proven verdict lives only in the gitignored leg-scoped overlay (`logs/routing/measured.json`), so a host without that overlay falls through every leg pointing here on an agentic card, scaleway's `scw/gpt-oss-120b` (FREEKEYS-1) included. A fresh probe is what makes it true in the tracked data.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -2830,7 +2830,7 @@
     "morph": {
       "id": "morph",
       "omniroute_id": "morph",
-      "model_prefix": null,
+      "model_prefix": "morph",
       "litellm_env": null,
       "litellm_prefix": null,
       "api_base": null,
@@ -2945,7 +2945,7 @@
     "nebius": {
       "id": "nebius",
       "omniroute_id": "nebius",
-      "model_prefix": null,
+      "model_prefix": "nebius",
       "litellm_env": null,
       "litellm_prefix": null,
       "api_base": null,
@@ -2959,7 +2959,7 @@
     "deepinfra": {
       "id": "deepinfra",
       "omniroute_id": "deepinfra",
-      "model_prefix": null,
+      "model_prefix": "deepinfra",
       "litellm_env": null,
       "litellm_prefix": null,
       "api_base": null,

@@ -3176,7 +3176,8 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
                    client_state: dict, client: str = "opencode",
                    env: dict | None = None,
-                   overlay_missing_at: str | None = None) -> dict:
+                   overlay_missing_at: str | None = None,
+                   credit_guards: dict | None = None) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
@@ -3205,7 +3206,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
-                           client, env)
+                           client, env, credit_guards)
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"

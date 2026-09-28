@@ -2714,7 +2714,13 @@ class CreditSpendGuardTests(unittest.TestCase):
                          if "groq" in p and "without monthly_cap_usd" in p])
 
     def test_a_non_credit_row_needs_no_guard(self):
+        # The trio is the credit tier's contract. A row that carries no grant at all
+        # (a real downgrade -- CreditTierEvasionTests) needs no guard, and the tier
+        # that keeps the money is what the checks below refuse.
         reg = mutated()
+        for key in ("tier", "credit_usd", "monthly_cap_usd", "monthly_warn_fraction",
+                    "monthly_cap_source"):
+            reg["providers"]["morph"].pop(key, None)
         reg["providers"]["morph"]["tier"] = "free"
         self.assertEqual([p for p in self.credit_problems(reg) if "morph" in p], [])
 
@@ -2834,6 +2840,135 @@ class ThirdPartyClaudeLegTests(unittest.TestCase):
         served = {leg for route in reg["routes"].values()
                   for leg in (route.get("legs") or []) if leg in legs}
         self.assertEqual(served, set())
+
+
+class CreditTierEvasionTests(unittest.TestCase):
+    """FREEKEYS-1b (item 4, rev-freekeys1 finding 6): a credited provider moved to
+    `tier: free` while it still carries `credit_usd` is the one edit that makes the
+    whole guard disappear -- the trio check only reads credit rows, the spend guard
+    only gates credit legs, and `tier: free` also re-admits the provider to the
+    `-clean` sweeps. The data says the operator funded it, so the tier is what has
+    to be rejected, not the grant.
+
+    A genuine downgrade is still possible: it just has to move the money out of the
+    row first, which is the version of the edit a reviewer can see.
+    """
+
+    def morph_downgrade(self, **changes) -> dict:
+        reg = mutated()
+        entry = reg["providers"]["morph"]
+        entry["tier"] = "free"
+        for key, value in changes.items():
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        return reg
+
+    def problems_for(self, reg, needle="credit_usd"):
+        return [p for p in registry.check_registry(reg)
+                if "morph" in p and needle in p]
+
+    def test_the_shipped_registry_has_no_tier_that_hides_a_grant(self):
+        reg = load_registry()
+        for pid, entry in reg["providers"].items():
+            if isinstance(entry, dict) and entry.get("tier") != "credit":
+                self.assertFalse(entry.get("credit_usd"),
+                                 "providers.%s: tier %s carries credit_usd"
+                                 % (pid, entry.get("tier")))
+
+    def test_a_free_tier_with_a_grant_on_it_is_rejected(self):
+        problems = self.problems_for(self.morph_downgrade())
+        self.assertTrue(problems, "a credited provider read as free with no complaint")
+        self.assertIn("credit", problems[0])
+
+    def test_the_refuse_line_survives_the_downgrade(self):
+        """`monthly_cap_usd` is what the guard refuses at -- renaming the tier must
+        not silently un-cap a funded grant either."""
+        self.assertTrue(self.problems_for(self.morph_downgrade(),
+                                          needle="monthly_cap_usd"))
+
+    def test_a_real_downgrade_moves_the_money_out_of_the_row(self):
+        reg = self.morph_downgrade(credit_usd=None, monthly_cap_usd=None,
+                                   monthly_warn_fraction=None,
+                                   monthly_cap_source=None)
+        self.assertEqual([p for p in registry.check_registry(reg) if "morph" in p], [])
+
+
+class ModelPrefixTests(unittest.TestCase):
+    """FREEKEYS-1b (item 1, rev-freekeys1 finding 1): `morph`, `deepinfra` and
+    `nebius` serve their models under their own name (`morph/morph-dsv4flash`,
+    `deepinfra/google/gemini-2.5-flash`, `nebius/zai-org/GLM-5.1` -- read from the
+    live gateway's `GET /v1/models`, 2026-09-28), so a `null` `model_prefix` leaves
+    a consumer that strips the namespace with nothing to strip against. Each row now
+    declares the prefix the gateway was measured using, and the ids registered under
+    it start with that prefix.
+    """
+
+    def prefix_of(self, reg, pid):
+        return reg["providers"][pid].get("model_prefix")
+
+    def models_of(self, reg, pid) -> list:
+        """Every registered model row that carries this provider's namespace, in
+        id spelling (`morph-dsv4flash`) or in the gateway's served spelling
+        (`deepinfra/google/gemini-2.5-flash`)."""
+        provider = reg["providers"][pid]
+        namespaces = {provider.get("model_prefix"), pid, provider.get("omniroute_id")}
+        out = []
+        for model_id, model in reg["models"].items():
+            if not isinstance(model, dict):
+                continue
+            shown = str(model.get("display_name") or "")
+            for ns in namespaces:
+                if ns and (model_id.startswith(ns + "-") or model_id.startswith(ns + "/")
+                           or shown.startswith(ns + "/")):
+                    out.append(model_id)
+                    break
+        return sorted(out)
+
+    def test_the_measured_providers_declare_their_namespace(self):
+        reg = load_registry()
+        self.assertEqual(self.prefix_of(reg, "morph"), "morph")
+        self.assertEqual(self.prefix_of(reg, "deepinfra"), "deepinfra")
+        self.assertEqual(self.prefix_of(reg, "nebius"), "nebius")
+
+    def test_every_registered_model_of_a_prefixed_provider_starts_with_it(self):
+        """The sweep, not the list: a thirteenth prefixed provider is covered the
+        moment its first model row lands."""
+        reg = load_registry()
+        offenders = []
+        for pid in sorted(reg["providers"]):
+            prefix = self.prefix_of(reg, pid)
+            if not prefix:
+                continue
+            for model_id in self.models_of(reg, pid):
+                model = reg["models"][model_id]
+                shown = str(model.get("display_name") or "")
+                if not (model_id.startswith(prefix) or shown.startswith(prefix + "/")):
+                    offenders.append("%s/%s" % (pid, model_id))
+        self.assertEqual(offenders, [])
+
+    def test_the_prefixed_providers_carry_model_rows_at_all(self):
+        reg = load_registry()
+        for pid in ("morph", "deepinfra", "nebius"):
+            self.assertTrue(self.models_of(reg, pid), pid)
+
+    def test_a_null_prefix_on_a_namespaced_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["deepinfra"]["model_prefix"] = None
+        problems = [p for p in registry.check_registry(reg)
+                    if "deepinfra" in p and "model_prefix" in p]
+        self.assertTrue(problems, "a namespaced provider with no declared prefix passed")
+
+    def test_a_prefix_that_is_not_the_served_namespace_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["morph"]["model_prefix"] = "morphx"
+        problems = [p for p in registry.check_registry(reg)
+                    if "morph" in p and "model_prefix" in p]
+        self.assertTrue(problems, "a prefix nothing is served under passed")
+
+    def test_the_check_ships_the_rule(self):
+        self.assertTrue(hasattr(registry, "_check_model_prefix"))
 
 
 if __name__ == "__main__":

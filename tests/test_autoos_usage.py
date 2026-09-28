@@ -1021,5 +1021,95 @@ class ProviderLinesTests(CostTests):
         self.assertTrue(out.splitlines()[0].startswith("provider="), out)
 
 
+class CreditGuardFromRecordedRowsTests(unittest.TestCase):
+    """FREEKEYS-1b (item 4): `credit_guards` is the builder the resolver's leg
+    filter is handed, and its figure is `paid_spend` over recorded usage rows at
+    real registry prices -- the same number the report prints, so the router and
+    the ledger can never disagree about what the grant cost.
+
+    It also pins the fail-closed reading of a price: `price_in`/`price_out` of 0
+    means NO PRICE ON FILE (rev-freekeys1 finding 3), not "free". A row that bills
+    an unpriced model adds nothing to `spend_usd` and is counted in
+    `models_unpriced`, which is what lets the resolver refuse the leg instead of
+    routing work onto a grant it cannot see draining.
+    """
+
+    REG = {
+        "providers": {
+            "morph": {"tier": "credit", "credit_usd": 10.0, "monthly_cap_usd": 10.0,
+                      "monthly_warn_fraction": 0.8},
+            "groq": {"tier": "free"},
+        },
+        "models": {
+            "morph-priced": {"price_in": 1e-06, "price_out": 1e-06},
+            "morph-zero-priced": {"price_in": 0, "price_out": 0},
+        },
+    }
+    SINCE = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+    TS = iso(datetime.datetime(2026, 9, 28, 12, 0, tzinfo=datetime.timezone.utc))
+
+    def rows(self, provider, model, tin, tout):
+        return [{"timestamp": self.TS, "provider": provider, "model": model,
+                 "tokens": {"in": tin, "out": tout}}]
+
+    def spend_of(self, rows, provider):
+        return usage.paid_spend(rows, usage.prices_from_registry(self.REG),
+                                self.REG, self.SINCE, provider=provider)
+
+    # --- prices: 0 is not a price -------------------------------------------
+
+    def test_a_zero_price_model_is_not_priced(self):
+        prices = usage.prices_from_registry(self.REG)
+        self.assertIn("morph-priced", prices)
+        self.assertNotIn("morph-zero-priced", prices)
+
+    def test_a_row_on_a_zero_price_model_counts_as_unpriced_not_free(self):
+        spend = self.spend_of(self.rows("morph", "morph-zero-priced", 1_000_000,
+                                        1_000_000), "morph")
+        self.assertEqual(spend["spend_usd"], 0.0)
+        self.assertEqual(spend["models_unpriced"], 1)
+
+    # --- the guard, from rows -----------------------------------------------
+
+    def test_guards_are_the_three_states_of_recorded_spend(self):
+        for tin, tout, state in ((1_000_000, 1_000_000, "ok"),      # $2 of $10
+                                 (4_000_000, 4_000_000, "warn"),    # $8 = 80 %
+                                 (5_000_000, 5_000_000, "refuse")):  # $10 = 100 %
+            guards = usage.credit_guards(self.REG, self.rows("morph", "morph-priced",
+                                                             tin, tout), self.SINCE)
+            self.assertEqual(guards["morph"]["state"], state, (tin, tout))
+            self.assertEqual(guards["morph"]["cap_usd"], 10.0)
+            self.assertEqual(guards["morph"]["warn_usd"], 8.0)
+        self.assertEqual(usage.credit_guards(self.REG, [], self.SINCE)["morph"]["spend_usd"],
+                         0.0)
+
+    def test_only_credited_providers_get_a_guard(self):
+        guards = usage.credit_guards(self.REG, self.rows("groq", "morph-priced",
+                                                         1_000_000, 1_000_000),
+                                     self.SINCE)
+        self.assertEqual(sorted(guards), ["morph"])
+
+    def test_a_guard_counts_rows_of_its_own_provider_only(self):
+        rows = (self.rows("morph", "morph-priced", 4_000_000, 4_000_000)
+                + self.rows("groq", "morph-priced", 9_000_000, 9_000_000))
+        self.assertEqual(usage.credit_guards(self.REG, rows, self.SINCE)["morph"]
+                         ["spend_usd"], 8.0)
+
+    def test_the_daily_usage_line_says_which_grant_is_running_down(self):
+        """Item 2's other half: the warn is not resolver-only. The report block
+        carries the guard, and the text render names the provider that reached
+        80 % of what the operator funded."""
+        guards = usage.credit_guards(self.REG, self.rows("morph", "morph-priced",
+                                                         4_000_000, 4_000_000),
+                                     self.SINCE)
+        report = usage.build_report(self.rows("morph", "morph-priced", 4_000_000,
+                                              4_000_000), ["provider"], self.SINCE,
+                                    1, False, credit_guards=guards)
+        self.assertEqual(report["credit_guards"]["morph"]["state"], "warn")
+        text = usage.render_text(report, ["provider"])
+        self.assertIn("morph", text)
+        self.assertIn("$8.00", text)
+
+
 if __name__ == "__main__":
     unittest.main()

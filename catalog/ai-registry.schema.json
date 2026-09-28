@@ -227,6 +227,11 @@
         "tool_calls": { "enum": ["proven", "unproven", "broken"] },
         "price_in": { "type": "number", "minimum": 0 },
         "price_out": { "type": "number", "minimum": 0 },
+        "price_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1b, 2026-09-28): where `price_in`/`price_out` came from, dated (`gateway /v1/models 2026-09-28`, `vendor pricing page <url> <date>`). A `tier: credit` provider's leg is refused by the resolver while its price is 0 or absent (an uncostable grant bills $0 and would drain invisibly), so this is the field that turns a dropped leg back on - record the source, not just the number."
+        },
         "price_cache_read": { "type": "number", "minimum": 0 },
         "paid_price_in": {
           "type": "number",

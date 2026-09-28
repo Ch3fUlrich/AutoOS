@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import autoos_resolver as r  # noqa: E402
+import autoos_usage as usage  # noqa: E402  (the spend guard's one reader of the cap trio)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
 # A full canonical ladder, so a rung the rule wants is always present unless a
@@ -4268,4 +4269,153 @@ class ClaudeBudgetGateTests(unittest.TestCase):
                                    env={})
         self.assertEqual(skipped["cc/claude-opus-4-6"],
                          ["claude_budget: cc/claude-opus-4-6 held for finals"])
+
+
+class CreditGuardLegFilterTests(unittest.TestCase):
+    """FREEKEYS-1b (items 2-4): the spend guard on a `credit` provider BLOCKS a
+    leg instead of only reporting one.
+
+    The two halves the reviewer named as missing (rev-freekeys1 findings 2 and 3)
+    are both pinned here. `refuse` (100 % of the operator's grant) drops the leg
+    through `usable_legs`, so a route whose only leg is a drained grant is removed
+    by `filter_routes` exactly as an unavailable leg is; `warn` (80 % by default)
+    keeps the leg and says so in the plan's `explain`. And a `credit` model with
+    no price on file is refused outright: an unpriced grant would bill $0 to
+    `paid_spend` and read as an untouched $10 while it drains, which is the
+    fail-open the guard must not ship with. Free-tier legs are untouched by all
+    of this -- they cost nothing measured and the guard is about money.
+
+    The spend is NOT hand-written here: it is `autoos_usage.paid_spend` over
+    recorded usage rows at real registry prices, so the number the resolver acts
+    on is the number the usage report prints (one reader, one figure).
+    """
+
+    CAP = 10.0
+    NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    SINCE = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+
+    def registry(self):
+        return {
+            "providers": {
+                "morph": {"id": "morph", "tier": "credit", "model_prefix": "morph",
+                          "credit_usd": self.CAP, "monthly_cap_usd": self.CAP,
+                          "monthly_warn_fraction": 0.8, "trains_on_prompts": False},
+                "groq": {"id": "groq", "tier": "free", "trains_on_prompts": False},
+            },
+            "models": {
+                "morph-priced": {"id": "morph-priced", "tool_calls": "proven",
+                                 "context_usable": {"tokens": 100000, "source": "default"},
+                                 "price_in": 1e-06, "price_out": 1e-06},
+                "morph-unpriced": {"id": "morph-unpriced", "tool_calls": "proven",
+                                   "context_usable": {"tokens": 100000, "source": "default"},
+                                   "price_in": 0, "price_out": 0},
+                "groq-free": {"id": "groq-free", "tool_calls": "proven",
+                              "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                "r-credit": {"id": "r-credit",
+                             "legs": ["morph/morph-priced", "morph/morph-unpriced",
+                                      "groq/groq-free"]},
+                "r-only-credit": {"id": "r-only-credit",
+                                  "legs": ["morph/morph-priced"]},
+            },
+            "policy": {"leg_rules": []},
+        }
+
+    def card(self):
+        return {"kind": "implement", "privacy": "public"}
+
+    def feats(self):
+        return {"need_tokens": 10}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def rows(self, tokens_in, tokens_out):
+        """Recorded usage rows for the priced leg, in the gateway's call-log shape."""
+        return [{"timestamp": self.NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "morph", "model": "morph-priced",
+                 "tokens": {"in": tokens_in, "out": tokens_out}}]
+
+    def guards(self, tokens_in, tokens_out):
+        """The resolver-facing guard map, built by the usage module from real rows."""
+        return usage.credit_guards(self.registry(),
+                                   self.rows(tokens_in, tokens_out), self.SINCE)
+
+    def legs(self, guards=None, warns=None):
+        reg = self.registry()
+        return r.usable_legs(reg["routes"]["r-credit"], self.card(), self.feats(),
+                             self.state(), reg, {}, credit_guards=guards,
+                             credit_warns=warns)
+
+    # --- refuse: the guard blocks ------------------------------------------
+
+    def test_a_drained_grant_drops_the_leg_at_the_cap(self):
+        # 5M in + 5M out at 1e-06/token is exactly the $10 grant.
+        guards = self.guards(5_000_000, 5_000_000)
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        _kept, skipped, _notes = self.legs(guards)
+        self.assertEqual(skipped["morph/morph-priced"],
+                         ["credit exhausted morph $%.2f/$%.2f" % (self.CAP, self.CAP)])
+
+    def test_a_drained_grant_removes_the_route_that_has_only_it(self):
+        """Blocking, not reporting: the lone-leg route loses its survivorship."""
+        reg = self.registry()
+        survivors, removed = r.filter_routes(self.card(), self.feats(), self.state(),
+                                             reg, {},
+                                             credit_guards=self.guards(5_000_000,
+                                                                       5_000_000))
+        self.assertNotIn("r-only-credit", survivors)
+        self.assertIn("credit exhausted morph", removed["r-only-credit"][0])
+
+    def test_the_free_leg_survives_a_drained_credit_grant(self):
+        """FT fall-through preserved: the guard removes a leg, never a whole route
+        that still has capacity that costs nothing."""
+        _kept, skipped, _notes = self.legs(self.guards(5_000_000, 5_000_000))
+        self.assertNotIn("groq/groq-free", skipped)
+
+    # --- warn: the leg stays, the plan says so ------------------------------
+
+    def test_at_eighty_percent_the_leg_is_kept_and_warned(self):
+        warns = []
+        guards = self.guards(4_000_000, 4_000_000)  # $8 of $10
+        self.assertEqual(guards["morph"]["state"], "warn")
+        kept, skipped, _notes = self.legs(guards, warns)
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertNotIn("morph/morph-priced", skipped)
+        self.assertEqual(warns, ["credit warn morph $8.00/$10.00"])
+
+    def test_below_the_warn_line_nothing_is_said_and_nothing_is_dropped(self):
+        warns = []
+        guards = self.guards(1_000_000, 1_000_000)  # $2 of $10
+        kept, _skipped, _notes = self.legs(guards, warns)
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertEqual(warns, [])
+
+    # --- fail closed when there is no price on file -------------------------
+
+    def test_an_unpriced_credit_leg_is_dropped_with_no_spend_data(self):
+        """No `credit_guards` passed at all still refuses the unpriced leg: the
+        missing number is the reason to refuse, not a licence to assume free."""
+        _kept, skipped, _notes = self.legs(None)
+        self.assertEqual(skipped["morph/morph-unpriced"],
+                         ["credit leg unpriced morph-unpriced"])
+
+    def test_an_unpriced_credit_leg_is_dropped_even_when_spend_is_zero(self):
+        _kept, skipped, _notes = self.legs(self.guards(0, 0))
+        self.assertEqual(skipped["morph/morph-unpriced"],
+                         ["credit leg unpriced morph-unpriced"])
+
+    def test_a_free_leg_needs_no_price(self):
+        """The unpriced rule is about a finite grant; a free tier costs nothing
+        whether or not anyone recorded a number."""
+        _kept, skipped, _notes = self.legs(None)
+        self.assertNotIn("groq/groq-free", skipped)
+
+    def test_the_priced_credit_leg_is_usable_when_the_grant_is_intact(self):
+        """The guard must not refuse what it has money left for, or the whole
+        tier reads as dead data."""
+        kept, _skipped, _notes = self.legs(self.guards(1_000_000, 1_000_000))
+        self.assertIn(("morph", "morph-priced"), kept)
+
 

@@ -74,6 +74,26 @@ which entry to fill in (`meta_api` is that case today).
 | `together_ai` | `together` | FREEKEYS-1: **$5 vendor grant** (`tier: credit`, `monthly_cap_usd: 5`, warns at 80 %). 277 canonical ids, **every probe 403** → `available: false` (the grant is not yet usable through this connection) |
 | `omniroute` | — | the **client** key apps use; not a provider |
 
+### What a `credit` grant does to routing
+
+FREEKEYS-1b (D-132/D-141): the guard on the `tier: credit` rows above is enforced,
+not just reported. `tools/autoos_usage.py credit_guards()` costs each grant from the
+gateway's recorded usage rows at registry prices, and the resolver's leg filter
+(`tools/autoos_resolver.py usable_legs`) drops every leg of a provider whose guard
+says `refuse` — at 100 % of `monthly_cap_usd`, reason
+`credit exhausted <provider> $x/$cap`. At the warn line (`monthly_warn_fraction`,
+80 % by default) the leg stays, and the plan's `explain` plus the daily usage report
+say `credit warn ...`.
+
+A `credit` model with no price on file is **not usable**: `price_in`/`price_out` of
+0 or missing means the grant cannot be costed at all, and an uncostable grant that
+bills as $0 is a $10 drain reported as free money, so the leg is refused with
+`credit leg unpriced <model>`. Neither `GET /v1/models` nor the model detail
+endpoint carries a pricing block for any of these ids (measured 2026-09-28), so
+today every credit leg is dropped until real prices are recorded. Free-tier models
+are untouched by both rules, and `registry.py check` rejects a row that keeps
+`credit_usd` while calling itself another tier.
+
 ## Where to get them
 
 Ordered by free value. "Training" = free tier may train on prompts: fine for

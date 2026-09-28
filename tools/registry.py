@@ -2864,6 +2864,101 @@ def _check_credit_guards(registry) -> list:
                 and "monthly_cap_usd" not in provider:
             problems.append("providers.%s: monthly_warn_fraction without monthly_cap_usd"
                             % provider_id)
+    # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
+    # label every reader branches on, so a row that keeps `credit_usd` and calls
+    # itself `free` silently un-limits the money, drops out of the leg filter's
+    # guard, and re-admits the provider to the `-clean` sweeps. A real downgrade has
+    # to move the grant out of the row, which is the edit a reviewer can see.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or provider.get("tier") == "credit":
+            continue
+        credit = provider.get("credit_usd")
+        if credit:
+            cap = provider.get("monthly_cap_usd")
+            problems.append("providers.%s: tier %r carries credit_usd %r - a funded grant "
+                            "stays tier credit (its refuse line monthly_cap_usd %r is "
+                            "checked only there); move the money out of the row to "
+                            "downgrade it" % (provider_id, provider.get("tier"),
+                                              credit, cap))
+    return problems
+
+
+def _provider_model_ids(model_id, model, provider_id, provider) -> list:
+    """The namespaces `model` is spelled under for `provider_id`, if any.
+
+    A model belongs to a provider in one of three spellings, all of them read from
+    the data instead of a name list: its `display_name` carries a gateway namespace
+    (``deepinfra/google/gemini-2.5-flash``), its own id does (``meta/muse-...``), or
+    it is namespaced by the provider with a hyphen (``morph-dsv4flash``, served as
+    ``morph/morph-dsv4flash``). Returns every namespace among the provider's id,
+    ``omniroute_id`` and declared ``model_prefix`` that one of those spellings starts
+    with -- more than one is normal (a provider id and its prefix are often equal).
+    """
+    shown = str(model.get("display_name") or "")
+    names = {"pid": provider_id, "omni": provider.get("omniroute_id"),
+             "prefix": provider.get("model_prefix")}
+    out = []
+    for kind, namespace in names.items():
+        if not namespace:
+            continue
+        if (shown.startswith(namespace + "/") or model_id.startswith(namespace + "/")
+                or (kind != "prefix" and model_id.startswith(namespace + "-"))):
+            out.append(namespace)
+    return out
+
+
+def _check_model_prefix(registry) -> list:
+    """``model_prefix`` must name a namespace the provider's models really carry.
+
+    The field is what `gateway_ref()` rewrites a registry leg to at render time and
+    what a consumer strips to recover the model id, so a row whose models are served
+    under a namespace and whose prefix is null leaves the stripping unresolvable
+    (brief FREEKEYS-1b item 1 / rev-freekeys1 finding 1: `morph`, `deepinfra` and
+    `nebius` serve ``morph/*``, ``deepinfra/*`` and ``nebius/*`` per the live
+    gateway's ``GET /v1/models``, and both checks below fail closed on exactly that
+    shape). A prefix that is not the namespace its own models sit under is worse
+    than none: the render silently asks the gateway for models it does not have.
+
+    A provider with no registered model rows is never judged -- most declared
+    prefixes today name a connection nobody has registered a model against yet.
+    """
+    problems = []
+    models = _section(registry, "models")
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        declared = provider.get("model_prefix")
+        served = []  # (model_id, namespaces it is served under)
+        for model_id, model in sorted(models.items()):
+            if not isinstance(model, dict):
+                continue
+            namespaces = _provider_model_ids(model_id, model, provider_id, provider)
+            if namespaces:
+                served.append((model_id, namespaces))
+        if not served:
+            continue
+        own = {provider_id, provider.get("omniroute_id")}
+        if declared is None:
+            # Only a gateway namespace (a `display_name` spelled `<ns>/<id>`) proves
+            # the provider's models are served prefixed; a bare `<pid>-<model>` id is
+            # how this registry spells them, which is not a claim about the gateway.
+            namespaced = [(model_id, namespace)
+                          for model_id, spaces in served for namespace in spaces
+                          if namespace in own
+                          and str(models[model_id].get("display_name") or "")
+                          .startswith(namespace + "/")]
+            if namespaced:
+                model_id, namespace = namespaced[0]
+                problems.append("providers.%s.model_prefix is null while %s is served "
+                                "under '%s/': set model_prefix to '%s'"
+                                % (provider_id, model_id, namespace, namespace))
+            continue
+        for model_id, spaces in served:
+            if declared in spaces:
+                continue
+            problems.append("providers.%s.model_prefix is '%s' but %s is spelled under "
+                            "'%s': a prefix must name the namespace the gateway serves"
+                            % (provider_id, declared, model_id, "', '".join(spaces)))
     return problems
 
 
@@ -2882,6 +2977,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_credit_guards(registry))
+    problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
