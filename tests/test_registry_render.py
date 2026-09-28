@@ -1309,10 +1309,20 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         self.assertIn("samba/MiniMax-M3", ids)
 
     def test_openhands_drops_a_tier_that_declares_legs_but_serves_none(self):
-        ids = {t["id"] for t in registry.render_openhands(real_registry())["tiers"]}
-        # t1-orchestrator-free-only is NOT dropped: T1FREE gave it a gemini
-        # servable leg.
-        # No other route currently declares legs but serves none.
+        # PROVFIX3 finding 7: T1FREE re-serviced every tier that used to be in
+        # the dropped set, so the real registry alone proves nothing here.
+        # Synthesize the dead route instead of commenting the assertion out.
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["t1-orchestrator"]
+        route.setdefault("unavailable_legs", {})
+        for leg in list(route["legs"]):
+            route["unavailable_legs"][leg] = {"available": False}
+        self.assertEqual(registry.gateway_legs(route, reg), [])
+        ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
+        self.assertNotIn("omniroute-t1-orchestrator", ids)
+        self.assertNotIn("litellm-t1-orchestrator", ids)
+        # every other openhands declaration is untouched by the gate
+        self.assertEqual(len(ids), len(registry.render_openhands(real_registry())["tiers"]) - 2)
 
     def test_openhands_keeps_a_tier_whose_route_now_declares_no_legs(self):
         # The rule reaches a route that DECLARED legs and cannot serve them -
@@ -1578,6 +1588,204 @@ class FreeAiRenderTests(unittest.TestCase):
     def test_combos_file_matches_the_render(self):
         rendered = registry.render_omniroute(real_registry())
         self.assertEqual(registry.omniroute_diff(rendered, real_combos()), [])
+
+
+class LitellmFallbackServabilityTests(unittest.TestCase):
+    """PROVFIX3 finding 5: router_settings.fallbacks is the last resort, so a
+    chain that ends in a group whose every model belongs to a provider the
+    registry has switched off is not an escalation — the retry 404s/503s exactly
+    like the tier it replaced ("the escalation must actually answer"). A dropped
+    chain must say why in the file, or the next edit re-adds it."""
+
+    def _fallback_targets(self, text):
+        block = re.search(r"(?ms)^\s*fallbacks:\s*$(.*?)(?=^\S|\Z)", text)
+        if not block:
+            return []
+        targets = []
+        for line in block.group(1).splitlines():
+            for match in re.finditer(r"\[([^\]]*)\]", line):
+                targets += [t.strip() for t in match.group(1).split(",") if t.strip()]
+        return targets
+
+    def _models_by_group(self, text):
+        groups = {}
+        current = None
+        for line in text.splitlines():
+            name = re.match(r"\s*-\s*model_name:\s*(\S+)\s*$", line)
+            if name:
+                current = name.group(1)
+                groups.setdefault(current, [])
+                continue
+            model = re.match(r"\s*model:\s*(\S+)\s*$", line)
+            if model and current:
+                groups[current].append(model.group(1))
+        return groups
+
+    def _provider_is_off(self, ref, providers):
+        prefix = ref.split("/", 1)[0] if "/" in ref else ""
+        provider = providers.get(prefix)
+        # "openai" is a transport prefix several providers share (meta_api's
+        # Muse, free_ai's qwen7b), so it can never condemn a leg here; an
+        # unresolvable prefix is not evidence either.
+        if not isinstance(provider, dict) or prefix == "openai":
+            return False
+        return provider.get("available") is False
+
+    def test_no_fallback_chain_ends_in_an_all_dead_group(self):
+        text = real_litellm_config()
+        providers = real_registry()["providers"]
+        models = self._models_by_group(text)
+        for target in self._fallback_targets(text):
+            legs = models.get(target)
+            self.assertIsNotNone(legs, "fallbacks name %r, which has no group" % target)
+            self.assertTrue(
+                [ref for ref in legs if not self._provider_is_off(ref, providers)],
+                "fallback chain ends in %r, whose every model is an off provider: %s"
+                % (target, ", ".join(legs)))
+
+    def test_the_committed_config_explains_the_dropped_chains(self):
+        # The guard above is satisfied by an empty `fallbacks` block only when the
+        # file says so right above the key; a silent removal reads like an
+        # oversight and gets reverted.
+        lines = real_litellm_config().splitlines()
+        at = next((i for i, line in enumerate(lines)
+                   if re.match(r"\s*fallbacks:\s*\[\]\s*$", line)), None)
+        self.assertIsNotNone(at, "config.yaml has no emptied `fallbacks: []` key")
+        block = []
+        for line in reversed(lines[:at]):
+            if not line.lstrip().startswith("#"):
+                break
+            block.append(line)
+        note = " ".join(reversed(block)).lower()
+        self.assertIn("fallback", note)
+        self.assertTrue(
+            any(word in note for word in
+                ("deepseek", "openrouter", "402", "dead", "unservable", "off")),
+            "the note above fallbacks says nothing about why the chains are gone")
+
+
+class RouteContextCapTests(unittest.TestCase):
+    """PROVFIX3 finding 1: a route's declared context is a promise a client sizes
+    its requests against. A priority route falls to its next leg whenever the head
+    refuses, so the promise may only be as big as the SMALLEST context among the
+    legs it can actually be served by - otherwise the fallback leg 400s
+    mid-conversation (docs/models.md: "a 200k model in a 1M-declared route would
+    400"). The renderers clamp, so no declaration can carry the lie.
+
+    Gated legs (provider off, route-gated, client-bound, policy-denied) do NOT
+    clamp: a leg the gateway will never be asked to serve cannot be the reason a
+    client is throttled. A leg with no recorded window doesn't clamp either -
+    absence of data is not evidence of a small model.
+    """
+
+    def _reg(self):
+        reg = synthetic_gateway_registry()
+        reg["models"]["first"]["context_advertised"] = 1_048_576
+        reg["models"]["second"]["context_advertised"] = 131_072
+        reg["routes"]["mix"]["surfaces"]["omniroute"]["context_declared"] = "1M"
+        return reg
+
+    def _combo(self, reg):
+        return {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}["mix"]
+
+    def test_combo_context_is_clamped_to_the_smallest_servable_leg(self):
+        self.assertEqual(self._combo(self._reg())["context"], "128k")
+
+    def test_a_promise_every_servable_leg_can_take_is_left_alone(self):
+        reg = self._reg()
+        reg["models"]["second"]["context_advertised"] = 1_048_576
+        self.assertEqual(self._combo(reg)["context"], "1M")
+
+    def test_a_gated_leg_does_not_lower_the_promise(self):
+        reg = self._reg()
+        reg["models"]["deadmodel"]["context_advertised"] = 1024
+        reg["models"]["bound"]["context_advertised"] = 1024
+        self.assertEqual(self._combo(reg)["context"], "128k")
+
+    def test_a_leg_with_no_recorded_window_does_not_clamp(self):
+        reg = self._reg()
+        del reg["models"]["second"]["context_advertised"]
+        self.assertEqual(self._combo(reg)["context"], "1M")
+
+    def test_the_real_t1_combo_does_not_promise_more_than_gemini_takes(self):
+        combos = {c["name"]: c for c in
+                  registry.render_omniroute(real_registry())["combos"]}
+        # gemini/gemini-3.8-flash is a servable leg of every t1 combo and the
+        # registry records 131072 for it, so no t1 combo may declare 1M.
+        self.assertEqual(combos["t1-orchestrator"]["context"], "128k")
+        self.assertEqual(combos["t1-orchestrator-free-only"]["context"], "128k")
+        # spark-1.3-contributor's only servable leg is the 1M contributor model,
+        # so its promise is not clamped.
+        self.assertEqual(combos["spark-1.3-contributor"]["context"], "1M")
+
+    def test_no_combo_in_the_real_render_overshoots_a_leg_it_serves(self):
+        # The rule as a loop over real data, not just the two flagged combos:
+        # every combo's declared window is <= every model it lists.
+        reg = real_registry()
+        rendered = registry.render_omniroute(reg)
+        for combo in rendered["combos"]:
+            declared = registry.context_label_to_tokens(combo["context"])
+            if declared is None:
+                continue
+            for ref in combo["models"]:
+                window = registry.leg_advertised_context(ref, reg)
+                if window is None:
+                    continue
+                self.assertLessEqual(
+                    declared, window,
+                    "combo %s declares %s (%d) but falls to %s at %d"
+                    % (combo["name"], combo["context"], declared, ref, window))
+
+    def test_docs_promise_carries_the_clamped_window(self):
+        promise = registry._route_context_promise(
+            real_registry()["routes"]["t1-orchestrator"], real_registry())
+        self.assertEqual(promise, "128k")
+
+
+class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
+    """PROVFIX3 finding 1 (picker side) and finding 8: catalog/ide-models.json is
+    what the client pickers read, so it must carry the same clamped window as the
+    combo, and its effort ladder / default effort must describe the leg that will
+    actually answer - the first SERVED leg, not the first DECLARED one. A default
+    the served head rejects is dropped rather than forwarded (combos.json's old
+    rule: "a combo NEVER forwards an effort its head leg rejects")."""
+
+    def _t1_gated_to_gemini(self):
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["t1-orchestrator"]
+        route.setdefault("unavailable_legs", {})
+        for leg in list(route["legs"]):
+            if leg != "gemini/gemini-3.8-flash":
+                route["unavailable_legs"][leg] = {"available": False}
+        return reg
+
+    def _ide_entry(self, reg, route_id):
+        return {m["id"]: m for m in registry.render_ide(reg)["models"]}[route_id]
+
+    def test_the_real_t1_picker_window_is_clamped(self):
+        entry = self._ide_entry(real_registry(), "t1-orchestrator")
+        self.assertLessEqual(entry["context"], 131_072)
+
+    def test_effort_ladder_comes_from_the_first_servable_leg(self):
+        entry = self._ide_entry(self._t1_gated_to_gemini(), "t1-orchestrator")
+        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
+
+    def test_an_effort_default_the_served_head_rejects_is_dropped(self):
+        entry = self._ide_entry(self._t1_gated_to_gemini(), "t1-orchestrator")
+        self.assertNotIn("reasoning_effort", entry)
+
+    def test_a_default_the_served_head_carries_is_still_forwarded(self):
+        # Nothing is gated in the real registry: meta_api/muse-spark-1.3-
+        # contributor is the served head and does carry xhigh.
+        entry = self._ide_entry(real_registry(), "t1-orchestrator")
+        self.assertEqual(entry.get("reasoning_effort"), "xhigh")
+        self.assertIn("xhigh", entry["effort_ladder"])
+
+    def test_openhands_max_input_tokens_is_clamped(self):
+        tiers = {t["id"]: t for t in
+                 registry.render_openhands(real_registry())["tiers"]}
+        for tier_id in ("omniroute-t1-orchestrator", "litellm-t1-orchestrator"):
+            self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 131_072, tier_id)
 
 
 if __name__ == "__main__":

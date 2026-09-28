@@ -3,8 +3,8 @@
   "models": [
     {
       "id": "t1-orchestrator",
-      "name": "t1 orchestrator-1M — 1M ctx (meta_api first, then free)",
-      "context": 1000000,
+      "name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
+      "context": 131072,
       "output": 32768,
       "reasoning_effort": "xhigh",
       "effort_ladder": [
@@ -52,16 +52,13 @@
     },
     {
       "id": "t1-orchestrator-free-only",
-      "name": "t1 orchestrator-1M — zero spend (free legs only)",
-      "context": 1000000,
+      "name": "t1 orchestrator-128k — zero spend (free legs only)",
+      "context": 131072,
       "output": 32768,
       "effort_ladder": [
-        "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh",
-        "max"
+        "high"
       ],
       "surfaces": {
         "omniroute": [
@@ -104,11 +101,6 @@
       "name": "t2 smart-reasoning-128k — no training (sensitive data)",
       "context": 131072,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "high",
-        "max"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -193,11 +185,6 @@
       "name": "t3 cheap-driver-128k — no training (sensitive data)",
       "context": 131072,
       "output": 16384,
-      "effort_ladder": [
-        "low",
-        "high",
-        "max"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",

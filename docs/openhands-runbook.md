@@ -13,8 +13,10 @@ read it, then continue from `docs/handoff.md` Open item 1.
 - UI: `http://localhost:3000` locally, `http://<tail-ip>:3000` by phone.
   Find `<tail-ip>` with `tailscale ip -4` on the host.
 - You route through the same OmniRoute combos as opencode
-  (`configuration/omniroute/combos.json`): `t1-orchestrator` = spark-only + xhigh,
-  `*-clean` = paid legs only (privacy). Full skill:
+  (`configuration/omniroute/combos.json`): `t1-orchestrator` = the `meta_api`
+  Muse Spark contributor head with a free `gemini` fallback, `xhigh`, and a
+  128k promise (a route may only advertise what its smallest servable leg
+  takes — PROVFIX3), `*-clean` = paid legs only (privacy). Full skill:
   `.agents/skills/unattended-orchestration/unattended-orchestration.md`. Live board: `docs/tasks.md`.
 
 ## 2. Get the repo in your sandbox
