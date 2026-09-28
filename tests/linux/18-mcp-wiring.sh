@@ -162,6 +162,30 @@ PY
     if (( ok )); then pass; else fail "rc=$got good=[$good] none=[$none] bad=[$bad] nograph=[$nograph] file=[$fromfile]"; fi
 fi
 
+# The D9 bridge benchmark (SPEC-OMNI A5). CI can neither install npm packages
+# nor reach a server, so both checks below run against `--fake-server` and the
+# fake stdio bridge fixture — the live 16-parallel cold/warm run is the
+# operator's step and its numbers go in docs/omnigraph.md.
+if it "omnigraph bridge benchmark: unit tests pass offline (fake server + fake bridge)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_check_omnigraph_bridge.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
+if it "omnigraph bridge benchmark: the sh wrapper drives a fake-server run to exit 0"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(tools/check-omnigraph-bridge.sh --fake-server \
+                  --bridge-cmd "python3 tests/fixtures/omnigraph_bridge_stub.py" \
+                  --parallel 2 --graph-id autoos --warm 2>&1)"; rc=$?
+        if [[ $rc -eq 0 && "$out" == *"healthy 2/2"* && "$out" == *"whoami ok 2/2"* ]]; then pass
+        else fail "rc=$rc [$out]"; fi
+    fi
+fi
+
 if it "both healthchecks probe omnigraph through the live probe"; then
     ok=1
     for f in configuration/healthcheck.sh configuration/healthcheck.ps1; do
