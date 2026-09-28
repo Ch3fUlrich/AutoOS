@@ -69,8 +69,11 @@ at-least-once. An inbox with no timestamped record exits 1 — never "no events"
 A line that looks like a stamp but does not parse (a minute-precision one, say
 `2026-09-27T03:55Z → done: …`) is still an acknowledgement, so it prints on
 stdout too, in file order, tagged `(malformed line N)` with the lines under it —
-no position, because it is not a record — beside the stderr notice that counts
-them.
+no position, because it is not a record — beside a stderr notice that counts
+them. The notice is made only for an entry the window actually printed: one
+behind `--since` says nothing, and one dropped with the record it rode on by
+`--max-records` is named in the cut line instead ("cut N earlier records and M
+malformed entries").
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;

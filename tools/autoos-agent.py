@@ -3778,9 +3778,13 @@ def cmd_inbox(args) -> int:
 
     The record shapes live in tools/autoos_inbox.py (§0, one home); this is the
     window and the printing. Records go to stdout with their continuations and
-    a malformed line goes there too, tagged `(malformed line N)` with the lines
-    under it, so a context pack that embeds stdout keeps every acknowledgement;
-    every notice goes to stderr as well.
+    a malformed line inside the window goes there too, tagged `(malformed line
+    N)` with the lines under it, so a context pack that embeds stdout keeps
+    every acknowledgement. The notice is made only for an entry this run
+    actually prints — it promises the text is on stdout, and a line behind
+    `--since` or dropped by the `--max-records` cut reaches nowhere. A malformed
+    entry cut with the record it rode on is counted in the cut line.
+    Every notice goes to stderr.
 
     Exit 0 read, 1 the file holds no timestamped record (an inbox of another
     shape is never read as "no events"), 2 no window named, a bad position, or
@@ -3840,24 +3844,33 @@ def cmd_inbox(args) -> int:
     if not records:
         print("inbox: no timestamped records in %s" % path, file=sys.stderr)
         return 1
-    for entry in malformed:
-        lines = 1 + len(entry.continuations)
-        print("inbox: malformed at line %d (%d %s): the line looks like a UTC "
-              "timestamp but is not one, so it is neither a record nor a "
-              "continuation; its text is on stdout tagged (malformed line %d)"
-              % (entry.line, lines, "line" if lines == 1 else "lines",
-                 entry.line), file=sys.stderr)
     entries = inbox.window_entries(records, malformed, since)
     selected = [entry for entry in entries if not
                 isinstance(entry, inbox.Malformed)]
     if len(selected) > args.max_records:
         cut = len(selected) - args.max_records
         dropped = {id(entry) for entry in selected[:cut]}
-        entries = [entry for entry in entries
-                   if id(entry) not in dropped
-                   and not (isinstance(entry, inbox.Malformed)
-                            and id(entry.anchor) in dropped)]
-        print("inbox: cut %d earlier records" % cut, file=sys.stderr)
+        kept = [entry for entry in entries
+                if id(entry) not in dropped
+                and not (isinstance(entry, inbox.Malformed)
+                         and id(entry.anchor) in dropped)]
+        # Names the malformed entries that rode on a cut record, so the budget
+        # that dropped them is stated whole rather than implied by the records.
+        lost = sum(1 for entry in entries
+                   if isinstance(entry, inbox.Malformed)
+                   and id(entry.anchor) in dropped)
+        print("inbox: cut %d earlier records%s"
+              % (cut, " and %d malformed entries" % lost if lost else ""),
+              file=sys.stderr)
+        entries = kept
+    for entry in entries:
+        if isinstance(entry, inbox.Malformed):
+            lines = 1 + len(entry.continuations)
+            print("inbox: malformed at line %d (%d %s): the line looks like a UTC "
+                  "timestamp but is not one, so it is neither a record nor a "
+                  "continuation; its text is on stdout tagged (malformed line %d)"
+                  % (entry.line, lines, "line" if lines == 1 else "lines",
+                     entry.line), file=sys.stderr)
     if not selected:
         # Names the window as the caller wrote it: a bare UTC cut reads that
         # whole second internally (ordinal 0), and "#0" is not a position a card

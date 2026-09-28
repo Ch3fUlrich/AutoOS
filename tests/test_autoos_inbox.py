@@ -468,6 +468,49 @@ class InboxCliTests(_Files):
             "2026-09-27T03:56:00Z#1 second",
             "2026-09-27T03:57:00Z#1 third"])
 
+    def test_the_notice_speaks_only_for_a_malformed_line_inside_the_window(self):
+        # R1FIX2: the notice claims "its text is on stdout", so it may only be
+        # made for an entry the window actually reads.
+        path = self.write("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+                          "2026-09-27T03:55Z → done: answers read (BYOK opt2);\n"
+                          "2026-09-27T04:03:09Z lesson: host omniroute CLI 401\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                  "--since", "2026-09-27T03:53:13Z#1")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("malformed at line 2", err)
+        self.assertIn("its text is on stdout tagged (malformed line 2)", err)
+        self.assertIn(
+            "(malformed line 2) 2026-09-27T03:55Z → done: answers read (BYOK opt2);",
+            out.splitlines())
+
+    def test_a_malformed_line_outside_the_window_gets_no_notice(self):
+        path = self.write("2026-09-27T03:53:13Z E3 RTK A/B plan\n"
+                          "2026-09-27T03:55Z → done: answers read (BYOK opt2);\n"
+                          "2026-09-27T04:03:09Z lesson: host omniroute CLI 401\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                  "--since", "2026-09-27T04:03:09Z#1")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("malformed at line 2", err)
+        self.assertEqual(out, "")
+
+    def test_a_malformed_line_cut_by_max_records_is_counted_in_the_cut_line(self):
+        # The sample's shape: --max-records drops the record a malformed line
+        # rode on, yet stderr still promised its text was on stdout — text that
+        # never reached it.
+        path = self.write("2026-09-27T03:50:00Z oldest\n"
+                          "2026-09-27T03:55Z → done: an acknowledgement\n"
+                          "2026-09-27T03:56:00Z second\n"
+                          "2026-09-27T03:57:00Z third\n")
+        rc, out, err = self.invoke("inbox", "--file", path, "--all",
+                                  "--max-records", "2")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cut 1 earlier records and 1 malformed entries", err)
+        self.assertNotIn("malformed at line 2", err)
+        self.assertNotIn("on stdout", err)
+        self.assertEqual(out.splitlines(), [
+            "2026-09-27T03:56:00Z#1 second",
+            "2026-09-27T03:57:00Z#1 third"])
+
     def test_a_name_and_a_file_together_is_refused(self):
         path = self.write(COLLIDING)
         rc, _out, err = self.invoke("inbox", "L1-routing", "--file", path, "--all")
