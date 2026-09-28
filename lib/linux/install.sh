@@ -372,6 +372,10 @@ catalog_probe_installed() {
     CAT_INSTALLED=()
     local i
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        # A retired id is never "installed": the ✓ would advertise machinery
+        # AutoOS no longer provides, and its name would join the "Installed
+        # apps" line of every later run.
+        if catalog_is_tombstone "$i"; then CAT_INSTALLED+=(0); continue; fi
         if is_installed "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"; then
             CAT_INSTALLED+=(1)
         else

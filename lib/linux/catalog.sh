@@ -16,6 +16,7 @@
 CATALOG_PATH=""
 declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
 declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP CAT_VERIFY CAT_CASK
+declare -a CAT_TOMBSTONE CAT_RETIRE_NOTE
 
 catalog_require_python() {
     if ! has_cmd python3; then
@@ -44,6 +45,10 @@ if not cats:
     print("catalog: missing 'categories'"); sys.exit(1)
 
 all_ids = {c.get("id") for grp in cats for c in grp.get("components", [])}
+# A tombstone installs nothing, so it can never satisfy a dependency and no
+# entry may name one in `requires`.
+retired_ids = {c.get("id") for grp in cats for c in grp.get("components", [])
+               if c.get("tombstone") is True}
 for grp in cats:
     if not grp.get("id"):   problems.append("category: missing 'id'")
     if not grp.get("name"): problems.append(f"category '{grp.get('id')}': missing 'name'")
@@ -71,9 +76,23 @@ for grp in cats:
         for r in c.get("requires", []):
             if r not in all_ids:     problems.append(f"{where}: requires unknown component '{r}'")
             if r == cid:             problems.append(f"{where}: requires itself")
+            if r in retired_ids:     problems.append(f"{where}: requires '{r}', a tombstone that installs nothing")
         hp = c.get("homepage")
         if hp and not str(hp).startswith(("http://", "https://")):
             problems.append(f"{where}: 'homepage' must be an http(s) URL")
+        # "tombstone": true keeps the id known and installs nothing. Only the
+        # boolean true means that: a string would read as retired to a shell
+        # test (`[[ -n ]]`) and as live to a python `is True`, so the entry would
+        # be retired everywhere and nowhere at once. A tombstone may omit
+        # postInstall / prompt / requires / verify — the loader ignores all four.
+        t = c.get("tombstone")
+        if "tombstone" in c and t is not True:
+            problems.append(f"{where}: 'tombstone' must be the boolean true")
+        if "note" in c:
+            if not str(c.get("note") or "").strip():
+                problems.append(f"{where}: 'note' is present but empty")
+            if t is not True:
+                problems.append(f"{where}: 'note' is only meaningful on a tombstone entry")
         v = c.get("verify")
         if "verify" in c and not (v or "").strip():
             problems.append(f"{where}: 'verify' is present but empty")
@@ -161,16 +180,18 @@ catalog_load() {
     CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
     CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
     CAT_VERIFY=(); CAT_CASK=(); CAT_HOMEPAGE=(); CAT_INSTALLED=()
+    CAT_TOMBSTONE=(); CAT_RETIRE_NOTE=()
 
     # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
     # bash collapses runs of them and every empty field shifts the columns left.
-    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage; do
+    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage tombstone note; do
         [[ -z "$id" ]] && continue
         CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
         CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
         CAT_PROFILES+=("$profiles");CAT_POST+=("$post");     CAT_PROMPT+=("$prompt")
         CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
         CAT_CASK+=("$cask"); CAT_HOMEPAGE+=("$homepage"); CAT_INSTALLED+=(0)
+        CAT_TOMBSTONE+=("$tombstone"); CAT_RETIRE_NOTE+=("$note")
     done < <(python3 - "$path" "$arch" "$headless" <<'PY'
 import json, sys
 path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
@@ -190,9 +211,19 @@ for grp in cat.get("categories", []):
             (c.get("notes","") or "").replace("\x1f"," "), grp.get("name",""),
             c.get("verify","") or "",
             "1" if c.get("cask") else "0", c.get("homepage", ""),
+            "1" if c.get("tombstone") is True else "0",
+            (c.get("note","") or "").replace("\x1f"," "),
         ]))
 PY
     )
+}
+
+# catalog_is_tombstone <index> — is the loaded component at <index> a retired
+# id? One home for the question: the profile list, the dependency walk, the
+# installed probe and every printed row all ask it, and a row that answers
+# "installed" for something that installs nothing is a wrong answer.
+catalog_is_tombstone() {
+    [[ "${CAT_TOMBSTONE[${1:-0}]:-0}" == 1 ]]
 }
 
 catalog_index_of() {
@@ -209,6 +240,10 @@ catalog_profile_defaults() {
     [[ "$profile" == "custom" ]] && { echo ""; return; }
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
         [[ "${CAT_PROVIDER[i]}" == manual ]] && continue
+        # A profile pre-ticks what it wants *installed*. A retired id keeps its
+        # profiles so old state files still resolve, so the expansion has to ask
+        # the flag rather than trust the list.
+        catalog_is_tombstone "$i" && continue
         [[ ",${CAT_PROFILES[i]}," == *",${profile},"* ]] && out+="${CAT_ID[i]} "
     done
     echo "${out% }"
@@ -229,7 +264,10 @@ catalog_resolve() {
         i="$(catalog_index_of "$id")" || continue
         if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_err "AutoOS cannot install $id; use its vendor link for manual setup."; return 1; fi
         wanted+=("$id")
-        if [[ -n "${CAT_REQUIRES[i]}" ]]; then
+        # A retired entry keeps whatever `requires` it had; pulling those in for
+        # a component that installs nothing would only add work the user never
+        # asked for.
+        if [[ -n "${CAT_REQUIRES[i]}" ]] && ! catalog_is_tombstone "$i"; then
             IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
             for dep in "${deps[@]}"; do
                 [[ -n "$dep" ]] && queue+=("$dep")
@@ -294,6 +332,7 @@ PY
 catalog_detect_installed() {
     local i
     for ((i=0; i<${#CAT_ID[@]}; i++)); do
+        if catalog_is_tombstone "$i"; then CAT_INSTALLED[i]=0; continue; fi
         detect_installed_status "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"
         if [[ "$INSTALLED_STATUS" == installed ]]; then CAT_INSTALLED[i]=1; else CAT_INSTALLED[i]=0; fi
     done
