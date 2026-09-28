@@ -10,8 +10,8 @@ every model at tool_calls "unproven". This script sends each distinct leg
 (a "<provider>/<model>" string exactly as written in a route's ``legs``) two
 tool-calling trials through the OmniRoute gateway (OpenAI chat/completions
 format: the "model" field is the leg string and OmniRoute routes it straight
-to that leg) and records a verdict in the git-ignored overlay
-logs/routing/measured.json. tools/autoos_resolver.py's filter_routes() reads
+to that leg) and records a verdict in the machine-wide overlay
+(tools/autoos_overlay.py). tools/autoos_resolver.py's filter_routes() reads
 that overlay (overlay wins over the registry) when it enforces "tool_calls =
 proven" for implement/debug/bulk kinds.
 
@@ -28,7 +28,7 @@ Usage:
     python3 tools/probe-toolcalls.py --leg deepseek/deepseek-flash --trials 5
     python3 tools/probe-toolcalls.py --route t2-worker
     python3 tools/probe-toolcalls.py --registry catalog/ai-registry.json \\
-        --overlay logs/routing/measured.json --gateway http://127.0.0.1:20128/v1/chat/completions
+        --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 
 Exit codes: 0 the probe ran (verdicts, including "broken"/"unproven", are
 data, not failure); 2 bad arguments or an unreadable registry; 3 no OmniRoute
@@ -41,6 +41,7 @@ is the status, plus the one fact read out of a 400's body (see
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -55,6 +56,7 @@ sys.path.insert(0, HERE)
 from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     DEFAULT_GATEWAY,
     DEFAULT_OVERLAY,
+    overlay_target,
     DEFAULT_REGISTRY,
     RETRY_DELAYS_S,  # re-exported: tests read it on this module
     _skip_reason,  # re-exported: tests read the shared leg selection here
@@ -317,7 +319,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="list legs and skip reasons; make no request")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY)
-    ap.add_argument("--overlay", default=DEFAULT_OVERLAY)
+    ap.add_argument("--overlay", default=None,
+                    help="overlay file (default: the machine-wide one, %s)" % DEFAULT_OVERLAY)
     ap.add_argument("--gateway", default=DEFAULT_GATEWAY)
     args = ap.parse_args(argv)
 
@@ -351,7 +354,9 @@ def main(argv=None) -> int:
         return 3
 
     post = make_post(args.gateway, key)
-    overlay = load_overlay(args.overlay)
+    overlay_path, legacy = overlay_target(args.overlay)
+    overlay = load_overlay(overlay_path, legacy)
+    base = copy.deepcopy(overlay)  # save_overlay merges only this run's changes
     for leg, skip in todo:
         if skip:
             print("%s\tskip\t-/%d\t%s" % (leg, args.trials, skip))
@@ -361,7 +366,7 @@ def main(argv=None) -> int:
         value, detail = classify(trials)
         overlay = record_verdict(overlay, leg, value, detail, trials, passes, _now_iso())
         print("%s\t%s\t%d/%d\t%s" % (leg, value or "no-verdict", passes, args.trials, detail))
-    save_overlay(args.overlay, overlay)
+    save_overlay(overlay_path, overlay, base, legacy)
     return 0
 
 

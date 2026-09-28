@@ -180,12 +180,13 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
     try:
         now = agent.parse_now(None)
         registry = agent.load_registry(agent.REGISTRY_PATH)
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, overlay_missing_at = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         client_state = agent.measure_mod.client_state(agent.clients)
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
-                                      registry, overlay, track_record, client_state)
+                                      registry, overlay, track_record, client_state,
+                                      overlay_missing_at=overlay_missing_at)
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:

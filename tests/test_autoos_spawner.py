@@ -1980,7 +1980,7 @@ class ProbeProposalTests(unittest.TestCase):
     """TC2: propose a tool-calling re-probe when a real run's gate contradicts
     the recorded tool_calls status of its route's legs (spec 5.6 track_entry,
     catalog/ai-registry.json models[<model>].tool_calls, overlay
-    logs/routing/measured.json legs[<leg>].tool_calls.value)."""
+    (tools/autoos_overlay.py) legs[<leg>].tool_calls.value)."""
 
     REGISTRY = {
         "providers": {
@@ -3780,6 +3780,7 @@ class RawTailClassificationTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
 
     def _run_verdict(self, exit_obj):
@@ -4219,6 +4220,7 @@ class RouteCliTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         self.agent.clients = _FakeClients
 
@@ -4350,6 +4352,7 @@ class RouteCliTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # Build a minimal fake plan so cmd_run does not need the real
         # route-resolution machinery.
@@ -4413,6 +4416,7 @@ class RunCardV2Tests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # _small_route_registry()'s only orchestrator-priceable model is "orch".
         self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
@@ -4692,7 +4696,7 @@ class RunCardV2PrivacyTests(unittest.TestCase):
         agent = load_agent()
         registry = json.loads((ROOT / "catalog" / "ai-registry.json")
                               .read_text(encoding="utf-8"))
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, _ = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         result = agent.route_plan_for(
             "kind=review,paths=tools/registry.py,privacy=sensitive", "", str(ROOT),
@@ -6002,7 +6006,7 @@ def _fallthrough_registry(route_ids, policy=None):
 
 
 def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
-                      track_record, client_state):
+                      track_record, client_state, overlay_missing_at=None):
     """route_plan_for stand-in: the first route id still in `registry`.
 
     `_resolve_route_v2` drops the excluded ids before calling, so the second
@@ -6044,8 +6048,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     statedir = tempfile.mkdtemp()
     case.addCleanup(shutil.rmtree, root, True)
     case.addCleanup(shutil.rmtree, statedir, True)
-    old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
-                                        agent.MEASURED_OVERLAY_PATH)
+    old_root, old_track, old_overlay, old_legacy = (agent.ROOT, agent.TRACK_RECORD,
+                                                    agent.MEASURED_OVERLAY_PATH,
+                                                    agent.LEGACY_OVERLAY_PATH)
     agent.ROOT = root
     # A run without --isolate works in the caller's own directory (plan["cwd"] is
     # os.getcwd()), and the fake client writes there — so the whole run happens
@@ -6054,6 +6059,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    agent.LEGACY_OVERLAY_PATH = os.path.join(statedir, "legacy-measured.json")
     case.provider_state = os.path.join(statedir, "provider-state.json")
     old_provider_state = agent.PROVIDER_STATE_PATH
     agent.PROVIDER_STATE_PATH = case.provider_state
@@ -6125,8 +6131,8 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
         (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH,
-         agent.PROVIDER_STATE_PATH) = (
-            old_root, old_track, old_overlay, old_provider_state)
+         agent.LEGACY_OVERLAY_PATH, agent.PROVIDER_STATE_PATH) = (
+            old_root, old_track, old_overlay, old_legacy, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
@@ -7530,6 +7536,7 @@ class ReviewerGateTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         self.tmp = tmp
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # No recorded provider stop: this fixture decides who reviews from the
         # registry and the probes, not from an outage some earlier run saw.
@@ -9206,6 +9213,7 @@ class EffortRungPlumbingTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         patch = mock.patch.object(self.agent.measure_mod, "client_state",
                                   lambda *a, **k: {})
@@ -9915,6 +9923,106 @@ class PsTreeTests(_WorkerRecordBase):
         self.assertIn("lonely", " ".join(roots))
         self.assertEqual(sum(1 for l in roots if l.strip().split()[0] in ("a", "b")), 1,
                          "one of the cycle is entered as a root, the other hangs under it")
+
+
+class OverlayHomeTests(unittest.TestCase):
+    """OVERLAYHOME (2026-09-28 12:5xZ incident): one machine-wide overlay, a
+    legacy per-checkout fallback, and a loud reason when there is none. Temp
+    dirs only - never the real state dir or the checkout's logs/."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(self.tmp, "state", "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(self.tmp, "repo", "logs", "routing",
+                                                      "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(self.tmp, "track-record.jsonl")
+        self.agent.clients = _FakeClients
+
+    @staticmethod
+    def _unproven_registry():
+        registry = _small_route_registry()
+        for model in registry["models"].values():
+            model["tool_calls"] = "unproven"
+        return registry
+
+    def _cmd_route(self, card):
+        ns = argparse.Namespace(card=card, brief="", explain=True, orchestrator_model="orch",
+                                repo=str(ROOT), now=None)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.object(self.agent, "load_registry",
+                                   lambda path: self._unproven_registry()):
+                rc = self.agent.cmd_route(ns)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_agent_resolves_the_machine_wide_path(self):
+        fresh = load_agent()
+        import autoos_overlay
+        self.assertEqual(fresh.MEASURED_OVERLAY_PATH, autoos_overlay.default_path())
+        self.assertEqual(fresh.LEGACY_OVERLAY_PATH, autoos_overlay.legacy_path(fresh.ROOT))
+
+    def test_a_missing_overlay_is_named_in_the_tool_calls_reason(self):
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 5, err)
+        reason = json.loads(out)["reason"]
+        self.assertIn("no tool_calls overlay found at %s" % self.agent.MEASURED_OVERLAY_PATH,
+                      reason)
+        self.assertIn("AUTOOS_MEASURED_OVERLAY", reason)
+
+    def test_a_present_overlay_keeps_the_plain_reason(self):
+        import autoos_overlay
+        autoos_overlay.save(self.agent.MEASURED_OVERLAY_PATH, {"legs": {}})
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 5, err)
+        self.assertNotIn("no tool_calls overlay found", json.loads(out)["reason"])
+
+    def test_the_legacy_overlay_is_read_with_a_note(self):
+        import autoos_overlay
+        legs = {leg: {"tool_calls": {"value": "proven"}}
+                for route in self._unproven_registry()["routes"].values()
+                for leg in route["legs"]}
+        autoos_overlay.save(self.agent.LEGACY_OVERLAY_PATH, {"legs": legs})
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("overlay: using legacy %s" % self.agent.LEGACY_OVERLAY_PATH, err)
+        self.assertTrue(os.path.isfile(self.agent.LEGACY_OVERLAY_PATH))
+
+    def test_the_only_overlay_loader_is_the_one_that_knows_legacy(self):
+        # Muse review (LOW): a single-argument load_overlay dropped the fallback.
+        self.assertFalse(hasattr(self.agent, "load_overlay"))
+
+    def test_the_resolver_flags_a_route_lost_to_tool_calls(self):
+        # Muse review (LOW): gate the loud reason on a structured flag, not a
+        # substring of the reason text.
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        lost = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                         str(ROOT), "orch", now, self._unproven_registry(),
+                                         {}, [], _fake_client_state())
+        self.assertIs(lost.get("unproven_toolcalls"), True)
+        ready = self.agent.route_plan_for("kind=review,paths=tools/registry.py", "",
+                                          str(ROOT), "orch", now, _small_route_registry(),
+                                          {}, [], _fake_client_state())
+        self.assertFalse(ready.get("unproven_toolcalls"))
+
+    def test_the_loud_reason_follows_the_flag_not_the_text(self):
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        path = self.agent.MEASURED_OVERLAY_PATH
+        for flag, loud in ((False, False), (True, True)):
+            fake = {"route": None, "state": "input_required",
+                    "reason": "override r: tool_calls: mentioned in text", "unproven_toolcalls": flag}
+            with mock.patch.object(self.agent.resolver, "plan", lambda *a, **k: dict(fake)):
+                got = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                                str(ROOT), "orch", now, self._unproven_registry(),
+                                                {}, [], _fake_client_state(),
+                                                overlay_missing_at=path)
+            self.assertEqual("no tool_calls overlay found" in got["reason"], loud, flag)
+
+    def test_heartbeat_json_carries_the_overlay_state(self):
+        data, _ = self.agent.heartbeat_state(None, None, [self.tmp], None)
+        self.assertEqual(data["overlay"], {"path": self.agent.MEASURED_OVERLAY_PATH,
+                                           "present": False, "age_hours": None})
 
 
 if __name__ == "__main__":

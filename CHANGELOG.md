@@ -281,6 +281,31 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
   harnesses.
 
+### Fixed — one machine-wide tool_calls overlay, and a loud reason when it is missing (OVERLAYHOME, 2026-09-28)
+
+The overlay lived at `<checkout>/logs/routing/measured.json`. At 12:5xZ the main
+checkout had none, so `route` skipped every agentic leg as `tool_calls: ...
+unproven` and returned `input_required` — it looked like a fleet-wide outage.
+
+- **`tools/autoos_overlay.py`** (new): the one path — `$AUTOOS_MEASURED_OVERLAY`,
+  else `${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+  `%LOCALAPPDATA%\autoos\measured.json`) — plus load with a read-only legacy
+  fallback (one stderr note; the old file is never deleted), an atomic mode-600
+  save, `status` and the missing-overlay reason.
+- **Readers**: `tools/autoos-agent.py` (`route`, `run`/`spawn` routing,
+  `propose_reprobe`) and `tools/autoos_agent_mcp.py` read through it. With no
+  overlay anywhere, an agentic card that fails on tool_calls says `no tool_calls
+  overlay found at <path> (run tools/probe-toolcalls.py or set
+  AUTOOS_MEASURED_OVERLAY)`. `heartbeat --json` gains `overlay: {path, present,
+  age_hours}`.
+- **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
+  `probe-effort`) default to the new path; the first run reads the legacy file so
+  its verdicts carry over (only when `--overlay` is not given). The
+  read-modify-write holds a lock on `<overlay>.lock` and merges only this run's
+  changes into the file as it is now, so probes running at once lose nothing.
+- `$AUTOOS_MEASURED_OVERLAY` is expanded (`~`, `$VAR`) and made absolute. The
+  loud reason is gated on the resolver's structured `unproven_toolcalls` flag,
+  not on reason text.
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and

@@ -453,7 +453,7 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
 
 
 def usable_legs(route, card, features, client_state, registry, overlay,
-               client="opencode", now=None):
+               client="opencode", now=None, toolcalls_skips=None):
     """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
     operator decision): the serving legs of `route` that also pass every
     *per-leg* filter, and why each rejected leg did not.
@@ -576,6 +576,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if agentic and not proven:
             reasons.append("tool_calls: %s/%s is %s"
                            % (provider_id, model_id, value))
+            # OVERLAYHOME: a structured record of the skip, so a caller can
+            # tell "no overlay" apart without parsing reason text.
+            if toolcalls_skips is not None:
+                toolcalls_skips.add(leg)
 
         bound = registry["models"][model_id].get("client_bound")
         if bound:
@@ -606,7 +610,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
 
 def filter_routes(card, features, client_state, registry, overlay,
-                  client="opencode", now=None):
+                  client="opencode", now=None, toolcalls_skips=None):
     """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
     amended by FT (2026-09-26 operator decision): "a leg that is
     rate-limited or unproven makes the combo fall through to the next proven
@@ -670,7 +674,8 @@ def filter_routes(card, features, client_state, registry, overlay,
             reasons.append(client_reason)
 
         usable, skipped, _ = usable_legs(route, card, features, client_state,
-                                        registry, overlay, client, now)
+                                        registry, overlay, client, now,
+                                        toolcalls_skips)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -1720,13 +1725,17 @@ def plan(card, features, client_state, registry, overlay, track_record,
             raise ValueError("missing card key %r" % key)
 
     now = _now_or_default(now)
+    toolcalls_skips = set()
     survivors, removed = filter_routes(card, features, client_state, registry,
-                                       overlay, client, now)
+                                       overlay, client, now, toolcalls_skips)
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
         result = no_route(removed)
         result["bucket"] = bucket_name
+        # True when a leg was skipped as not proven for tool calls, so the
+        # caller can name a missing overlay without parsing the reason.
+        result["unproven_toolcalls"] = bool(toolcalls_skips)
         return result
 
     override_route, override_reason = apply_override(card, survivors, removed)

@@ -2062,9 +2062,9 @@ class PlanTests(unittest.TestCase):
         """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
         sensitive-routing regression below needs an agentic kind's
         tool_calls proven for at least one private-safe leg, but
-        logs/routing/measured.json (the real probe's overlay) is
-        git-ignored and absent on a fresh clone or in CI. Marks the
-        -clean routes' head leg (clean_head_leg: private-safe — paid tier,
+        the real probe's overlay (tools/autoos_overlay.py) is never in
+        git and absent on a fresh clone or in CI. Marks the -clean routes'
+        head leg (clean_head_leg: private-safe — paid tier,
         trains_on_prompts false, no model-level override) proven and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
@@ -2082,7 +2082,7 @@ class PlanTests(unittest.TestCase):
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
         # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
         # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
-        # instead of reading the git-ignored logs/routing/measured.json --
+        # instead of reading the machine-wide overlay --
         # see
         # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
         # below for the real-probe-overlay variant, which may still skip.
@@ -2108,13 +2108,17 @@ class PlanTests(unittest.TestCase):
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
         # Extra (PRIV2): the same regression against the real probe's
-        # overlay, when one happens to be on disk. logs/routing/measured.json
-        # is git-ignored, so this skips on a fresh clone or in CI rather than
-        # failing -- the inline-overlay test above is the one that must run.
-        overlay_path = (Path(__file__).resolve().parent.parent
-                        / "logs" / "routing" / "measured.json")
-        if not overlay_path.is_file():
-            self.skipTest("no logs/routing/measured.json overlay to probe with")
+        # overlay, when one happens to be on disk. The machine-wide overlay
+        # (autoos_overlay, OVERLAYHOME) is never in git, so this skips on a
+        # fresh clone or in CI rather than failing -- the inline-overlay test
+        # above is the one that must run. Read-only: it never writes the file.
+        import autoos_overlay
+        found = autoos_overlay.found(
+            autoos_overlay.default_path(),
+            autoos_overlay.legacy_path(str(Path(__file__).resolve().parent.parent)))
+        if found is None:
+            self.skipTest("no tool_calls overlay on this machine to probe with")
+        overlay_path = Path(found)
         registry_path = (Path(__file__).resolve().parent.parent
                          / "catalog" / "ai-registry.json")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
