@@ -565,9 +565,28 @@
           "homepage": "https://www.npmjs.com/package/herdr"
         },
         {
+          "id": "omnigraph-client",
+          "name": "Omnigraph MCP client",
+          "description": "Pinned Omnigraph bridge, env file and MCP wrapper",
+          "provider": "custom",
+          "package": "omnigraph-client",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "Install-AutoOSOmnigraphClient",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "omnigraph_url",
+          "homepage": "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp",
+          "notes": "Needs the omnigraph_url answer and the omnigraph_token key (or OMNIGRAPH_TOKEN) and skips with a hint when either is missing. Writes %USERPROFILE%\\.autoos-omnigraph.env (your account only), pre-installs the pinned bridge into a private npm prefix instead of npx, and installs the omnigraph-mcp-autoos wrapper that reads the env file itself."
+        },
+        {
           "id": "agent-skills",
           "name": "agent-skills + MCP servers",
-          "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
+          "description": "Wire the MCP stack into the clients and link this repo's skills",
           "provider": "custom",
           "package": "agent-skills",
           "requires": [
@@ -579,7 +598,6 @@
             "workstation",
             "ai-coding"
           ],
-          "prompt": "omnigraph_url",
           "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {

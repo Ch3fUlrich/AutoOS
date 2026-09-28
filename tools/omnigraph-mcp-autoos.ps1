@@ -6,15 +6,25 @@
 # omnigraph-client component pre-installed is exec'd directly (npx start-up
 # measured 6.7-9.3 s — spec 2026-09-27, decision D9).
 #
-# Windows wiring lands in a later lane; this file is the tracked source of that
-# step, so it must parse and behave the same way as the shell one.
+# Written by Install-AutoOSOmnigraphClient in lib/windows/AutoOS.Install.psm1,
+# which recognises its own copy of this file by the marker line below and leaves
+# a file without it alone.
+# AutoOS:omnigraph-mcp-autoos
+#
+# The bridge lives in the private npm prefix AutoOS created for it, and Windows
+# npm links a global package's bin into the prefix itself (that is why
+# %APPDATA%\npm is on every Node machine's PATH) — so this path is a second
+# spelling of Get-AutoOSOmnigraphClientPath/Get-AutoOSOmnigraphBridgePath in the
+# module, which this standalone script cannot import. tests/run-tests.ps1 binds
+# the two: it runs this file and compares what it says it looked for against what
+# the installer computed.
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest)
 
 $ErrorActionPreference = 'Stop'
 
 $envFile = Join-Path $env:USERPROFILE '.autoos-omnigraph.env'
-$bridge = Join-Path $env:USERPROFILE '.local\share\autoos\omnigraph-mcp\bin\omnigraph-mcp.cmd'
+$bridge = Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'autoos') 'omnigraph-mcp') 'omnigraph-mcp.cmd'
 
 if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     # Only the three keys the bridge uses, assigned as literal strings: a value

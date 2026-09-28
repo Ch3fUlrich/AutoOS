@@ -32,7 +32,13 @@ function Initialize-AutoOSInstaller {
     $script:DryRun  = $DryRun
     $script:Answers = $Answers
     Clear-AutoOSInstalledStatus
-    if ($RepoRoot) { $script:RepoRoot = $RepoRoot }
+    if ($RepoRoot) {
+        # The parsed harness is read from the repo, so pointing the installer at a
+        # different checkout has to drop the cached one — otherwise the catalog's
+        # pins keep coming from the repo the last caller named.
+        $script:AgentHarness = $null
+        $script:RepoRoot = $RepoRoot
+    }
 }
 
 function Get-AutoOSAnswer {
@@ -1030,8 +1036,12 @@ function Write-AutoOSOmnigraphReadiness {
         fails with "pull access denied", "fetch failed" or "missing bearer token"
         respectively - none of which say which of the three it was. AutoOS does
         not build or start that stack; it reports what is not ready yet.
+
+        The two commands it names are paths inside an AutoOS checkout — that is
+        where infra/mcp-servers lives — and not inside a second clone, which used
+        to be what this was handed.
     #>
-    param([Parameter(Mandatory)][string]$AgentSkillsDir)
+    param([Parameter(Mandatory)][string]$RepoRoot)
 
     if (-not (Get-Command 'docker' -ErrorAction SilentlyContinue)) {
         Write-AutoOSLine 'docker is not installed - omnigraph runs as a container.' -Level warn
@@ -1042,13 +1052,13 @@ function Write-AutoOSOmnigraphReadiness {
     $images = (& docker images --format '{{.Repository}}:{{.Tag}}' 2>&1 | Out-String)
     if ($images -notmatch 'omnigraph-mcp:latest') {
         Write-AutoOSLine 'omnigraph-mcp:latest is not built. Build it with:' -Level warn
-        Write-AutoOSLine "    docker build -t omnigraph-mcp:latest $AgentSkillsDir\infra\mcp-servers\servers\omnigraph-mcp" -Level muted
+        Write-AutoOSLine "    docker build -t omnigraph-mcp:latest $RepoRoot\infra\mcp-servers\servers\omnigraph-mcp" -Level muted
         $ready = $false
     }
     $nets = (& docker network ls --format '{{.Name}}' 2>&1 | Out-String)
     if ($nets -notmatch 'mcp-server') {
         Write-AutoOSLine 'no mcp-server Docker network - the graph server stack is not up.' -Level warn
-        Write-AutoOSLine "    docker compose -f $AgentSkillsDir\infra\mcp-servers\docker-compose.client.yml up -d" -Level muted
+        Write-AutoOSLine "    docker compose -f $RepoRoot\infra\mcp-servers\docker-compose.client.yml up -d" -Level muted
         $ready = $false
     }
     $envFileToken = Select-String -Path (Join-Path $env:USERPROFILE '.autoos-omnigraph.env') -Pattern '^OMNIGRAPH_TOKEN=.' -Quiet -ErrorAction SilentlyContinue
@@ -1064,6 +1074,22 @@ function Write-AutoOSOmnigraphReadiness {
         $ready = $false
     }
     $ready
+}
+
+function Test-AutoOSWindowsHost {
+    <#
+      .SYNOPSIS
+        Is this process actually running on Windows?
+      .DESCRIPTION
+        Two units need the answer — the icacls protection that has no Unix
+        equivalent, and the persistent-PATH edit that a Unix host would accept and
+        silently ignore — and a third will if the suite keeps growing. Testing
+        $IsWindows alone is wrong on Windows PowerShell 5.1, where the variable
+        does not exist (Set-StrictMode makes reading it an error), which is why
+        the edition is checked first.
+    #>
+    ($PSVersionTable.PSEdition -eq 'Desktop') -or
+        ((Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
 }
 
 function Protect-AutoOSUserFile {
@@ -1095,6 +1121,63 @@ function Protect-AutoOSUserFile {
     }
 }
 
+function Write-AutoOSProtectedFile {
+    <#
+      .SYNOPSIS
+        Create or replace a file so the secret in it is never widely readable.
+      .DESCRIPTION
+        Writing a token to a path and restricting it afterwards leaves a window in
+        which anything holding the profile's inherited ACLs — and, on a shared or
+        imaged machine, that can be broad — can open it. So the bytes go to a
+        sibling file that is protected *before* they land, and that file is then
+        moved into place on the same volume, where a rename carries the DACL with
+        it and the target path is never itself created unprotected.
+
+        A protection that FAILED stops the write: a secret machine-wide is the
+        leak this exists to prevent, and the caller gets 'failed' to report.
+        Off Windows there is no icacls and the answer is 'skipped' — the content
+        still has to be written, because that is what a test (and a WSL run of the
+        Linux-shaped part of this module) can check.
+
+        Returns 'ok', 'failed' or 'skipped' for the file now at $Path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+    )
+    $dir = Split-Path -Parent $Path
+    if (-not $dir) { throw "Write-AutoOSProtectedFile needs a directory to hold the sibling it moves in: $Path" }
+    if (-not (Test-Path -LiteralPath $dir)) {
+        $null = New-Item -ItemType Directory -Path $dir -Force
+    }
+    $temp = Join-Path $dir ('.{0}-{1}.tmp' -f [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString('N'))
+    try {
+        # Empty until the ACL says so: no BOM, the file is read as KEY=VALUE by
+        # non-PowerShell tools, exactly like the file it replaces.
+        [IO.File]::WriteAllText($temp, '', (New-Object Text.UTF8Encoding($false)))
+        $verdict = Protect-AutoOSUserFile -Path $temp
+        if ($verdict -eq 'failed') {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+            return 'failed'
+        }
+        [IO.File]::WriteAllText($temp, $Content, (New-Object Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $Path) {
+            # Move-Item onto an existing file needs the destination gone; the
+            # caller backed it up first (Copy-AutoOSBackup), which is what makes
+            # this window a missing file and never a lost one.
+            Remove-Item -LiteralPath $Path -Force
+        }
+        Move-Item -LiteralPath $temp -Destination $Path
+        # Re-state it on the final name: the rename carries the DACL, and this is
+        # the check that says so rather than an assumption that it did.
+        Protect-AutoOSUserFile -Path $Path
+    } catch {
+        Write-AutoOSLine "could not write $Path ($($_.Exception.Message))" -Level warn
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        'failed'
+    }
+}
+
 function Set-AutoOSOmnigraphEnv {
     <#
       .SYNOPSIS
@@ -1112,21 +1195,29 @@ function Set-AutoOSOmnigraphEnv {
         token, read-modify-write (other keys are kept, a changed file is backed
         up). The token is also set as the OMNIGRAPH_TOKEN *user* variable - one
         named variable, read first and written only when it differs - so every
-        newly started process sees it. The value comes from $env:OMNIGRAPH_TOKEN,
-        else from a local omnigraph-server container, else whatever the file
-        already had. Never invented, never printed.
+        newly started process sees it. The value comes from -Token when a caller
+        resolved one, else $env:OMNIGRAPH_TOKEN, else from a local omnigraph-server
+        container, else whatever the file already had. Never invented, never
+        printed.
+
+      .RETURNS
+        'written', 'unchanged' or 'failed' — the caller's idempotency answer. The
+        omnigraph-client component cannot report a truthful `skipped` without
+        knowing whether this changed anything (AGENTS.md section 4), and a caller
+        that ignores the value still gets the same file it always got.
     #>
     param(
         [Parameter(Mandatory)][string]$BaseUrl,
+        [string]$Token = '',
         [string]$EnvFile = (Join-Path $env:USERPROFILE '.autoos-omnigraph.env'),
         # Tests: never touch the real user environment.
         [switch]$NoUserVariable
     )
     if ($script:DryRun) {
         Write-AutoOSLine "would write $EnvFile and the OMNIGRAPH_TOKEN user variable" -Level muted
-        return
+        return 'unchanged'
     }
-    $token = $env:OMNIGRAPH_TOKEN
+    if (-not $Token) { $token = $env:OMNIGRAPH_TOKEN } else { $token = $Token }
     if (-not $token -and (Get-Command docker -ErrorAction SilentlyContinue)) {
         try {
             $lines = & docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null
@@ -1161,6 +1252,7 @@ function Set-AutoOSOmnigraphEnv {
             Write-AutoOSLine "could not restrict $EnvFile to your account (icacls) - check its permissions" -Level warn
         }
         Write-AutoOSLine "omnigraph env file unchanged ($EnvFile)" -Level muted
+        $state = 'unchanged'
     } else {
         if ($old) {
             $backup = Copy-AutoOSBackup -Path $EnvFile
@@ -1168,30 +1260,300 @@ function Set-AutoOSOmnigraphEnv {
                 Write-AutoOSLine "could not restrict $backup to your account (icacls)" -Level warn
             }
         }
-        # No BOM: the file is also read as KEY=VALUE by non-PowerShell tools.
-        [IO.File]::WriteAllText($EnvFile, $new, (New-Object Text.UTF8Encoding($false)))
-        if ((Protect-AutoOSUserFile -Path $EnvFile) -eq 'failed') {
-            Write-AutoOSLine "could not restrict $EnvFile to your account (icacls) - check its permissions" -Level warn
+        # The bytes are a live bearer token, so the file is created protected and
+        # moved into place rather than written and restricted afterwards.
+        if ((Write-AutoOSProtectedFile -Path $EnvFile -Content $new) -eq 'failed') {
+            Write-AutoOSLine "could not restrict $EnvFile to your account (icacls) - the token file was not written" -Level warn
+            return 'failed'
         }
         Write-AutoOSLine "omnigraph env written to $EnvFile" -Level ok
+        $state = 'written'
     }
     if (-not $fileToken) {
         Write-AutoOSLine 'OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one.' -Level warn
         Write-AutoOSLine "    add OMNIGRAPH_TOKEN=<token issued by the graph server> to $EnvFile" -Level muted
-        return
+        return $state
     }
-    if ($NoUserVariable) { return }
+    if ($NoUserVariable) { return $state }
     $token = $fileToken.Substring($fileToken.IndexOf('=') + 1)
     if ([Environment]::GetEnvironmentVariable('OMNIGRAPH_TOKEN', 'User') -cne $token) {
         [Environment]::SetEnvironmentVariable('OMNIGRAPH_TOKEN', $token, 'User')
         Write-AutoOSLine 'OMNIGRAPH_TOKEN user variable set (new processes see it)' -Level ok
     }
+    $state
+}
+
+# ─── omnigraph-client ───────────────────────────────────────────────────────
+# The client-side component for a Windows machine that talks to a shared
+# Omnigraph server — the twin of install_omnigraph_client in
+# lib/linux/install.sh. Four artifacts, each idempotent on its own: the
+# token-bearing env file, the pinned bridge pre-installed into a private npm
+# prefix (npx start-up measured 6.7-9.3 s, spec decision D9), the wrapper an MCP
+# client actually runs, and the PATH entry that makes that wrapper resolvable.
+function Get-AutoOSOmnigraphBridgePath {
+    <#
+      .SYNOPSIS The bridge command the private npm prefix holds (or will hold).
+      .DESCRIPTION
+        Windows npm links a global package's bin into the prefix directory
+        itself — %APPDATA%\npm, which is on every Node machine's PATH, is that
+        same prefix-root layout — so this is <prefix>\<bin>.cmd and not the
+        <prefix>/bin/<bin> a Unix install produces. The bin's name is the last
+        segment of the package name, and only the pin-independent half of the
+        layout lives in Get-AutoOSOmnigraphClientPath: this needs the catalog.
+    #>
+    $spec = [string](Get-AutoOSMcpPackage -Name 'omnigraph')
+    $at = $spec.LastIndexOf('@')
+    if ($at -lt 1) { return '' }
+    $name = $spec.Substring(0, $at)
+    $bin = ($name -split '/')[-1]
+    Join-Path (Get-AutoOSOmnigraphClientPath).Prefix "$bin.cmd"
+}
+
+function Get-AutoOSOmnigraphBridgeVersion {
+    <#
+      .SYNOPSIS The version the private prefix actually holds, or ''.
+      .DESCRIPTION
+        What is installed, not what the catalog wants — the gate compares the two,
+        so reading the catalog here would make every machine look current. '' when
+        the prefix holds no bridge, or holds a package.json this cannot read.
+    #>
+    $spec = [string](Get-AutoOSMcpPackage -Name 'omnigraph')
+    $at = $spec.LastIndexOf('@')
+    if ($at -lt 1) { return '' }
+    $name = $spec.Substring(0, $at)
+    $pkgJson = (Join-Path (Get-AutoOSOmnigraphClientPath).Prefix 'node_modules')
+    foreach ($part in ($name -split '/')) { $pkgJson = Join-Path $pkgJson $part }
+    $pkgJson = Join-Path $pkgJson 'package.json'
+    if (-not (Test-Path -LiteralPath $pkgJson -PathType Leaf)) { return '' }
+    try {
+        $text = [string](Get-Content -LiteralPath $pkgJson -Raw -Encoding UTF8 | ConvertFrom-Json).version
+        if ($text) { $text } else { '' }
+    } catch { '' }
+}
+
+function Install-AutoOSOmnigraphBridge {
+    <#
+      .SYNOPSIS Install the pinned bridge into the private prefix.
+      .DESCRIPTION
+        'installed' when npm changed something, 'skipped' when the prefix already
+        holds the catalog's pin, 'failed' when npm did not deliver it. The pin is
+        read from catalog/agent-harness.json and never repeated here (the mcp-pins
+        group forbids a literal). A spec with no @version is refused rather than
+        installed: an unpinned global would take the newest bridge on every run and
+        make the pre-install meaningless.
+    #>
+    $spec = [string](Get-AutoOSMcpPackage -Name 'omnigraph')
+    $at = $spec.LastIndexOf('@')
+    $pin = if ($at -ge 0) { $spec.Substring($at + 1) } else { '' }
+    if ($at -lt 1 -or -not $pin) {
+        Write-AutoOSLine "the omnigraph pin in catalog/agent-harness.json ('$spec') carries no @version" -Level error
+        return 'failed'
+    }
+    $prefix = (Get-AutoOSOmnigraphClientPath).Prefix
+    $bin = Get-AutoOSOmnigraphBridgePath
+    if ($script:DryRun) {
+        $have = Get-AutoOSOmnigraphBridgeVersion
+        $replaces = if ($have) { ", replacing the installed $have" } else { '' }
+        Write-AutoOSLine "would install $spec into $prefix$replaces" -Level muted
+        return 'skipped'
+    }
+    $have = Get-AutoOSOmnigraphBridgeVersion
+    if ($have -eq $pin -and (Test-Path -LiteralPath $bin -PathType Leaf)) {
+        Write-AutoOSLine "omnigraph bridge $pin already installed in $prefix - skipped" -Level muted
+        return 'skipped'
+    }
+    if ($have) {
+        Write-AutoOSLine "the installed bridge is $have and the catalog pins $pin - reinstalling" -Level info
+    }
+    $r = Invoke-AutoOSProcess -FilePath 'npm' -Arguments @('install', '-g', '--prefix', $prefix, $spec)
+    if (-not $r.Success) {
+        Write-AutoOSLine "npm install -g --prefix $prefix $spec failed (exit $($r.ExitCode)) - the bridge is not installed" -Level warn
+        return 'failed'
+    }
+    if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+        # The wrapper execs this exact path, so a package whose bin is named
+        # something else installs cleanly and fails at every client start.
+        Write-AutoOSLine "$spec installed but $bin is not there - the package's bin is named differently than the wrapper expects" -Level warn
+        return 'failed'
+    }
+    Write-AutoOSLine "omnigraph bridge $pin installed in $prefix" -Level ok
+    'installed'
+}
+
+function Install-AutoOSOmnigraphWrapper {
+    <#
+      .SYNOPSIS Place the MCP-client entry point: the .ps1 and its .cmd shim.
+      .DESCRIPTION
+        COPIED, not linked or generated: the component must keep working after the
+        checkout moves, and an MCP client must never execute a file the repository
+        can rewrite underneath it (the same rule as the shell twin). The copy is
+        recognised as AutoOS's own by the marker line inside it, so:
+
+          identical content  -> skipped, nothing touched;
+          a marked older copy -> backed up, then replaced;
+          anything else there -> LEFT ALONE with a warning. A file of the user's
+                                is theirs, and overwriting one is the defect
+                                AGENTS.md section 1 and 5 exist to prevent.
+
+        The .cmd exists because a client that resolves a bare command name through
+        cmd.exe will not find an extension-less script; it carries the same marker
+        and only ever launches the .ps1 beside it.
+    #>
+    $paths = Get-AutoOSOmnigraphClientPath
+    $src = Join-Path (Join-Path $script:RepoRoot 'tools') 'omnigraph-mcp-autoos.ps1'
+    $marker = '# AutoOS:omnigraph-mcp-autoos'
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+        Write-AutoOSLine "the tracked wrapper is missing at $src - nothing was installed" -Level error
+        return 'failed'
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would copy $src to $($paths.Wrapper) and write $($paths.WrapperCmd)" -Level muted
+        return 'skipped'
+    }
+
+    # The pair is placed in order: a .ps1 that cannot go in means no .cmd either,
+    # because a shim pointing at a script that is not there is worse than neither.
+    $state = 'skipped'
+    if (Test-Path -LiteralPath $paths.Wrapper) {
+        if (-not (Test-Path -LiteralPath $paths.Wrapper -PathType Leaf)) {
+            Write-AutoOSLine "$($paths.Wrapper) is not a file - left alone. Remove it to let AutoOS install its wrapper there." -Level warn
+            return 'failed'
+        }
+        $same = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -eq
+            (Get-FileHash -LiteralPath $paths.Wrapper -Algorithm SHA256).Hash
+        if ($same) {
+            Write-AutoOSLine "wrapper unchanged ($($paths.Wrapper))" -Level muted
+        } else {
+            $body = [IO.File]::ReadAllText($paths.Wrapper)
+            if ($body -notmatch [regex]::Escape($marker)) {
+                Write-AutoOSLine "$($paths.Wrapper) is your own file, not one AutoOS wrote - left alone. Remove it to let AutoOS install its wrapper there." -Level warn
+                return 'failed'
+            }
+            $backup = Copy-AutoOSBackup -Path $paths.Wrapper
+            Write-AutoOSLine "updated the wrapper at $($paths.Wrapper) (the previous AutoOS copy is in $backup)" -Level ok
+            Copy-Item -LiteralPath $src -Destination $paths.Wrapper -Force
+            $state = 'installed'
+        }
+    } else {
+        $null = New-Item -ItemType Directory -Path $paths.BinDir -Force
+        Copy-Item -LiteralPath $src -Destination $paths.Wrapper -Force
+        $state = 'installed'
+    }
+
+    $cmd = @(
+        'rem AutoOS:omnigraph-mcp-autoos'
+        'rem Written by AutoOS (Install-AutoOSOmnigraphWrapper); launches the PowerShell'
+        'rem wrapper beside it. MCP clients that resolve a bare command through cmd.exe'
+        'rem need this extension-less-script stand-in; the .ps1 holds every decision.'
+        '@echo off'
+        '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0omnigraph-mcp-autoos.ps1" %*'
+    ) -join "`r`n"
+    if (Test-Path -LiteralPath $paths.WrapperCmd -PathType Leaf) {
+        $haveCmd = [IO.File]::ReadAllText($paths.WrapperCmd)
+        if ($haveCmd -notmatch 'AutoOS:omnigraph-mcp-autoos') {
+            Write-AutoOSLine "$($paths.WrapperCmd) is your own file, not one AutoOS wrote - left alone." -Level warn
+            return 'failed'
+        }
+        if ($haveCmd -ceq $cmd) {
+            Write-AutoOSLine "shim unchanged ($($paths.WrapperCmd))" -Level muted
+        } else {
+            $null = Copy-AutoOSBackup -Path $paths.WrapperCmd
+            [IO.File]::WriteAllText($paths.WrapperCmd, $cmd, (New-Object Text.UTF8Encoding($false)))
+            $state = 'installed'
+        }
+    } else {
+        $null = New-Item -ItemType Directory -Path $paths.BinDir -Force
+        [IO.File]::WriteAllText($paths.WrapperCmd, $cmd, (New-Object Text.UTF8Encoding($false)))
+        $state = 'installed'
+    }
+    $state
+}
+
+function Install-AutoOSOmnigraphClient {
+    <#
+      .SYNOPSIS postInstall for the omnigraph-client catalog entry.
+      .DESCRIPTION
+        The whole component in one place, in the order the pipeline expects:
+        answer, then credential, then the three artifacts. A machine that has no
+        server URL or no token is not a broken machine, so each of those is a
+        `skipped` with the remedy named (AGENTS.md section 4) — never a failure,
+        and never an invented value: a guessed host or token is both wrong and, in
+        a public repository, a leak.
+
+        Returns 'installed' | 'skipped' | 'failed', the same contract every custom
+        postInstall answers to on the Linux side. It is safe to run twice: the
+        second pass compares what each step would write and reports skipped.
+    #>
+    $base = ([string](Get-AutoOSAnswer 'omnigraph_url' '')).Trim().TrimEnd('/')
+    if (-not $base) {
+        Write-AutoOSLine "omnigraph-client: no Omnigraph server is configured on this machine. Answer the 'omnigraph_url' prompt (the browser UI and interactive setup both ask for it) and run again." -Level warn
+        Write-AutoOSLine 'omnigraph-client: skipped: no omnigraph URL' -Level info
+        return 'skipped'
+    }
+    $token = $env:OMNIGRAPH_TOKEN
+    if (-not $token) { $token = Get-AutoOSApiKeySetting -Name 'omnigraph_token' }
+    if (-not $token) {
+        # The token is issued by the graph server, not by AutoOS, so the hint has
+        # to name where a person gets one rather than asking them to guess.
+        Write-AutoOSLine "omnigraph-client: no bearer token for $base. The token is issued by the graph server, not by AutoOS: export OMNIGRAPH_TOKEN, or set the omnigraph_token key in configuration/api-keys.yml, and run again." -Level warn
+        Write-AutoOSLine 'omnigraph-client: skipped: no omnigraph token' -Level info
+        return 'skipped'
+    }
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        Write-AutoOSLine 'omnigraph-client: npm is not on PATH - install the nodejs component first.' -Level warn
+        Write-AutoOSLine 'omnigraph-client: skipped: no npm' -Level info
+        return 'skipped'
+    }
+
+    $changed = $false
+    if ((Set-AutoOSOmnigraphEnv -BaseUrl $base -Token $token) -eq 'written') { $changed = $true }
+
+    $bridge = Install-AutoOSOmnigraphBridge
+    if ($bridge -eq 'failed') { return 'failed' }
+    $wrapper = Install-AutoOSOmnigraphWrapper
+    if ($wrapper -eq 'failed') { return 'failed' }
+    if ($bridge -eq 'installed' -or $wrapper -eq 'installed') { $changed = $true }
+
+    # The wrapper is the command an MCP config names, so its directory has to be on
+    # the persistent PATH for a client started outside this shell.
+    # Add-AutoOSPathEntry is the one code path that edits PATH, and it appends.
+    # Off Windows the User/Machine registry writes are silently ignored, so
+    # asking would report a change that cannot happen — and a client started by
+    # cmd.exe resolves the .cmd beside the .ps1 through the process PATH, which a
+    # no-op edit would leave pointing nowhere.
+    $binDir = (Get-AutoOSOmnigraphClientPath).BinDir
+    if (Test-AutoOSWindowsHost) {
+        $onPath = $false
+        foreach ($scope in @('User', 'Machine')) {
+            $scopePath = [Environment]::GetEnvironmentVariable('Path', $scope)
+            if ($scopePath -and (@($scopePath -split ';' |
+                    Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') }).Count -gt 0)) { $onPath = $true }
+        }
+        if (-not $onPath) {
+            $null = Add-AutoOSPathEntry -Directory @($binDir)
+            if (-not $script:DryRun) { $changed = $true }
+        }
+    }
+
+    if ($script:DryRun) {
+        # A dry run only announces: it never sets the changed flags, so claiming
+        # "already installed and current" would report a comparison that did not
+        # happen.
+        Write-AutoOSLine 'omnigraph-client: dry run: nothing was written' -Level info
+        return 'skipped'
+    }
+    if (-not $changed) {
+        Write-AutoOSLine 'omnigraph-client: skipped: already installed and current' -Level info
+        return 'skipped'
+    }
+    Write-AutoOSLine 'omnigraph-client: installed' -Level ok
+    'installed'
 }
 
 function Install-AutoOSAgentSkills {
     <#
       .SYNOPSIS
-        Clone agent-skills and wire its MCP servers into Claude Code for real.
+        Wire the MCP servers into Claude Code and Antigravity, and link the skills.
 
       .DESCRIPTION
         graphify and omnigraph are wired in opposite ways, and getting it the
@@ -1204,28 +1566,14 @@ function Install-AutoOSAgentSkills {
                       A user-scope `omnigraph` silently WINS over the project one
                       and answers from the wrong graph, so this never creates one
                       and says so when it finds one.
+
+        It used to clone a second repository into Documents\code\agent-skills to
+        get those declarations and its skill links from. It does not: the servers
+        this wires are declared by this checkout's own .mcp.json (SPEC-OMNI D14 —
+        the clone was a copy of what AutoOS already ships), the omnigraph URL and
+        token now belong to the omnigraph-client component, and a machine that ran
+        this installer before keeps its old checkout untouched.
     #>
-    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-    $codeRoot = Join-Path $myDocs 'Code'
-    if (Test-Path (Join-Path $myDocs 'code')) {
-        $codeRoot = Join-Path $myDocs 'code'
-    }
-    $dest = Join-Path $codeRoot 'agent-skills'
-    if (-not $script:DryRun -and -not (Test-Path $codeRoot)) {
-        New-Item -ItemType Directory -Path $codeRoot -Force | Out-Null
-    }
-    if (Test-Path $dest) {
-        Invoke-AutoOSProcess -FilePath 'git' -Arguments @('-C', $dest, 'pull', '--ff-only') | Out-Null
-    } else {
-        Invoke-AutoOSProcess -FilePath 'git' -Arguments @(
-            'clone', 'https://github.com/Ch3fUlrich/agent-skills.git', $dest) | Out-Null
-    }
-
-    $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
-    $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
-    Write-AutoOSLine "Omnigraph base URL: $baseUrl" -Level info
-    Set-AutoOSOmnigraphEnv -BaseUrl $baseUrl
-
     # ── MCP stack: wire user-scope servers across Claude Code and Antigravity ──
     Install-AutoOSMcpGraphify
     Install-AutoOSMcpSerena
@@ -1238,12 +1586,14 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine 'per-repo one and answers from the wrong graph. Remove it with:' -Level warn
         Write-AutoOSLine '    claude mcp remove omnigraph --scope user' -Level muted
     }
-    $projectMcp = Join-Path $dest '.mcp.json'
-    if (Test-Path $projectMcp) {
+    # Approved from the checkout that declares it, which is this one: pointing
+    # these at any other tree approves a server nobody runs.
+    $projectMcp = Join-Path $script:RepoRoot '.mcp.json'
+    if (Test-Path -LiteralPath $projectMcp) {
         Write-AutoOSLine "omnigraph is declared per-repo in $projectMcp" -Level muted
-        Enable-AutoOSProjectMcpServer -RepoPath $dest -Name 'omnigraph'
+        Enable-AutoOSProjectMcpServer -RepoPath $script:RepoRoot -Name 'omnigraph'
     } else {
-        Write-AutoOSLine "no .mcp.json in $dest - nothing to pin omnigraph to." -Level warn
+        Write-AutoOSLine "no .mcp.json in $script:RepoRoot - nothing to pin omnigraph to." -Level warn
     }
     # The agent spawner is declared in this repo's own .mcp.json.
     if (Test-Path (Join-Path $script:RepoRoot '.mcp.json')) {
@@ -1251,39 +1601,6 @@ function Install-AutoOSAgentSkills {
     }
 
     Set-AutoOSAntigravityMcp
-
-    # ── Wire skills into Antigravity and Claude Code global skills directories ──
-    $agySkills = Join-Path $env:USERPROFILE '.gemini\config\skills'
-    $claudeSkills = Join-Path $env:USERPROFILE '.claude\skills'
-    $skillsSrc = Join-Path $dest 'skills'
-    if (Test-Path $skillsSrc) {
-        if ($script:DryRun) {
-            Write-AutoOSLine "would link skills from $skillsSrc to $agySkills and $claudeSkills" -Level muted
-        } else {
-            foreach ($dir in @($agySkills, $claudeSkills)) {
-                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-            }
-            foreach ($s in Get-ChildItem -Path $skillsSrc -Directory) {
-                $agyTarget = Join-Path $agySkills $s.Name
-                $claudeTarget = Join-Path $claudeSkills $s.Name
-                if (-not (Test-Path $agyTarget)) {
-                    try {
-                        New-Item -ItemType Junction -Path $agyTarget -Target $s.FullName | Out-Null
-                    } catch {
-                        Copy-Item -Path $s.FullName -Destination $agyTarget -Recurse -Force
-                    }
-                }
-                if (-not (Test-Path $claudeTarget)) {
-                    try {
-                        New-Item -ItemType Junction -Path $claudeTarget -Target $s.FullName | Out-Null
-                    } catch {
-                        Copy-Item -Path $s.FullName -Destination $claudeTarget -Recurse -Force
-                    }
-                }
-            }
-            Write-AutoOSLine 'Agent skills registered with Antigravity and Claude Code' -Level ok
-        }
-    }
 
     # Repo skills into project .claude/skills (Claude Code reads only that dir).
     # Junctions, created at install time (never committed - see .gitignore), so a
@@ -1320,7 +1637,7 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
         return
     }
-    if (Write-AutoOSOmnigraphReadiness -AgentSkillsDir $dest) {
+    if (Write-AutoOSOmnigraphReadiness -RepoRoot $script:RepoRoot) {
         Write-AutoOSLine 'omnigraph prerequisites are all present.' -Level ok
     }
     Write-AutoOSLine 'Restart Claude Code and Antigravity - MCP servers are only read at session start.' -Level info
@@ -3403,6 +3720,32 @@ function Set-AutoOSClaudeGateway {
     }
 }
 
+function Get-AutoOSApiKeySetting {
+    <#
+      .SYNOPSIS One top-level key from configuration/api-keys.yml, or $null.
+      .DESCRIPTION
+        The keys file is the single home for a credential the operator owns, and
+        every component that needs one reads it through here rather than writing
+        its own Select-String: three private copies of that lookup already drift
+        (two trim one layer of quotes, one does not, one rejects a placeholder by
+        a different pattern). A missing file, a missing key, an empty value and an
+        unfilled REPLACE_WITH_ placeholder are all the same answer — there is no
+        value on this machine yet — which is what lets a caller skip instead of
+        inventing one. Never prints the value: it returns it.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [string]$KeysFile)
+    if (-not $KeysFile) { $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml' }
+    if (-not (Test-Path -LiteralPath $KeysFile)) { return $null }
+    # PS 5.1 turns a native command's stderr into a terminating error under Stop;
+    # Select-String on a file with no such key is simply no match.
+    $line = Select-String -LiteralPath $KeysFile -Pattern ("^{0}\s*:" -f [regex]::Escape($Name)) |
+        Select-Object -First 1
+    if (-not $line) { return $null }
+    $value = $line.Line.Split(':', 2)[1].Trim().Trim('"').Trim("'")
+    if (-not $value -or $value.StartsWith('REPLACE_WITH_')) { return $null }
+    $value
+}
+
 function Set-AutoOSApiKeyEnv {
     <#
       .SYNOPSIS Export one api-keys.yml key as a User env var, once.
@@ -3415,12 +3758,8 @@ function Set-AutoOSApiKeyEnv {
     if (-not $KeysFile) {
         $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
     }
-    $key = $null
-    if (Test-Path -LiteralPath $KeysFile) {
-        $line = Select-String -Path $KeysFile -Pattern "^$KeysName\s*:" | Select-Object -First 1
-        if ($line) { $key = $line.Line.Split(':', 2)[1].Trim() }
-    }
-    if ([string]::IsNullOrWhiteSpace($key) -or $key.StartsWith('REPLACE_WITH_')) {
+    $key = Get-AutoOSApiKeySetting -Name $KeysName -KeysFile $KeysFile
+    if ([string]::IsNullOrWhiteSpace($key)) {
         Write-AutoOSLine "no $KeysName key in $KeysFile - fill it first (docs/api-keys.md)" -Level warn
         return
     }
@@ -3970,6 +4309,7 @@ Export-ModuleMember -Function `
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,
     Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup, ConvertTo-AutoOSCanonicalJson,
+    Write-AutoOSProtectedFile, Get-AutoOSOmnigraphBridgePath, Install-AutoOSOmnigraphClient,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
     Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,

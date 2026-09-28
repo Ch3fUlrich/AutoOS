@@ -221,6 +221,33 @@ function Test-AutoOSRegisteredName {
     $Actual -match $pattern
 }
 
+function Get-AutoOSOmnigraphClientPath {
+    <#
+      .SYNOPSIS Where the omnigraph-client component keeps each of its artifacts.
+      .DESCRIPTION
+        One home for the layout, read by the installer that writes it, the
+        detection probe that decides whether it is there, and the suite. The
+        prefix is private to AutoOS on purpose: a bridge in the user's global npm
+        install is outside their control, and one fetched by npx costs 6.7-9.3 s
+        per client start-up (docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md
+        decision D9). Only the wrapper's directory is on PATH, and only it is
+        named by an MCP config.
+
+        Pure path arithmetic — no writes, no probing — so this is the fact every
+        other unit points at. The bridge inside the prefix is derived from the
+        catalog pin and so lives with the installer, not here.
+    #>
+    $binDir = Join-Path $env:USERPROFILE '.local\bin'
+    [pscustomobject]@{
+        # The bearer token lives here: 0600 on the shell twin, user-only ACL here.
+        EnvFile    = Join-Path $env:USERPROFILE '.autoos-omnigraph.env'
+        Prefix     = Join-Path (Join-Path $env:LOCALAPPDATA 'autoos') 'omnigraph-mcp'
+        BinDir     = $binDir
+        Wrapper    = Join-Path $binDir 'omnigraph-mcp-autoos.ps1'
+        WrapperCmd = Join-Path $binDir 'omnigraph-mcp-autoos.cmd'
+    }
+}
+
 function Get-AutoOSInstalledStatus {
     <# .SYNOPSIS Read-only detection shared by selection and installer skipping.
        .DESCRIPTION Unknown is retained when a component has no reliable probe.
@@ -252,6 +279,18 @@ function Get-AutoOSInstalledStatus {
         if ($Component.Package -eq 'agent-skills') {
             $docs = [Environment]::GetFolderPath('MyDocuments')
             return $(if (Test-Path -LiteralPath (Join-Path $docs 'Code\agent-skills') -PathType Container) { 'installed' } else { 'not-detected' })
+        }
+        if ($Component.Package -eq 'omnigraph-client') {
+            # Two files answer "is this component's work present": the prefix the
+            # bridge was installed into and the .cmd an MCP client is configured to
+            # run. Neither one proves the *values* are current — that is the
+            # installer's own comparison, and it still runs on 'skipped'
+            # (setup.ps1 invokes a post-install for both states), so a rotated
+            # token or a moved pin is repaired rather than hidden by this gate.
+            $paths = Get-AutoOSOmnigraphClientPath
+            $have = (Test-Path -LiteralPath $paths.Prefix -PathType Container) -and
+                (Test-Path -LiteralPath $paths.WrapperCmd -PathType Leaf)
+            return $(if ($have) { 'installed' } else { 'not-detected' })
         }
         if ($Component.Package -like 'mcp-*') {
             $server = $Component.Package.Substring(4)
@@ -697,4 +736,5 @@ Export-ModuleMember -Function `
     Get-AutoOSSuggestedProfile, Get-AutoOSBlockers,
     Get-AutoOSLaunchHint, Get-AutoOSStartMenuShortcut, Get-AutoOSStartApp,
     Get-AutoOSInstalledStatus, Set-AutoOSInstalledStatus, Clear-AutoOSInstalledStatus,
-    Test-AutoOSRegisteredName, Get-AutoOSShimDirectory, Get-AutoOSProgramDirectoryName
+    Test-AutoOSRegisteredName, Get-AutoOSShimDirectory, Get-AutoOSProgramDirectoryName,
+    Get-AutoOSOmnigraphClientPath
