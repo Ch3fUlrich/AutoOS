@@ -120,6 +120,67 @@ class MonthlyCapTests(unittest.TestCase):
         self.assertEqual(usage.SPEND_WARN_USD, 20.0)
 
 
+class CreditGuardTests(unittest.TestCase):
+    """FREEKEYS-1 (D-132/D-141): `spend_warn_usd` / `spend_guard` are the READER
+    of the new `providers.<id>.monthly_warn_fraction`, so a credit row's guard is
+    data with a consumer instead of a number nothing looks at.
+
+    Warn at the fraction of the grant (80 %), refuse at the cap (100 %) -- and a
+    row that predates the field keeps reporting exactly what it reported before,
+    which is what makes the change safe to ship against the live deepseek cap.
+    """
+
+    REG = {"providers": {
+        "morph": {"tier": "credit", "credit_usd": 10.0, "monthly_cap_usd": 10.0,
+                  "monthly_warn_fraction": 0.8},
+        "deepseek": {"monthly_cap_usd": 25},
+    }}
+
+    def test_the_warn_line_is_the_fraction_of_the_grant(self):
+        self.assertEqual(usage.spend_warn_usd(self.REG, "morph"), 8.0)
+
+    def test_a_row_without_a_fraction_keeps_the_legacy_line(self):
+        self.assertEqual(usage.spend_warn_usd(self.REG, "deepseek"),
+                         usage.SPEND_WARN_USD)
+
+    def test_the_three_states_and_their_borders(self):
+        for spend, state in ((0.0, "ok"), (7.99, "ok"), (8.0, "warn"),
+                             (9.99, "warn"), (10.0, "refuse"), (11.0, "refuse")):
+            self.assertEqual(usage.spend_guard(self.REG, "morph", spend)[0],
+                             state, spend)
+
+    def test_a_fraction_without_a_cap_raises_rather_than_warns_at_zero(self):
+        with self.assertRaises(ValueError):
+            usage.spend_warn_usd({"providers": {"x": {"monthly_warn_fraction": 0.8}}}, "x")
+
+    def test_a_fraction_outside_the_unit_interval_raises(self):
+        for bad in (0, 1.0, "0.8"):
+            with self.assertRaises(ValueError):
+                usage.spend_warn_usd(
+                    {"providers": {"x": {"monthly_cap_usd": 5, "monthly_warn_fraction": bad}}},
+                    "x")
+
+    def test_the_shipped_credit_rows_are_guardable(self):
+        """Live data, read through the same functions a caller uses: every
+        `credit` provider refuses at its own grant and warns at 80 % of it."""
+        reg = json.loads((ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+        credited = [pid for pid, entry in reg["providers"].items()
+                    if isinstance(entry, dict) and entry.get("tier") == "credit"]
+        self.assertTrue(credited)
+        for pid in credited:
+            cap = usage.monthly_cap_usd(reg, pid)
+            self.assertEqual(usage.spend_guard(reg, pid, cap * 0.5)[0], "ok", pid)
+            self.assertEqual(usage.spend_guard(reg, pid, cap * 0.8)[0], "warn", pid)
+            self.assertEqual(usage.spend_guard(reg, pid, cap)[0], "refuse", pid)
+
+    def test_the_deepseek_line_is_unchanged(self):
+        """The paid row this brief must not have disturbed: warn stays 20.0, the
+        refuse stays at its 25 cap (WS-DSCALL's own numbers)."""
+        self.assertEqual(usage.spend_warn_usd(self.REG), usage.SPEND_WARN_USD)
+        self.assertEqual(usage.spend_guard(self.REG, "deepseek", 20.0)[0], "warn")
+        self.assertEqual(usage.spend_guard(self.REG, "deepseek", 25.0)[0], "refuse")
+
+
 class UsageCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -249,6 +249,48 @@ def monthly_cap_usd(registry, provider=SPEND_PROVIDER):
     return float(cap)
 
 
+def spend_warn_usd(registry, provider=SPEND_PROVIDER):
+    """The USD line at which a provider's spend guard WARNS (brief FREEKEYS-1,
+    D-132/D-141): `providers.<id>.monthly_warn_fraction` x its `monthly_cap_usd`.
+
+    A row that declares no fraction keeps the legacy DSGUARD line (SPEND_WARN_USD),
+    so the paid rows written before this field existed report exactly what they
+    reported before. ValueError when a fraction is declared on a row with no cap --
+    that pairing is what registry.py check already rejects, and reading it here
+    would silently warn at 0.0 on every call."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    fraction = entry.get("monthly_warn_fraction") if isinstance(entry, dict) else None
+    if fraction is None:
+        return float(SPEND_WARN_USD)
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction < 1:
+        raise ValueError("providers.%s.monthly_warn_fraction is not a fraction in (0, 1)"
+                         % provider)
+    return monthly_cap_usd(registry, provider) * float(fraction)
+
+
+def spend_guard(registry, provider, spend_usd):
+    """(state, note) for one provider's spend guard: "ok" below the warn line,
+    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at or
+    above `monthly_cap_usd` (100 %).
+
+    The refuse half is the same rule deepseek_call.py applies today (WS-DSCALL):
+    at or above the cap the call does not happen. This is the shared reading of
+    the pair so a `credit` provider's guard is data with a consumer, not a
+    comment; a caller that has no price on file for the provider's models still
+    sees 0 spend here, which is why the grant's own balance is what FREEKEYS-2
+    must check as well.
+    """
+    cap = monthly_cap_usd(registry, provider)
+    warn = spend_warn_usd(registry, provider)
+    if spend_usd >= cap:
+        return "refuse", ("%s spend $%.2f is at or above the $%.2f cap "
+                          "(providers.%s.monthly_cap_usd)" % (provider, spend_usd, cap, provider))
+    if spend_usd >= warn:
+        return "warn", ("%s spend $%.2f reached the $%.2f warn line "
+                        "(providers.%s.monthly_warn_fraction)" % (provider, spend_usd, warn, provider))
+    return "ok", ("%s spend $%.2f of a $%.2f cap" % (provider, spend_usd, cap))
+
+
 def month_start(now):
     """The first instant of `now`'s UTC calendar month - the spend window's default."""
     return now.astimezone(datetime.timezone.utc).replace(
@@ -305,10 +347,14 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
 
     spend = round(spend, 6)
     warnings = []
-    if spend >= SPEND_WARN_USD:
-        warnings.append("%s spend $%.2f since %s reached the %.0f USD cap"
+    # The warn line is the provider's own guard when it declares one (a credit
+    # grant warns at 80 % of what the operator funded); a row with no fraction
+    # keeps the legacy DSGUARD line, so deepseek reports exactly what it did.
+    warn_usd = spend_warn_usd(registry, provider)
+    if spend >= warn_usd:
+        warnings.append("%s spend $%.2f since %s reached the %.2f USD warn line"
                         % (SPEND_PROVIDER_LABEL, spend,
-                           since.strftime("%Y-%m-%dT%H:%M:%SZ"), SPEND_WARN_USD))
+                           since.strftime("%Y-%m-%dT%H:%M:%SZ"), warn_usd))
     if balance is not None and balance < BALANCE_FLOOR_USD:
         warnings.append("%s balance $%.2f is below the %.0f USD floor"
                         % (SPEND_PROVIDER_LABEL, balance, BALANCE_FLOOR_USD))
@@ -319,7 +365,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "spend_usd": spend,
-        "threshold_usd": SPEND_WARN_USD,
+        "threshold_usd": warn_usd,
         "balance_usd": balance,
         "balance_threshold_usd": BALANCE_FLOOR_USD,
         "models_unpriced": len(unpriced),

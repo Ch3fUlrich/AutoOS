@@ -2824,6 +2824,49 @@ def _check_monthly_caps(registry) -> list:
     return problems
 
 
+def _check_credit_guards(registry) -> list:
+    """Every `credit`-tier provider carries a complete spend guard (brief FREEKEYS-1,
+    D-132/D-141): `credit_usd` is the operator's grant, `monthly_cap_usd` equals it (a
+    caller REFUSES at 100 % of the grant) and `monthly_warn_fraction` is a fraction in
+    (0, 1) naming where it WARNS first (0.8 = 80 %).
+
+    The trio is checked as data, not prose: a credit row with no cap would be spent
+    without a limit, a cap that is not the grant silently raises or lowers the refuse
+    line below what the operator actually funded, and a warn fraction outside (0, 1)
+    warns at or after the refusal (0.0 warns on every call, 1.0 never warns) - all
+    three read as "configured" while doing nothing.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or provider.get("tier") != "credit":
+            continue
+        credit = provider.get("credit_usd")
+        if isinstance(credit, bool) or not isinstance(credit, (int, float)) or credit <= 0:
+            problems.append("providers.%s: tier credit needs a positive credit_usd, got %r"
+                            % (provider_id, credit))
+        cap = provider.get("monthly_cap_usd")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+            problems.append("providers.%s: tier credit needs monthly_cap_usd (the refuse "
+                            "line), got %r" % (provider_id, cap))
+        elif not isinstance(credit, bool) and isinstance(credit, (int, float)) and cap != credit:
+            problems.append("providers.%s: monthly_cap_usd %r != credit_usd %r - the guard "
+                            "must refuse at 100%% of the grant the operator funded"
+                            % (provider_id, cap, credit))
+        fraction = provider.get("monthly_warn_fraction")
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) \
+                or not 0 < fraction < 1:
+            problems.append("providers.%s: tier credit needs a monthly_warn_fraction in "
+                            "(0, 1) (0.8 = warn at 80%% of the grant), got %r"
+                            % (provider_id, fraction))
+    # A warn fraction without a cap is a number nothing reads.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if isinstance(provider, dict) and "monthly_warn_fraction" in provider \
+                and "monthly_cap_usd" not in provider:
+            problems.append("providers.%s: monthly_warn_fraction without monthly_cap_usd"
+                            % provider_id)
+    return problems
+
+
 def check_registry(registry) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -2838,6 +2881,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
+    problems.extend(_check_credit_guards(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))

@@ -2629,6 +2629,212 @@ class ClaudeBudgetPolicyTests(unittest.TestCase):
                          {"$comment", "mode", "weekly_share_left",
                           "budget_below", "source"})
 
+class CreditSpendGuardTests(unittest.TestCase):
+    """FREEKEYS-1 (D-132/D-141) step 4: ``tier: credit`` is the finite vendor
+    grant -- morph's $10, deepinfra's and together_ai's $5 -- so it needs a guard
+    that reads as data, not as a comment in a `$comment`.
+
+    The trio a caller reads is `credit_usd` (what the operator funded),
+    `monthly_cap_usd` (where the call REFUSES, DSGUARD's shape: 100 % of the
+    grant) and `monthly_warn_fraction` (where it warns first, 80 %). Each half
+    fails silently on its own: a credit row with no cap is spent without a
+    limit, a cap that is not the grant moves the refuse line away from what was
+    funded, and a fraction of 0 or 1 warns on every call or never -- all three
+    look "configured" while enforcing nothing.
+    """
+
+    CREDIT_PROBLEM = "tier credit needs"
+
+    def credit_problems(self, reg):
+        return [p for p in registry.check_registry(reg) if self.CREDIT_PROBLEM in p
+                or "monthly_warn_fraction without" in p or "!= credit_usd" in p]
+
+    # --- the live data -----------------------------------------------------
+
+    def test_every_credited_provider_carries_a_complete_guard(self):
+        """The sweep the brief asked for, written over the data rather than over
+        a list of provider names: whatever row says `credit` must carry the whole
+        trio, so a twelfth credited provider is covered by this test the moment
+        someone adds its row."""
+        reg = load_registry()
+        credited = sorted(pid for pid, entry in reg["providers"].items()
+                          if isinstance(entry, dict) and entry.get("tier") == "credit")
+        self.assertTrue(credited, "no provider carries tier credit -- did the field die?")
+        self.assertEqual(registry._check_credit_guards(reg), [])
+        for pid in credited:
+            entry = reg["providers"][pid]
+            self.assertGreater(entry["credit_usd"], 0, pid)
+            self.assertEqual(entry["monthly_cap_usd"], entry["credit_usd"], pid)
+            self.assertTrue(0 < entry["monthly_warn_fraction"] < 1, pid)
+            self.assertTrue(entry["monthly_cap_source"].strip(), pid)
+
+    def test_the_shipped_grants_are_the_operators_numbers(self):
+        granted = {pid: entry["credit_usd"] for pid, entry in
+                   load_registry()["providers"].items()
+                   if isinstance(entry, dict) and entry.get("tier") == "credit"}
+        self.assertEqual(granted, {"morph": 10.0, "deepinfra": 5.0, "together_ai": 5.0})
+
+    def test_a_credit_tier_is_not_the_free_tier(self):
+        # private_safe() and probe_common._skip_reason both branch on tier: a
+        # credit row is never probed by the standing free probes and never
+        # called clean, so `-clean` work cannot land on a finite grant.
+        reg = load_registry()
+        for pid in ("morph", "deepinfra", "together_ai"):
+            self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
+            safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
+            self.assertFalse(safe, pid)
+            self.assertIn("credit", reason, pid)
+
+    # --- the validator -----------------------------------------------------
+
+    def test_a_credit_row_without_a_cap_is_flagged(self):
+        reg = mutated()
+        del reg["providers"]["morph"]["monthly_cap_usd"]
+        problems = self.credit_problems(reg)
+        self.assertTrue(problems)
+        self.assertIn("morph", problems[0])
+
+    def test_a_cap_that_is_not_the_grant_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["morph"]["monthly_cap_usd"] = 20.0
+        self.assertTrue([p for p in self.credit_problems(reg)
+                         if "morph" in p and "credit_usd" in p])
+
+    def test_a_warn_fraction_outside_the_unit_interval_is_flagged(self):
+        for bad in (0, 1.0, 1.5, "0.8", True, None):
+            reg = mutated()
+            reg["providers"]["morph"]["monthly_warn_fraction"] = bad
+            self.assertTrue([p for p in self.credit_problems(reg) if "morph" in p], bad)
+
+    def test_a_warn_fraction_without_a_cap_is_flagged(self):
+        # A fraction on a row with no cap is a number nothing reads.
+        reg = mutated()
+        reg["providers"]["groq"]["monthly_warn_fraction"] = 0.8
+        self.assertTrue([p for p in self.credit_problems(reg)
+                         if "groq" in p and "without monthly_cap_usd" in p])
+
+    def test_a_non_credit_row_needs_no_guard(self):
+        reg = mutated()
+        reg["providers"]["morph"]["tier"] = "free"
+        self.assertEqual([p for p in self.credit_problems(reg) if "morph" in p], [])
+
+    def test_the_credit_guard_is_part_of_the_shipped_check(self):
+        """`check_registry` runs it: a guard only its own unit test reads
+        protects nothing from the next edit to the data."""
+        reg = mutated()
+        del reg["providers"]["deepinfra"]["monthly_cap_usd"]
+        self.assertTrue(self.credit_problems(reg))
+
+
+class ThirdPartyClaudeLegTests(unittest.TestCase):
+    """FREEKEYS-1 step 4 (D-102): a Claude model reached through anyone else's
+    API is priced as Claude, so it must never be usable outside the budget gate.
+
+    Two things hold it in, and this class pins both: `policy.leg_rules` denies
+    `*/claude-*` (deny-claude-paid-api), and rule 9 (`_check_leg_rules`) refuses
+    a route that carries a denied leg without gating it. The sweep below walks
+    every provider x every Claude-named model row instead of only the legs
+    written today, because what matters is the pairing a later edit (FREEKEYS-2's
+    combos, or a probe that found a cheap Claude route) could add unnoticed.
+
+    The measured exceptions are named, not guessed: `cc` / `antigravity` /
+    `anthropic` are the operator's Claude SEATS (a subscription and a free
+    sign-in, rules 9-10), and `zen` (OpenCode Zen) is allowed wholesale by
+    `allow-opencode-zen-client-bound` -- its legs 403 through the gateway and
+    answer only inside the opencode client, so no combo can carry them. Nothing
+    else is exempt.
+    """
+
+    SEAT_PROVIDERS = {"cc", "antigravity", "anthropic"}
+    GATEWAY_UNREACHABLE_SEATS = {"zen"}
+    CLAUDE_NAME_RE = re.compile(r"(?i)claude|anthropic")
+
+    def claude_models(self, reg) -> list:
+        return sorted(key for key, model in reg["models"].items()
+                      if self.CLAUDE_NAME_RE.search(key)
+                      or (model or {}).get("family") == "anthropic")
+
+    def third_party_legs(self, reg):
+        """Every (provider, leg) pair outside the named seats, for each
+        Claude-named model the registry knows."""
+        exempt = self.SEAT_PROVIDERS | self.GATEWAY_UNREACHABLE_SEATS
+        return [(pid, "%s/%s" % (pid, model_key))
+                for pid, entry in sorted(reg["providers"].items())
+                if isinstance(entry, dict) and pid not in exempt
+                for model_key in self.claude_models(reg)]
+
+    # --- the live data -----------------------------------------------------
+
+    def test_every_claude_leg_on_a_third_party_provider_is_denied(self):
+        reg = load_registry()
+        legs = self.third_party_legs(reg)
+        self.assertTrue(legs, "the sweep found no third-party provider at all")
+        allowed = [leg for _, leg in legs if not registry.leg_denied(leg, reg)]
+        self.assertEqual(allowed, [],
+                         "Claude legs a third-party provider would serve: %s" % allowed)
+
+    def test_the_named_exceptions_are_exactly_the_measured_ones(self):
+        """If a future edit lets a Claude leg through some other provider, it
+        lands here instead of quietly narrowing the sweep above."""
+        reg = load_registry()
+        escaped = sorted({pid for pid, entry in reg["providers"].items()
+                          if isinstance(entry, dict) and pid not in self.SEAT_PROVIDERS
+                          for model_key in self.claude_models(reg)
+                          if not registry.leg_denied("%s/%s" % (pid, model_key), reg)})
+        self.assertEqual(escaped, sorted(self.GATEWAY_UNREACHABLE_SEATS))
+
+    def test_the_zen_allowance_is_client_bound_not_a_claude_allow(self):
+        """Zen's exemption is the whole provider (its free models are the
+        reason), it carries the gateway-403 justification, and the budget
+        predicate still reads those legs as Claude -- so it is exempt from the
+        DENY sweep, never from the budget gate."""
+        reg = load_registry()
+        rule = registry.leg_rule_for("zen/claude-opus-5-5", reg)
+        self.assertIsNotNone(rule)
+        self.assertTrue(rule["allow"])
+        self.assertEqual(rule["id"], "allow-opencode-zen-client-bound")
+        self.assertEqual(rule["match"], "opencode-zen/*")
+        self.assertIn("client", rule["reason"].lower())
+        self.assertIn("403", rule["reason"])
+        self.assertTrue(self.CLAUDE_NAME_RE.search("claude-opus-5-5"))
+        self.assertEqual(reg["models"]["claude-opus-5-5"]["family"], "anthropic")
+
+    def test_no_route_carries_a_claude_leg_off_a_seat(self):
+        reg = load_registry()
+        offenders = sorted({leg for route in reg["routes"].values()
+                            for leg in (route.get("legs") or [])
+                            if isinstance(leg, str) and self.CLAUDE_NAME_RE.search(leg)
+                            and leg.partition("/")[0]
+                            not in self.SEAT_PROVIDERS | self.GATEWAY_UNREACHABLE_SEATS})
+        self.assertEqual(offenders, [])
+
+    # --- the enforcement ---------------------------------------------------
+
+    def test_a_credited_provider_cannot_add_a_claude_leg_without_gating_it(self):
+        """Rule 9, not a comment: put `morph/claude-sonnet-5` in a serving route
+        and the check fails until the leg is gated unavailable."""
+        reg = mutated()
+        morph = reg["models"]["claude-sonnet-5"]["id"]
+        route_id = sorted(reg["routes"])[0]
+        reg["routes"][route_id].setdefault("legs", []).append("morph/%s" % morph)
+        self.assertTrue(registry.leg_denied("morph/%s" % morph, reg))
+        problems = [p for p in registry.check_registry(reg) if "leg_rules" in p
+                    or "denied" in p]
+        self.assertTrue(problems, "an allowed-looking Claude leg passed the check")
+        self.assertIn("morph/%s" % morph, " ".join(problems))
+
+    def test_the_freekeys1_providers_register_no_claude_model(self):
+        """D-102 held the probe off Claude, so none of the 11 providers added for
+        FREEKEYS-1 may carry a Claude-named model row of its own."""
+        reg = load_registry()
+        added = ("morph", "bazaarlink", "navyai", "arcee", "bluesminds", "agentrouter",
+                 "novita_ai", "scaleway", "nebius", "deepinfra", "together_ai")
+        legs = {"%s/%s" % (pid, model_key) for pid in added
+                for model_key in self.claude_models(reg)}
+        served = {leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if leg in legs}
+        self.assertEqual(served, set())
+
 
 if __name__ == "__main__":
     unittest.main()

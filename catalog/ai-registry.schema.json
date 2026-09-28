@@ -143,16 +143,27 @@
           "exclusiveMinimum": 0,
           "description": "Hard monthly spend cap in USD for a paid provider (WS-DSCALL, 2026-09-28): a paid caller refuses at or above it, or when spend cannot be read. Distinct from autoos_usage.SPEND_WARN_USD, the warning line. Read through autoos_usage.monthly_cap_usd; tools/registry.py requires a positive number and a monthly_cap_source."
         },
+        "monthly_warn_fraction": {
+          "type": ["number", "null"],
+          "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1, D-132/D-141): the fraction of `monthly_cap_usd` at which a paid caller WARNS (0.8 = 80 % of the grant); the cap itself is where it REFUSES. Only meaningful beside `monthly_cap_usd`, which tools/registry.py's check_registry() enforces (_check_credit_guards, brief FREEKEYS-1). Absent means the legacy DSGUARD line (tools/autoos_usage.py SPEND_WARN_USD), which is why the pre-existing paid rows keep their behaviour unchanged."
+        },
         "monthly_cap_source": {
           "type": "string",
           "minLength": 1,
           "description": "Who set monthly_cap_usd and when (e.g. an operator decision)."
         },
         "trains_on_prompts": {
-          "type": "boolean",
-          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices."
+          "type": ["boolean", "null"],
+          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices. `null` (brief FREEKEYS-1, D-132) means UNVERIFIED - the vendor's terms were never read - and is not the same as `false`: tools/registry.py's private_safe() passes only on exactly false, so an unverified provider is kept out of every -clean route by the same fail-closed rule a missing key already was. Never guess `false` to make a row look clean."
         },
-        "tier": { "enum": ["free", "paid", "subscription"] },
+        "credit_usd": {
+          "type": ["number", "null"],
+          "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1, D-132/D-141): the one-off vendor credit in USD the operator funded this `credit`-tier provider with, from the vendor's own grant (source in the row's $comment). It is the balance the spend guard is sized against: `monthly_cap_usd` is set to the same number (refuse at 100 % of the grant) and `monthly_warn_fraction` to 0.8 (warn at 80 %). tools/registry.py's check_registry() requires the trio to agree on every `credit` row."
+        },
+        "tier": {
+          "enum": ["free", "paid", "subscription", "credit"],
+          "description": "`credit` (brief FREEKEYS-1, D-132/D-141) is a metered API the operator funded with a one-off vendor grant rather than a standing plan: the spend is real, so it is not `free` (a free tier is never private-safe and is what the probes may spend), and it is not `paid` either, because the money is a finite balance the guard must track — see `credit_usd` and `monthly_cap_usd`. tools/registry.py's private_safe() rejects any tier that is not exactly paid or subscription, and tools/probe_common.py probes only tier free, so a credit leg is never probed by the standing probes and never reaches a -clean route; the FREEKEYS-1 grant probe (logs/freekeys1_probe.py, an uncommitted work file) is the deliberate, capped exception."
+        },
         "windows": { "type": "array", "items": { "$ref": "#/$defs/window" } },
         "limits": {
           "type": "object",
