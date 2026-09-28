@@ -351,6 +351,17 @@ class InboxCliTests(_Files):
         self.assertEqual(rc, 2)
         self.assertIn("--all", err)
 
+    def test_two_named_windows_are_refused(self):
+        # --since-card is the successor's resume point; a run that also names
+        # --since reads one of them by precedence nobody chose.
+        path = self.write(COLLIDING)
+        card = self.write("# card L1-routing — 2026-09-28T07:00:00Z | gen=x "
+                          "| last-event 2026-09-25T19:21:08Z#2\n", name="card.md")
+        rc, _out, err = self.invoke("inbox", "--file", path, "--since-card", card,
+                                    "--since", "2026-09-28T06:00:00Z")
+        self.assertEqual(rc, 2)
+        self.assertIn("one window", err)
+
     def test_a_bad_since_value_is_exit_2(self):
         path = self.write(COLLIDING)
         rc, _out, err = self.invoke("inbox", "--file", path,

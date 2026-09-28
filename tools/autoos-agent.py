@@ -3677,6 +3677,10 @@ def cmd_inbox(args) -> int:
         print("inbox: --all reads the whole file; drop --since/--since-card",
               file=sys.stderr)
         return 2
+    if args.since and args.since_card:
+        print("inbox: name one window -- --since-card reads where the card "
+              "stopped, --since where you say", file=sys.stderr)
+        return 2
     if not args.all and not args.since and not args.since_card:
         print("inbox: name the window -- --since-card <card>, --since "
               "<position|UTC> or --all", file=sys.stderr)
