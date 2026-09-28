@@ -29,8 +29,16 @@ import subprocess
 # another word ("PAUSED" must not count).
 _PAUSE_RE = re.compile(r"\bPAUSE\b")
 _RESUME_RE = re.compile(r"\bRESUME\b")
+# The acknowledgement markers: RESTART spec §0 names this list its one home, so
+# §1's `card: stale` check (lane R2b) and §3's pack cite it rather than
+# restating it. A line carrying one of these reports on something the session
+# already did, so it is never an order to pause: `pause_state` filters these
+# out of the PAUSE scan. The list held only `lesson:` and `→ done` until lane
+# R2a added the other markers in use — a `→ main` reply quoting a PAUSE read as
+# a fresh stop.
+ACK_MARKERS = ("lesson:", "→ done", "→ ack", "→ relaunched", "→ operator", "→ main")
 # a line that reports on a pause is not an order to pause
-_NOT_AN_ORDER_RE = re.compile(r"lesson:|→ done")
+_NOT_AN_ORDER_RE = re.compile("|".join(re.escape(marker) for marker in ACK_MARKERS))
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 
 # The first-80-chars report the CLI/MCP print for an active pause.
@@ -113,9 +121,10 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     PAUSE is active when the newest line whose text contains the word PAUSE
     is newer than the newest line containing the word RESUME, or there is no
     RESUME line at all. A line older than `since` (the session start, see
-    session_start()) and a `lesson:` / `→ done` line never count as a PAUSE:
-    the relaunch after a pause is its resume. Lines are ordered by their own parsed timestamp, not
-    file order, so an inbox is read correctly even if a line was appended
+    session_start()) and an acknowledgement line carrying any `ACK_MARKERS`
+    marker never count as a PAUSE: the relaunch after a pause is its resume.
+    Lines are ordered by their own parsed timestamp, not file order, so an
+    inbox is read correctly even if a line was appended
     out of order. A missing/unreadable inbox, or one with no PAUSE line
     (win or lose to a RESUME), is `{"active": False, "at": None, "text":
     None}`; an active pause also carries the winning line's own timestamp

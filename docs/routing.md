@@ -75,6 +75,22 @@ behind `--since` says nothing, and one dropped with the record it rode on by
 `--max-records` is named in the cut line instead ("cut N earlier records and M
 malformed entries").
 
+State card: `autoos-agent.py card check <file>` (RESTART spec §1) validates the
+one card a successor resumes from, `<RUN>/status/<name>.card.md`, which that
+session writes and nothing else touches. It checks the header (`# card <name> —
+<UTC> | gen=<id> | context <n>k/<cap>k | last-event <position>`), the fixed
+section order (goal, state, next, threads, traps, operator) and each section's
+line cap, the 40-line total, the 200-char line limit, and that `last-event`
+parses as a position — read with `autoos_inbox`'s parser, never a second one. A
+`threads` line whose id starts with `Q` must carry `asked <time>`, since those
+lines are the pack's open questions (§3). Every problem prints on stdout with
+its line number, sorted by line; a file that cannot be read is a stderr notice.
+Exit 0 valid, 1 invalid, 2 unreadable. The rules live in `tools/autoos_card.py`;
+the acknowledgement markers the same spec §0 names one list are
+`autoos_heartbeat.ACK_MARKERS` (`lesson:`, `→ done`, `→ ack`, `→ relaunched`,
+`→ operator`, `→ main`), which is what keeps an acknowledgement of a finished
+order from reading as a new PAUSE.
+
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
 tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).

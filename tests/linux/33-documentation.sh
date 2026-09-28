@@ -573,6 +573,13 @@ if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch ta
     out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RESTART spec §1 (lane R2a): the state-card checker (tools/autoos_card.py) and
+# the `card check` verb. Fixtures are temp files; the checker is read-only, so
+# nothing here writes a card or reads a live run dir.
+if it "autoos_card: section order, line caps, header fields, the card check verb (unit tests)"; then
+    out="$(python3 tests/test_autoos_card.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"

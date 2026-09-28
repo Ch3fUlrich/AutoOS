@@ -22,6 +22,7 @@ Run directly, never through unittest discover:
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -98,6 +99,47 @@ class PauseStateTests(unittest.TestCase):
                     "2026-09-26T14:00:00Z lesson: two PAUSE lines were ignored",
                     "2026-09-26T14:01:00Z → done: PAUSE handled")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    # RESTART spec §0: the acknowledgement markers are one list, hb.ACK_MARKERS
+    # (the old `_NOT_AN_ORDER_RE` held only `lesson:` and `→ done`, so every
+    # other acknowledgement quoting a PAUSE read as a fresh order). One test per
+    # marker in use.
+
+    def test_marker_done_is_not_a_pause_order(self):
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → done: PAUSE handled")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_ack_is_not_a_pause_order(self):
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE seen, stopping")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_relaunched_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → relaunched: the session the PAUSE stopped")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_operator_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → operator: PAUSE needs your call")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_main_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → main: merged before the PAUSE landed")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_plain_pause_with_no_marker_is_still_an_order(self):
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z operator: PAUSE NOW")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_ack_markers_are_the_one_list_the_pause_filter_uses(self):
+        # §0: one home. The regex must be built from ACK_MARKERS, not restated.
+        self.assertEqual(
+            hb._NOT_AN_ORDER_RE.pattern,
+            "|".join(re.escape(m) for m in hb.ACK_MARKERS))
+        for marker in hb.ACK_MARKERS:
+            self.assertTrue(hb._NOT_AN_ORDER_RE.search("2026-09-26T14:01:00Z %s: PAUSE"
+                                                       % marker), marker)
 
     def test_session_start_is_the_first_transcript_timestamp(self):
         path = os.path.join(self._tmp.name, "t.jsonl")

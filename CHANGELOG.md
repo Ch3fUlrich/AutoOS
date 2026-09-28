@@ -5,6 +5,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `card check`: the state-card checker, and the §0 marker list completed (RESTART R2a, 2026-09-28)
+
+- **`tools/autoos_card.py`** (new, stdlib, read-only): the §1 shape of
+  `<RUN>/status/<name>.card.md` as one table — `SECTIONS` (goal 3, state 6,
+  next 3, threads 12, traps 8, operator 4), `MAX_TOTAL_LINES = 40`,
+  `MAX_LINE_CHARS = 200`. `check_card(text)` returns `Problem(line, text)` for
+  every violation and `check_file(path)` reads it; nothing is written, so the
+  check is safe to run twice (AGENTS.md §4). `last-event` parses through
+  `autoos_inbox.parse_position` — §0 keeps one position parser and this module
+  deliberately does not own a second one.
+- **Two numbers §1 left open, now settled** (a successor has to write to them,
+  so they are in the module docstring, not implied): a section's cap counts its
+  **content lines** — a heading line and blank lines are not content — while
+  every line in the file counts toward the 40. The caps therefore overflow the
+  total on purpose (36 content + 6 headings + the header = 43): the total is
+  what binds a real card. And an old `references/state-file.md` heading
+  (`## Decisions + why`) is a *problem*, not a synonym — §1 says a successor
+  writes a fresh card rather than converting the status file. `## Goal (…)` and
+  `## traps: what bit us` do resolve to their sections, so a note on a heading
+  is free.
+- **§3's one card rule**: a `threads` line whose id starts with `Q` must carry
+  an `asked <time>` field, because the pack's `open questions` section prints
+  those lines and nothing else knows an id was asked about.
+- **`autoos-agent.py card check <file>`** (parser + dispatch tables, same pair
+  `inbox` uses): problems on stdout, one per line, each with its line number;
+  the reason a file cannot be read on stderr. Exit 0 valid, 1 invalid, 2
+  unreadable. **No MCP twin**: `inbox`, `ready` and `review-status` have none
+  either — only the spawning/routing surface is mirrored in
+  `tools/autoos_agent_mcp.py`, so this stays a CLI verb (open: below).
+- **`tools/autoos_heartbeat.py`**: the §0 acknowledgement-marker list was
+  `lesson:|→ done` only, so an acknowledgement that quotes the word PAUSE —
+  `→ main: merged before the PAUSE landed` — reads as a fresh order to stop. The
+  markers in use are now one named list, `ACK_MARKERS` = `lesson:`, `→ done`,
+  `→ ack`, `→ relaunched`, `→ operator`, `→ main`, and `_NOT_AN_ORDER_RE` is
+  built from it (a guard test pins the regex to the list, so §1 and §3 can cite
+  it without restating it).
+- **`tests/test_autoos_card.py`** (new, 64 tests) and marker tests in
+  `tests/test_autoos_heartbeat.py` (45 → 50). Red before the code: 5 marker
+  tests failed (`→ ack`, `→ relaunched`, `→ operator`, `→ main`; `→ done`
+  already passed) and the card suite could not import. Green: 166 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py`, and
+  `test_autoos_spawner.py test_suite_wiring.py test_agent_harness.py
+  test_skill_rules.py` 696 passed / 0 failed. Wired into both harnesses
+  (`tests/linux/33-documentation.sh`, `tests/run-tests.ps1`).
+- **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
+  in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
+  `relaunch-line` (R3+).
+
 ### Fixed — Muse's slow first byte: a 180 s response-start ceiling, and the combo probe streams (MUSETIME, 2026-09-28)
 
 - **`configuration/docker/ai-stack/compose.yml`**: the gateway gives up on a provider call whose response has not *started* within `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS`, and unset resolves to 30000 (`resolveDirectHeadersTimeoutMs` reads the env and returns 3e4 when absent — `autoos-omniroute:/app/.build/next/server/chunks/_0117s88._.js` @900, the env name @965; `directFetchWithBoundedResponseStart` is exported at @758 and its `code: "DIRECT_RESPONSE_START_TIMEOUT"` const at @47, carrying the text "Direct response did not start within 30000ms"). Muse spark-1.3's first byte runs 3-32 s at minimal/low/medium and 4-58 s straight to the provider (routing-00 09:2xZ, image `autoos/omniroute:3.8.50-autoos2`), so the `high` leg 504'd. That 504 is also what opened the breaker for the *next* call: `shouldTripProviderBreakerForResult` requires the status to be in `new Set([408,500,502,503,504])` (all three in one module: the set `_0gq2i23._.js` @54054, `isProviderBreakerFailureStatus` @54261, `shouldTripProviderBreakerForResult` @54549), so two slow legs at the apikey `failureThreshold=2` `apply.sh` pins produced the measured `503 ALL_TARGETS_SKIPPED`. compose now pins 180000, operator-overridable, documented as a commented default in `stack.env.example`. **An `ai-stack` recreate of the omniroute service is required for the env to take effect.**
