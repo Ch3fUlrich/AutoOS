@@ -76,13 +76,23 @@ code from state the session keeps small at every wave. Then the context cap drop
   `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and `PAUSE: → main …` are all
   orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
   wide list costs a spurious order at worst, and `hold on: → main merged` is one).
+  **The pause-class subset — `PAUSE_ORDER_WORDS` in `tools/autoos_heartbeat.py`
+  (`PAUSE`, `STOP`, `HOLD`, `HALT`, `ABORT`) — is the filter `pause_state` reads**
+  (R2a9 item 3, closing the probe R2a8 recorded: `operator: STOP all lanes` was a record
+  `_gives_order` called an order and `pause_state` reported `active: False` with, because
+  its filter was the PAUSE word alone — a lost stop, the one unacceptable direction). Case-
+  sensitive and whole-word like PAUSE itself, so `stop`, `PAUSED` and `HOLDs` are prose, and
+  a subset of `ORDER_WORDS`, so every stop is a word the exemption rules already clear.
+  FREEZE is deliberately outside the class: the real corpus's `→ done: freeze cleared
+  (2/4 units, 6.73GB)` reports memory, and reading it as a hard stop turns a report into an
+  order nobody gave. RESUME is the release, so it can never be a stop.
   **An acknowledgement then exempts only an order word its own record closes — one
   more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`,
   `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`,
-  `resolved`), which must follow the order word within 3 words while *the sentence that
-  holds the order word stays unnegated*: the fourth one-list rule, `NEGATION_WORDS`
-  (`not`, `cannot`, `n't`, `never`, `no`, `without`, and `un-` on any word of the sentence),
-  vetoes a close wherever that sentence puts it — before the closing word, after it, or on
+  `resolved`), which must follow the order word within 3 words while *the record's payload
+  stays unnegated*: the fourth one-list rule, `NEGATION_WORDS`
+  (`not`, `cannot`, `n't`, `never`, `no`, `without`, and `un-` on any word of the payload),
+  vetoes a close wherever the record puts it — before the closing word, after it, or on
   it — so `→ done: PAUSE lifted`
   reports a stop that ended while `→ done: applied the fix. PAUSE
   all lanes until further notice`, `→ done: noted. PAUSE over the weekend`,
@@ -95,25 +105,44 @@ code from state the session keeps small at every wave. Then the context cap drop
   `cleared, unconfirmed by ops` — closed a stop nobody confirmed lifted; R2a8, the Muse
   review of R2a7: the veto itself stopped at the 3-word window, so
   `PAUSE lifted but it was never really confirmed by ops` — the negation five words out —
-  closed it too. What bounds the veto now is the **sentence**, split on `.` `;` `!` `?`
-  and newline (`_sentence_span`), which is both wider and narrower than the window: wider
-  because a sentence that keeps talking after its closing word is read to the end of that
-  sentence, narrower because a negation belonging to a *different* claim
-  (`→ done: no merges today. PAUSE lifted`) no longer reaches in to hold the stop. An
-  `un-`-shaped word that is only vocabulary (`units`, `until`) still vetoes a close:
-  measured on the real corpus that is one record reclassified and no inbox flipped, the
-  spurious hold this rule is allowed to cost, never a lost order. A *release* word is read
+  closed it too. What bounds the veto now is the **record's payload** — everything after
+  the speaker prefix and, in an acknowledgement, after the marker (R2a9 item 1: the
+  sentence splitter is gone, because a splitter reads an abbreviation (`e.g.`) and a
+  decimal (`3.5`) as a sentence break, and each of those was a way for a negation to
+  escape the veto — `→ done: PAUSE lifted e.g. not confirmed by ops` cut at the second `.`
+  and closed a stop the record itself says was never confirmed, and
+  `→ done: no merges today. PAUSE lifted` let a negation that belongs to another claim of
+  the same record close it). One structure, not one more heuristic: the payload is the
+  unit for both halves of the filter, the veto and the release head. An
+  `un-`-shaped word that is only vocabulary (`units`, `until`) still vetoes a close, and
+  now reaches further than one sentence: measured over the real corpus that is **1** record
+  reclassified by the widened veto (`→ done: combined FLEETSPEC review came back NOT
+  READY …`, whose close R2a8's sentence cut had exempted) and **30** records reclassified
+  by the pause-class filter — the fleet's own `MEM HOLD` / `CHEAP-WORKER HOLD` / `ON HOLD`
+  notes — of which the two rules together flip **3** inboxes, one from inactive to
+  active: `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze rule
+  applies again: max 4 local units/workers fleet-wide …` reads as a stop whose `LIFTED`
+  the `units` in its next sentence vetoes. That is the spurious direction, which this
+  rule is allowed to cost, never a lost order — but it is a cost measured on live inboxes,
+  and it is recorded here rather than glossed. A *release* word is read
   **strictly** — not the stop rule loosened, but a rule of its own, because the asymmetry
   points the other way here: a refused release costs one wasted heartbeat and a re-issued
   `RESUME`, a release nobody gave is the lost stop (R2a8's HIGH: R2a7 gated `RESUME` the
   way a `PAUSE` is gated, so any *mention* of an unnegated, un-undone `RESUME` lifted a
   stop — `→ done: we should RESUME tomorrow`, `considering RESUME options`,
-  `RESUME pending`, `discussed RESUME`). Exactly two shapes lift. (a) A record **with no**
-  acknowledgement marker, where `RESUME` is the first word of the payload or of its
-  sentence — the imperative the operator writes (`operator: RESUME all lanes`,
-  `from L0 (operator) RESUME now`, `work done. RESUME every lane`) — unnegated in that
-  sentence and followed by no *undoing* close within 3 words. (b) An acknowledgement whose
-  sentence says nothing but the landing: `RESUME` plus a `RELEASE_ACK_WORDS` word
+  `RESUME pending`, `discussed RESUME`). Exactly two shapes lift, and both refuse a
+  payload that carries a `?` (a question about a release is not one) or a negation
+  anywhere in it, by the same record veto. (a) A record **with no**
+  acknowledgement marker whose payload opens **directly** with the bare word `RESUME` —
+  the imperative the operator writes (`operator: RESUME all lanes`,
+  `from L0 (operator) RESUME now`) — followed by no *undoing* close within 3 words. There
+  is one head now, the payload's, and it wears no punctuation of its own: the
+  sentence-head path R2a8 also accepted is gone (`note the fix landed. RESUME every lane`
+  and `noting e.g. RESUME is due` order nothing), and so is a quoted or asked word
+  (`operator: "RESUME all lanes"`, ``operator: `RESUME` `` `operator: (RESUME all lanes)`,
+  `operator: RESUME?`, `RESUME tomorrow?`, lowercase `operator: resume all lanes`).
+  (b) An acknowledgement whose
+  payload says nothing but the landing: `RESUME` plus a `RELEASE_ACK_WORDS` word
   (`acknowledged`, `acked` — the release half of the reporting partition, named once),
   optionally followed by punctuation or a time (`→ done: RESUME acknowledged at 12:00`),
   and by no prose (`→ done: RESUME acknowledged but ops still holding` lifts nothing).

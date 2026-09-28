@@ -25,11 +25,13 @@ import re
 import string
 import subprocess
 
-# Case-sensitive, whole word: operator lines write "PAUSE"/"RESUME" in caps
-# (e.g. "PAUSE NOW", "PAUSE (operator..."), never lowercase or as part of
-# another word ("PAUSED" must not count).
-_PAUSE_RE = re.compile(r"\bPAUSE\b")
-_RESUME_RE = re.compile(r"\bRESUME\b")
+# The release, in the one shape of it that counts: the bare word `RESUME` at the very head
+# of the payload. Case-sensitive and whole-word — operator lines write their orders in
+# caps (`"RESUME NOW"`, never lowercase), and `resumed` is another word. A quote, a
+# backtick or a parenthesis in front of it is a *mention* of the release, not one
+# (`operator: "RESUME all lanes"`), which is why the head is matched against the payload
+# itself and not against its first word (R2a9, the strict release).
+_BARE_RESUME_RE = re.compile(r"\ARESUME\b")
 # The acknowledgement markers: RESTART spec §0 names this list its one home, so
 # §1's `card: stale` check (lane R2b) and §3's pack cite it rather than
 # restating it. A line carrying one of these at its head reports on something
@@ -58,6 +60,20 @@ _MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)(?=[:\s]|$)"
 # ruling one costs a lane running against an operator's stop.
 ORDER_WORDS = ("PAUSE", "RESUME", "STOP", "HOLD", "FREEZE", "HALT", "ABORT")
 _ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE)
+# The pause-class words — the order words that *stop the run*, and the filter
+# `pause_state` reads (R2a9 item 3, closing the probe R2a8 recorded: `operator: STOP all
+# lanes` was a record `_gives_order` called an order and `pause_state` reported
+# `active: False`, because its filter was the PAUSE word alone. A lost stop is the one
+# unacceptable outcome here, so a STOP is read exactly like the PAUSE it means). Case-
+# sensitive and whole-word like PAUSE itself — `stop`, `PAUSED` and `HOLDs` are prose.
+# A subset of `ORDER_WORDS` is required, so every stop this filter reads is a word the
+# exemption rules have already been shown to clear. FREEZE stays out: the real corpus's
+# `→ done: freeze cleared (2/4 units, 6.73GB)` reports memory, and widening the class to
+# it turns that report into a hard stop nobody gave. RESUME is the release, so it can
+# never be a stop.
+PAUSE_ORDER_WORDS = ("PAUSE", "STOP", "HOLD", "HALT", "ABORT")
+assert set(PAUSE_ORDER_WORDS) <= set(ORDER_WORDS)
+_PAUSE_ORDER_RE = re.compile(r"\b(?:%s)\b" % "|".join(PAUSE_ORDER_WORDS))
 # The closing words (RESTART spec §0) — one list beside the two above, and the only
 # thing that lets an acknowledgement absorb an order word. An ack record reports on
 # what already happened, so a word from this list within `_CLOSING_WINDOW` words of
@@ -101,11 +117,12 @@ _RELEASE_ACK_RE = re.compile(r"\ARESUME\s+(?:%s)\b" % "|".join(RELEASE_ACK_WORDS
 TIME_WORDS = ("at", "on", "by")
 _TIME_SHAPE_RE = re.compile(r"\A\D*\d[\w.:+\-]*\Z")
 # The negation words (RESTART spec §0) — the fourth one-list rule, and the veto on the
-# list above. A closing word with a negation in its sentence closes nothing:
-# `PAUSE was not lifted`, `PAUSE isn't cleared`, `PAUSE never released` all report a
-# stop that is *still* holding, so the order survives (R2a6). `n't` is a clitic rather
-# than a word, so it is matched at the end of the word it hangs on — `isn't`, `wasn't`,
-# and `won't` alike; `cannot` is on the list because it is a negation of the close
+# list above. A closing word with a negation anywhere in the record's payload closes
+# nothing: `PAUSE was not lifted`, `PAUSE isn't cleared`, `PAUSE never released` all report
+# a stop that is *still* holding, so the order survives (R2a6; R2a9 made the veto reach the
+# whole payload rather than a window or a sentence, see `_record_is_negated`). `n't` is a
+# clitic rather than a word, so it is matched at the end of the word it hangs on — `isn't`,
+# `wasn't`, and `won't` alike; `cannot` is on the list because it is a negation of the close
 # spelled as one word, and `→ done: PAUSE cannot be lifted` is the same lost order as
 # `was not lifted`.
 NEGATION_WORDS = ("not", "cannot", "n't", "never", "no", "without")
@@ -116,13 +133,13 @@ _NEGATION_RE = re.compile(r"\b(?:%s)\b|%s\Z"
                              re.escape(_NEGATION_CLITIC)),
                           re.IGNORECASE)
 # …and the negation that is a prefix rather than a word of its own. `un-` on a closing
-# word was R2a6's case (`PAUSE unlifted`); R2a7 widens it to the prefix standing on any
-# word of the window, because `PAUSE cleared, unconfirmed by ops` reports the same stop
-# `PAUSE was not confirmed cleared` does. The widening is one-sided on purpose: an
-# `un-`-shaped word that is only vocabulary (`until`, `units`) can veto a close and hold
-# a lane one heartbeat longer, and that is the accepted cost — measured on the real
-# corpus, one record changes class (`freeze cleared (2/4 units, 6.73GB)`) and no inbox
-# flips.
+# word was R2a6's case (`PAUSE unlifted`); R2a7 widened it to the prefix standing on any
+# word of the window and R2a9 to any word of the payload, because `PAUSE cleared,
+# unconfirmed by ops` reports the same stop `PAUSE was not confirmed cleared` does. The
+# widening is one-sided on purpose: an `un-`-shaped word that is only vocabulary (`until`,
+# `units`) can veto a close and hold a lane one heartbeat longer, and that is the accepted
+# cost — spec §0 records what it measures on the real corpus, which is a fleet note read
+# as a stop (`MEM HOLD LIFTED … max 4 local units/workers`) rather than a lost order.
 _NEGATION_PREFIX_RE = re.compile(r"\Aun[A-Za-z]", re.IGNORECASE)
 # How many words may stand between the order word and its closing word — enough to
 # cover the shapes the writers use ("PAUSE was cleared at 12:00"), no further.
@@ -175,35 +192,6 @@ _HEAD_JUNK = "\ufeff\u200b \t\r\n"
 # …and what separates a head from its payload: the same junk plus the colon or comma a
 # writer sticks after a marker (`→ done:`, `→ done,`).
 _HEAD_SEPARATORS = _HEAD_JUNK + ":,"
-# The sentence boundary (RESTART spec §0, R2a8): a record makes one claim per sentence, so
-# the negation that vetoes a close is read across the sentence the order word stands in,
-# not across a fixed number of words. `.`, `;`, `!`, `?` and the newline each end one.
-_SENTENCE_BREAKS = ".;!?\n"
-# A word run that is no word at all — the punctuation and spacing that may stand in front
-# of an order word inside its sentence and still leave it the sentence's first word.
-_NON_WORD_RUN_RE = re.compile(r"\A[\s\W]*\Z")
-
-
-def _sentence_span(text: str, start: int, end: int):
-    """(begin, past-end) of the sentence of `text` holding `text[start:end]`.
-
-    Split on `. ; ! ?` and newline (R2a8, the Muse review of R2a7): a negation belongs to
-    the sentence that made the claim, so `→ done: no merges today. PAUSE lifted` closes
-    the stop — that `no` is a different claim — while `PAUSE lifted but it was never
-    really confirmed by ops` does not, however far into its own sentence the negation
-    stands.
-    """
-    begin = 0
-    for char in _SENTENCE_BREAKS:
-        at = text.rfind(char, 0, start)
-        if at != -1 and at + 1 > begin:
-            begin = at + 1
-    stop = len(text)
-    for char in _SENTENCE_BREAKS:
-        at = text.find(char, end)
-        if at != -1 and at < stop:
-            stop = at
-    return begin, stop
 
 
 def _speaker_prefix(text: str) -> int | None:
@@ -281,44 +269,53 @@ def _is_negation(word: str) -> bool:
     return _NEGATION_RE.search(word) is not None or _NEGATION_PREFIX_RE.match(word) is not None
 
 
-def _order_word_is_negated(text: str, start: int, end: int) -> bool:
-    """True when a negation stands anywhere in the sentence of the order word
-    `text[start:end]` — `PAUSE lifted but not confirmed`, `PAUSE lifted but it was never
-    really confirmed by ops`, `no RESUME given`.
+def _payload_start(text: str) -> int:
+    """The index `text`'s payload begins at — past the speaker prefix and, in an
+    acknowledgement, past the marker and the `:` or `,` after it.
 
-    The sentence is the unit (R2a8, the Muse review of R2a7, HIGH): the veto stopped at
-    `_CLOSING_WINDOW` words, so `PAUSE lifted but it was never really confirmed by ops`
-    — the negation five words out — closed a stop nobody confirmed lifted. R2a7 already
-    widened the veto from *before the closing word* to the *whole window*, and the window
-    is simply too short for a sentence that goes on talking after its closing word. What
-    bounds it now is the sentence itself, so a negation of a different claim
-    (`→ done: no merges today. PAUSE lifted`) stays out of it. A negation that is only
-    vocabulary (`until`, `units`) still vetoes and holds a lane one heartbeat longer —
-    the accepted cost, measured on the real corpus in the R2a7 and R2a8 changelog entries.
+    `_ack_head` is the one home of that split; this only asks it for the second half.
     """
-    begin, stop = _sentence_span(text, start, end)
+    return _ack_head(text)[1]
+
+
+def _record_is_negated(text: str) -> bool:
+    """True when a negation word stands anywhere in the record's payload — the veto that
+    keeps a `NEGATION_WORDS` word from closing an order: `PAUSE was not lifted`,
+    `PAUSE isn't cleared`, `PAUSE never released`, `PAUSE unlifted`,
+    `PAUSE lifted e.g. not confirmed by ops`.
+
+    The unit is the **record** (R2a9 item 1, the decision that ends the sentence-splitting
+    heuristics): R2a8 vetoed across the order word's *sentence*, and a splitter reads an
+    abbreviation (`e.g.`) and a decimal (`3.5`) as a sentence break, so
+    `→ done: PAUSE lifted e.g. not confirmed by ops` cut at the second `.` and closed a
+    stop whose negation the cut had escaped — the same for `→ main: no agreement was
+    reached; PAUSE acknowledged`, whose `;` separates one claim from the next only to a
+    splitter. A record is now one claim for this purpose, and the veto reaches every word
+    of it. Widening the veto can only ever hold a lane longer, which is the accepted
+    direction, and it is what the strict release of `_resumes` reads too.
+    """
     return any(_is_negation(word.strip(_WORD_TRIM))
-               for word in text[begin:stop].split())
+               for word in text[_payload_start(text):].split())
 
 
-def _order_word_is_closed(text: str, start: int, end: int,
+def _order_word_is_closed(text: str, end: int,
                           closing_re: re.Pattern = _CLOSING_WORD_RE) -> bool:
     """True when `closing_re`'s unnegated closing word stands within `_CLOSING_WINDOW`
-    words after the order word `text[start:end]` — `PAUSE lifted`, `PAUSE was cleared at
+    words after the order word that ends at `end` — `PAUSE lifted`, `PAUSE was cleared at
     12:00`, `PAUSE, cancelled`.
 
-    A `NEGATION_WORDS` word standing anywhere in the order word's *sentence* vetoes the
-    close, and so does an `un-` prefix on any word of it: `PAUSE was not lifted`,
-    `PAUSE isn't cleared`, `PAUSE unlifted`, `PAUSE lifted but not confirmed` and
-    `PAUSE lifted but it was never really confirmed by ops` all report a stop that is still
-    holding (R2a6, the Muse review of R2a5 — the generic words the review struck from
+    A `NEGATION_WORDS` word standing anywhere in the record's payload vetoes the close, and
+    so does an `un-` prefix on any word of it: `PAUSE was not lifted`, `PAUSE isn't
+    cleared`, `PAUSE unlifted`, `PAUSE lifted but not confirmed` and
+    `PAUSE lifted e.g. not confirmed by ops` all report a stop that is still holding
+    (R2a6, the Muse review of R2a5 — the generic words the review struck from
     `CLOSING_WORDS` are what made the first two shapes readable as closed at all; R2a7
-    widened the veto to the whole window; R2a8 to the whole sentence; see
-    `_order_word_is_negated`). `closing_re` is `CLOSING_WORDS` for a stop word and
+    widened the veto to the whole window; R2a8 to the whole sentence; R2a9 to the whole
+    record, see `_record_is_negated`). `closing_re` is `CLOSING_WORDS` for a stop word and
     `UNDOING_CLOSING_WORDS` for a release word, which the words that only report a landing
     leave counting.
     """
-    if _order_word_is_negated(text, start, end):
+    if _record_is_negated(text):
         return False
     for word in text[end:].split()[:_CLOSING_WINDOW]:
         if closing_re.fullmatch(word.strip(_WORD_TRIM)):
@@ -326,8 +323,11 @@ def _order_word_is_closed(text: str, start: int, end: int,
     return False
 
 
-def _gives_order(text: str) -> bool:
-    """True when the record body `text` gives an order rather than reporting one.
+def _gives_order(text: str, word_re: re.Pattern = _ORDER_WORD_RE) -> bool:
+    """True when the record body `text` gives an order rather than reporting one — over
+    every `ORDER_WORDS` word by default, or over one class of them when a narrower
+    `word_re` is passed (`_PAUSE_ORDER_RE`, `pause_state`'s stop filter: the same
+    exemption read over just the words that stop the run).
 
     A record with no acknowledgement marker at its head gives one wherever an
     `ORDER_WORDS` word appears — the wide reading of R2a4: an order that wears its
@@ -344,9 +344,9 @@ def _gives_order(text: str) -> bool:
     if marker is not None:
         if marker in NEVER_ORDER_MARKERS:
             return False
-        return any(not _order_word_is_closed(text, match.start(), match.end())
-                   for match in _ORDER_WORD_RE.finditer(text))
-    return _ORDER_WORD_RE.search(text) is not None
+        return any(not _order_word_is_closed(text, match.end())
+                   for match in word_re.finditer(text))
+    return word_re.search(text) is not None
 
 
 def _is_punctuation_or_time(text: str) -> bool:
@@ -371,56 +371,55 @@ def _is_punctuation_or_time(text: str) -> bool:
     return True
 
 
-def _release_is_acknowledged(sentence: str) -> bool:
-    """True when `sentence` is exactly `RESUME` plus a `RELEASE_ACK_WORDS` word, with only
+def _release_is_acknowledged(payload: str) -> bool:
+    """True when `payload` is exactly `RESUME` plus a `RELEASE_ACK_WORDS` word, with only
     punctuation or a time after it — what an acknowledgement must say to lift a stop."""
-    match = _RELEASE_ACK_RE.match(sentence)
-    return match is not None and _is_punctuation_or_time(sentence[match.end():])
+    match = _RELEASE_ACK_RE.match(payload)
+    return match is not None and _is_punctuation_or_time(payload[match.end():])
 
 
 def _resumes(text: str) -> bool:
     """True when the record body `text` *orders* the release, which is the only shape that
-    lifts a stop (R2a8, the Muse review of R2a7, HIGH: R2a7 gated the RESUME word the way
-    a PAUSE is gated — loose — so a mere mention of an unnegated, un-undone `RESUME`
-    released a run: `→ done: we should RESUME tomorrow`, `→ done: considering RESUME
-    options`, `→ done: RESUME pending`, `→ done: discussed RESUME`).
+    lifts a stop (R2a8, the Muse review of R2a7, HIGH: a mere *mention* of an unnegated,
+    un-undone `RESUME` released a run — `→ done: we should RESUME tomorrow`,
+    `→ done: considering RESUME options`, `→ done: RESUME pending`).
 
     Two shapes count and nothing else, both read off the shared head/negation helpers —
-    there is no second copy of the rule. (a) A record with **no** acknowledgement marker
-    lifts when `RESUME` is the first word of its payload or of its sentence — the
-    imperative the operator writes (`operator: RESUME all lanes`, `from L0 (operator) RESUME
-    now`, `work done. RESUME every lane`) — unnegated in that sentence and not undone by a
-    closing word within `_CLOSING_WINDOW` words after it. (b) An acknowledgement lifts when
-    its sentence says nothing but the release landing (`→ done: RESUME acknowledged`), which
-    is a report, not an order, and is exactly as wide as it has to be. A `lesson:` record
-    lifts nothing: it reports on the code and never addresses the run.
+    there is no second copy of the rule. Both refuse a payload that carries a `?` (a
+    question about a release is not one) or a negation anywhere in it, by the same record
+    veto a close is refused by. (a) A record with **no** acknowledgement marker whose
+    payload opens **directly** with the bare word `RESUME` — the imperative the operator
+    writes (`operator: RESUME all lanes`, `from L0 (operator) RESUME now`) — and that no
+    *undoing* closing word follows within `_CLOSING_WINDOW` (`operator: RESUME cancelled`
+    withdraws the release). (b) An acknowledgement whose payload says nothing but the
+    release landing (`→ done: RESUME acknowledged`), which is a report, not an order, and
+    is exactly as wide as it has to be. A `lesson:` record lifts nothing: it reports on
+    the code and never addresses the run.
+
+    R2a9 closes the last loose edge of (a): R2a8 let `RESUME` release from the head of
+    *any* sentence, and the splitter handed that head to a negation that had escaped its
+    own, so `note the fix landed. RESUME every lane` and `noting e.g. RESUME is due` both
+    opened a claim nobody had made. There is one head now — the payload's — and it must
+    wear no punctuation of its own: `operator: "RESUME all lanes"` and
+    `operator: `RESUME`` quote the word rather than order it, `operator: RESUME?` and
+    `RESUME tomorrow?` ask about it, and `operator: resume all lanes` does not write the
+    order the way the operator does.
 
     The asymmetry that sets the width points the other way for a release than for a stop: a
     release wrongly refused costs one wasted heartbeat and one re-issued `RESUME`, a release
-    nobody gave is the lost stop every rule here exists to prevent. So where a stop word's
-    negation only vetoes its *close* (`PAUSE NOW, no launches` is a hard stop), a negated
-    `RESUME` counts in no record shape, and a mention that is neither of the two shapes never
-    counts either.
+    nobody gave is the lost stop every rule here exists to prevent.
     """
     marker, head = _ack_head(text)
     if marker in NEVER_ORDER_MARKERS:
         return False
-    for match in _RESUME_RE.finditer(text):
-        begin, stop = _sentence_span(text, match.start(), match.end())
-        begin = max(begin, head)
-        if not _NON_WORD_RUN_RE.match(text[begin:match.start()]):
-            continue  # not the sentence's first word: a mention, not an order
-        sentence = text[begin:stop]
-        if _order_word_is_negated(text, match.start(), match.end()):
-            continue
-        if marker is not None:
-            if _release_is_acknowledged(sentence):
-                return True
-            continue
-        if _order_word_is_closed(text, match.start(), match.end(), _UNDOING_CLOSING_RE):
-            continue
-        return True
-    return False
+    payload = text[head:]
+    if "?" in payload or _record_is_negated(text):
+        return False
+    if marker is not None:
+        return _release_is_acknowledged(payload)
+    if _BARE_RESUME_RE.match(payload) is None:
+        return False
+    return not _order_word_is_closed(text, head + len("RESUME"), _UNDOING_CLOSING_RE)
 
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
@@ -499,35 +498,37 @@ def session_start(transcript_path: str | None):
 
 
 def pause_state(inbox_path: str | None, since=None) -> dict:
-    """The newest PAUSE/RESUME state of an inbox file (R-pause-01,
+    """The newest stop/release state of an inbox file (R-pause-01,
     R-heartbeat-03: "a hard stop, checked every heartbeat and before every
     launch").
 
-    PAUSE is active when the newest line whose text contains the word PAUSE
-    is newer than the newest line containing the word RESUME, or there is no
-    RESUME line at all. Both halves are gated on their word being an order in its own
-    record — `_gives_order` for the PAUSE, `_resumes` for the RESUME, both reading the same
-    head, sentence and closing-word helpers (never a second copy of the rule) and the RESUME
-    read strictly on top of that (R2a7, the Sonnet review of R2a6: a bare RESUME match let
+    A stop is active when the newest record that *gives* a pause-class order (one of
+    `PAUSE_ORDER_WORDS`: PAUSE, STOP, HOLD, HALT, ABORT — R2a9, closing the probe R2a8
+    recorded: `operator: STOP all lanes` was an order `_gives_order` reported and this
+    filter ignored, because it keyed on the PAUSE word alone, and a lost stop is the one
+    unacceptable outcome) is newer than the newest record that *orders* the release, or
+    there is no release at all. Both halves read the same head, payload and closing-word
+    helpers — never a second copy of the rule — with the release gated strictly, as
+    `_resumes` defines it (R2a7, the Sonnet review of R2a6: a bare RESUME match let
     `→ done: applied the fix already; RESUME was never issued, still holding` lift a stop
     that was never lifted; R2a8, the Muse review of R2a7: R2a7's gate still lifted on a
-    *mention* — `→ done: we should RESUME tomorrow`. A RESUME lifts in exactly two shapes,
-    the imperative of an unmarked record and an acknowledgement that says nothing but
-    `RESUME acknowledged`). A line older than `since` (the session start, see
-    session_start()) never counts — the relaunch after a pause is its resume. A
-    PAUSE is skipped only where the record closes it: an acknowledgement — a body
-    that opens with an `ACK_MARKERS` marker, at the head or at the head after one
-    `_speaker_prefix` (see `_acknowledgement`) — exempts that order word only when an
-    unnegated `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words *and* no
-    negation stands anywhere in the order word's own sentence, so `→ done: PAUSE lifted`
-    and `→ main: PAUSE acknowledged` report a stop that ended, while
-    `→ done: noted. PAUSE over the weekend`, `→ done: PAUSE was not lifted` and
-    `→ done: PAUSE lifted but it was never really confirmed by ops` are orders still in
-    force (R2a6, the Muse
-    review of R2a5: the generic words `over`, `done`, `noted` closed orders nobody closed,
-    and a negated closing word — `was not lifted`, `isn't cleared` — did too; R2a7 for the
-    negation *after* the closing word; R2a8 for the negation past the 3-word window, see
-    `_order_word_is_negated`), while
+    *mention* — `→ done: we should RESUME tomorrow`; R2a9: not even a sentence-head
+    `RESUME` counts, only the bare word at the head of the payload, and no `?` or
+    negation anywhere in it). A line older than `since` (the session start, see
+    session_start()) never counts — the relaunch after a pause is its resume. A stop word
+    is skipped only where the record closes it: an acknowledgement — a body that opens
+    with an `ACK_MARKERS` marker, at the head or at the head after one `_speaker_prefix`
+    (see `_acknowledgement`) — exempts that order word only when an unnegated
+    `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words *and* no negation
+    stands anywhere in the record's payload, so `→ done: PAUSE lifted` and
+    `→ main: PAUSE acknowledged` report a stop that ended, while `→ done: noted. PAUSE
+    over the weekend`, `→ done: PAUSE was not lifted`,
+    `→ done: PAUSE lifted but it was never really confirmed by ops` and
+    `→ done: PAUSE lifted e.g. not confirmed by ops` are orders still in force (R2a6, the
+    Muse review of R2a5: the generic words `over`, `done`, `noted` closed orders nobody
+    closed, and a negated closing word — `was not lifted`, `isn't cleared` — did too;
+    R2a7 for the negation *after* the closing word; R2a8 for the negation past the 3-word
+    window; R2a9 for the whole record, see `_record_is_negated`), while
     `→ done: applied the fix. PAUSE all lanes until further notice`
     gives a fresh order and wins (R2a5, the Sonnet review of R2a4: gating the whole
     record on the marker lost that order, and a lost order is the one unacceptable
@@ -538,7 +539,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     acknowledgement. Lines are ordered by their own parsed timestamp, not file
     order, so an
     inbox is read correctly even if a line was appended
-    out of order. A missing/unreadable inbox, or one with no PAUSE line
+    out of order. A missing/unreadable inbox, or one with no stop line
     (win or lose to a RESUME), is `{"active": False, "at": None, "text":
     None}`; an active pause also carries the winning line's own timestamp
     (`at`, ISO 8601 UTC) and the first 80 characters of its text (`text`).
@@ -561,7 +562,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
             newest_resume = when
         if since is not None and when < since:
             continue
-        if (_PAUSE_RE.search(text) and _gives_order(text)
+        if (_gives_order(text, _PAUSE_ORDER_RE)
                 and (newest_pause is None or when > newest_pause[0])):
             newest_pause = (when, text)
     if newest_pause is None:

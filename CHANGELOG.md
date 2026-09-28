@@ -5,6 +5,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the veto is the record, the release is a bare leading RESUME, and STOP/HOLD/HALT/ABORT stop the run (RESTART R2a9, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a8, S1, safety, FIX-FIRST): R2a8
+  replaced one heuristic with another. It split the record into sentences and let both the
+  negation veto and the release ride that split — and a splitter reads an abbreviation
+  (`e.g.`) and a decimal (`3.5`) as a sentence break, which is a way for a negation to
+  escape the veto, and for a *mention* to earn a head. The decision is to stop
+  sentence-splitting and make both sides strict by construction. **(1) The veto is the
+  record.** `_sentence_span` is gone; `_record_is_negated` reads the whole **payload**
+  (everything after the speaker prefix and, in an acknowledgement, after the marker —
+  `_ack_head`/`_payload_start` stay the one home of that split), so a `NEGATION_WORDS` word
+  anywhere in it closes nothing: `→ done: PAUSE lifted e.g. not confirmed by ops`,
+  `→ done: no merges today. PAUSE lifted` and
+  `→ main: no agreement was reached; PAUSE acknowledged` all report a stop still in force.
+  No word joined `NEGATION_WORDS`; the round's point is the structure again.
+  **(2) The release is a bare leading RESUME.** `_resumes`' shape (a) no longer accepts the
+  first word of *any* sentence — the payload must open **directly** with the uppercase word,
+  with no quote, backtick or parenthesis in front of it (`operator: "RESUME all lanes"`,
+  ``operator: `RESUME` ``), no `?` anywhere in the payload (`operator: RESUME?`,
+  `RESUME tomorrow?`), no negation, and no *undoing* close within the window; shape (b)
+  stays the acknowledgement that says nothing but `RESUME acknowledged`/`acked` plus
+  punctuation or a time. So `note the fix landed. RESUME every lane`,
+  `operator: work done. RESUME all lanes` and `noting e.g. RESUME is due` order nothing,
+  while `operator: RESUME all lanes` and `→ done: RESUME acknowledged` still lift.
+  **(3) STOP, HOLD, HALT and ABORT are PAUSE-class.** `PAUSE_ORDER_WORDS` is the filter
+  `pause_state` reads (through `_gives_order(text, _PAUSE_ORDER_RE)` — the same exemption,
+  one narrower list), closing R2a8's recorded probe: `operator: STOP all lanes` reported
+  `active: False` while `_gives_order` called it an order. `FREEZE` stays out of the class
+  and `RESUME` never joins it. Both sides read `_ack_head`, `_record_is_negated` and
+  `_order_word_is_closed`; no second copy of the rule.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2238
+  records** — the corpus is live and grew during the run — 927 acknowledgements, 187
+  quoting an order word, 8 quoting `PAUSE`, 0 quoting
+  an uppercase `RESUME`): **0** records change `_resumes` (the release half moves nobody —
+  the corpus has never written an imperative `RESUME`), **1** changes `_gives_order`
+  (`→ done: combined FLEETSPEC review came back NOT READY …`, whose close R2a8's sentence
+  cut had exempted), and **30** change class as *stop* records under (3) — 25 unmarked
+  fleet notes and 5 acknowledgements. `pause_state` goes from **3 active to 4**:
+  `L2-general.md` flips inactive → active and `L1-backlog.md`/`L1-routing.md` change their
+  winning record, in all three cases to the same line —
+  `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze rule applies
+  again: max 4 local units/workers fleet-wide …`. It wins because an **unmarked** record
+  never gets its closing word read at all (R2a4's wide reading, unchanged here), so a
+  `MEM HOLD`/`CHEAP-WORKER HOLD`/`ON HOLD` capacity note now reads as a hard stop that its
+  own `LIFTED` cannot end. That is the spurious direction the asymmetry allows — one wasted
+  heartbeat and a `RESUME`, never a lost order — but it is a cost measured on live inboxes,
+  so it is recorded as an open item rather than glossed.
+- **Docs:** RESTART spec §0 holds the rule (the payload-wide veto, the bare-head release,
+  `PAUSE_ORDER_WORDS`, the measured cost); `docs/routing.md` cites §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_payload_start`/`_record_is_negated` instead of
+  restating it.
+
 ### Fixed — the release is strict by construction and the negation veto spans the sentence (RESTART R2a8, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7

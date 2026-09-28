@@ -113,23 +113,28 @@ names a marker mid-sentence still stops the run. A prefix may also never name on
 spec §0's other one-list rules, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUME`,
 `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
 is held` is an order wearing its own first clause as a speaker, not an acknowledgement
-(R2a4). What an acknowledgement may then exempt — `autoos_heartbeat.CLOSING_WORDS` and
-its 3-word window, the `autoos_heartbeat.NEGATION_WORDS` veto over the order word's whole
-sentence, the `RELEASE_ACK_WORDS` half of the
-`REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition, and the two record shapes a
-`RESUME` is allowed to lift through — is
+(R2a4). The words that *stop the run* are the pause-class subset,
+`autoos_heartbeat.PAUSE_ORDER_WORDS` (`PAUSE`, `STOP`, `HOLD`, `HALT`, `ABORT` — the same
+exemption read over a narrower list, so `operator: STOP all lanes` holds the lane the way
+the PAUSE it means does; `FREEZE` and `RESUME` are not in it). What an acknowledgement may
+then exempt — `autoos_heartbeat.CLOSING_WORDS` and its 3-word window, the
+`autoos_heartbeat.NEGATION_WORDS` veto over the record's whole payload, the `RELEASE_ACK_WORDS`
+half of the `REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition, and the two record
+shapes a `RESUME` is allowed to lift through (the bare word at the head of the payload, or an
+acknowledgement that says nothing but the landing) — is
 RESTART spec §0's rule (`docs/plans/2026-09-28-restart-spec.md`), which is its one home
 and is not restated here; in code it is `autoos_heartbeat._gives_order` for a stop word
-and `_resumes` for a release, both reading `_ack_head`, `_sentence_span`,
-`_order_word_is_negated` and `_order_word_is_closed`. So `→ done: PAUSE lifted` and
+and `_resumes` for a release, both reading `_ack_head`, `_payload_start`,
+`_record_is_negated` and `_order_word_is_closed`. So `→ done: PAUSE lifted` and
 `→ done: RESUME acknowledged`
 report what already happened, while `→ done: PAUSE lifted but not confirmed`,
 `→ done: PAUSE lifted but it was never really confirmed by ops`,
+`→ done: PAUSE lifted e.g. not confirmed by ops`,
 `→ done: noted. PAUSE over the weekend`,
 `→ done: applied the fix already; RESUME was never issued, still holding` and
 `→ done: we should RESUME tomorrow` are still in
 force (R2a5, the Sonnet review of R2a4; R2a6, the Muse review of R2a5; R2a7, the Sonnet
-review of R2a6) — and `lesson:` is the
+review of R2a6; R2a8 and R2a9, the Muse reviews of R2a7 and R2a8) — and `lesson:` is the
 one marker that exempts a whole record, because a lesson reports on the code and never
 addresses the run.
 
