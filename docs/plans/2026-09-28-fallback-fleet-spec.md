@@ -4,8 +4,8 @@
 - Path: `docs/plans/2026-09-28-fallback-fleet-spec.md`.
 - Task: L2-general, routing-00 D-143 (fallback fleet).
 - Status: **spec, not implemented.** This is a design document. Every mechanism it
-  relies on is either already live in this checkout (cited below with a verified
-  `path:line`) or explicitly marked as a dependency that is spec'd-not-built or
+  relies on is either already live in this checkout (tracked files only; cited below with a verified
+  `path:line`; git-ignored runtime files are named as such) or explicitly marked as a dependency that is spec'd-not-built or
   `(inference)`. No code is changed by this file.
 - Owner: `autoos-L2-general`.
 - Related specs: the HOOKS spec (`docs/plans/2026-09-28-agent-hooks-spec.md`),
@@ -50,7 +50,7 @@ already deployed, not new infrastructure:
 
 `opencode serve` runs the browser UI and the JSON API on port 4096 and guards `/api/*`
 with its own HTTP Basic auth (`docs/web-services.md:24`), with the password pinned in
-`configuration/api-keys.yml` via the documented `opencode_password` single source
+`configuration/api-keys.yml` (git-ignored; template `configuration/api-keys.example.yml`) via the documented `opencode_password` single source
 (`configuration/README.md:47-55`). On the server profile this service reaches the phone
 exactly as `opencode.<domain>` already does: Authelia's admins-group + 2FA gate sits at
 the reverse proxy (`docs/web-services.md:43`) and, before it, Caddy **strips** the
@@ -93,7 +93,7 @@ Both candidates for the L1/L2 role are real:
   nothing (`lib/linux/install.sh:2689-2693`; `lib/windows/AutoOS.Install.psm1:3409-3414`).
 - **opencode sessions** instead, reached the same way §2 describes, on free/gateway legs.
 
-What the harness *does* on a gateway model (router research note, stated as fact): the
+What the harness *does* on a gateway model (router research note, private and not in this checkout — `(inference)` here): the
 harness — tool use, subagents, hooks, background sessions, and same-machine
 `SendMessage` — keeps working; what breaks is **Remote Control** and the cloud/Desktop
 surface, not the local orchestration loop. There is no documented in-session model swap
@@ -111,11 +111,11 @@ LiteLLM/Bedrock/Vertex, not only OmniRoute.)
   reachable), not a verified *fidelity* claim.
 - (b) **model aliasing** — which OmniRoute-served model stands in for the harness's default
   model and its haiku-class "small" model once Claude subscription models are unavailable
-  (carried to §10 as open questions, per correction 2, alongside OmniRoute's Anthropic-format
-  `/v1/messages` endpoint).
+  (carried to §10 as open questions, per correction 2, alongside OmniRoute's expected Anthropic-format
+  `/v1/messages` endpoint, which is unverified — see §10 `messages-endpoint`).
 
 **The measured task (phase 1, concrete and cheap to run twice):** spawn one leaf worker via
-the `autoos-agent` spawn path (`tools/autoos-agent.py:1577`, `claude_allowed("spawn", …)` — the
+the `autoos-agent` spawn path (`tools/autoos-agent.py:1549` and `:1762`, `claude_allowed("spawn", …)` — the
 same gate every spawn routes through), have it edit one file and report back, then compare the
 report's tool-call shape against a baseline run on a normal Claude-Code harness. **Metrics:**
 does the task complete; tool-call / argument fidelity vs the baseline; wall time; do
@@ -159,7 +159,7 @@ today. What **this spec needs from B4** (a different lane's job) is exactly two 
 
 The **relaunch-from-status-card pattern** already has a documented home: the restart spec's
 `relaunch-line <name>` builds a context pack from the run's state and prints one relaunch
-command (`docs/plans/2026-09-28-restart-spec.md:214-228`), including the crash-recovery path that
+command (`docs/plans/2026-09-28-restart-spec.md:343-357`), including the crash-recovery path that
 reuses the same line. B4's automatic trigger is the same mechanism fired by usage rather than by a
 human/L1-main. Whether orchestrators have already been relaunched from status cards *in this run*
 is `(inference)` — the handoff inbox/status logs where that would be evidenced are not part of this
@@ -183,7 +183,7 @@ being safe to repeat is already shipped.)
 | Cloud sessions / Desktop / Routines | (none yet) | degraded in fallback mode `(inference)` |
 | artifacts / web-search on some providers | provider-dependent | verify per leg in phase 1 (§3) |
 
-Same-machine limitation, named plainly: per the router research note, `SendMessage` works
+Same-machine limitation, named plainly: per the router research note `(inference)`, `SendMessage` works
 **same-machine only**. Until fleetd ships, **cross-host coordination in fallback mode is
 degraded, not equivalent** — an operator on a second host cannot be messaged into a gateway-model
 session the way Remote Control allowed. That gap is fleetd's to close, and fleetd is a sibling spec,
@@ -194,7 +194,7 @@ not this one.
 The harness+gateway combination has **no built-in web UI** (router research note; correction 2 —
 headless is `claude -p` / Agent SDK). So the UI in fallback is `opencode serve` (§2) or OpenHands —
 OpenHands is the docker app on port 3000 with no own login, guarded by Authelia alone
-(`docs/web-services.md:52`). This is the reason item (1)'s opencode web session matters **even for
+(`docs/web-services.md:25,52`). This is the reason item (1)'s opencode web session matters **even for
 L1/L2 operators**, not only for phone/L0 access: when the harness is on a gateway model, the web
 UI is a separate already-running service, and `opencode.<domain>` / `openhands.<domain>` are how a
 human sees and steers the fallback run.
@@ -256,6 +256,6 @@ measurement; every lane is kept small so no row is flagged as over ~1M weighted 
 |---|---|---|---|---|
 | FALLBACK-0 (phase 0, operator action) | Confirm the live substrate end-to-end: flip `claude_gateway_routing=gateway` (§3), drive one opencode web L0 session (§2), read the §6 loss table back to the operator as the interim state | tiny (final review only; free-model writer) | <1 day | nothing — all pieces already in the checkout |
 | FALLBACK-1 (phase 1) | Run the §3 measured comparison on both candidates; answer fidelity (a) and aliasing (b); record the per-layer winner and the `/v1/messages` + small-model facts (§10) | small (final review only) | 1–2 days | nothing new to build; operator time on the probe |
-| FALLBACK-2 (phase 2) | H3 opencode/OpenHands renderer so the L0 is Claude-Code-equivalent (§2) | small (final review only) | ~2 evenings | HOOKS H1 shared shape; the HOOKS spec itself (`docs/plans/2026-09-28-agent-hooks-spec.md:255`) |
+| FALLBACK-2 (phase 2) | H3 opencode/OpenHands renderer so the L0 is Claude-Code-equivalent (§2) | small (final review only) | ~2 evenings | HOOKS H1 shared shape; H3 renderer built (`docs/plans/2026-09-28-agent-hooks-spec.md:255`) |
 | FALLBACK-3 (phase 3) | Wire B4's trigger + relaunch-with-env to this spec's §5 needs; enforce the repeat-relaunch-is-skip obligation | small–medium FINAL ONLY (a relaunch path that mis-fires on real orchestrators is state-mutating) | ~2–3 evenings | ORCH-B4 built (`docs/tasks.md:53`); CLAUDEBUDGET gate (already live, §5) |
 | FALLBACK-4 (phase 4) | Cross-host coordination substitute for the §6 messaging row | out of this lane's scope | — | fleetd bus built (`docs/plans/2026-09-28-fleetd-eventbus-spec.md:3`) |
