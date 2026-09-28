@@ -625,6 +625,12 @@ if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE ref
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy
+# fallback, locked merge-save) - temp dirs only, never the real state dir.
+if it "autoos_overlay: machine-wide overlay path, legacy fallback, locked merge-save (unit tests)"; then
+    out="$(python3 tests/test_autoos_overlay.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # catalog/ai-registry.json (routing v2 spec section 3): check rules.
 if it "registry.py: check rules (unit tests) and the committed registry is valid"; then
     out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
