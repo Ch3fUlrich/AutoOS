@@ -5,6 +5,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the FF1 env scrub had a second door, and its push fence was an accident guard (FF1b, D-106)
+
+Muse#high over 362b8af..6bdeca5 read FF1's own diff and found four things it
+did not close. Tests first, in `tests/test_autoos_spawner.py`
+(`PlanEnvPasslistTests`, `ChildRuntimeDirTests`, `PushFenceHonestyTests`,
+`SubprocessEnvAuditTests`) and `tests/test_user_config_fence.py`
+(`LanePathIdentityTests`) — 24, red before the change.
+
+- **`plan["env"]` bypassed the allowlist** (HIGH): the scrub only filtered what
+  the *caller* exported, then copied the plan's entries in behind it. A builder
+  that set `PATH`, `LD_PRELOAD`, `PYTHONPATH` or `NODE_OPTIONS` owned the child
+  and nothing said so. Plan entries now need a name on
+  `WORKER_PLAN_ENV_PASSLIST` (the names the plan builders actually set:
+  `OPENCODE_CONFIG_CONTENT`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, the gemini
+  header constant, `AUTOOS_AGENT_*`) **and** must clear the deny check; anything
+  else is refused and printed to stderr. The deny set gained the loader and
+  interpreter injection names, `GIT_*`, `SSH_*`, `*_ASKPASS`,
+  `GIT_PROXY_COMMAND`, `KUBECONFIG`, `DOCKER_CONFIG`, `AUTOOS_KEYS_FILE` and the
+  `*_CONFIG_FILE` / `*_CREDENTIALS` shapes. A test derives the passlist from
+  `build_plan`'s own `env[...] =` assignments, so a new plan name that is not
+  reviewed fails rather than leaking.
+- **git's config channels were not all forced** (HIGH): the worker's git reads
+  `GIT_CONFIG_PARAMETERS` (what a parent's `git -c key=value` exports) and
+  `GIT_CONFIG_KEY_n/VALUE_n` by *index*. `worker_env` now forces
+  `GIT_CONFIG_PARAMETERS=""`, sets `GIT_CONFIG_COUNT` from the guard list itself
+  (two entries, cancelling `credential.helper` and `core.askPass`), deletes any
+  `GIT_CONFIG_KEY_n/VALUE_n` past that count, and names `GIT_SSH`,
+  `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` off rather than trusting a pattern.
+- **The push fence was called a fence** (HIGH): the `pre-push` hook and the
+  disabled push URLs are an **accident guard** — `git push --no-verify`,
+  `core.hooksPath` and `git remote set-url` walk past both. They stay (they stop
+  the worker that types `git push` at a path its own brief named), the code and
+  `docs/handoff.md` now say what they are, and
+  `test_a_no_verify_push_is_NOT_blocked_by_the_hook` asserts the bypass *works*
+  so no future reader treats the hook as containment. Real containment is the
+  disposable clone plus an environment with no credential in it. Also:
+  `fence_sandbox_push()` was defined and unit-tested but **never called** — a
+  real `--isolate` sandbox only had `origin`'s push URL disabled. It is wired
+  into the clone site now, which is what installs the hook.
+- **`XDG_RUNTIME_DIR` was inherited** (HIGH/MED): the operator's session
+  directory (message bus, sockets, sometimes the agent's own) came through the
+  `XDG_` allow prefix. It is now dropped from the inheritance and the plan points
+  it at a private, empty directory under the state tree keyed by run id, created
+  mode 0700 at the launch site (`provision_runtime_dir`) — a dry run still writes
+  nothing. A test asserts no value in the child env names an ssh-agent socket or
+  the operator's runtime dir.
+- **`user_config_fence()` compared paths as strings** (MED): `os.path.abspath`
+  folds `..` lexically and never follows a symlink, so a lane reached through a
+  link read as a real checkout and the render wrote into the home directory. Both
+  halves now go through `os.path.realpath`, and the comparison folds case
+  (`normcase` + `casefold`) where the filesystem does — Windows and macOS open one
+  directory under `AutoOS-lanes` and `autoos-lanes`; a case-sensitive host keeps
+  them apart. `is_lane_checkout(..., fold=True)` lets the Linux suite prove the
+  case-insensitive branch.
+- **Every child site is audited** (MED): `tools/autoos_agent_mcp.py` handed its
+  detached runner, its preflight and `run_job` the caller's whole environment
+  (`env=dict(os.environ, AUTOOS_TASK_DIR=path)`). The three now pass
+  `agent.spawner_child_env()` — the worker scrub with the one credential the CLI
+  genuinely reads (`AUTOOS_OMNIROUTE_KEY`) added back. An ast-based test walks
+  every `subprocess.run/Popen/call/check_output/check_call` in both files and
+  fails on any site without `env=`, allowing only the ones whose argv head is the
+  literal `git`/`taskkill` (the spawner's own plumbing, running as the operator on
+  purpose).
+- Out of scope, recorded under `open:`: per-worker `HOME` isolation.
+
 ### Fixed — a spawned worker's environment is chosen, not inherited (FF1, D-106)
 
 - **`tools/autoos-agent.py` `worker_env()`** (new, used by both spawn sites —

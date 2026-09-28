@@ -563,7 +563,24 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, AUTOOS_AGENT_RUN_ID, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    # The env the child gets, named in the plan (FF1/FF1b, D-106). Sorted and
+    # padded by whatever the caller legitimately exports, so name the entries
+    # that must be there instead of one exact line nobody can reproduce.
+    missing=""
+    leaked=""
+    for want in OPENCODE_CONFIG_CONTENT XDG_DATA_HOME XDG_RUNTIME_DIR \
+                GIT_TERMINAL_PROMPT GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS; do
+        if ! grep -q "env: [^\n]*${want}" <<<"$out"; then
+            missing="${missing}${want} "
+        fi
+    done
+    for banned in AUTOOS_KEYS_FILE PYTHONPATH LD_PRELOAD GIT_SSH_COMMAND; do
+        if grep -q "env: [^\n]*${banned}" <<<"$out"; then
+            leaked="${leaked}${banned} "
+        fi
+    done
+    assert_eq "$missing" ""
+    assert_eq "$leaked" ""
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi

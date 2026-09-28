@@ -16,6 +16,7 @@ Run from the repo root:
 
     python3 tests/test_user_config_fence.py
 """
+import atexit
 import builtins
 import contextlib
 import importlib.util
@@ -45,14 +46,30 @@ def load_module():
     return module
 
 
+_SYNTHETIC_LANE = []
+
+
 def lane_checkout():
     """A real lane sandbox path if this suite is running in one (it usually is:
-    every spawned worker runs it there), else a synthetic one with the same shape."""
+    every spawned worker runs it there), else a synthetic one with the same shape.
+
+    The synthetic one is *created*, under a temp dir rather than an invented
+    /home/user: a test that chdirs into it (a relative path judged from a lane
+    cwd) has to find a directory, and the suite must pass on a host that is not
+    a lane.
+    """
     here = str(ROOT)
     if any(marker in here for marker in LANE_MARKERS):
         return here
-    return os.path.join("/home/user/code", "AutoOS-lanes", "L1-routing-FF1",
-                        "logs", "sandboxes", "L1-routing-FF1-20260928-000000-ff1-abc123")
+    if not _SYNTHETIC_LANE:
+        base = tempfile.mkdtemp(prefix="autoos-synthetic-lane-")
+        path = os.path.join(base, "code", "AutoOS-lanes", "L1-routing-FF1",
+                            "logs", "sandboxes",
+                            "L1-routing-FF1-20260928-000000-ff1-abc123")
+        os.makedirs(path, exist_ok=True)
+        atexit.register(shutil.rmtree, base, True)
+        _SYNTHETIC_LANE.append(path)
+    return _SYNTHETIC_LANE[0]
 
 
 def neutral_checkout():
@@ -232,6 +249,88 @@ class LaneConfigFenceTests(_RenderCase):
         _rc, output = self.render_opencode(lane_checkout())
         self.assertIn("lane sandbox", output)
         self.assertIn("real checkout", output)
+
+
+class LanePathIdentityTests(unittest.TestCase):
+    """FF1b item 5: the fence compared paths by string, on a checkout path it had
+    only abspath()'d. `os.path.abspath` does not resolve symlinks and folds ".."
+    lexically, so a lane reached through a link (or through a link plus "..")
+    read as a real checkout; and on Windows/macOS, where the filesystem is
+    case-insensitive, 'autoos-lanes' opens the same directory as 'AutoOS-lanes'
+    while the string comparison says they are unrelated."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="autoos-fence-identity-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def link(self, name, target):
+        path = os.path.join(self.tmp, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.symlink(target, path)
+        return path
+
+    def test_a_symlink_into_a_lane_is_a_lane(self):
+        # The link lives under the temp dir, so a lexical fold of the ".." that
+        # walks back up through it must not be trusted either.
+        deep = os.path.join(self.tmp, "a", "b")
+        os.makedirs(deep)
+        lane_link = os.path.join(deep, "lane")
+        os.symlink(lane_checkout(), lane_link)
+        via_dotdot = os.path.join(lane_link, "..", "lane")
+        for path in (lane_link, via_dotdot):
+            self.assertTrue(self.module.is_lane_checkout(path), path)
+
+    def test_the_fence_bites_through_a_symlinked_checkout(self):
+        lane_link = self.link("lane", lane_checkout())
+        with mock.patch.dict(os.environ, {"HOME": "/home/dev",
+                                          "XDG_CONFIG_HOME": "/home/dev/.config"}):
+            ok, reason = self.module.user_config_fence(
+                lane_link, "/home/dev/.claude.json")
+        self.assertFalse(ok, "a symlinked lane opened the home directory: %s" % reason)
+
+    def test_a_symlinked_home_still_counts_as_user_level(self):
+        # The other half: HOME reached through a link is still somebody's home.
+        home = os.path.join(self.tmp, "real-home")
+        os.makedirs(os.path.join(home, ".config"))
+        home_link = self.link("home", home)
+        with mock.patch.dict(os.environ, {"HOME": home, "XDG_CONFIG_HOME": ""}):
+            self.assertTrue(self.module.is_user_level_target(
+                os.path.join(home_link, ".config", "opencode", "opencode.json")))
+            ok, _reason = self.module.user_config_fence(lane_checkout(), home_link)
+            self.assertFalse(ok)
+
+    def test_case_folding_follows_the_platform(self):
+        # Only the `/AutoOS-lanes/` marker differs in case here, so a fold that
+        # is not the platform's own cannot borrow the other marker.
+        lane = "/home/dev/AutoOS-lanes/L1-routing/work"
+        lower = "/home/dev/autoos-lanes/l1-routing/work"
+        self.assertTrue(self.module.is_lane_checkout(lane))
+        self.assertTrue(self.module.is_lane_checkout(lower, fold=True))
+        self.assertFalse(self.module.is_lane_checkout(lower, fold=False))
+        self.assertEqual(self.module.case_insensitive_paths(),
+                         self.module.is_lane_checkout(lower))
+        with mock.patch.dict(os.environ, {"HOME": "/home/dev",
+                                          "XDG_CONFIG_HOME": "/home/dev/.config"}):
+            ok, reason = self.module.user_config_fence(lower, "/home/dev/.claude.json",
+                                                       fold=True)
+            self.assertFalse(ok, reason)
+            ok, _r = self.module.user_config_fence(lower, "/home/dev/.claude.json",
+                                                   fold=False)
+            self.assertTrue(ok)
+
+    def test_the_comparator_is_injectable_for_the_suites_platform(self):
+        # Linux is case-sensitive, so the Windows/macOS behaviour is proven by
+        # forcing the fold, and the negative half by a path that is not a lane
+        # in any case.
+        self.assertTrue(self.module.is_lane_checkout(
+            "/home/dev/AUTOOS-LANES/L1/logs/sandboxes/x", fold=True))
+        self.assertFalse(self.module.is_lane_checkout("/home/dev/AutoOS", fold=True))
+        self.assertFalse(self.module.is_lane_checkout(
+            "/home/dev/autoos-lanes-clone/L1", fold=True))
 
 
 class LaneShapeTests(unittest.TestCase):

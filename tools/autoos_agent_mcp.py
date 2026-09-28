@@ -342,7 +342,10 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
 def preflight(argv: list, cwd: str):
     """The CLI's own dry run: every refusal (promo, flag clashes, route) comes back now."""
     dry = argv if "--dry-run" in argv else argv[:-1] + ["--dry-run", argv[-1]]
+    # FF1b item 6: a child of ours, so a chosen env — the caller's GitHub,
+    # provider and cloud tokens have nothing to do with resolving a plan.
     r = subprocess.run([sys.executable, AGENT] + dry, cwd=cwd, stdin=subprocess.DEVNULL,
+                       env=agent.spawner_child_env(),
                        capture_output=True, text=True)
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
@@ -423,7 +426,8 @@ def spawn(req: dict) -> dict:
     _write_json(os.path.join(path, "job.json"), job)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            env=agent.spawner_child_env())
     job["pid"] = proc.pid
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
@@ -463,10 +467,13 @@ def run_job(path: str) -> int:
     job = _read_json(os.path.join(path, "job.json"))
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
-        # at this run dir; the CLI forwards os.environ to the client, so the
+        # at this run dir; the CLI forwards its own chosen env onward, so the
         # worker sees it too.
+        # FF1b item 6: this used to be `dict(os.environ, ...)`. The detached
+        # runner above already got a scrubbed env, so this is the same scrub run
+        # a second time rather than a copy of the caller's tokens.
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             env=dict(os.environ, AUTOOS_TASK_DIR=path),
+                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)

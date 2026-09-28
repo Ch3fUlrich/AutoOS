@@ -278,26 +278,66 @@ WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR"
 # Cross-check on top of the allowlist, applied to what the *plan* injects too:
 # no secret-shaped name reaches the child from either side.
 WORKER_ENV_DENY = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
-                   "SSH_AUTH_SOCK", "SSH_ASKPASS", "AUTOOS_OMNIROUTE_KEY")
+                   "SSH_AUTH_SOCK", "SSH_ASKPASS", "AUTOOS_OMNIROUTE_KEY",
+                   # Loader/interpreter injection: a value under any of these
+                   # names repoints what the child executes before its first
+                   # line runs, so no amount of allowlisting the name is safe.
+                   "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                   "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
+                   "NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+                   # git reaching a credential or a helper of the operator's.
+                   "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+                   "GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                   "GIT_DIR", "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_CONFIG",
+                   "SUDO_ASKPASS", "SSH_ASKPASS_REQUIRE",
+                   # Other credential caches the child would read by itself.
+                   "KUBECONFIG", "DOCKER_CONFIG", "NETRC", "_NETRC",
+                   "AUTOOS_KEYS_FILE")
 WORKER_ENV_DENY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
-                            "_ACCESS_KEY", "_CREDENTIALS")
+                            "_ACCESS_KEY", "_CREDENTIALS", "_ASKPASS",
+                            "_CONFIG_FILE", "_CONFIG_PATH")
 WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
                             "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
-                            "GITHUB_", "GITLAB_", "SLACK_")
+                            "GITHUB_", "GITLAB_", "SLACK_",
+                            "LD_", "DYLD_", "GIT_", "SSH_", "KUBE", "DOCKER_")
+# And what the *plan* is allowed to add, on top of clearing the deny check. The
+# allowlist above only ever covered the caller's own exports: plan["env"] was
+# copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
+# owned the child without anyone noticing (FF1b, Muse#high on 362b8af..6bdeca5).
+# This is the list of names the spawner's builders genuinely set; anything else
+# is refused and announced, because a name nobody wrote down here is a name
+# nobody decided the child should have.
+WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
+                            "XDG_RUNTIME_DIR", clients.GEMINI_CUSTOM_HEADERS_ENV)
+WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
 # non-zero, no terminal prompt, and a config that cancels any stored credential.
 _GIT_ASKPASS_FALSE = ("/bin/false" if os.path.exists("/bin/false")
                       else "/usr/bin/false")
-WORKER_GIT_GUARDS = (
+# The only git config the worker may read: these two, cancelling the credential
+# helper and askPass. GIT_CONFIG_COUNT has to equal their number — a parent's
+# leftover GIT_CONFIG_KEY_n/VALUE_n (what `git -c ...` exports, and the
+# orchestrator runs `git -c` a lot) is read by name, so anything past the count
+# would be an unreviewed channel.
+_GIT_GUARD_CONFIG = (("credential.helper", ""), ("core.askPass", ""))
+WORKER_GIT_GUARDS = ((
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_ASKPASS", _GIT_ASKPASS_FALSE),
-    ("GIT_CONFIG_COUNT", "2"),
-    ("GIT_CONFIG_KEY_0", "credential.helper"),
-    ("GIT_CONFIG_VALUE_0", ""),
-    ("GIT_CONFIG_KEY_1", "core.askPass"),
-    ("GIT_CONFIG_VALUE_1", ""),
+    # GIT_CONFIG_PARAMETERS is how `git -c key=value` reaches a child git; it
+    # is read before GIT_CONFIG_KEY_n, so forcing it empty is not optional.
+    ("GIT_CONFIG_PARAMETERS", ""),
+    ("GIT_CONFIG_COUNT", str(len(_GIT_GUARD_CONFIG))))
+    + tuple(("GIT_CONFIG_KEY_%d" % i, k) for i, (k, _v) in enumerate(_GIT_GUARD_CONFIG))
+    + tuple(("GIT_CONFIG_VALUE_%d" % i, v) for i, (_k, v) in enumerate(_GIT_GUARD_CONFIG))
 )
+# Named off rather than left to the deny patterns, because these are the three
+# ways git reaches a *program* the operator installed (FF1b item 2): an ssh
+# transport, a proxy command, and an askpass helper. The guards above cannot
+# cancel them, and an allowlist miss is silent.
+WORKER_ENV_FORCED_OFF = ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+                         "SSH_ASKPASS", "SUDO_ASKPASS", "GIT_ASKPASS_REQUIRE")
 
 
 def _worker_env_denied(name: str) -> bool:
@@ -313,10 +353,32 @@ def _worker_env_allowed(name: str) -> bool:
             name.startswith(WORKER_ENV_ALLOW_PREFIXES))
 
 
+def _plan_env_passed(name: str) -> bool:
+    return (name in WORKER_PLAN_ENV_PASSLIST or
+            name.startswith(WORKER_PLAN_ENV_PASSLIST_PREFIXES))
+
+
+def _drop_extra_git_config(env: dict) -> None:
+    """Keep git's numbered config channels to the guards (FF1b item 2).
+
+    GIT_CONFIG_KEY_n/VALUE_n are read *by index*, so a leftover GIT_CONFIG_KEY_3
+    from a parent's `git -c ...` is consulted even with GIT_CONFIG_COUNT right,
+    as long as it is present. Anything at or past the guard count is removed.
+    """
+    for name in list(env):
+        for prefix in ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"):
+            if name.startswith(prefix):
+                tail = name[len(prefix):]
+                if not tail.isdigit() or int(tail) >= len(_GIT_GUARD_CONFIG):
+                    del env[name]
+                break
+
+
 def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
     """The environment of one spawned worker: an allowlist of the caller's
-    environment, the plan's own entries, the worker's single gateway ``key``,
-    and the guards that stop git from prompting or reading a stored credential.
+    environment, the plan's own passlisted entries, the worker's single gateway
+    ``key``, and the guards that stop git from prompting or reading a stored
+    credential.
 
     The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
     added only when this run genuinely goes through the gateway. ``base`` exists
@@ -324,25 +386,91 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     """
     src = os.environ if base is None else base
     env = {n: v for n, v in src.items() if _worker_env_allowed(n)}
+    # The operator's session directory (bus, sockets, sometimes the agent's own)
+    # is not the worker's, whatever the XDG_ prefix rule above decided (FF1b
+    # item 4). The plan puts a private one back.
+    env.pop("XDG_RUNTIME_DIR", None)
     for n, v in (plan.get("env") or {}).items():
-        if not _worker_env_denied(n):
-            env[n] = v
+        # A plan entry is our own code talking, so a name that is not on the
+        # passlist is drift, not an attack — refuse it and say so loudly rather
+        # than let the child quietly run under a repointed PATH or loader.
+        if not _plan_env_passed(n):
+            print("autoos-agent: refused plan env %s: not on the plan passlist"
+                  % n, file=sys.stderr)
+            continue
+        if _worker_env_denied(n):
+            print("autoos-agent: refused plan env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
     env["PWD"] = plan["cwd"]
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
+    _drop_extra_git_config(env)
+    for n in WORKER_ENV_FORCED_OFF:
+        env.pop(n, None)
     env.pop("AUTOOS_OMNIROUTE_KEY", None)
     if key:
         env["AUTOOS_OMNIROUTE_KEY"] = key
     return env
 
 
-def fence_sandbox_push(sandbox: str) -> None:
-    """Make every push out of an --isolate clone fail, however it is addressed.
+def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> dict:
+    """The environment of a child that is *our own CLI*, not a worker.
 
-    `git remote set-url --push` fences the *named* remotes, but a brief that
-    names the parent's absolute path (which `isolate_task_prefix` does, so the
-    worker can be told what to avoid) lets `git push </parent>` through — the
-    sandbox's own pre-push hook is what covers every destination.
+    The MCP server preflights a plan and runs a detached job, both by exec'ing
+    ``tools/autoos-agent.py``, which scrubs again for the client it launches. The
+    child still gets the same allowlist — a token does not need to travel to the
+    process that only forwards it — plus the one credential the CLI reads
+    directly (``AUTOOS_OMNIROUTE_KEY``, which it mints the worker's client key
+    from) and whatever ``extra`` names for itself. The path to the keys file is
+    not among them: the CLI finds it under ``ROOT``.
+    """
+    env = worker_env({"cwd": os.getcwd(), "env": {}}, None, base=base)
+    src = os.environ if base is None else base
+    if src.get("AUTOOS_OMNIROUTE_KEY"):
+        env["AUTOOS_OMNIROUTE_KEY"] = src["AUTOOS_OMNIROUTE_KEY"]
+    env.update(extra or {})
+    return env
+
+
+def provision_runtime_dir(path: str | None) -> str | None:
+    """Create the worker's private ``XDG_RUNTIME_DIR``: empty, mode 0700.
+
+    Provisioned at the launch site, not in the plan builder — a dry run writes
+    nothing, and git refuses to clone into a directory that is not empty, so a
+    dir beside the clone would have to come after it. Failing to make it is not
+    fatal: a client with an unusable runtime dir falls back to its own default,
+    which is exactly the state before this change.
+    """
+    if not path or not os.path.isabs(path):
+        return None
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        print("autoos-agent: could not provision the worker's runtime dir %s: %s"
+              % (path, exc), file=sys.stderr)
+    return path
+
+
+def fence_sandbox_push(sandbox: str) -> None:
+    """Make the obvious push out of an --isolate clone fail: every remote's push
+    URL is disabled, and the clone gets a pre-push hook that exits 1.
+
+    This is an ACCIDENT GUARD, not a containment boundary, and it must not be
+    described as one. `git push --no-verify` skips the hook, `core.hooksPath`
+    points it somewhere else, and `git remote set-url` (or a URL-addressed push,
+    which never consults the disabled pushurl) sidesteps both — all three in one
+    command, with nothing stolen to do it. `tests/test_autoos_spawner.py`
+    `PushFenceHonestyTests.test_a_no_verify_push_is_NOT_blocked_by_the_hook`
+    asserts the bypass works, so a future reader cannot take this for a fence.
+
+    What it is for: a worker that *means* no harm and types `git push` — which a
+    brief that names the parent's path invites, since `pushurl` alone does not
+    cover `git push </parent>`. The containment is elsewhere: the clone is
+    disposable, and the worker's environment (worker_env, FF1b items 1, 2 and 4)
+    carries no credential, no ssh transport and no config channel to push with.
     """
     remotes = subprocess.run(["git", "-C", sandbox, "remote"],
                              capture_output=True, text=True).stdout.split()
@@ -356,6 +484,14 @@ def fence_sandbox_push(sandbox: str) -> None:
         fh.write("#!/bin/sh\n"
                  "# autoos --isolate: a worker's work leaves the sandbox by the\n"
                  "# spawner's take-it step, never by push.\n"
+                 "#\n"
+                 "# This is an ACCIDENT GUARD, not a security boundary:\n"
+                 "# `git push --no-verify` skips it, `core.hooksPath` moves it,\n"
+                 "# and `git remote set-url`/a URL-addressed push walks past the\n"
+                 "# disabled pushurl. Containment is the disposable clone plus\n"
+                 "# an env with no credential in it (tools/autoos-agent.py\n"
+                 "# worker_env). Do not add a check here and call the sandbox\n"
+                 "# sealed.\n"
                  'echo "autoos: git push is disabled in an --isolate sandbox" >&2\n'
                  "exit 1\n")
     os.chmod(path, 0o755)
@@ -2065,6 +2201,13 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                                      read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
+    # FF1b item 4: a private, empty XDG_RUNTIME_DIR of its own instead of the
+    # operator's session one (message bus, sockets, sometimes the ssh-agent).
+    # Keyed by run id inside the git-ignored state tree, so a non-isolate run
+    # does not leave a directory in the checkout it works in. Only the *name* is
+    # decided here: provisioning happens at the launch site, because a dry run
+    # writes nothing and git will not clone into a directory that has content.
+    env["XDG_RUNTIME_DIR"] = os.path.join(clients.state_dir(), "runtimes", run_id)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
@@ -4381,6 +4524,9 @@ def cmd_run(args, cfg: dict) -> int:
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
     env = worker_env(plan, key)
+    # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
+    # this is the first point past the dry run, where a directory is allowed.
+    provision_runtime_dir(env.get("XDG_RUNTIME_DIR"))
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -4427,11 +4573,13 @@ def cmd_run(args, cfg: dict) -> int:
         parent_snap = parent_snapshot()
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--local", ROOT, sb["path"]], check=True)
-        # The orchestrator still fetches from the sandbox path (unchanged);
-        # only the push URL is disabled, so `git push` from the sandbox
-        # cannot update the parent's branches.
-        subprocess.run(["git", "-C", sb["path"], "remote", "set-url", "--push",
-                        "origin", ISOLATE_PUSH_DISABLED], check=True)
+        # The orchestrator still fetches from the sandbox path (unchanged); the
+        # push URLs are disabled and the pre-push hook is installed, so an
+        # unplanned `git push` — to origin or to the parent's absolute path the
+        # containment brief names — fails. ACCIDENT GUARD, not containment: see
+        # fence_sandbox_push. The credentials it cannot use are what really
+        # keeps the parent safe (worker_env, FF1b).
+        fence_sandbox_push(sb["path"])
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()

@@ -540,44 +540,76 @@ def _backup_and_write(path, text, stamp=None):
 LANE_PATH_MARKERS = ("/AutoOS-lanes/", "/logs/sandboxes/")
 
 
-def _norm(path):
-    """Absolute, with forward slashes: the two spellings are one shape."""
-    return os.path.abspath(path).replace(os.sep, "/")
+def case_insensitive_paths():
+    """True where one directory opens under two spellings.
+
+    Windows and macOS format volumes are case-insensitive by default, so
+    `autoos-lanes` and `AutoOS-lanes` reach the same lane there. On a
+    case-sensitive filesystem they are two directories and the fence must not
+    invent a lane out of a name.
+    """
+    return os.name == "nt" or sys.platform == "darwin"
 
 
-def is_lane_checkout(path):
-    # The text as given, not abspath()'d: on POSIX a Windows path resolves
-    # against the current directory, and a lane's cwd would mark every argument
-    # a lane. A genuinely relative path is still resolved — the installer passes
-    # one, and its own directory is what the rule is about.
+def _norm(path, fold=False):
+    """Absolute, slash-separated, links and `..` resolved — the path as the
+    operating system opens it, not as it was typed (FF1b item 5).
+
+    `os.path.abspath` folds `..` lexically and never follows a symlink, so a lane
+    reached through a link (or through a link and back up) read as an ordinary
+    checkout and the fence let the render through.
+    """
+    norm = os.path.realpath(os.path.abspath(str(path)))
+    norm = norm.replace(os.sep, "/").replace("\\", "/")
+    if fold:
+        norm = os.path.normcase(norm).casefold()
+    return norm
+
+
+def is_lane_checkout(path, fold=None):
+    """True when `path` is a checkout that is going away with its sandbox.
+
+    `fold` overrides the platform's case rule (the suite runs on a
+    case-sensitive host and has to be able to prove the Windows/macOS branch).
+    """
+    fold = case_insensitive_paths() if fold is None else fold
+    # The text as given is always judged. It is resolved too — a symlink or a
+    # `..` that walks through one reaches the same directory the OS would open —
+    # unless it is an absolute path on the *other* platform, which would resolve
+    # against this one's cwd and mark every argument a lane from a lane checkout.
     given = str(path).replace(os.sep, "/").replace("\\", "/")
-    forms = [given]
-    if not os.path.isabs(given) and not (len(given) > 2 and given[1] == ":"):
-        forms.append(_norm(path))
+    foreign_abs = (len(given) > 2 and given[1] == ":") if os.sep == "/" \
+        else given.startswith("/")
+    forms = [given if not fold else given.casefold()]
+    if not foreign_abs:
+        forms.append(_norm(path, fold))
+    markers = [m if not fold else m.casefold() for m in LANE_PATH_MARKERS]
     return any(marker in form.rstrip("/") + "/"
-               for form in forms for marker in LANE_PATH_MARKERS)
+               for form in forms for marker in markers)
 
 
-def is_user_level_target(path):
+def is_user_level_target(path, fold=None):
     """True when `path` sits under a home directory the child agents read from."""
-    target = _norm(path)
+    fold = case_insensitive_paths() if fold is None else fold
+    target = _norm(path, fold)
     homes = [os.path.expanduser("~"), os.environ.get("XDG_CONFIG_HOME"),
              os.environ.get("XDG_DATA_HOME"), os.environ.get("XDG_STATE_HOME")]
     for home in homes:
         if not home:
             continue
-        base = _norm(home)
+        base = _norm(home, fold)
         if target == base or target.startswith(base + "/"):
             return True
     return False
 
 
-def user_config_fence(repo_root, target):
+def user_config_fence(repo_root, target, fold=None):
     """(ok, reason): a user-level config must not be rendered from a lane."""
-    if is_lane_checkout(repo_root) and is_user_level_target(target):
+    if is_lane_checkout(repo_root, fold) and is_user_level_target(target, fold):
         return False, ("refusing to write %s into a home directory from the lane "
                        "sandbox checkout %s — run the installer from the real "
-                       "checkout instead" % (_norm(target), _norm(repo_root)))
+                       "checkout instead" % (_norm(target, fold),
+                                             _norm(repo_root, fold)))
     return True, ""
 
 
