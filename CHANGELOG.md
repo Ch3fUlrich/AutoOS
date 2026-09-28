@@ -533,6 +533,42 @@ closes it.
 - **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
   in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
   `relaunch-line` (R3+).
+### Fixed — a load cannot emit an unvalidated edge, and D-88 is D-088 (memlink round 2, D-140, 2026-09-28)
+
+A cross-family review of `2c27a24` returned NOT READY on the D-140
+Task→Decision edges; this closes all six items test-first in
+`tests/test_sync_memory_graph.py` (28 → 47 tests).
+
+- **`--load` without `--known-slugs` emitted unvalidated edges** (HIGH):
+  `main` now refuses (clear stderr, rc 1, nothing marked) when the emitted
+  batch carries an edge-only Implements/Supersedes record and no known-slug set
+  was passed — an unresolved citation would create a dangling edge. Plain dump
+  mode still defaults to no filtering. The module Usage now shows how to build
+  the slug list (an omnigraph query of Decision slugs written to a file). An
+  `HTTPError`/`URLError` from the load endpoint becomes a named message and a
+  non-zero exit, never a traceback, and the ledger stays untouched.
+- **A bare `D-NNN` was not zero-padded** (HIGH): `D-88` and `routing-d-88` both
+  normalise to `routing-d-088`. A test documents the design fact behind the
+  review's "two ledgers" worry: this repo's D-NNN ids ARE the router's routing
+  decision numbers — one number space — so the two spellings name one decision.
+- **An edge batch could be marked on an empty-tables response** (MED):
+  `load_confirmed` returns False when the response has no per-table detail and
+  the batch carried an edge-only record (no `@key` — a retry would duplicate);
+  a node-only batch keeps the prior permissive behavior.
+- **`Supersedes` read across a sentence break** (MED): the citation must sit in
+  the same clause as the supersede/replace verb (the window is cut at `.`, `;`
+  or a newline), so a later sentence's citation is not read as a replacement.
+  A data-driven test uses fixture text, not the module's DECISIONS constants.
+- **Duplicate ledger keys from colliding task titles** (LOW): `records()` now
+  emits each ledger key once. `--known-slugs` rejects an empty value, a missing
+  value, and a value starting with `--` (so `--known-slugs --load` cannot
+  swallow `--load`); `-`, a file and `=VALUE` are covered, and a test pins node
+  lines before edge lines in the `--load` body.
+
+Known limitation (not fixed): a Task's board row is its slug source, so editing
+a row's wording mints a new slug and leaves the old slug's Implements edges
+behind (stale-edge churn); the module docstring records it.
+
 ### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
 
 Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the
