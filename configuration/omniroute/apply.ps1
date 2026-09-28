@@ -4,8 +4,10 @@
 
 .DESCRIPTION
   1. Registers every provider key found in configuration/api-keys.yml.
-  2. (Re)creates the tier combos from configuration/omniroute/combos.json.
-  3. Prunes the combos listed there as "retired" or "omitted" from the store
+  2. Refreshes the gateway's model catalog for what it just registered
+     (omniroute models <provider>), so one run is enough for a fresh machine.
+  3. (Re)creates the tier combos from configuration/omniroute/combos.json.
+  4. Prunes the combos listed there as "retired" or "omitted" from the store
      (only those).
 
   Safe to re-run: providers are add-or-update, combos are replaced in place,
@@ -223,6 +225,7 @@ function Get-AutoOSProviderDataJson {
     return $plain
 }
 
+$RegisteredNow = @()
 Write-Host 'Providers:'
 # A provider whose every route leg is registry-unavailable (task A5a) is
 # reported here and never touched below - no key lookup, no existing-id
@@ -255,6 +258,9 @@ foreach ($keyName in $ProviderMap.Keys) {
     }
     if ($DryRun) {
         Write-Host "  - $providerId : would register (key from $keyName)"
+        # The Catalog step below plans from this list too: a dry run has to say
+        # it would refresh what it would just have registered.
+        $RegisteredNow += $providerId
         continue
     }
     $varName = 'AUTOOS_KEY_' + $keyName.ToUpperInvariant()
@@ -270,10 +276,33 @@ foreach ($keyName in $ProviderMap.Keys) {
     }
     $addArgs += '--yes'
     & omniroute @addArgs *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId registered" }
+    if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId registered"; $RegisteredNow += $providerId }
     else { Write-Host "  ! $providerId registration failed - register it in the dashboard" }
     if ($hadVar) { Set-Item -Path "Env:$varName" -Value $oldVar }
     else { Remove-Item -Path "Env:$varName" -ErrorAction SilentlyContinue }
+}
+
+# --- Refresh the gateway's model catalog -------------------------------------
+# Registering a connection does not by itself put that provider's models in
+# /v1/models: the gateway enumerates a provider when it is asked for its models.
+# Reading the catalog before that gave a freshly registered provider no entries
+# to validate against, so its leg was dropped as "catalog does not know" and
+# only appeared on the SECOND apply run (L0 2026-09-27T19:07:39Z, free-ai/qwen7b
+# on a fresh machine). Order is therefore register -> refresh -> read -> combos,
+# the same order configuration/omniroute/apply.sh uses.
+Write-Host 'Catalog:'
+if ($DryRun) {
+    foreach ($providerId in $RegisteredNow) {
+        Write-Host "  - would refresh $providerId's models (omniroute models $providerId)"
+    }
+} elseif ($RegisteredNow.Count -eq 0) {
+    Write-Host '  = nothing new registered - the catalog is already current'
+} else {
+    foreach ($providerId in $RegisteredNow) {
+        & omniroute models $providerId *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId enumerated" }
+        else { Write-Host "  ! $providerId could not be enumerated - its legs may be dropped below" }
+    }
 }
 
 # --- Live catalog for validation ---

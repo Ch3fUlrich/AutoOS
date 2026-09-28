@@ -2406,7 +2406,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M — 1M ctx (meta_api first, then free)",
+          "display_name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
           "effort_default": "xhigh",
           "openhands_profile": {
             "gateway": "litellm",
@@ -2425,7 +2425,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M — 1M ctx (meta_api first, then free)",
+          "display_name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
           "effort_default": "xhigh",
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -2486,7 +2486,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "display_name": "t1 orchestrator-128k — zero spend (free legs only)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 1000000,
@@ -2504,7 +2504,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M — zero spend (free legs only)",
+          "display_name": "t1 orchestrator-128k — zero spend (free legs only)",
           "openhands_profile": {
             "max_input_tokens": 1000000,
             "max_output_tokens": 32768,

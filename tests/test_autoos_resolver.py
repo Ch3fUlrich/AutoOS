@@ -2019,7 +2019,19 @@ class PlanTests(unittest.TestCase):
                                      "reason": ""}}
         result = r.plan(card, features, client_state, registry, overlay, [],
                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
-        self.assertIsNotNone(result["route"], result)
+        # What is under test is the RULE, not the state of the market. The
+        # overlay is a snapshot of probes, so "a route exists" is a claim about
+        # the day the file was written: with a real measured overlay on disk,
+        # every private-safe route can legitimately be down, and the correct
+        # answer to a sensitive card then is input_required. Asserting a non-None
+        # route here made the suite machine-dependent — and pushed towards
+        # keeping an unsafe route alive just to satisfy it.
+        if result["route"] is None:
+            self.assertEqual(result["state"], "input_required", result)
+            # ... but only with a reason. A plan that gives up naming nothing is
+            # a resolver hole, not a private-safe refusal.
+            self.assertTrue(result.get("reason", "").strip(), result)
+            return
         route = registry["routes"][result["route"]]
         for provider_id, model_id in r.serving_legs(route, registry):
             safe, reason = registry_tool.private_safe(provider_id, model_id, registry)

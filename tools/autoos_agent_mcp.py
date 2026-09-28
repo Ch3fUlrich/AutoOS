@@ -384,7 +384,13 @@ def spawn(req: dict) -> dict:
         run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
         path = os.path.join(state_root(), run_id)
         try:
-            os.makedirs(path)
+            # Private like the spawner's workers dir: the run dir holds the task
+            # brief and autoos-ask.py's question/answer pair. makedirs' mode is
+            # masked by the umask and never applied to an existing parent, so
+            # chmod after.
+            os.makedirs(path, mode=0o700)
+            if os.name != "nt":
+                os.chmod(path, 0o700)
             break
         except FileExistsError:
             if attempt == max_attempts - 1:
@@ -678,7 +684,9 @@ def serve() -> None:
         take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
         isolate: private git clone on its own branch. lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
-        privacy=sensitive + ctx=1m unless allow_training."""
+        privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
+        does not unlock it — routing.select_combo is explicit that the flag is
+        inert there; it only waives the privacy check on an explicit --model)."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,

@@ -100,11 +100,21 @@ class RepoTests(unittest.TestCase):
                                 capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_the_1m_tier_is_1000000_everywhere(self):
+    def test_the_wide_tiers_carry_the_window_their_smallest_servable_leg_takes(self):
+        # PROVFIX3 finding 1 re-pins this: "1M everywhere" was the defect. A
+        # route falls through to its smallest leg at any time, so t1-orchestrator
+        # and t1-orchestrator-free-only advertise the 131,072 their gemini leg
+        # really takes, while the tiers whose every served leg is the 1M
+        # contributor keep the full window.
+        clamp = {"t1-orchestrator": 131072, "t1-orchestrator-free-only": 131072,
+                 "t1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
+        seen = set()
         for m in doc["models"]:
-            if m["id"].startswith("t1-") or m["id"] == "spark-1.3-contributor":
-                self.assertEqual(m["context"], 1000000, m["id"])
+            if m["id"] in clamp:
+                seen.add(m["id"])
+                self.assertEqual(m["context"], clamp[m["id"]], m["id"])
+        self.assertEqual(seen, set(clamp), "a wide tier left the catalog")
 
 
 class CheckTests(SandboxCase):
@@ -217,8 +227,8 @@ class WriteTests(SandboxCase):
                 self.assertEqual(entry["name"], model(doc, mid)["name"])
 
     def test_variants_blocks_are_generated_from_effort_ladder(self):
-        # A6a: models whose route's first leg carries an effort_ladder in the
-        # registry get a "variants" block with reasoningEffort labels (none
+        # A6a: models whose route's served head leg carries an effort_ladder in
+        # the registry get a "variants" block with reasoningEffort labels (none
         # omitted). Models without a ladder get no variants.
         self.assertEqual(self.box.run().returncode, 0)
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
@@ -237,16 +247,22 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # A6a review: t2-worker-clean (first leg deepseek/deepseek-flash with
-        # ladder none/low/high/max) gets variants for each non-"none" rung in
-        # that order; t3-driver (first leg mistral-code-latest with empty ladder)
-        # has no variants key. deepseek-v4.1-flash was the example until it
-        # fail-closed 2026-09-27T16:4xZ.
-        t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
-        expected_rungs = ["low", "high", "max"]
-        self.assertEqual([v["id"] for v in t1["variants"]], expected_rungs)
-        for v in t1["variants"]:
+        # A6a review, re-pinned by PROVFIX3 finding 8: the ladder comes from the
+        # leg that ANSWERS, not from legs[0]. t1-orchestrator-free-only's served
+        # head is gemini-3.8-flash (low/medium/high), so its variants are those
+        # three rungs. t2-worker-clean used to inherit deepseek/deepseek-flash's
+        # none/low/high/max from its first declared leg even though that provider
+        # is off (available: false, 402 2026-09-27T16:4xZ) — the picker then
+        # forwarded an effort the mistral-small leg that actually answers
+        # rejects. It now carries no ladder and no variants; t3-driver (head
+        # mistral-code-latest, empty ladder) never had any.
+        free = oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]
+        self.assertEqual([v["id"] for v in free["variants"]],
+                         ["low", "medium", "high"])
+        for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
+        self.assertNotIn("variants",
+                         oc["providers"]["omniroute"]["models"]["t2-worker-clean"])
         self.assertNotIn("variants", oc["providers"]["omniroute"]["models"]["t3-driver"])
 
 
@@ -546,13 +562,18 @@ class RegistrySourcedTests(unittest.TestCase):
 
     def test_non_string_rung_in_registry_effort_ladder_raises_error(self):
         # A6a review: a non-string rung in the head model's effort_ladder
-        # raises ValueError (load_from_registry wraps it as ConfigError).
+        # raises ValueError (load_from_registry wraps it as ConfigError). Which
+        # route the tool reports first is registry order, and that moved when
+        # MUSEAPI/PROVFIX3 changed the heads — so what is pinned here is that the
+        # error names a route, the model and the bad rung.
         doc = self.box.registry()
         doc["models"]["gemini-3.8-flash"]["effort_ladder"] = ["low", 99, "high"]
         self.box.save_registry(doc)
         result = self.box.run()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("t2-worker", result.stderr)
+        self.assertRegex(result.stderr,
+                         r"routes\.[a-z0-9-]+: non-string rung 99 "
+                         r"in model gemini-3\.8-flash effort_ladder")
 
 
 if __name__ == "__main__":
