@@ -30,6 +30,26 @@
           "note": "wired by keep-demo now",
           "homepage": "https://example.invalid/retired-demo",
           "profiles": ["workstation", "light"]
+        },
+        {
+          "id": "successor-demo",
+          "name": "Successor Component",
+          "description": "An ordinary entry another component names in replaced_by.",
+          "provider": "custom",
+          "package": "successor-demo",
+          "verify": "true",
+          "profiles": []
+        },
+        {
+          "id": "replaced-demo",
+          "name": "Replaced Component",
+          "description": "A tombstone whose work moved to two live ids.",
+          "provider": "custom",
+          "package": "replaced-demo",
+          "tombstone": true,
+          "note": "split into two components",
+          "replaced_by": ["keep-demo", "successor-demo"],
+          "profiles": []
         }
       ]
     },

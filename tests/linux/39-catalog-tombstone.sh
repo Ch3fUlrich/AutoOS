@@ -498,3 +498,236 @@ if it "end-to-end: a retired id chosen by hand still plans one marked row"; then
     [[ "$row" == *"(retired)"* ]] || problems+="[the plan row reads [$row]] "
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
+
+# ─── replaced_by: a replayed retirement keeps its work ─────────────────────
+# A state file saved before a retirement names the retired id and none of the ids
+# that inherited its work, so replaying it did the retirement's bookkeeping and
+# none of the installing. `replaced_by` is what a tombstone carries so the replay
+# can find them; the fixture's `replaced-demo` is the retired-with-successors
+# shape and `retired-demo` stays the retired-without-successors shape.
+if it "catalog: a tombstone with replaced_by validates"; then
+    out="$(catalog_validate "$TOMBSTONE_FIXTURE" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "rc=$rc: $out"; fi
+fi
+
+if it "catalog: replaced_by naming an unknown id is rejected"; then
+    # An id that does not exist can never be planned, so the expansion would
+    # promise work it cannot deliver and the replay would lose it silently.
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "replaced-demo": c["replaced_by"] = ["never-existed-demo"]
+json.dump(d, open(p, "w"))
+')"
+    out="$(catalog_validate "$f" 2>&1)"; rc=$?
+    rm -f "$f"
+    if [[ $rc -ne 0 && "$out" == *"replaced_by"* ]]; then pass
+    else fail "rc=$rc out=[$out]"; fi
+fi
+
+if it "catalog: replaced_by naming a tombstone is rejected"; then
+    # Successors have to install something, or the replay lands on another row
+    # that reports skipped and the work is lost one step later.
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "replaced-demo": c["replaced_by"] = ["retired-demo"]
+json.dump(d, open(p, "w"))
+')"
+    out="$(catalog_validate "$f" 2>&1)"; rc=$?
+    rm -f "$f"
+    if [[ $rc -ne 0 && "$out" == *"replaced_by"* ]]; then pass
+    else fail "rc=$rc out=[$out]"; fi
+fi
+
+if it "catalog: replaced_by on an entry that is not a tombstone is rejected"; then
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "keep-demo": c["replaced_by"] = ["successor-demo"]
+json.dump(d, open(p, "w"))
+')"
+    out="$(catalog_validate "$f" 2>&1)"; rc=$?
+    rm -f "$f"
+    if [[ $rc -ne 0 && "$out" == *"replaced_by"* && "$out" == *"tombstone"* ]]
+    then pass; else fail "rc=$rc out=[$out]"; fi
+fi
+
+if it "catalog: an empty replaced_by is rejected"; then
+    # The field means "the work moved to these ids"; an empty list is an author
+    # intent that got lost, not a statement that nothing replaced it.
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "replaced-demo": c["replaced_by"] = []
+json.dump(d, open(p, "w"))
+')"
+    out="$(catalog_validate "$f" 2>&1)"; rc=$?
+    rm -f "$f"
+    if [[ $rc -ne 0 && "$out" == *"replaced_by"* ]]; then pass
+    else fail "rc=$rc out=[$out]"; fi
+fi
+
+if it "catalog loading: a tombstone keeps its replaced_by and a live entry keeps none"; then
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    i="$(catalog_index_of replaced-demo)"
+    j="$(catalog_index_of retired-demo)"
+    k="$(catalog_index_of keep-demo)"
+    problems=""
+    [[ "${CAT_REPLACED_BY[i]:-<missing>}" == "keep-demo,successor-demo" ]] \
+        || problems+="[replaced_by is [${CAT_REPLACED_BY[i]:-<missing>}]] "
+    [[ -z "${CAT_REPLACED_BY[j]:-}" ]] \
+        || problems+="[a tombstone with no replaced_by loaded one: [${CAT_REPLACED_BY[j]}]] "
+    [[ -z "${CAT_REPLACED_BY[k]:-}" ]] \
+        || problems+="[an ordinary entry loaded a replaced_by: [${CAT_REPLACED_BY[k]}]] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog loading: expansion replays a tombstone as the ids that replaced it"; then
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    EXPANDED_IDS=""; EXPANDED_LINES=()
+    catalog_expand_replacements replaced-demo >/dev/null
+    problems=""
+    [[ "$EXPANDED_IDS" == "replaced-demo keep-demo successor-demo" ]] \
+        || problems+="[expanded selection [$EXPANDED_IDS]] "
+    # The tombstone row stays: it is what still reports "skipped: retired", and
+    # the one muted line is what tells the reader the work did not vanish.
+    [[ "${EXPANDED_LINES[0]:-<none>}" == "replaced-demo is retired: replaced by keep-demo, successor-demo" ]] \
+        || problems+="[announced [${EXPANDED_LINES[0]:-<none>}]] "
+    [[ ${#EXPANDED_LINES[@]} -eq 1 ]] || problems+="[${#EXPANDED_LINES[@]} lines announced] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog loading: expansion names each retired id once and adds nothing twice"; then
+    # A state file written after one replay already lists the replacements; a
+    # second replay must not plan them twice, and untouched ids keep their place.
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    EXPANDED_IDS=""; EXPANDED_LINES=()
+    catalog_expand_replacements keep-demo replaced-demo successor-demo prompted-demo >/dev/null
+    problems=""
+    [[ "$EXPANDED_IDS" == "keep-demo replaced-demo successor-demo prompted-demo" ]] \
+        || problems+="[expanded selection [$EXPANDED_IDS]] "
+    [[ ${#EXPANDED_LINES[@]} -eq 1 ]] || problems+="[${#EXPANDED_LINES[@]} lines announced] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog loading: expansion leaves an id with no replacement alone"; then
+    # The guard that the new step is inert on the path every run already takes:
+    # retired without successors, and ordinary ids, come back unchanged.
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    EXPANDED_IDS=""; EXPANDED_LINES=()
+    catalog_expand_replacements retired-demo keep-demo prompted-demo >/dev/null
+    problems=""
+    [[ "$EXPANDED_IDS" == "retired-demo keep-demo prompted-demo" ]] \
+        || problems+="[expanded selection [$EXPANDED_IDS]] "
+    [[ ${#EXPANDED_LINES[@]} -eq 0 ]] || problems+="[announced: ${EXPANDED_LINES[*]}] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+# old_state_tree <json> — a scratch tree whose state file is what a machine
+# wrote *before* the retirement: it names a retired id and none of its
+# successors. Hand-authored rather than produced by a run, because the whole
+# point is a file that predates the field.
+old_state_tree() {
+    local tree state
+    tree="$(tombstone_tree)"
+    state="$tree/state.json"
+    printf '%s\n' "$1" > "$state"
+    printf '%s\n' "$tree"
+}
+
+if it "from-state: replaying a state saved before the retirement plans the replacements"; then
+    tree="$(old_state_tree '{"version":1,"platform":"linux","profile":"custom","selected":["replaced-demo"],"answers":{},"results":{}}')"
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --from-state "$tree/state.json" --yes --no-color \
+        --dry-run --save-state "$tree/state2.json" 2>&1)"; rc=$?
+    planned="$(printf '%s\n' "$out" | grep -E '^ +[0-9]+\. ')"
+    line="$(printf '%s\n' "$out" | grep 'is retired: replaced by' | head -1)"
+    row="$(printf '%s\n' "$out" | grep -E '^ +[0-9]+\. Replaced Component' | head -1)"
+    problems=""
+    (( rc == 0 )) || problems+="[rc=$rc: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$planned" == *"Successor Component"* ]] || problems+="[the successor is not planned: [$planned]] "
+    [[ "$planned" == *"Kept Component"* ]] || problems+="[the first replacement is not planned: [$planned]] "
+    [[ "$row" == *"(retired)"* ]] || problems+="[the tombstone row reads [$row]] "
+    [[ "$line" == "replaced-demo is retired: replaced by keep-demo, successor-demo" ]] \
+        || problems+="[announced as [$line]] "
+    [[ "$out" == *"Kept Component done"* ]] || problems+="[the replacement was not installed: $(printf '%s\n' "$out" | tail -6)] "
+    [[ "$out" == *"Successor Component done"* ]] || problems+="[the second replacement was not installed]"
+    [[ "$out" == *"Replaced Component: skipped: retired"* ]] || problems+="[the tombstone reported no skip]"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+    rm -rf "$tree"
+fi
+
+if it "from-state: a replay records the replacements as installed and the tombstone as skipped"; then
+    # No --dry-run here: a dry run only announces the state file, and the
+    # recorded buckets are what a second replay reads back. Nothing is touched
+    # either way — every component the plan names is a `custom` one whose work
+    # is a post-install step the fixture does not carry.
+    tree="$(old_state_tree '{"version":1,"platform":"linux","profile":"custom","selected":["replaced-demo"],"answers":{},"results":{}}')"
+    HOME="$tree/home" bash "$tree/setup.sh" --from-state "$tree/state.json" --yes --no-color \
+        --save-state "$tree/state2.json" >/dev/null 2>&1
+    saved="$(tombstone_state_results "$tree/state2.json")"
+    again="$(HOME="$tree/home" bash "$tree/setup.sh" --from-state "$tree/state2.json" --yes --no-color \
+        --dry-run 2>&1)"; rc=$?
+    second="$(printf '%s\n' "$again" | grep -E '^ +[0-9]+\. ')"
+    rm -rf "$tree"
+    problems=""
+    [[ "$saved" == "installed=[keep-demo successor-demo] skipped=[replaced-demo] failed=[] answers={}" ]] \
+        || problems+="[the state file says: $saved] "
+    # Replaying the replay: the saved selection now lists the successors itself,
+    # so the tombstone adds nothing and each row appears exactly once.
+    (( rc == 0 )) || problems+="[second replay rc=$rc] "
+    [[ "$(printf '%s\n' "$second" | grep -c 'Kept Component')" == "1" ]] \
+        || problems+="[the second replay planned Kept Component twice: $second] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "end-to-end: --only a retired id plans the ids that replaced it"; then
+    # --serve/-Send reaches setup.sh as --only, so the browser's saved selection
+    # replays through this same expansion; profiles never name a tombstone.
+    tree="$(tombstone_tree)"
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only replaced-demo --yes --no-color --dry-run 2>&1)"; rc=$?
+    rm -rf "$tree"
+    planned="$(printf '%s\n' "$out" | grep -E '^ +[0-9]+\. ')"
+    problems=""
+    (( rc == 0 )) || problems+="[rc=$rc: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$planned" == *"Successor Component"* && "$planned" == *"Kept Component"* ]] \
+        || problems+="[--only planned only: [$planned]] "
+    [[ "$out" == *"replaced-demo is retired: replaced by keep-demo, successor-demo"* ]] \
+        || problems+="[nothing announced the substitution]"
+    [[ "$out" != *"Unknown component"* ]] || problems+="[--only refused a known id]"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog tombstone: the serve payload carries replaced_by"; then
+    # The page draws the retired row from the payload; the fact of what took the
+    # work over has to cross with it, the way `tombstone` and `note` do.
+    failures="$(python3 - "$TOMBSTONE_FIXTURE" <<'PY' 2>&1
+import json, sys
+sys.path.insert(0, "lib/linux")
+from serve import state_components
+
+catalog = json.load(open(sys.argv[1], encoding="utf-8"))
+comps = {c["id"]: c for c in state_components(catalog, "linux", {}, "x64", False, {})}
+bad = []
+rep = comps.get("replaced-demo") or {}
+if rep.get("replaced_by") != ["keep-demo", "successor-demo"]:
+    bad.append("replaced_by is %r" % (rep.get("replaced_by"),))
+tomb = comps.get("retired-demo") or {}
+if tomb.get("replaced_by") != []:
+    bad.append("a tombstone with no replacements says %r" % (tomb.get("replaced_by"),))
+keep = comps.get("keep-demo") or {}
+if "replaced_by" not in keep:
+    bad.append("an ordinary entry has no replaced_by key at all")
+print("; ".join(bad))
+PY
+)"
+    assert_eq "$failures" ""
+fi

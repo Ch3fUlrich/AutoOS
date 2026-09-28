@@ -998,6 +998,126 @@ Test-Case 'tombstone: setup.ps1 -FromState replays a retired id without a warnin
         "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(500, $r.Out.Length)))"
 }
 
+# ─── replaced_by: a replayed retirement keeps its work ─────────────────────
+# A state file saved before a retirement names the retired id and none of the ids
+# that inherited its work, so the replay booked the retirement and installed
+# nothing. `replaced-demo` is the fixture's retired-with-successors row;
+# `retired-demo` stays the retired-without-successors one.
+Test-Case 'tombstone: replaced_by naming an unknown id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('never-existed-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'unknown') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by naming a tombstone is rejected' {
+    # A successor has to install something, or the replay loses the work one
+    # step later on another row that can only report skipped.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'replaced_by' @('successor-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty replaced_by is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @()
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: a valid replaced_by does not make the catalog fail' {
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: the projection carries replaced_by' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $r = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (@($t.ReplacedBy) -join ',') 'keep-demo,successor-demo' `
+        "the row lost its successors: [$(Get-AutoOSComponentProperty $t 'ReplacedBy' '<missing>' | Out-String)]"
+    Assert-Equal (@($r.ReplacedBy).Count) 0 'a tombstone with no replaced_by loaded one'
+    Assert-Equal (@($k.ReplacedBy).Count) 0 'an ordinary entry loaded a replaced_by'
+}
+
+Test-Case 'tombstone: expansion replays a tombstone as the ids that replaced it' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo successor-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion adds nothing twice and keeps the order' {
+    # A state written by a replay already lists the successors; replaying it
+    # must not plan them a second time.
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('keep-demo', 'replaced-demo', 'successor-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'keep-demo replaced-demo successor-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 1 "lines: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion leaves an id with no replacement alone' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('retired-demo', 'keep-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'retired-demo keep-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 0 "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion names only successors this machine offers' {
+    # A Windows-only successor on a Pi: promising it in the line and then
+    # planning nothing would be the same defect wearing better manners.
+    $avail = @($tombAvailable | Where-Object { $_.Id -ne 'successor-demo' })
+    $x = Expand-AutoOSTombstoneReplacements -Available $avail -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo' "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: the serve payload carries replaced_by' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'replaced-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-Equal (@($t.replaced_by) -join ',') 'keep-demo,successor-demo' `
+        "payload row: $($t | ConvertTo-Json -Compress)"
+    Assert-True $k.Contains('replaced_by') 'an ordinary entry has no replaced_by key at all'
+    Assert-Equal (@($k.replaced_by).Count) 0 'an ordinary entry carries successors'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a tombstone plans its replacements' {
+    # -Serve passes the browser's selection through as -Only, so the served
+    # replay takes this path too; a profile never names a tombstone.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'replaced-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 `
+                 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $r.Out -notmatch 'Unknown component') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a tombstone as its replacements' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-old-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('replaced-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('replaced-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $rows = @(($r.Out -split "`n") | Where-Object { $_ -match '^\s+\d+\.\s' })
+    $retiredRow = @($rows | Where-Object { $_ -match 'Replaced Component' })[0]
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $retiredRow -match '\(retired\)' -and $r.Out -match 'Successor Component.*done' `
+                 -and $r.Out -notmatch 'not available on this machine') `
+        "rc=$($r.Rc) rows=$($rows -join ' | ') out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 
