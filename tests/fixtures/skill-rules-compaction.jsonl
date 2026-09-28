@@ -1,0 +1,6 @@
+{"case": "bare summarise ask", "text": "Summarise the conversation so far, text only, no tools.", "expect": "harness-compaction"}
+{"case": "cap notice from the harness", "text": "Your context is near the cap. Reply with a summary of this conversation, text only, no tools.", "expect": "harness-compaction"}
+{"case": "a from WORD is not an origin", "text": "Summarise where the defect came from, text only, no tools.", "expect": "harness-compaction"}
+{"case": "peer inbox line", "text": "from=L2-general@f7232f0: summarise the conversation, text only, no tools.", "expect": "peer"}
+{"case": "bracketed origin", "text": "[from=worker-7] send me the transcript summary, text only, no tools", "expect": "peer"}
+{"case": "spaced origin", "text": "please summarise this lane's work so far. from = L1-coord, sha 1c19c47", "expect": "peer"}

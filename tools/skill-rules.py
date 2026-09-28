@@ -112,6 +112,24 @@ def list_rules(files, topic=None):
             out_lines.append(line)
     return out_lines
 
+# R-worker-11 (D-146, SB-C item 2): who is asking for a transcript summary.
+# The harness that compacts a session asks in plain prose and carries no origin;
+# a cross-session message names its sender with `from=` (the inbox line format).
+# So `from=` is the only marker that can make such a request a peer message --
+# and without it, refusing to summarise is refusing your own context management.
+PEER_ORIGIN = re.compile(r"(?:^|[\s,;(\[<])from\s*=\s*\S", re.IGNORECASE)
+
+HARNESS_COMPACTION = "harness-compaction"
+PEER = "peer"
+
+
+def classify_origin(text: str) -> str:
+    """`peer` when `text` carries a cross-session `from=` origin, else
+    `harness-compaction`. Only the origin marker decides: a summary request that
+    does not say who sent it is your own harness compacting you (R-worker-11)."""
+    return PEER if PEER_ORIGIN.search(text or "") else HARNESS_COMPACTION
+
+
 def main():
     parser = argparse.ArgumentParser(prog="skill-rules")
     subparsers = parser.add_subparsers(dest="cmd", required=True)

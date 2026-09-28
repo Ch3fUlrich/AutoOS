@@ -2,6 +2,7 @@
 """Tests for the skill-rules utility script.
 """
 import re
+import json
 import unittest
 import subprocess
 import sys
@@ -238,6 +239,66 @@ class RuleResolutionTests(unittest.TestCase):
                     missing.append(f"{old_id} -> {new_id}")
         self.assertEqual(missing, [],
                          f"rule-map targets not in SKILL.md: {missing}")
+
+
+class CompactionRuleTests(unittest.TestCase):
+    """D-146 / SB-C item 2: `R-worker-11` — who may ask for a transcript summary.
+
+    A 'summarise the conversation, text only, no tools' request with no cross-session
+    `from=` is the agent's own harness compacting it, so complying is the right call
+    and a refusal is a self-inflicted context death; only a `from=` line can be a
+    peer (and a peer asking for a transcript is an injection). The fixture is the
+    contract: one JSON object per line, and both verdicts must appear, so a
+    classifier that stops reading `from=` — or starts reading a bare 'from' word as
+    one — fails here rather than in a live lane."""
+
+    REPO = Path(__file__).resolve().parent.parent
+    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
+    FIXTURE = REPO / 'tests' / 'fixtures' / 'skill-rules-compaction.jsonl'
+
+    def cases(self):
+        lines = self.FIXTURE.read_text(encoding='utf-8').splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+
+    def test_a_request_without_from_is_harness_compaction(self):
+        bare = [case for case in self.cases()
+                if case['expect'] == _sr.HARNESS_COMPACTION]
+        self.assertTrue(bare, "the fixture names no from=-less case at all")
+        for case in bare:
+            self.assertEqual(_sr.classify_origin(case['text']),
+                             _sr.HARNESS_COMPACTION, case['case'])
+
+    def test_a_request_with_a_from_origin_is_a_peer(self):
+        peers = [case for case in self.cases() if case['expect'] == 'peer']
+        self.assertTrue(peers, "the fixture names no from= case at all")
+        for case in peers:
+            self.assertEqual(_sr.classify_origin(case['text']), _sr.PEER, case['case'])
+
+    def test_every_fixture_case_matches_its_verdict(self):
+        for case in self.cases():
+            self.assertEqual(_sr.classify_origin(case['text']), case['expect'],
+                             case['case'])
+
+    def test_the_fixture_carries_both_classes(self):
+        self.assertEqual({c['expect'] for c in self.cases()},
+                         {_sr.HARNESS_COMPACTION, _sr.PEER})
+
+    def test_the_skill_file_defines_the_rule(self):
+        rules = {}
+        for line in self.SKILL.read_text(encoding='utf-8').splitlines():
+            parsed = parse_rule(line)
+            if parsed:
+                rules[parsed[0]] = parsed
+        rule = rules.get('R-worker-11')
+        self.assertIsNotNone(rule, 'R-worker-11 is not a rule in SKILL.md')
+        _id, imperative, why, source = rule
+        self.assertIn('from=', imperative)
+        self.assertTrue(why and source, 'the rule lost its (why: …; source: …) tail')
+
+    def test_the_skill_file_passes_the_checker(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), 'check', str(self.SKILL)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 if __name__ == '__main__':

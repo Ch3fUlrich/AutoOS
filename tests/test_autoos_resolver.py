@@ -4269,3 +4269,114 @@ class ClaudeBudgetGateTests(unittest.TestCase):
         self.assertEqual(skipped["cc/claude-opus-4-6"],
                          ["claude_budget: cc/claude-opus-4-6 held for finals"])
 
+
+
+class ZenClaudeLegRulesTests(unittest.TestCase):
+    """SB-C item 3 (the hole FREEKEYS-1 found): a provider wildcard allow must
+    not re-open a Claude leg that ``deny-claude-paid-api`` denies.
+
+    ``allow-opencode-zen-client-bound`` (match ``opencode-zen/*``) sat ABOVE
+    ``deny-claude-paid-api`` (match ``*/claude-*``) and matched first, so a
+    Claude leg spelled under zen was never denied by the leg rules — and the leg
+    rules are the only Claude filter that still applies once the budget gate
+    says yes (a declared final, or the budget off). The rule list is the real
+    catalog/ai-registry.json; only the legs are synthetic (an unknown provider is
+    a dead route, so a bare new spelling would not reach the rule filter).
+    """
+
+    ZEN_CLAUDE = "opencode-zen/claude-sonnet-5"
+    ZEN_FREE = "opencode-zen/muse-spark-1.3-contributor-free"
+
+    def registry(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        registry["models"]["claude-sonnet-5"] = {
+            "id": "claude-sonnet-5", "family": "anthropic", "tier": "paid",
+            "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["routes"]["r-zen-claude"] = {
+            "id": "r-zen-claude", "class": "frontier",
+            "legs": [self.ZEN_CLAUDE, self.ZEN_FREE]}
+        registry["policy"]["claude_budget"] = {
+            "mode": "budget", "weekly_share_left": 0.10, "budget_below": 0.25,
+            "source": "test SB-C"}
+        return registry
+
+    def features(self):
+        return {"need_tokens": 1000}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def legs(self, card, registry, env, route_id="r-zen-claude"):
+        kept, skipped, _ = r.usable_legs(registry["routes"][route_id], card,
+                                        self.features(), self.state(),
+                                        registry, {}, "opencode", None, env)
+        return kept, skipped
+
+    # --- the committed verdict, rules only ----------------------------------
+
+    def test_a_claude_leg_under_the_zen_wildcard_is_denied(self):
+        registry = self.registry()
+        rule = registry_tool.leg_rule_for(self.ZEN_CLAUDE, registry)
+        self.assertIsNotNone(rule, self.ZEN_CLAUDE)
+        self.assertFalse(rule["allow"],
+                         "matched %s: the zen wildcard re-opens Claude" % rule["id"])
+        self.assertTrue(registry_tool.leg_denied(self.ZEN_CLAUDE, registry))
+
+    def test_a_declared_final_does_not_reopen_a_claude_leg_under_zen(self):
+        """The budget gate says yes (the orchestrator declared the final), and
+        the leg rules must still say no: a zen Claude leg is a paid API."""
+        registry = self.registry()
+        env = {"AUTOOS_CLAUDE_FINAL": "L1-routing@deadbeef"}
+        _kept, skipped = self.legs({"kind": "final", "privacy": "public"},
+                                   registry, env)
+        self.assertNotIn(("zen", "claude-sonnet-5"), _kept)
+        reasons = " ".join(skipped[self.ZEN_CLAUDE])
+        self.assertIn("leg_rules", reasons)
+        self.assertNotIn("claude_budget", reasons)
+
+    def test_without_a_declaration_the_budget_holds_it_too(self):
+        """Latent half of the same hole: with the budget ON and nothing
+        declared, the leg is held by the budget — so the leg-rule hole only
+        shows through when the gate allows Claude. Pinned so a future reader
+        knows which layer closed it first."""
+        registry = self.registry()
+        _kept, skipped = self.legs({"kind": "final", "privacy": "public"},
+                                   registry, {})
+        reasons = " ".join(skipped[self.ZEN_CLAUDE])
+        self.assertIn("claude_budget", reasons)
+
+    # --- what must NOT change ----------------------------------------------
+
+    def test_non_claude_zen_legs_stay_allowed(self):
+        registry = self.registry()
+        for leg in [self.ZEN_FREE, "opencode-zen/deepseek-v4.1-flash",
+                    "opencode-zen/glm-5.2"]:
+            rule = registry_tool.leg_rule_for(leg, registry)
+            self.assertIsNotNone(rule, leg)
+            self.assertTrue(rule["allow"], "%s denied by %s" % (leg, rule["id"]))
+
+    def test_the_two_free_claude_seats_keep_their_allow(self):
+        """The reorder moves the paid-API deny up, never onto a seat that is
+        Claude by contract: the subscription seat and the free sign-in."""
+        registry = self.registry()
+        for leg, seat in [("cc/claude-opus-4-6", "allow-claude-code-subscription"),
+                          ("antigravity/claude-opus-4-6-thinking",
+                           "allow-antigravity-signin")]:
+            rule = registry_tool.leg_rule_for(leg, registry)
+            self.assertEqual((rule or {}).get("id"), seat, leg)
+
+    def test_the_claude_deny_precedes_every_provider_wildcard_allow(self):
+        """Structural: the deny is only as strong as its position, so no
+        wildcard provider allow except the named free seats may match first."""
+        rules = self.registry()["policy"]["leg_rules"]
+        ids = [rule["id"] for rule in rules]
+        deny = ids.index("deny-claude-paid-api")
+        seats = {"allow-claude-code-subscription", "allow-antigravity-signin"}
+        for rule in rules[:deny]:
+            if rule["allow"] is True and rule["match"].endswith("/*"):
+                self.assertIn(rule["id"], seats,
+                              "%s re-opens Claude before deny-claude-paid-api"
+                              % rule["id"])

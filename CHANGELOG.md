@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — spawn isolation, compaction rule, and the zen Claude leg hole (SB-C, 2026-09-28)
+
+Three items from the SB-C brief:
+
+- **SPAWNISO** (`tools/autoos_agent_mcp.py`): KEYDENY3 forced tiers 2-3 and every
+  leaf role into an isolated clone, but a tier-1 *write* role still ran in the
+  caller's checkout — and `role=implement, complexity=hard` routes UP to tier 1
+  (`routing.select_combo`'s public-strong bucket). A write-role card now defaults
+  to `isolate`, and one that explicitly asks for `isolate=False` while `cwd` is the
+  caller's own worktree is refused unless the call names `allow_shared_checkout=True`.
+  The MCP tool's `isolate` default became `None` (absent = the default applies) so a
+  caller that never mentions it is not read as asking to run in place. Read-only
+  roles (review, orchestrate) still run in place.
+- **COMPACTRULE** (D-146): `.agents/skills/unattended-orchestration/SKILL.md` gains
+  `R-worker-11` — a "summarise, no tools" ask carrying no cross-session `from=` is
+  the agent's own harness compacting it, so it should comply or hand off before the
+  cap; only a `from=` line can be a peer. `classify_origin()` in
+  `tools/skill-rules.py` decides it, pinned by `tests/fixtures/skill-rules-compaction.jsonl`
+  (both verdicts must appear in the fixture).
+- **ZENCLAUDE** (`catalog/ai-registry.json`, found by FREEKEYS-1): `leg_rules`
+  matched `allow-opencode-zen-client-bound` (`opencode-zen/*`) before
+  `deny-claude-paid-api` (`*/claude-*`), so a Claude leg spelled under zen was never
+  denied by the leg rules. Measured live, not latent: with `AUTOOS_CLAUDE_FINAL`
+  declared (the gate the leg rules are supposed to sit under), the resolver returned
+  `opencode-zen/claude-sonnet-5` as a usable leg; without the declaration the Claude
+  budget held it, so only that first half was open. `deny-claude-paid-api` now
+  precedes every provider wildcard allow, with the two free Claude seats
+  (`cc/*`, `antigravity/*`) moved up with it so they keep matching first. Sweeping
+  every leg the registry names: no committed verdict changed
+  (`tests/test_autoos_resolver.py ZenClaudeLegRulesTests`).
+
 ### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
 
 Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated

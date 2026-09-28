@@ -1937,10 +1937,31 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
+        "id": "allow-claude-code-subscription",
+        "match": "cc/*",
+        "allow": true,
+        "reason": "Claude Code subscription seat, not a paid API. Moved up with deny-claude-paid-api (SB-C): the two Claude seats that are Claude by contract must match before the paid-API deny, no other provider wildcard may",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "allow-antigravity-signin",
+        "match": "antigravity/*",
+        "allow": true,
+        "reason": "agy free sign-in, not a paid API. Moved up with deny-claude-paid-api (SB-C) for the same reason as cc/*: it serves Claude-legitimately on a free seat",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "deny-claude-paid-api",
+        "match": "*/claude-*",
+        "allow": false,
+        "reason": "no Claude models through a paid API (too expensive). First before every provider wildcard allow on purpose (SB-C, found by FREEKEYS-1): 'opencode-zen/*' sat above this rule and matched first, so opencode-zen/claude-* was never denied by the leg rules and was usable the moment the Claude budget gate said yes (a declared final, or budget off). A leg_rule is only as strong as its position",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C item 3 2026-09-28, tests/test_autoos_resolver.py ZenClaudeLegRulesTests"
+      },
+      {
         "id": "allow-opencode-zen-client-bound",
         "match": "opencode-zen/*",
         "allow": true,
-        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them",
+        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them. This wildcard no longer reaches a Claude spelling: deny-claude-paid-api (*/claude-*) precedes it since SB-C",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); operator direction 2026-09-27T07:3xZ (corrects the 04:5xZ 'never in gateway combos')"
       },
       {
@@ -1986,31 +2007,10 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
-        "id": "allow-claude-code-subscription",
-        "match": "cc/*",
-        "allow": true,
-        "reason": "Claude Code subscription seat, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "allow-antigravity-signin",
-        "match": "antigravity/*",
-        "allow": true,
-        "reason": "agy free sign-in, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
         "id": "allow-gpt-oss",
         "match": "*/gpt-oss-*",
         "allow": true,
         "reason": "open-weight gpt-oss is not an OpenAI paid-API model",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "deny-claude-paid-api",
-        "match": "*/claude-*",
-        "allow": false,
-        "reason": "no Claude models through a paid API (too expensive)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
