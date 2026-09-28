@@ -1,8 +1,8 @@
-# RESTART — cheap relaunches: state card + context pack (spec v2)
+# RESTART — cheap relaunches: state card + context pack (spec v3)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
-Status: SPEC v2. v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
+Status: SPEC v3 (v2 Sonnet FIX-FIRST resolved, table under Delivery). v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
 `work/L1-routing/review-restart-spec.out`: 7 blockers, 11 high); v2 resolves every finding (§R at
 the end). Next: the Sonnet review, then the lanes.
 
@@ -44,8 +44,14 @@ code from state the session keeps small at every wave. Then the context cap drop
   record before it is still returned when it is after P in file order, and is flagged `(late)`.
 - **No parseable timestamp:** an inbox with records but no timestamp (another shape) makes every
   reader exit 1 with `no timestamped records in <file>`. It never reads as "no events".
-- **Acknowledgement markers:** one list, reused from `tools/autoos_heartbeat.py` `_NOT_AN_ORDER_RE`
-  (`→ done`, `→ ack`, `→ relaunched`, `→ operator`, `→ main`, …). §1 and §3 cite it.
+- **Acknowledgement markers:** one list, `tools/autoos_heartbeat.py` `_NOT_AN_ORDER_RE`. It holds
+  only `lesson:|→ done` today. Lane R2a extends it to the markers in use (`→ done`, `→ ack`,
+  `→ relaunched`, `→ operator`, `→ main`) with a test per marker. §1 and §3 cite that one list.
+- **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that
+  has no trailing newline (a torn append): it is not a record and not a continuation, and the next
+  read sees it whole. Writers append one complete line per write (`append_inbox_line` already does,
+  in `a` mode). A record whose timestamp line fails the ISO parse *after* a newline is reported as
+  `malformed at line N`, never glued onto the previous record.
 
 ## 1. State card — `<RUN>/status/<name>.card.md`
 
@@ -100,8 +106,10 @@ printed. The order is:
      for which no later record in its own inbox from the parent contains the first 7 hex of `<sha>`
      together with `main=`.
    - An **open question** is a record in `<RUN>/inbox/L0.md` or this session's inbox matching
-     `Q[-:]\s?\d*` or `question:` that was written by this session, with no later `answer Q…` /
-     `ANSWERED` record naming the same id.
+     `Q[-:]\s?\d*` or `question:` that was written by this session and is not answered. Answered
+     means a later record matches `\banswer\s+(?P<id>Q-\d+)\b` or `\b(?P<id>Q-\d+)\s+ANSWERED\b`
+     (the id-first form in use) with the same id. A `question:` without an id is open until a later
+     `→ done` record of this session quotes its first 40 characters.
 3. **Memory:** stub `memory: not wired (MEMSPEC)`.
 4. **Role brief:** `<RUN>/briefs/<name>.md`, verbatim.
 5. **State card:** verbatim.
@@ -127,8 +135,10 @@ printed. The order is:
 
 ## 5. Context cap and the metric
 
-- **Cap:** `policy.handoff_caps.claude-opus-1m` goes to `cap_tokens` 350000 and `cap_fraction` 0.35
-  (source D-040). `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
+- **Cap:** D-040 names the Opus orchestrators. The registry row `claude-opus-1m` today matches
+  `["opus","fable"]`, so the lane first splits it: `claude-opus-1m` (`["opus"]`) goes to `cap_tokens`
+  350000 / `cap_fraction` 0.35 (source D-040), and a new `claude-fable-1m` (`["fable"]`) keeps 600000
+  until the router decides. That default is reversible and is asked as a `Q:` line. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
   pinned tests change in the same lane. `tools/registry.py validate` asserts
   `cap_tokens == window × cap_fraction`.
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
@@ -148,7 +158,17 @@ printed. The order is:
 ## 6. Context provenance (operator D-042, PLAN §16)
 
 Goal: lineage for every context a session starts from. The console can show which pack a session
-started from, diff two packs, and answer "why this decision" by replaying the exact pack.
+started from, diff two packs, and answer "why this decision" by replaying the exact pack. Trade-off
+(operator retention D-042): exact replay works for 90 days. After that the manifest still names every
+part by sha, which proves lineage but can no longer rebuild the bytes.
+
+- **Redaction:** every blob is written through the repo's one secret-pattern module
+  (`tools/autoos_redact.py`, landing with REDACTMERGE). Packs quote inbox text, briefs and operator
+  lines verbatim, so a blob holds the redacted text and its sha is the sha of the redacted bytes.
+  R7 starts after REDACTMERGE is on main.
+- **Canonical JSON:** manifests are serialized with `json.dumps(obj, sort_keys=True,
+  separators=(",", ":"), ensure_ascii=False)`, UTF-8, integers only (token counts), and UTC times as
+  `YYYY-MM-DDTHH:MM:SSZ` strings. A test pins the id of a fixed manifest.
 
 - **Store:** `logs/context/` in the repo the session runs from (git-ignored, like `logs/sandboxes/`).
   The module is `tools/autoos_context_store.py` (new).
@@ -183,16 +203,30 @@ started from, diff two packs, and answer "why this decision" by replaying the ex
 | lane | scope | files (one writer each) |
 |---|---|---|
 | R1 inbox | §0 module + `inbox`; replace `main()`'s dispatch fallthrough (`cmd_list … else cmd_run`) with an explicit verb table so later verbs cannot fall into `run` | tools/autoos_inbox.py (new), tools/autoos-agent.py (dispatch + inbox verb), tests |
-| R2 card | `card check`, heartbeat `card: stale` | tools/autoos-agent.py, tools/autoos_heartbeat.py, tools/autoos_agent_mcp.py, tests |
+| R2a card | `card check` + extend `_NOT_AN_ORDER_RE` | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
+| R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
 | R3 pack | `pack`, budget, `l1_handoff.py --pack` | tools/autoos-agent.py, .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
 | R4 relaunch | `relaunch-line`, run.json schema + example | tools/autoos-agent.py, configuration/run.example.json (new), tests |
-| R5 metric+cap | `token-rate`, before-number, then the cap (registry, DEFAULT_CAPS, tests, validate invariant) | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
+| R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
+| R5b cap | split the opus/fable row, opus 350k, DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources | SKILL.md, references/ |
 
-Order: R1 first (it freezes the dispatch). Then R2 and R5's `token-rate` in parallel (different
-files except one argparse line each). Then R3, R7, R4, the cap change, and R6. Every lane after R1
-merges main before it starts.
+Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
+dispatch-table line each), then R2b. Then R3, R7 (after REDACTMERGE is on main), R4, R5b (after the
+before-number), and R6. Every lane after R1 merges main before it starts. Each lane is at most three
+items per worker run.
+
+| v2 Sonnet finding | v3 resolution |
+|---|---|
+| blobs store raw inbox/brief text | §6 Redaction through autoos_redact; R7 after REDACTMERGE |
+| opus row also matches fable | §5 split the row; fable stays 600k, asked as Q: |
+| `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it, test per marker |
+| torn appends by concurrent writers | §0 last line without newline ignored; malformed reported |
+| R2/R5 over 3 items | R2a/R2b, R5a/R5b |
+| canonical JSON undefined | §6 pinned serialization + id test |
+| 90-day prune vs replay | §6 trade-off stated in the goal |
+| "answered" left to prose | §3 exact patterns |
 
 ## §R. v1 review findings → v2 resolution
 
