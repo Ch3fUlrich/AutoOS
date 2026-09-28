@@ -43,7 +43,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pass here. No test that exists on `origin/main` was edited to make this merge
   pass; the only hostexec-test edits are the lane's own pre-merge fixture splits
   (`"gh" "p_abc123"` is the same string as `"ghp_abc123"`, written so GitHub push
-  protection sees no literal).
+  protection sees no literal). Verified on a fresh clone of the merged lane
+  (`set -o pipefail`, each job under `systemd-run --user --scope -p
+  MemoryMax=2G`): the targeted set (`tests/test_autoos_spawner.py tests/ -k
+  'hostexec or redact or audit'`) 197 passed / 3 skipped / 4402 subtests,
+  `tests/test_autoos_spawner.py` 557 passed + 73 subtests, and the whole python
+  suite `2060 passed, 4 skipped, 4596 subtests passed`, exit 0.
 
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
