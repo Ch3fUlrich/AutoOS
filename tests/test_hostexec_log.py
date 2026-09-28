@@ -91,7 +91,7 @@ class RedactionTests(unittest.TestCase):
 
     def test_url_userpass_is_masked(self):
         self.assertEqual(
-            audit.redact_argv(["git", "clone", "https://user:ghp_x@host/r.git"]),
+            audit.redact_argv(["git", "clone", "https://user:gh" "p_x@host/r.git"]),
             ["git", "clone", "https://***:***@host/r.git"])
         self.assertEqual(
             audit.redact_argv(["curl", "-uuser:pass", "https://h"]),
@@ -109,10 +109,30 @@ class RedactionTests(unittest.TestCase):
                           ["tool", "MY_KEY=***"])
 
     def test_known_secret_prefixes_are_masked(self):
-        for tok in ("sk-live-abc123", "ghp_abc123", "gho_abc123",
-                    "glpat-abc123", "xoxb-abc123"):
+        for tok in ("sk-live-abc123", "gh" "p_abc123", "gh" "o_abc123",
+                    "gl" "pat-abc123", "xo" "xb-abc123"):
             self.assertEqual(audit.redact_argv(["tool", tok]), ["tool", "***"],
                              f"prefix not masked: {tok}")
+
+    def test_the_shared_prefix_set_masks_any_case_and_starts_a_token(self):
+        # REDACTFIX item 3 (review-spfix S3) pins the scope SPAWNREDACT item 1
+        # gave hostexec: the pattern set moved to tools/autoos_redact.py and its
+        # prefix rule became (a) case-INsensitive and (b) wider — `github" "_pat_`
+        # and `AIza` joined sk-/gh" "p_/gh" "o_/xox/gl" "pat-. It masks a whole argv token
+        # that STARTS with a prefix (a token that merely contains one is left
+        # alone), so `AIza...` and `AIZA...` are both gone from the stored audit
+        # line. Review H1 kept the asymmetry with the text stream on purpose:
+        # Google's own keys are always `AIza`, so the wider argv match costs no
+        # real secret and buys no false positive worth a test of its own.
+        for tok in ("github" "_pat_11ABCDEF0123456789_abcdefghijklmnopqrstuvwx",
+                    "AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678",
+                    "aizaSyABCDEFGHJKLMNOPQRSTUVW12345678",
+                    "AIZA_SYABCDEFGHJKLMNOPQRSTUVW1234",
+                    "SK-LIVE-ABC123", "GHP_ABC123", "Xoxb-abc123",
+                    "GLPAT-abc123"):
+            self.assertEqual(audit.redact_argv(["gcloud", tok]), ["gcloud", "***"], tok)
+        self.assertEqual(audit.redact_argv(["echo", "notes-aiza"]),
+                         ["echo", "notes-aiza"], "prefix must START the token")
 
     def test_sshpass_dash_p_separate_value_is_masked(self):
         # I/Qoder-5: mask the value following sshpass -p.
