@@ -247,7 +247,7 @@ private project. Ask the live cluster.
 | You want | MCP tool | HTTP equivalent |
 |---|---|---|
 | Every repository / project name | `graphs_list` | `curl -fsS -H "Authorization: Bearer $OMNIGRAPH_TOKEN" http://localhost:8080/graphs` |
-| This repo's own record (name + clone URL) | `query whoami() { match { $p: Project } return { $p.slug, $p.name, $p.repository } }` | `POST /graphs/<id>/query` with the same header |
+| This repo's own record (slug) | `query whoami() { match { $p: Project } return { $p.slug } }` (no `repository` property in the live schema; for a scope check use the decision-keyed query in CLAUDE.md) | `POST /graphs/<id>/query` with the same header |
 
 **A bearer token is the only key.** Measured against the live server on 2026-08-31:
 

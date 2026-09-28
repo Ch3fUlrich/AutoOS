@@ -104,6 +104,14 @@ class FakeServerContractTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 404)
 
 
+class WhoamiQueryTests(unittest.TestCase):
+    def test_whoami_query_asks_only_for_properties_the_live_schema_has(self):
+        # Project has no `repository` property live: asking for it is a type error
+        # (T6), which made the bridge check fail against a healthy server.
+        self.assertNotIn("repository", module.WHOAMI_QUERY)
+        self.assertIn("$p.slug", module.WHOAMI_QUERY)
+
+
 class BridgeBenchmarkTests(unittest.TestCase):
     def test_all_healthy_exits_zero(self):
         rc, out, err = run_main(base_args())
