@@ -128,6 +128,29 @@ AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh
   an `edit` deny). `t3-reviewer` now denies the harness fences and every MCP
   write tool by name; `tools/autoos-agent.py` is the one-command way to spawn
   a tier agent on its own model.
+- **A permission rule fences what the engine matches, not what its name says**
+  (measured in `@opencode/cli` 2.0.16, KEYDENY3 2026-09-28): `read` sees a path,
+  `grep`/`glob` see the *search pattern*, a searched path is checked only by
+  `external_directory`, and every MCP call is asserted as
+  `{action:"<server>_<tool>", resources:["*"]}` — so an MCP tool can never be
+  fenced by path, only denied whole. `catalog/agent-harness.json`
+  `mcp_servers.serena.raw_content_tools` is the denied-to-leaves list.
+- **The pattern fence cannot fence a pattern search, and the spawn gate has two
+  spellings** (measured in `@opencode/cli` 2.0.16, KEYDENY3b 2026-09-28): the
+  engine's rename map is `{bash: shell, task: subagent, apply_patch: patch}`, so
+  `subagent` is the canonical action while `task` is the legacy alias the
+  `permission` object still declares — deny one spelling only and you have deny
+  in whichever form the build happens to read. And because `grep`/`glob` are
+  matched against the *pattern*, `grep "sk-" .` reads a git-ignored
+  `configuration/api-keys.yml` right through the fence: the control that holds is
+  the directory, so a spawned tier (2 or 3, or any role whose catalog flag is
+  `leaf: true`) is refused in place unless `--isolate` gives it a
+  `git clone --local` — forked from the caller's checkout, not from wherever the
+  spawner script lives — which carries committed files only. The MCP `spawn` tool
+  does not take the ask: it forces the clone for a spawned tier and reports
+  `forced_isolate` in the route it returns. Leaf roles may list
+  `serena` and `graphify` and nothing else — an MCP server whose tools take a URL
+  or a path (`playwright`, `context7`, any filesystem server) is denied whole.
 - Serena memory tools are off by design; Omnigraph + graphify are the
   memory/graph layers. Zen free 500s at peak / Zen paid 402s without balance
   (chain hops). `/v1/models` 401s for client keys (use `--probe` / authed

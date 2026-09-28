@@ -5,6 +5,68 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
+
+Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated
+clone; only tier 1 (`role=orchestrate`, the operator's own session) may run in
+place. KEYDENY3b refused tier 3 and deliberately left tier 2 in the caller's
+checkout, recording the hole it left — a t2 running in place has the same
+pattern-fence gap for itself, and the native `t3-reviewer` it launches inherits
+that cwd and carries none of the fences. The directory, not the pattern, is what
+closes it.
+
+- **`tools/autoos-agent.py`**: `LEAF_TIERS = (3,)` is now `ISOLATE_TIERS = (2, 3)`,
+  and `leaf_isolation_refusal(tier, isolate, client, leaf=)` keys on the role's
+  `leaf` flag **or** the isolated tier, never on the tier number alone — a
+  `role=review` card is a leaf at any tier. The flag is read from
+  `catalog/agent-harness.json` (`harness_role_is_leaf` / `role_for_run`), so there
+  is one home for it. An in-place spawned tier exits 2 with the reason and the fix
+  named; a `--dry-run` only announces it. The qoder-writes force (the plan sets
+  `--isolate` itself) is what keeps that run legal, and the verdict is computed
+  after `build_plan` for exactly that reason.
+- **`tools/autoos_agent_mcp.py`**: `build_argv` calls the same shared helper — no
+  second rule table to drift — and **forces** `isolate` for a spawned tier rather
+  than refusing, because its caller is a headless agent that cannot retype a flag
+  and the alternative is a job that reports itself started and then exits 2. The
+  force is reported as `route.forced_isolate` in the spawn answer.
+- **`tools/autoos-agent.py` (item 7)**: an `--isolate` clone was forked from
+  `ROOT` — the checkout the *script* lives in — so an MCP isolated spawn cloned
+  the MCP server's own repo at its HEAD and every sandbox started on the wrong
+  branch while the worker ran elsewhere. New `isolate_source(cwd)` forks from the
+  caller's `git rev-parse --show-toplevel` (falling back to `ROOT` when the cwd is
+  not a repository), the containment prompt names that source, and the `--dry-run`
+  clone line prints it.
+- **`tools/autoos_clients.py`**: no client may leave a leaf able to spawn
+  silently. `LEAF_SPAWN_DENY` renders each CLI's own deny for a leaf run —
+  `claude`/`qoder` `--disallowed-tools`, `qwen` `--exclude-tools` (flag names
+  verified against each `--help` on this host; the values are tool-name patterns,
+  so every known spelling goes in and an unknown one is inert rather than an
+  error). `gemini`, `codex` and `agy` carry no gate and their rows already say
+  `subagents: False`; opencode's gate stays the config overlay. `opencode.jsonc`'s
+  agent blocks are unchanged.
+- **Tests**: `LeafIsolationMandatoryTests` re-pinned for tiers 2 and 3 plus the
+  leaf-flag keying; `McpIsolateForceTests`, `IsolateSourceTests` (a two-head repo:
+  a worktree on branch X yields a sandbox whose HEAD is X's, never the server's)
+  and `ClientSpawnGateTests` are new; `FixtureSpawnGateObjectTests` pins the
+  `{task, subagent, bash}` permission object against the checked-in fixture, and
+  `IgnoredKeyFilesTests` proves with git's own answers that
+  `configuration/api-keys.yml` and `.env*` are ignored and none of them tracked.
+  Tests of unrelated exit codes call `allow_in_place`, which neutralises only the
+  isolation gate; the two agy signin probes moved to `--tier 1` for the same
+  reason.
+- **Skill/docs**: `.agents/skills/unattended-orchestration` now shows `--isolate`
+  on every spawned-tier example and states the rule; so does `autoos-agent.py`'s
+  own usage block; `lib/agent_harness.py`'s fence comment records the hole as
+  closed.
+- **Open, recorded rather than hidden**: opencode 2.0.16's canonical action names
+  are `shell` / `subagent` / `patch` (its rename map is
+  `{bash: "shell", task: "subagent", apply_patch: "patch"}`) and `Config.Info`
+  declares `permissions` (ordered rules), not the `permission` map the harness
+  writes — the map is the legacy shape the normaliser still accepts, and the
+  spawner's overlay carries the ordered-rule form. A tier-1 run in place still has
+  the pattern hole for itself; that is the operator's own session, in a lane the
+  operator is watching.
+
 ### Fixed — the stop class is PAUSE plus the imperative STOP/HALT/ABORT; HOLD and FREEZE stay capacity notes (RESTART R2a10, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (this repo's own R2a9 open #1, S1, safety): R2a9 widened
@@ -471,6 +533,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
   in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
   `relaunch-line` (R3+).
+### Fixed — a load cannot emit an unvalidated edge, and D-88 is D-088 (memlink round 2, D-140, 2026-09-28)
+
+A cross-family review of `2c27a24` returned NOT READY on the D-140
+Task→Decision edges; this closes all six items test-first in
+`tests/test_sync_memory_graph.py` (28 → 47 tests).
+
+- **`--load` without `--known-slugs` emitted unvalidated edges** (HIGH):
+  `main` now refuses (clear stderr, rc 1, nothing marked) when the emitted
+  batch carries an edge-only Implements/Supersedes record and no known-slug set
+  was passed — an unresolved citation would create a dangling edge. Plain dump
+  mode still defaults to no filtering. The module Usage now shows how to build
+  the slug list (an omnigraph query of Decision slugs written to a file). An
+  `HTTPError`/`URLError` from the load endpoint becomes a named message and a
+  non-zero exit, never a traceback, and the ledger stays untouched.
+- **A bare `D-NNN` was not zero-padded** (HIGH): `D-88` and `routing-d-88` both
+  normalise to `routing-d-088`. A test documents the design fact behind the
+  review's "two ledgers" worry: this repo's D-NNN ids ARE the router's routing
+  decision numbers — one number space — so the two spellings name one decision.
+- **An edge batch could be marked on an empty-tables response** (MED):
+  `load_confirmed` returns False when the response has no per-table detail and
+  the batch carried an edge-only record (no `@key` — a retry would duplicate);
+  a node-only batch keeps the prior permissive behavior.
+- **`Supersedes` read across a sentence break** (MED): the citation must sit in
+  the same clause as the supersede/replace verb (the window is cut at `.`, `;`
+  or a newline), so a later sentence's citation is not read as a replacement.
+  A data-driven test uses fixture text, not the module's DECISIONS constants.
+- **Duplicate ledger keys from colliding task titles** (LOW): `records()` now
+  emits each ledger key once. `--known-slugs` rejects an empty value, a missing
+  value, and a value starting with `--` (so `--known-slugs --load` cannot
+  swallow `--load`); `-`, a file and `=VALUE` are covered, and a test pins node
+  lines before edge lines in the `--load` body.
+
+Known limitation (not fixed): a Task's board row is its slug source, so editing
+a row's wording mints a new slug and leaves the old slug's Implements edges
+behind (stale-edge churn); the module docstring records it.
+
 ### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
 
 Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the
@@ -991,6 +1089,40 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
   the template with the read tool, and the read allow is narrowed to the exact suffix
   `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+- KEYDENY3 (2026-09-28, same lane): the fence covered the **`read` tool only**, and opencode
+  v2.0.16 matches a *different* resource per action — a `grep`/`glob` rule is matched against the
+  search **pattern**, the searched **path** is checked only by `external_directory`, and an MCP
+  rule can name the **tool** and nothing else (every MCP call is asserted as
+  `{action:"<server>_<tool>", resources:["*"]}`). So a leaf could still pull the key bytes with
+  `grep`, with `serena_read_file`, or with a symbol tool's `include_body`. The same
+  `read_deny_all` / `read_allow_all` lists now also render as `grep`, `glob` and
+  `external_directory` maps, and the new `mcp_servers.serena.raw_content_tools` (serena 1.7.0:
+  `read_file`, `search_for_pattern`, and `find_symbol` / `find_declaration` /
+  `find_implementations` / `find_referencing_symbols` through `include_body`) is denied to every
+  leaf role in the render and dropped from `t3-reviewer`'s serena allow list. Name-only tools
+  (`get_symbols_overview`, `list_dir`, `find_file`, diagnostics) stay; spawning roles keep the
+  readers, because there is no path scoping and denying them there would cost every file read.
+- KEYDENY3b (2026-09-28, same lane): three holes left in that fence. **(1) the spawn gate was
+  denied in one spelling only** — v2.0.16's rename map is `{bash: shell, task: subagent,
+  apply_patch: patch}`, the `permission` object declares the alias key `task` ("Deprecated alias
+  for subagent") and the rule lists assert the action `subagent`; a leaf that can spawn hands its
+  work to a child that carries none of its read fences. `SPAWN_GATES` now renders both verdicts
+  from one `role.spawn`, `opencode.jsonc`'s tier agents carry both rules, and every opencode run
+  re-asserts them in its own overlay (which merges last), so a drifted checkout cannot re-open it.
+  **(2) `grep "sk-" .` inside a working checkout reads `configuration/api-keys.yml` straight
+  through the pattern fence**, so the guarantee moved to the directory: `--isolate` is mandatory
+  for a leaf (`LEAF_TIERS`, tier 3 — the catalog's `leaf: true` roles and `t3-reviewer`; the run
+  is refused with rc 2 before anything starts, a `--dry-run` announces the refusal), the clone
+  step is one function whose containment is now tested (a temp repo with an ignored fake key:
+  the clone carries no ignored, no untracked file), and no client is exempt from isolating, so
+  no leaf had to lose grep/glob. Tier 2 stays allowed in place — it is a spawning role and the
+  documented lane flow — and its residual pattern hole, including the native child it can launch
+  into that cwd, is written down rather than claimed closed. **(3) a leaf could list `context7`**,
+  and an MCP rule can never scope a resource, so `LEAF_ALLOWED_MCP` pins the leaf set to
+  `serena` + `graphify` in code, `check` refuses a leaf that lists anything else, `context7` is
+  out of the leaf roles and their vendored profiles, and `t3-reviewer` denies `playwright_*` and
+  `context7_*` whole (`browser_navigate` takes a `file://` path — `run_code_unsafe` was never the
+  only door).
 ### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
 
 - **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
