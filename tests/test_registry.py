@@ -2316,8 +2316,24 @@ class MistralReplaceTests(unittest.TestCase):
         entry = self.reg["providers"]["mistral"]["limits"]["codestral-latest"]
         self.assertEqual(entry["rpm"], 125)
         self.assertEqual(entry["tpm"], 625000)
-        self.assertEqual(entry["source"], self.GATEWAY_SOURCE)
+        self.assertIn("10:5xZ direct", entry["source"])
+        self.assertIn(self.GATEWAY_SOURCE, entry["source"])
         self.assertIn("codestral-latest", self.reg["models"])
+
+    def test_codestral_counts_as_training_until_sourced(self):
+        # Operator 2026-09-28T12:0xZ: "Mistral trains -> never in -clean tiers".
+        # Nobody sourced that codestral does NOT train, so the record says it
+        # does and private_safe() keeps it out of every -clean route.
+        self.assertIs(self.reg["models"]["codestral-latest"].get("trains_on_prompts"), True)
+        safe, reason = registry.private_safe("mistral", "codestral-latest", self.reg)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "model trains on prompts")
+
+    def test_mistral_comment_counts_three_limits_rows(self):
+        note = self.reg["providers"]["mistral"]["$comment"]
+        self.assertNotIn("Only the two models", note)
+        self.assertNotIn("mistral-large/codestral/", note)
+        self.assertIn("Only the three models", note)
 
     def test_codestral_is_not_a_leg_of_any_route(self):
         for route_id, route in self.reg["routes"].items():

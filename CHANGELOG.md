@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `codestral-latest` counts as training until a source says otherwise (MISTRALFIX3, Muse review of MISTRALFIX2, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `models.codestral-latest.trains_on_prompts: true` (operator 12:0xZ
+  "Mistral trains -> never in -clean tiers"), so `private_safe()` keeps it out of every `-clean`
+  route; its limits row names both sources (10:5xZ direct headers for rpm/tpm, 11:5xZ gateway
+  answers); the Mistral provider note counts three limits rows. Guard tests in `MistralReplaceTests`.
+
 ### Fixed — the codestral pair replaces `mistral-small`; the `-clean` twins stay non-training (MISTRALFIX2, 2026-09-28)
 
 - **Operator brief (via L1-main 11:5xZ)**: `mistral-small` does not work — replace it
