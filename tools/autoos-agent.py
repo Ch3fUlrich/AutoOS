@@ -93,6 +93,7 @@ Usage:
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
+    python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
     python3 tools/autoos-agent.py ps --tree                          # runs under their parent
     python3 tools/autoos-agent.py risk --sha <sha> --base origin/main   # the diff's risk class
@@ -162,6 +163,23 @@ so a pack can embed stdout verbatim. The RUN dir is `$AUTOOS_RUN_DIR` only - an
 unset variable with no `--file` is an error, never an empty read. Exit codes: 0
 read, 1 the file holds no timestamped record (an inbox of another shape is never
 "no events"), 2 no window named, a bad position, or an unreadable file.
+
+`card check <file>` (RESTART spec §1, lane R2a) validates the one state card a
+successor resumes from — `<RUN>/status/<name>.card.md`, written only by the
+session it names. It checks the header fields (`# card <name> — <UTC> |
+gen=<id> | context <n>k/<cap>k | last-event <position>`), the fixed section
+order (goal, state, next, threads, traps, operator), each section's line cap,
+the 40-line total, the 200-char line limit, and that `last-event` parses as a
+position — through `autoos_inbox.parse_position`, because §0 keeps one position
+parser. A `threads` line whose id matches the Q-id shape (`^[Qq][-:]?\\d`:
+`Q-008`, `q-008`) needs an `asked <time>` field (§3: those lines are the pack's
+open questions). Every problem prints on stdout with its line number, sorted by
+line; the reason a file cannot be read goes to stderr. The rules are
+`tools/autoos_card.py`, not restated here, and §0's acknowledgement markers are
+`autoos_heartbeat.ACK_MARKERS` — the same list the heartbeat's pause filter (at
+the head of a record) and the future `card: stale` check read. Read-only,
+so it is safe to run twice. Exit codes: 0 valid, 1 the card breaks at least one
+rule, 2 the file is unreadable.
 """
 from __future__ import annotations
 
@@ -186,6 +204,7 @@ if os.name != "nt":
     import fcntl  # the free-leg provider lock (SPAWNFIX item 2); msvcrt on Windows
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import autoos_card as card_mod  # noqa: E402
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
@@ -5959,6 +5978,37 @@ def cmd_inbox(args) -> int:
     return 0
 
 
+def cmd_card(args) -> int:
+    """`card check <file>` — validate one state card (RESTART spec §1, lane R2a).
+
+    The rules live in tools/autoos_card.py; this is the printing and the exit
+    code. Every problem prints on stdout with its line number, because the
+    lines *are* the deliverable: a successor edits the card from them. What is
+    wrong with the file as a whole (it is not there, not readable) is a notice
+    on stderr, the way `inbox` splits content from notices, so a pack can embed
+    stdout verbatim. A `last-event` that does not parse is §0's problem, so it
+    reads §0's own parser and its own wording.
+
+    Exit 0 valid, 1 the card breaks at least one §1 rule, 2 the file is
+    unreadable (argparse itself refuses when no card is named)."""
+    try:
+        text = card_mod.read_card(args.file)
+    except card_mod.CardUnreadable as exc:
+        print("card check: %s" % exc, file=sys.stderr)
+        return 2
+    problems = card_mod.check_card(text)
+    if not problems:
+        print("card check: OK — %s (%d lines, cap %d)"
+              % (args.file, len(card_mod.split_lines(text)), card_mod.MAX_TOTAL_LINES))
+        return 0
+    for problem in problems:
+        print("card check: line %d: %s" % (problem.line, problem.text))
+    print("card check: %s is not a card (§1): %d %s"
+          % (args.file, len(problems), "problem" if len(problems) == 1 else "problems"),
+          file=sys.stderr)
+    return 1
+
+
 # ── verbs: one table builds the parsers, one table dispatches ────────────────
 # What this replaces is the old last line of main(),
 # `cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)`: every verb that
@@ -6049,7 +6099,10 @@ def _parser_context(sub):
 def _parser_heartbeat(sub):
     heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
                                  "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
-    heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest PAUSE/RESUME line")
+    heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest "
+                             "stop (PAUSE anywhere, or a bare leading STOP/HALT/ABORT; "
+                             "HOLD/FREEZE are capacity notes, not stops) "
+                             "or release (RESUME)")
     heartbeat_p.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     heartbeat_p.add_argument("--repo", dest="repos", action="append",
                              help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
@@ -6155,6 +6208,19 @@ def _parser_inbox(sub):
                          help="print at most N records, cutting the oldest (default: %(default)s)")
 
 
+def _parser_card(sub):
+    card_p = sub.add_parser(
+        "card", help="the state card a successor resumes from (RESTART §1) — `card check "
+                      "<file>` prints every problem with its line number")
+    card_sub = card_p.add_subparsers(dest="card_action", metavar="ACTION",
+                                     required=True)
+    check_p = card_sub.add_parser(
+        "check", help="check one card: the header fields, the section order, each "
+                      "section's line cap, the 40-line total, the 200-char line limit "
+                      "and that `last-event` parses as a position (§0's parser)")
+    check_p.add_argument("file", help="the card file, usually <RUN>/status/<name>.card.md")
+
+
 VERB_PARSERS = {
     "usage": _parser_usage,
     "token-rate": _parser_token_rate,
@@ -6168,6 +6234,7 @@ VERB_PARSERS = {
     "review-status": _parser_review_status,
     "ready": _parser_ready,
     "inbox": _parser_inbox,
+    "card": _parser_card,
 }
 
 # Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
@@ -6177,6 +6244,7 @@ VERB_PARSERS = {
 # them belongs to that module.
 VERB_HANDLERS = {
     "context": lambda args, cfg: cmd_context(args),
+    "card": lambda args, cfg: cmd_card(args),
     "heartbeat": lambda args, cfg: cmd_heartbeat(args),
     "inbox": lambda args, cfg: cmd_inbox(args),
     "list": lambda args, cfg: cmd_list(cfg),
