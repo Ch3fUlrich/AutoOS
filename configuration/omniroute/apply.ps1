@@ -3,11 +3,7 @@
   Apply the AutoOS router configuration to OmniRoute (Windows).
 
 .DESCRIPTION
-  1. Registers every provider key found in configuration/api-keys.yml: as a
-     built-in connection where the installed CLI knows the provider id, and as
-     an OpenAI-compatible provider node plus a connection bound to it where it
-     does not (a registry endpoint such as meta-api's, which the CLI has nothing
-     to attach a key to).
+  1. Registers every provider key found in configuration/api-keys.yml.
   2. Refreshes the gateway's model catalog for what it just registered
      (omniroute models <provider>), so one run is enough for a fresh machine.
   3. (Re)creates the tier combos from configuration/omniroute/combos.json.
@@ -167,10 +163,6 @@ function Get-AutoOSProviderMap {
 
     $map = [ordered]@{}
     $data = @{}
-    # omniroute_id -> its own OpenAI-compatible endpoint, for the providers the
-    # CLI has no built-in for (see Set-AutoOSProviderNode below). apply.sh
-    # reads the same field from the same registry.
-    $bases = @{}
     $skipped = New-Object System.Collections.ArrayList
     foreach ($prop in $providers.PSObject.Properties) {
         $entry = $prop.Value
@@ -206,22 +198,18 @@ function Get-AutoOSProviderMap {
             }
         }
         $map[$keyName] = $entry.omniroute_id
-        if ($entry.PSObject.Properties['api_base'] -and $entry.api_base) {
-            $bases[$entry.omniroute_id] = [string]$entry.api_base
-        }
         if ($entry.PSObject.Properties['provider_data'] -and $null -ne $entry.provider_data) {
             # Keep the plain JSON string: the 5.1-vs-7.x escaping branch below
             # needs a string, and ConvertTo-Json -Compress is stable across both.
             $data[$entry.omniroute_id] = ($entry.provider_data | ConvertTo-Json -Compress)
         }
     }
-    [pscustomobject]@{ Map = $map; Data = $data; Skipped = @($skipped); Bases = $bases }
+    [pscustomobject]@{ Map = $map; Data = $data; Skipped = @($skipped) }
 }
 $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
 $ProviderMap = $registry.Map
 $ProviderData = $registry.Data
 $ProviderSkipped = $registry.Skipped
-$ProviderBases = $registry.Bases
 
 # Build the --provider-specific-data JSON for the running shell. PowerShell
 # 5.1 strips inner double quotes when marshalling to a native exe (the same
@@ -235,179 +223,6 @@ function Get-AutoOSProviderDataJson {
     $plain = $ProviderData[$ProviderId]
     if ($ShellMajor -lt 6) { return $plain -replace '"', '\"' }
     return $plain
-}
-
-# --- Provider nodes for ids the CLI does not know ----------------------------
-# A registry provider with an api_base whose omniroute_id is not one of
-# OmniRoute's built-ins cannot be added with `omniroute providers add` - the CLI
-# has nothing to add and says "Unknown provider: meta-api" (measured 2026-09-28
-# against omniroute 3.8.51). Such a provider is the gateway's own
-# OpenAI-compatible *provider node* with an API-key connection bound to it,
-# which is exactly what the dashboard creates. apply makes that node over REST
-# and hands the connection back to the CLI, so the vendor key still travels as
-# an environment variable and never appears in a command line. The manage key
-# only ever goes into a request header (never argv). Mirrors
-# configuration/omniroute/apply.sh.
-$RestKey = if ($env:OMNIROUTE_API_KEY) { $env:OMNIROUTE_API_KEY } else { '' }
-
-# Both keys are secrets: a CLI error that quotes one, or a gateway body that
-# echoes one, must not reach the log (and the log is the only record an operator
-# has when a headless run fails).
-function Get-AutoOSRedactedText {
-    param([string]$Text, [string[]]$Secrets)
-    $out = $Text
-    foreach ($secret in $Secrets) {
-        if ($secret) { $out = $out.Replace($secret, '[REDACTED]') }
-    }
-    $out
-}
-
-# Three lines, 200 columns, control characters stripped - the CLI's reason, not
-# its stack trace, and never an escape sequence that corrupts the log line.
-function Show-AutoOSCliError {
-    param([string]$Text, [string[]]$Secrets)
-    if (-not $Text) { return }
-    $clean = (Get-AutoOSRedactedText $Text $Secrets) -replace '[\x00-\x08\x0B-\x1F]', ''
-    foreach ($line in @($clean -split "`r?`n" | Where-Object { $_ } | Select-Object -First 3)) {
-        Write-Host "      $($line.Substring(0, [Math]::Min(200, $line.Length)))"
-    }
-}
-
-# The provider ids and aliases the installed CLI knows, read once per run and
-# cached (`providers available` answers 352 of them). Aliases count too, because
-# the gateway rejects a node whose prefix collides with one - omniroute
-# src/shared/constants/reservedProviderPrefixes.ts. An unreadable catalog is
-# treated as "everything is built-in", which is the behaviour this script had
-# before: a wrong decision here would spam provider nodes.
-$script:BuiltinIds = @()
-$script:BuiltinTried = $false
-$script:BuiltinKnown = $false
-function Test-AutoOSBuiltinProvider {
-    param([string]$ProviderId)
-    if (-not $script:BuiltinTried) {
-        $script:BuiltinTried = $true
-        $text = ''
-        try { $text = & omniroute providers available --json 2>&1 | Out-String } catch { $text = '' }
-        # The CLI prints its .env warning banner before the JSON document, so
-        # the document starts at the first line that opens a brace or bracket.
-        $lines = @($text -split "`r?`n")
-        $start = -1
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\s*[\{\[]') { $start = $i; break }
-        }
-        if ($start -lt 0) {
-            Write-Host "  ! the CLI's provider catalog is unreadable - treating every id as built-in"
-        } else {
-            try {
-                $doc = ($lines[$start..($lines.Count - 1)] -join "`n") | ConvertFrom-Json
-                $rows = if ($doc -is [Array]) { @($doc) } elseif ($doc.PSObject.Properties['providers']) { @($doc.providers) } else { @() }
-                foreach ($row in $rows) {
-                    if ($null -eq $row) { continue }
-                    if ($row.PSObject.Properties['id']) { $script:BuiltinIds += [string]$row.id }
-                    if ($row.PSObject.Properties['alias'] -and $row.alias) { $script:BuiltinIds += [string]$row.alias }
-                }
-                $script:BuiltinKnown = $true
-            } catch {
-                Write-Host "  ! the CLI's provider catalog is unreadable - treating every id as built-in"
-            }
-        }
-    }
-    if (-not $script:BuiltinKnown) { return $true }
-    return ($script:BuiltinIds -contains $ProviderId)
-}
-
-# A provider needs a node only when the registry gives it an endpoint of its own
-# AND the CLI has no built-in for its id - a built-in keeps the exact call the
-# script made before, argv included.
-function Test-AutoOSProviderNeedsNode {
-    param([string]$ProviderId)
-    if (-not $ProviderBases.ContainsKey($ProviderId)) { return $false }
-    return (-not (Test-AutoOSBuiltinProvider $ProviderId))
-}
-
-$script:RestError = ''
-# The gateway's REST surface, with the manage key in a header only. Returns the
-# parsed document, or $null with $script:RestError set for the caller's line.
-function Invoke-AutoOSRest {
-    param([string]$Method, [string]$Path, [string]$Body)
-    $script:RestError = ''
-    $headers = @{ Authorization = "Bearer $RestKey" }
-    try {
-        if ($Body) {
-            return Invoke-RestMethod -Uri "$Gateway$Path" -Method $Method -Headers $headers `
-                -ContentType 'application/json' -Body $Body -TimeoutSec 20
-        }
-        return Invoke-RestMethod -Uri "$Gateway$Path" -Method $Method -Headers $headers -TimeoutSec 20
-    } catch {
-        # A transport failure carries no Response at all, so the status is
-        # read conditionally and the exception text stays the reason.
-        $resp = $_.Exception.Response
-        $code = if ($resp -and $resp.StatusCode) { [string][int]$resp.StatusCode } else { '' }
-        $why = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
-        $script:RestError = "HTTP $code for $Path - $why"
-        return $null
-    }
-}
-
-function Get-AutoOSProviderNodeId {
-    param([string]$Prefix)
-    $doc = Invoke-AutoOSRest -Method GET -Path '/api/provider-nodes' -Body $null
-    if ($null -eq $doc) { return '' }
-    $rows = if ($doc -is [Array]) { @($doc) } elseif ($doc.PSObject.Properties['nodes']) { @($doc.nodes) } else { @() }
-    foreach ($row in $rows) {
-        if ($null -ne $row -and $row.PSObject.Properties['prefix'] -and $row.prefix -eq $Prefix) {
-            return [string]$row.id
-        }
-    }
-    return ''
-}
-
-# A connection bound to a node is invisible to `omniroute providers list` (its
-# provider column holds the node id, not a hex id), so its own existence is read
-# from the gateway. The document carries each connection's stored key, so it is
-# searched and never printed.
-function Test-AutoOSProviderConnection {
-    param([string]$NodeId, [string]$Name)
-    $doc = Invoke-AutoOSRest -Method GET -Path '/api/providers?limit=5000' -Body $null
-    if ($null -eq $doc) { return $false }
-    $rows = if ($doc -is [Array]) { @($doc) } elseif ($doc.PSObject.Properties['connections']) { @($doc.connections) } else { @() }
-    foreach ($row in $rows) {
-        if ($null -eq $row) { continue }
-        if ($row.PSObject.Properties['provider'] -and $row.provider -eq $NodeId) { return $true }
-        if ($row.PSObject.Properties['name'] -and $row.name -eq $Name) { return $true }
-    }
-    return $false
-}
-
-# "created" or "existing", so the caller says which one it was.
-$script:NodeNote = ''
-function Set-AutoOSProviderNode {
-    param([string]$ProviderId)
-    $script:NodeNote = ''
-    $nodeId = Get-AutoOSProviderNodeId $ProviderId
-    if ($nodeId) { $script:NodeNote = 'existing'; return $nodeId }
-    # createProviderNodeSchema, omniroute
-    # src/shared/validation/schemas/provider.ts:307-385: name, prefix, baseUrl,
-    # and - for type "openai-compatible" - an apiType, or the write is refused.
-    # The CLI's own POST sends no body at all (bin/cli/api-commands/
-    # provider-nodes.mjs:18-25), so this is the REST call, not `omniroute api`.
-    $body = [pscustomobject]@{
-        name    = $ProviderId
-        prefix  = $ProviderId
-        type    = 'openai-compatible'
-        apiType = 'chat'
-        baseUrl = $ProviderBases[$ProviderId]
-    } | ConvertTo-Json -Compress
-    if ($null -eq (Invoke-AutoOSRest -Method POST -Path '/api/provider-nodes' -Body $body)) { return '' }
-    # The created node is read back rather than trusted from the POST response:
-    # the response shape is not the documented contract, the prefix is.
-    $nodeId = Get-AutoOSProviderNodeId $ProviderId
-    if (-not $nodeId) {
-        $script:RestError = 'the gateway accepted the node but does not list it'
-        return ''
-    }
-    $script:NodeNote = 'created'
-    return $nodeId
 }
 
 $RegisteredNow = @()
@@ -442,45 +257,11 @@ foreach ($keyName in $ProviderMap.Keys) {
         continue
     }
     if ($DryRun) {
-        # Say how the connection would be made, not only that it would be: an id
-        # with no built-in needs its provider node first. Reading the CLI's
-        # catalog is a read; the dry run creates no node and adds no key.
-        if ((Test-Gateway) -and (Test-AutoOSProviderNeedsNode $providerId)) {
-            Write-Host "  - $providerId : would create its provider node (OpenAI-compatible" `
-                "endpoint $($ProviderBases[$providerId])) and add the key to it"
-        }
         Write-Host "  - $providerId : would register (key from $keyName)"
         # The Catalog step below plans from this list too: a dry run has to say
         # it would refresh what it would just have registered.
         $RegisteredNow += $providerId
         continue
-    }
-    $addId = $providerId
-    $nameArgs = @()
-    if (Test-AutoOSProviderNeedsNode $providerId) {
-        if (-not $RestKey) {
-            Write-Host "  ! $providerId is not a built-in provider - it needs a gateway provider node"
-            Write-Host '      and no manage key is available (OMNIROUTE_API_KEY): register it in the dashboard'
-            continue
-        }
-        $nodeId = Set-AutoOSProviderNode $providerId
-        if (-not $nodeId) {
-            Write-Host "  ! $providerId provider node could not be created - register it in the dashboard"
-            $why = if ($script:RestError) { $script:RestError } else { 'the gateway refused the request' }
-            Show-AutoOSCliError $why @($Keys[$keyName], $RestKey)
-            continue
-        }
-        if ($script:NodeNote -eq 'created') {
-            Write-Host "  + ${providerId}: provider node created (prefix $providerId -> $($ProviderBases[$providerId]))"
-        }
-        if (Test-AutoOSProviderConnection $nodeId $providerId) {
-            Write-Host "  = $providerId already registered"
-            continue
-        }
-        # The key binds to the node, and the connection keeps the registry's
-        # name so the gateway UI and --drift both read "meta-api".
-        $addId = $nodeId
-        $nameArgs = @('--name', $providerId)
     }
     $varName = 'AUTOOS_KEY_' + $keyName.ToUpperInvariant()
     # Save a pre-existing variable of the same name: apply must not clobber
@@ -488,23 +269,15 @@ foreach ($keyName in $ProviderMap.Keys) {
     $hadVar = Test-Path "Env:$varName"
     $oldVar = if ($hadVar) { (Get-Item "Env:$varName").Value } else { $null }
     Set-Item -Path "Env:$varName" -Value $Keys[$keyName]
-    # The node's own id first, then the registry's name for the connection; a
-    # built-in keeps the exact call (and argv) it made before.
-    $addArgs = @('providers', 'add', $addId) + $nameArgs + @('--credential-env', $varName)
+    $addArgs = @('providers', 'add', $providerId, '--credential-env', $varName)
     $dataJson = Get-AutoOSProviderDataJson $providerId
     if ($null -ne $dataJson) {
         $addArgs += @('--provider-specific-data', $dataJson)
     }
     $addArgs += '--yes'
-    # The CLI's stderr IS the reason a registration failed - it used to go to
-    # $null, which is why "register it in the dashboard" was all anybody ever
-    # saw. Captured here, redacted, three lines.
-    $addOut = & omniroute @addArgs 2>&1 | Out-String
+    & omniroute @addArgs *> $null
     if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId registered"; $RegisteredNow += $providerId }
-    else {
-        Write-Host "  ! $providerId registration failed - register it in the dashboard"
-        Show-AutoOSCliError $addOut @($Keys[$keyName], $RestKey)
-    }
+    else { Write-Host "  ! $providerId registration failed - register it in the dashboard" }
     if ($hadVar) { Set-Item -Path "Env:$varName" -Value $oldVar }
     else { Remove-Item -Path "Env:$varName" -ErrorAction SilentlyContinue }
 }
