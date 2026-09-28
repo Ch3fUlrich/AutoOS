@@ -653,26 +653,30 @@ class _WrapperSpec:
     consuming that many positionals after ``--``, which ends option parsing but
     not the positional region.
 
-    ``permute`` is how the real program's getopt was called. GNU getopt (the
-    default: flock, and every launcher here that leaves it unset) permutes
-    options that follow a positional back into the option region, so the walker
-    keeps scanning. POSIX ``+`` mode does not: util-linux calls it for chrt and
-    taskset, whose scanning stops at their positional -- after that, the very
-    next token is the command handed to execvp verbatim, ``--`` (measured:
-    ``chrt -i 0 -- /bin/echo x`` fails with "failed to execute --") or ``-p``
-    included. ``trailing`` names the only argument shapes the walker has to
-    recognize *after* the option region: env's NAME=VALUE assignments and
-    timeout's bare duration."""
+    ``trailing`` names the only argument shapes the walker has to recognize
+    *after* the option region: env's NAME=VALUE assignments and timeout's bare
+    duration.
+
+    util-linux 2.39.3 calls getopt(3) with a ``+``-prefixed optstring for all
+    three of the positional launchers, so nobody permutes: the scan stops at the
+    positional and the very next token is the command handed to ``execvp``
+    verbatim -- ``--`` (measured: ``chrt -i 0 -- /bin/echo x`` and ``flock ./l --
+    /bin/echo A`` each fail to execute ``--``) or an option-looking ``-p``/``-s``
+    included. The exception is ``post_positional_stops``: the literal argv tokens
+    a program still treats as its own option in that position. flock alone has
+    one, a bare ``-c`` / ``--command`` right after its lockfile, which it runs via
+    ``sh -c``. Each is recorded in the option list under the same name the option
+    region uses (``c`` / ``command``), so the stop predicates read one fact."""
 
     label: str
     longs: Mapping[str, str]
     short_value: frozenset[str] = frozenset()
     short_optional: frozenset[str] = frozenset()
     stops: frozenset[str] = frozenset()
+    post_positional_stops: frozenset[str] = frozenset()
     trailing: str = "none"  # none | assignments | duration
     lone_dash_is_flag: bool = False
     positionals_before_command: int = 0
-    permute: bool = True
 
 
 _ENV_SPEC = _WrapperSpec("env", _ENV_LONGS,
@@ -688,25 +692,31 @@ _IONICE_SPEC = _WrapperSpec("ionice", _IONICE_LONGS, short_value=frozenset("cn")
 _XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
                            short_value=frozenset("adEeILnsP"),
                            short_optional=frozenset("il"))
+# flock, chrt and taskset are the launchers that take a positional before their
+# command, and util-linux 2.39.3 stops their option scan there (a `+`-prefixed
+# optstring, measured): what follows the lockfile / priority / mask is the execed
+# command verbatim, never an option. flock alone re-opens that one position, for
+# a bare -c/--command (see _FLOCK_SPEC).
 _FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
                            stops=frozenset(("c", "command")),
-                           positionals_before_command=1,
-                           # The program the permuting walker was modelled on,
-                           # measured: `flock /tmp/l -c '/bin/echo x'` runs the
-                           # shell string, so -c after the lockfile really is an
-                           # option. The flag is explicit, not defaulted.
-                           permute=True)
+                           # Measured: `flock ./l -c 'echo D'` prints D -- flock
+                           # compares the token itself after the lockfile, so
+                           # nothing is abbreviated or attached there (`flock ./l
+                           # --comm x` and `flock ./l -cX` fail to execute that
+                           # literal token). 2.39.3's getopt refuses both
+                           # spellings *before* the lockfile (`invalid option --
+                           # 'c'`, rc 64), so `stops` up there denies a call the
+                           # program rejects on its own.
+                           post_positional_stops=frozenset(("-c", "--command")),
+                           positionals_before_command=1)
 _SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
 _NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
-# chrt and taskset call getopt with a `+`-prefixed optstring (util-linux 2.39.3,
-# measured): their option parsing stops at the priority / the mask, so what
-# follows that positional is the command verbatim and never an option.
 _CHRT_SPEC = _WrapperSpec("chrt", _CHRT_LONGS, short_value=frozenset("TPD"),
                           stops=frozenset(("p", "pid")),
-                          positionals_before_command=1, permute=False)
+                          positionals_before_command=1)
 _TASKSET_SPEC = _WrapperSpec("taskset", _TASKSET_LONGS,
                              stops=frozenset(("p", "pid")),
-                             positionals_before_command=1, permute=False)
+                             positionals_before_command=1)
 _WATCH_SPEC = _WrapperSpec("watch", _WATCH_LONGS, short_value=frozenset("nq"),
                            short_optional=frozenset("d"))
 
@@ -765,18 +775,19 @@ def _walk_wrapper_options(
     positional a wrapper takes before its command (flock's lockfile, chrt's
     priority, taskset's mask).
 
-    Two getopt dialects are modelled, and ``spec.permute`` says which a
-    launcher uses. GNU getopt -- the default here, and what flock and every
-    other launcher in _WRAPPER_SPECS except the two below call -- permutes an
-    option that follows the positional back into the option region, so the walk
-    continues past it (``flock /tmp/l -c cmd`` is ``flock -c cmd /tmp/l`` to the
-    real program). chrt and taskset pass util-linux a ``+``-prefixed optstring,
-    whose scan stops at the first non-option: past their positional nothing is
-    an option and the next token is the execed command, so the walk breaks
-    there and reports that token as the head however it is spelled.
+    One getopt dialect is modelled for the launchers that take a positional at
+    all: util-linux 2.39.3 passes flock, chrt and taskset a ``+``-prefixed
+    optstring, whose scan stops at the first non-option. Past their positional
+    nothing is an option and the next token is the execed command, so the walk
+    breaks there and reports that token as the head however it is spelled --
+    except ``spec.post_positional_stops``, the token a program still honours in
+    that position: flock runs a bare ``-c`` / ``--command`` after its lockfile
+    through ``sh -c``, so the walk ends as a stop with no head at all. No
+    launcher permutes, and the specs with nothing to consume never reach that
+    region, so their options keep parsing normally.
 
-    ``--`` ends option parsing in both dialects but only while options are
-    still being scanned, and it does not end the positional region, so the
+    ``--`` ends option parsing while options are still being scanned, but it
+    does not end the positional region, so the
     token after it is read as the wrapper's own argument even when it starts
     with ``-`` (``flock -- -c rm -rf /`` puts ``-c`` in the lockfile slot and
     ``rm`` in the command slot) -- the reading that keeps a command region in
@@ -791,14 +802,18 @@ def _walk_wrapper_options(
         if not isinstance(tok, str):
             i += 1
             continue
-        if (not spec.permute and positionals
-                and positionals >= spec.positionals_before_command):
+        if positionals and positionals >= spec.positionals_before_command:
             # A `+`-mode getopt stopped scanning at the first non-option, so
             # once one has been consumed there are no more options: this token
             # is the command the program execs, `--` and `-p` included -- and it
             # is the head verbatim, unresolvable or not. (`positionals` is what
             # makes it the *first* non-option: a launcher with none to consume
-            # would still parse its leading options normally.)
+            # would still parse its leading options normally.) The one program
+            # that reads an option here is flock, and only for the exact spelling
+            # it special-cases -- which is a shell stop, not a command.
+            if tok in spec.post_positional_stops:
+                options.append(tok.lstrip("-"))
+                return None, options, problem
             break
         if tok == "--":
             saw_dashdash = True
@@ -846,13 +861,11 @@ def _walk_wrapper_options(
                 return None, options, problem
             i += 2 if consumed_next else 1
             continue
-        # A positional. flock's lockfile, chrt's priority and taskset's mask
-        # are the ones a wrapper takes before its command; consume it and, for
-        # a permuting launcher, keep walking, because GNU getopt permutes
-        # options that follow it (flock /tmp/l -c cmd) into the option region.
-        # A non-permuting one (chrt, taskset) is caught by the scan-stop at the
-        # top of the loop on the next token: that token is its command. Any
-        # later positional is the wrapped command.
+        # A positional. flock's lockfile, chrt's priority and taskset's mask are
+        # the ones a wrapper takes before its command; consume it, and the
+        # scan-stop at the top of the loop catches the next token -- that token
+        # is the command the program execs. Any later positional is the wrapped
+        # command.
         if positionals < spec.positionals_before_command:
             positionals += 1
             i += 1
@@ -897,15 +910,15 @@ def _non_permuting_child_heads(
 ) -> list[list[str]]:
     """The command a `+`-mode (non-permuting) launcher hands to execvp.
 
-    chrt and taskset stop option scanning at their positional, so the next
+    flock, chrt and taskset stop option scanning at their positional, so the next
     token is the command *verbatim* -- ``--`` and ``-p`` included, which is why
-    this does not apply the ``-`` filter the permuting launchers' branches in
-    _direct_child_heads() do: for them a leading ``-`` means getopt permuted the
-    option into the option region, for these two it means the program is about
-    to fail to exec a file with that name. Surfacing it anyway is what keeps
-    decide() from auditing some later token as though it had run, and an
-    unresolvable head denies as path-hijack. Any wrapper that later sets
-    ``permute=False`` belongs on this path too.
+    this does not apply the ``-`` filter the other branches in
+    _direct_child_heads() do: a launcher that consumed its positional is about to
+    fail to exec a file with that name, whereas for the launchers that take no
+    positional a leading ``-`` really does mean an option was parsed. Surfacing
+    it anyway is what keeps decide() from auditing some later token as though it
+    had run, and an unresolvable head denies as path-hijack. Any wrapper that
+    takes a positional before its command belongs on this path.
     """
     idx = _walk_wrapper_options(cur, spec)[0]
     if idx is None or idx >= len(cur):
@@ -964,17 +977,17 @@ def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
     return _walk_wrapper_options(s, _STDBUF_SPEC)[0]
 
 
-def _idx_after_flock(s: Sequence[str]) -> int | None:
-    return _walk_wrapper_options(s, _FLOCK_SPEC)[0]
-
-
 def _flock_runs_shell(head: Sequence[str]) -> bool:
-    """flock -c/--command (and any unambiguous abbreviation) runs its argument
-    through a shell, so no transparent head exists and decide() denies it.
-    Reads the walker's option list rather than re-scanning: a -c/--command
-    seen before the wrapped command is a shell string, whether it was
-    written as -c, --command or --comm, and a -c consumed as the lockfile
-    after `--` is not."""
+    """flock -c/--command runs its argument through a shell, so no transparent
+    head exists and decide() denies it. Either way the walker canonicalizes the
+    option into its list and reports a stop, so a -c consumed as the lockfile
+    after `--` is not in that list, and neither is an -c that is some later
+    command's own argument. What each position honours differs: after the
+    lockfile flock compares the token itself, so only the bare `-c`/`--command`
+    are the shell form there (measured: `flock /tmp/l --comm x` execs the literal
+    `--comm`); before it, 2.39.3's own getopt refuses both spellings outright
+    (`flock -c x /tmp/l` → `invalid option -- 'c'`, rc 64), so the stop and the
+    abbreviation match there deny a call the program rejects anyway."""
     if not head or _basename(head[0]) != "flock":
         return False
     options = _walk_wrapper_options(head, _FLOCK_SPEC)[1]
@@ -1113,13 +1126,10 @@ def _direct_child_heads(cur: Sequence[str]) -> list[list[str]]:
     if base == "stdbuf":
         idx = _idx_after_stdbuf(cur)
         return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
-    if base in ("chrt", "taskset"):
-        # The `+`-mode pair: their command is the token right after the
-        # priority/mask, verbatim, so it is not dash-filtered here.
+    if base in ("flock", "chrt", "taskset"):
+        # The `+`-mode trio: their command is the token right after the
+        # lockfile/priority/mask, verbatim, so it is not dash-filtered here.
         return _non_permuting_child_heads(cur, _WRAPPER_SPECS[base])
-    if base == "flock":
-        idx = _idx_after_flock(cur)
-        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
     if base == "watch":
         idx = _idx_after_watch(cur)
         return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []

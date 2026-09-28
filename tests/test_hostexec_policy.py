@@ -389,7 +389,11 @@ _HARMLESS_ALLOWED = (
     ["flock", "/tmp/l", "ls"],
     ["flock", "--", "/tmp/l", "ls"],
     ["flock", "--", "-", "ls"],
-    ["flock", "/tmp/l", "--", "ls"],
+    # Options that *precede* the lockfile are still getopt's own, abbreviations
+    # included (measured: `flock -s /tmp/l /bin/echo F` prints `F`). What follows
+    # the lockfile is not -- see _NON_PERMUTING_HEADS.
+    ["flock", "-s", "/tmp/l", "ls"],
+    ["flock", "-n", "-w", "5", "/tmp/l", "ls"],
     ["setsid", "ls"],
     ["nohup", "ls"],
     # chrt: policy switch, value-taking -T/-P/-D, then the priority positional.
@@ -546,11 +550,10 @@ _THREE_LAUNCHER_HEADS = (
     (["watch", "-x", "-n", "5", "ls", "-l"], [["ls", "-l"]]),
     (["watch", "-x", "--", "ls"], [["ls"]]),
     (["watch", "--exec", "uptime"], [["uptime"]]),
-    # flock keeps its lockfile positional, and `--` does not reset the
-    # positional count: `flock /tmp/l -- ls` runs ls (the hand-scan gave it no
-    # head at all, so a forbidden command after `--` went unchecked), while
-    # `flock -- -c …` still takes -c as the lockfile name.
-    (["flock", "/tmp/l", "--", "ls"], [["ls"]]),
+    # flock keeps its lockfile positional and `--` does not reset the positional
+    # count: `flock -- -c …` takes `-c` as the lockfile *name* and runs `rm`.
+    # What follows the lockfile is execed verbatim -- flock stops there too, so
+    # those heads live in _NON_PERMUTING_HEADS (hx3 review).
     (["flock", "--", "-c", "rm", "-rf", "/"], [["rm", "-rf", "/"]]),
 )
 
@@ -600,8 +603,6 @@ _THREE_LAUNCHER_DENIED_BY_CHILD_RULE = (
     (["watch", "-x", "rm", "-rf", "/"], "destructive"),
     (["watch", "-q", "5", "-x", "rm", "-rf", "/"], "destructive"),
     (["watch", "-n", "5", "-x", "sh", "-c", "x"], "no-inline-shell"),
-    # the gap the positional-count fix closes: flock runs `rm -rf /` here.
-    (["flock", "/tmp/l", "--", "rm", "-rf", "/"], "destructive"),
 )
 
 
@@ -691,13 +692,17 @@ class ChrtTasksetWatchWalkerTests(unittest.TestCase):
 
 # ─── hx3 follow-up: chrt and taskset do NOT permute (POSIX `+` getopt) ─────
 #
-# The shared walker modelled flock's permuting GNU getopt on every wrapper that
-# takes a positional before its command, so it kept scanning options after
-# chrt's priority and taskset's mask. util-linux 2.39.3 chrt(1) and taskset(1)
-# pass a `+`-prefixed optstring to getopt(3): scanning stops at the first
-# non-option, nothing after the positional is an option, and the very next token
-# is handed to execvp verbatim -- `--` and `-p` included. Measured on this host
-# (chrt/taskset from util-linux 2.39.3) with /bin/echo as the command:
+# The hx3 review found flock belongs on this path too: its own measurements are
+# in _NON_PERMUTING_HEADS below. util-linux 2.39.3 stops option parsing at the
+# positional for all three.
+#
+# What the walker used to assume: it modelled flock's permuting GNU getopt on
+# every wrapper that takes a positional before its command, so it kept scanning
+# options after chrt's priority and taskset's mask. util-linux 2.39.3 chrt(1)
+# and taskset(1) pass a `+`-prefixed optstring to getopt(3): scanning stops at
+# the first non-option, nothing after the positional is an option, and the very
+# next token is handed to execvp verbatim -- `--` and `-p` included. Measured on
+# this host (chrt/taskset from util-linux 2.39.3) with /bin/echo as the command:
 #
 #   chrt -i 0 -- /bin/echo x    -> chrt: failed to execute --: No such file or
 #                                  directory                                rc 127
@@ -747,11 +752,25 @@ _NON_PERMUTING_HEADS = (
     (["chrt", "--", "9", "ls"], [["ls"]]),
     (["chrt", "--", "-i", "0", "ls"], [["0", "ls"]]),
     (["taskset", "--", "0x1", "ls"], [["ls"]]),
-    # A permuting wrapper keeps reading options after its positional, so flock
-    # still finds -c there (a stop, hence no head) and `--` after its lockfile
-    # still hands over the command. watch takes no positional at all.
+    # flock stops at its lockfile too (measured, util-linux 2.39.3, /bin/echo):
+    # `flock ./l -- /bin/echo A` -> `failed to execute --` rc 69 and
+    # `flock ./l -s /bin/echo B` -> `failed to execute -s` rc 69. It then
+    # special-cases exactly one token of that region -- a bare `-c`/`--command`,
+    # which it runs via sh -c, so it is a stop and yields no head. Nothing else
+    # in that spelling is honoured: `flock ./l --comm x` -> `failed to execute
+    # --comm` and `flock ./l -cX` -> `failed to execute -cX`. Options *before*
+    # the lockfile keep full getopt parsing, `--` included (`flock -- ./l
+    # /bin/echo C` prints C; `flock -s ./l /bin/echo F` prints F), and watch
+    # takes no positional at all.
     (["flock", "/tmp/l", "-c", "sh", "-c", "x"], []),
-    (["flock", "/tmp/l", "--", "ls"], [["ls"]]),
+    (["flock", "/tmp/l", "--command", "sh -c x"], []),
+    (["flock", "/tmp/l", "--", "ls"], [["--", "ls"]]),
+    (["flock", "/tmp/l", "-s", "ls"], [["-s", "ls"]]),
+    (["flock", "/tmp/l", "--comm", "x"], [["--comm", "x"]]),
+    (["flock", "/tmp/l", "-cX"], [["-cX"]]),
+    (["flock", "--", "/tmp/l", "ls"], [["ls"]]),
+    (["flock", "-s", "/tmp/l", "ls"], [["ls"]]),
+    (["flock", "-n", "-w", "5", "/tmp/l", "ls"], [["ls"]]),
     (["flock", "--", "-c", "rm", "-rf", "/"], [["rm", "-rf", "/"]]),
     (["watch", "-x", "--", "ls"], [["ls"]]),
 )
@@ -767,15 +786,25 @@ _NON_PERMUTING_DENIED = (
     (["chrt", "5", "-p", "123"], "path-hijack"),
     (["taskset", "0x1", "-c", "ls"], "path-hijack"),
     (["chrt", "9", "--", "rm", "-rf", "/"], "path-hijack"),
+    # The same reading for flock: `--`, `-s`, an unhonoured `--comm` and an
+    # attached `-cX` are the exec targets, so `ls` is never audited as though it
+    # had run -- and `rm -rf /` behind the `--` denies on the `--` it execs.
+    (["flock", "/tmp/l", "--", "ls"], "path-hijack"),
+    (["flock", "/tmp/l", "-s", "ls"], "path-hijack"),
+    (["flock", "/tmp/l", "--comm", "x"], "path-hijack"),
+    (["flock", "/tmp/l", "-cX"], "path-hijack"),
+    (["flock", "/tmp/l", "--", "rm", "-rf", "/"], "path-hijack"),
 )
 
 
 @unittest.skipIf(os.name == "nt", "sh stubs and chmod; POSIX only")
 class NonPermutingGetoptTests(unittest.TestCase):
-    """hx3: chrt and taskset parse with POSIX `+` getopt, so their command is
-    the token right after the priority/mask -- verbatim, even when it is `--` or
-    an option-looking `-p`. flock, watch and the rest permute and are
-    unchanged."""
+    """hx3: chrt, taskset and flock parse with POSIX `+` getopt, so their command
+    is the token right after the priority/mask/lockfile -- verbatim, even when it
+    is `--` or an option-looking `-p`/`-s`/`--comm`. flock alone re-opens that
+    position for a bare `-c`/`--command`, which is its own shell special case and
+    a stop, not a head. Every other launcher takes no positional, so it never
+    reaches the region."""
 
     @classmethod
     def setUpClass(cls):
@@ -813,12 +842,24 @@ class NonPermutingGetoptTests(unittest.TestCase):
                                                            policy._CHRT_SPEC)[1])
         self.assertEqual(self._decide(["chrt", "5", "-p", "123"]).rule, "path-hijack")
 
-    def test_only_chrt_and_taskset_declare_themselves_non_permuting(self):
+    def test_every_positional_wrapper_stops_at_its_positional(self):
+        # Nobody permutes: flock, chrt and taskset are the only launchers that
+        # take a positional before their command, and util-linux 2.39.3 stops
+        # their option scanning there (measured). If a future edit reopens the
+        # command region to getopt, every flock/chrt/taskset row above changes
+        # meaning -- this is the guard.
         self.assertEqual({label for label, spec in policy._WRAPPER_SPECS.items()
-                          if not spec.permute}, {"chrt", "taskset"})
-        # flock is the permuting program the walker was written against; if a
-        # future edit flips its flag, every flock case above changes meaning.
-        self.assertTrue(policy._FLOCK_SPEC.permute)
+                          if spec.positionals_before_command},
+                         {"flock", "chrt", "taskset"})
+        # flock is the one program that re-opens the very first token of that
+        # region, and only for its own shell special case, spelled in full.
+        self.assertEqual({label: tuple(sorted(spec.post_positional_stops))
+                          for label, spec in policy._WRAPPER_SPECS.items()
+                          if spec.post_positional_stops},
+                         {"flock": ("--command", "-c")})
+        self.assertEqual(policy._direct_child_heads(["flock", "/tmp/l", "-c", "x"]), [])
+        self.assertEqual(self._decide(["flock", "/tmp/l", "-c", "x"]).rule,
+                         "no-inline-shell")
 
 
 # ─── round 4 (hx4): generated long-option abbreviation matrix ────────────
