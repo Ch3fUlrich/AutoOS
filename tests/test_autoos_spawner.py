@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -4952,6 +4953,54 @@ elif mode == "sandbox-commit-reset":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "worker change"], check=True)
     subprocess.run(["git", "-C", cwd, "reset", "-q", "--hard", base], check=True)
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "sandbox-commit-own-branch":
+    # SB-A (D-103) NOOPCOMMIT: the worker commits inside its own sandbox, on a
+    # branch IT made. `git status --short` is clean and
+    # `<start-sha>..<sandbox-branch>` is empty — the only two reads the no-change
+    # verdict made — so the run graded NO-OP with a real commit sitting there.
+    def sandbox_git(*a):
+        subprocess.run(["git", "-C", os.getcwd(), *a], check=True,
+                       capture_output=True, text=True)
+    sandbox_git("switch", "-q", "-c", "worker-own")
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    sandbox_git("add", "worker-new.txt")
+    sandbox_git("-c", "user.name=autoos-worker",
+                "-c", "user.email=autoos-worker@users.noreply.github.com",
+                "commit", "-q", "-m", "worker change")
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "sandbox-commit-detached":
+    # The same escape with no new ref at all: a detached HEAD. The branch the
+    # spawner created never moves, so only HEAD vs the start sha sees it.
+    def sandbox_git2(*a):
+        subprocess.run(["git", "-C", os.getcwd(), *a], check=True,
+                       capture_output=True, text=True)
+    sandbox_git2("switch", "-q", "--detach")
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    sandbox_git2("add", "worker-new.txt")
+    sandbox_git2("-c", "user.name=autoos-worker",
+                 "-c", "user.email=autoos-worker@users.noreply.github.com",
+                 "commit", "-q", "-m", "worker change")
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "sandbox-commit-reset-to-start":
+    # The guard is completed, not relaxed: a writer that commits and resets the
+    # ref back to the start sha leaves nothing reachable, and keeps the verdict
+    # it had before (the read-only run's reflog witness is SPAWNFIX3c's job).
+    def sandbox_git3(*a):
+        subprocess.run(["git", "-C", os.getcwd(), *a], check=True,
+                       capture_output=True, text=True)
+    base = subprocess.run(["git", "-C", os.getcwd(), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    sandbox_git3("switch", "-q", "-c", "worker-own")
+    with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    sandbox_git3("add", "worker-new.txt")
+    sandbox_git3("-c", "user.name=autoos-worker",
+                 "-c", "user.email=autoos-worker@users.noreply.github.com",
+                 "commit", "-q", "-m", "worker change")
+    sandbox_git3("reset", "-q", "--hard", base)
     print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
 elif mode == "sandbox-edit":
     # SPAWNFIX3 (S3) item 4: the client's cwd IS its own sandbox, so this is
@@ -12802,6 +12851,374 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         self.assertNotIn("would run:", r.stdout)
 
 
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
+class CancelOrphanTests(unittest.TestCase):
+    """SB-A (D-103) item 1 (CANCELORPHAN). Measured live: `cancel` marked a run
+    canceled while its `opencode run` and that process's child
+    `opencode serve --stdio` (~480 MB) kept running — the runner died and the
+    children were reparented to systemd --user. A group kill is addressed by
+    pgid, which reparenting never changes, so the client's group has to be
+    recorded when the client starts and SIGTERM'd, then SIGKILL'd after a
+    grace, by `cancel`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.procs = []
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        for p in self.procs:  # never leak a 60 s sleeper on a failed assertion
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    p.kill()
+            p.wait()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def detached(self, code, files):
+        """A stub in its own session, like a real runner/client pair."""
+        proc = subprocess.Popen([sys.executable, "-c", code],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True,
+                                env=dict(os.environ, **files))
+        self.procs.append(proc)
+        return proc
+
+    def make_run(self, run_id, pid, pgrp=None):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": run_id, "run_id": run_id, "request": {}, "task": "t",
+            "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+            "pid": pid})
+        if pgrp is not None:
+            mcp_server._write_json(os.path.join(path, "pgrp.json"), {"pgid": pgrp})
+        return path
+
+    def gone(self, pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open("/proc/%d/status" % pid, encoding="utf-8") as fh:
+                state = next(l for l in fh if l.startswith("State:")).split()[1]
+        except (OSError, StopIteration):
+            return True
+        return state.startswith("Z")
+
+    def wait_gone(self, pid, secs=12):
+        deadline = time.time() + secs
+        while time.time() < deadline and not self.gone(pid):
+            time.sleep(0.05)
+        return self.gone(pid)
+
+    def test_cancel_kills_the_clients_group_and_the_child_it_orphaned(self):
+        # The measured shape: the client exits (or is cut off) and its child is
+        # reparented, still alive, still in the client's process group.
+        runner = self.detached("import time; time.sleep(60)", {})
+        client = self.detached(
+            "import os\n"
+            "from subprocess import Popen\n"
+            "p = Popen(['sleep', '60'])\n"   # same group as its parent, by default
+            "open(os.environ['GRANDCHILD'], 'w').write(str(p.pid))\n",
+            {"GRANDCHILD": os.path.join(self.tmp, "gc.txt")})
+        deadline = time.time() + 10
+        while time.time() < deadline and not os.path.exists(
+                os.path.join(self.tmp, "gc.txt")):
+            time.sleep(0.05)
+        client.wait(10)
+        with open(os.path.join(self.tmp, "gc.txt"), encoding="utf-8") as fh:
+            grandchild = int(fh.read().strip())
+        self.assertFalse(self.gone(grandchild), "the stub orphan died on its own")
+        path = self.make_run("orphan-test", runner.pid, pgrp=client.pid)
+        self.assertEqual(mcp_server.status("orphan-test")["state"], "working")
+        st = mcp_server.cancel("orphan-test")
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertTrue(self.wait_gone(runner.pid), "the runner survived the cancel")
+        self.assertTrue(self.wait_gone(grandchild),
+                        "CANCELORPHAN: %d outlived its canceled run" % grandchild)
+        self.assertTrue(os.path.isdir(path))
+
+    def test_cancel_escalates_to_sigkill_past_the_grace(self):
+        # A worker that traps and ignores SIGTERM must still be gone: cancel is
+        # what stops a runaway, and a runaway that outruns SIGTERM is the whole
+        # 480 MB we measured.
+        ready = os.path.join(self.tmp, "stubborn.ready")
+        runner = self.detached(
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, lambda *a: None)\n"
+            "open(%r, 'w').write('')\n"
+            "time.sleep(60)\n" % ready, {})
+        deadline = time.time() + 15  # the handler must be armed before the signal
+        while time.time() < deadline and not os.path.exists(ready):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(ready), "the stub never armed its handler")
+        self.make_run("stubborn-test", runner.pid)
+        st = mcp_server.cancel("stubborn-test")
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertTrue(self.wait_gone(runner.pid, 20),
+                        "a SIGTERM-ignoring worker survived the cancel")
+
+    def test_run_client_records_the_clients_group_for_the_canceller(self):
+        # The runner cannot know the client's pgid until the spawner that starts
+        # it writes it down; cancel reads exactly this file.
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "pgrp.json")
+            with mock.patch.dict(os.environ, {"AUTOOS_WORKER_PGRP": path}):
+                rc = agent.run_client([sys.executable, "-c", "pass"], tmp,
+                                       dict(os.environ))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.isfile(path),
+                            "run_client never recorded the client's group")
+            with open(path, encoding="utf-8") as fh:
+                self.assertIsInstance(json.load(fh)["pgid"], int)
+
+    def test_run_client_writes_no_group_file_when_not_asked(self):
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AUTOOS_WORKER_PGRP", None)
+                rc = agent.run_client([sys.executable, "-c", "pass"], tmp,
+                                       dict(os.environ))
+            self.assertEqual(rc, 0)
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_the_group_path_survives_the_child_env_scrub(self):
+        # The channel is one allowlist entry deep: drop the name and every other
+        # test here still passes while a real `cancel` goes back to orphaning the
+        # client it can no longer address.
+        agent = load_agent()
+        env = agent.spawner_child_env(
+            extra={"AUTOOS_WORKER_PGRP": "/run/%s" % agent.WORKER_PGRP_FILE})
+        self.assertEqual(env.get("AUTOOS_WORKER_PGRP"), "/run/pgrp.json")
+
+    def test_the_mcp_runner_names_the_group_file_to_the_spawner(self):
+        # _run_job execs the CLI with spawner_child_env(extra=...): the channel
+        # that carries the path has to be the one the CLI reads.
+        src = open(TOOLS / "autoos_agent_mcp.py", encoding="utf-8").read()
+        body = src.split("def run_job", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("AUTOOS_WORKER_PGRP", body, body)
+
+
+@unittest.skipIf(os.name == "nt", "shell stubs and git; POSIX first")
+class CommittedWorkNotANoOpTests(unittest.TestCase):
+    """SB-A (D-103) item 2 (NOOPCOMMIT). The no-change check read only the
+    uncommitted porcelain and `<start-sha>..<sandbox-branch>`, so a worker that
+    committed inside its own sandbox — on a branch it made, or detached — was
+    graded `NO-OP (agent changed nothing)` with a real commit sitting there.
+    The run's HEAD and every other ref must be compared to the start sha too,
+    and the sha and the branch it lives on reported."""
+
+    def _run(self, mode):
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        rc, out, err = case.run_isolated(root, stub, state, mode)
+        return rc, out + err, case, state
+
+    def ref(self, state, name):
+        out = subprocess.run(["git", "-C", self.lone(state), "rev-parse", "--short", name],
+                             capture_output=True, text=True)
+        return out.stdout.strip()
+
+    def lone(self, state):
+        base = os.path.join(state, "sandboxes")
+        names = os.listdir(base)
+        self.assertEqual(len(names), 1, names)
+        return os.path.join(base, names[0])
+
+    def test_a_commit_on_a_branch_the_worker_made_is_not_a_no_op(self):
+        rc, both, _case, state = self._run("sandbox-commit-own-branch")
+        self.assertEqual(rc, 0, both)
+        self.assertNotIn("NO-OP", both)
+        self.assertIn(self.ref(state, "worker-own"), both, both)
+        self.assertIn("worker-own", both, both)
+
+    def test_a_commit_on_a_detached_head_is_not_a_no_op(self):
+        rc, both, _case, state = self._run("sandbox-commit-detached")
+        self.assertEqual(rc, 0, both)
+        self.assertNotIn("NO-OP", both)
+        self.assertIn(self.ref(state, "HEAD"), both, both)
+        self.assertIn("detached", both, both)
+
+    def test_a_run_that_really_changed_nothing_is_still_a_no_op(self):
+        # The guard is not removed, only completed: no ref moved, so the verdict
+        # stays what it was.
+        rc, both, _case, _state = self._run("report")
+        self.assertEqual(rc, 5, both)
+        self.assertIn("NO-OP", both)
+
+    def test_a_commit_reset_back_to_the_start_sha_is_still_a_no_op(self):
+        # A writer that committed and reset away kept the measured verdict (its
+        # work is unreachable); the recovery is for refs that still point there.
+        rc, both, _case, _state = self._run("sandbox-commit-reset-to-start")
+        self.assertEqual(rc, 5, both)
+        self.assertIn("NO-OP", both)
+
+    def test_a_review_run_pays_for_no_ref_snapshot(self):
+        # Cost rule, same shape as the reflog/diff-stat gates: a review run is
+        # exempt from the sandbox verdict, so it must not pay for the snapshot.
+        # A writer run takes it twice: once at the clone (the baseline nothing
+        # can recover later) and once on the read that found no work at all.
+        agent = load_agent()
+        self.assertTrue(callable(agent.sandbox_ref_heads))
+        for card, want in (("role=review", 0), (None, 2)):
+            case = IsolateContainmentTests("setUp")
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+            calls = []
+            real = case.agent.sandbox_ref_heads
+
+            def spy(path):
+                calls.append(path)
+                return real(path)
+            with mock.patch.object(case.agent, "sandbox_ref_heads", spy):
+                rc, out, err = case.run_isolated(root, stub, state, "report", card=card)
+            # A run that never stood up a sandbox proves nothing about its cost.
+            self.assertTrue(os.path.isdir(case.lone_sandbox(state)),
+                            "%s run made no sandbox (rc=%d): %s" % (card, rc, out + err))
+            self.assertEqual(len(calls), want,
+                             "%s run took %d ref snapshots (rc=%d)"
+                             % (card or "writer", len(calls), rc))
+
+
+class ReviewVerdictRecoveryTests(unittest.TestCase):
+    """SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW). A review run's
+    deliverable is its verdict, and the lifecycle said nothing about it: a
+    reviewer that wrote `VERDICT: not ready` and died before its REPORT was
+    `failed/incomplete`, so the dispatcher threw the review away and re-ran it;
+    a reviewer that exited 0 having said nothing was `completed`, so the
+    dispatcher never re-routed at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def make_run(self, run_id, rc, text, review=True, dry_run=False):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        card = "role=review" if review else "role=implement"
+        argv = ["run", "--card", card] + (["--dry-run"] if dry_run else []) + ["t"]
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": run_id, "run_id": run_id,
+            "request": {"card": {"role": "review" if review else "implement"}},
+            "task": "t", "argv": argv, "cwd": str(ROOT), "route": {},
+            "started": time.time(), "pid": os.getpid()})
+        with io.open(os.path.join(path, "output.log"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": rc, "ended": time.time()})
+        return path
+
+    FINDINGS = ("Read tools/autoos-agent.py and tests/test_autoos_spawner.py.\n"
+                "VERDICT: not ready\n"
+                "1. HIGH sandbox_verdict never reads the ref snapshot.\n")
+    READY = ("Checked the diff.\n"
+             "**VERDICT**: ready\n"
+             "sha, red->green per item, open: none\n")
+
+    def test_a_dead_reviewer_that_left_a_verdict_is_completed_and_kept(self):
+        # REPORTLESS: rc 10 (INCOMPLETE) is the measured death, but the verdict
+        # is the deliverable and it exists — keep the work, flag the missing REPORT.
+        self.make_run("rl-notready", 10, self.FINDINGS)
+        st = mcp_server.status("rl-notready")
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "verdict-recovered")
+        self.assertIn("verdict recovered, no REPORT", st["note"])
+        self.assertIn("not ready", st["verdict"])
+
+    def test_a_ready_verdict_recovers_a_failed_review_run_too(self):
+        self.make_run("rl-ready", 8, self.READY)
+        st = mcp_server.status("rl-ready")
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "verdict-recovered")
+        self.assertIn("ready", st["verdict"])
+
+    def test_a_dead_reviewer_with_no_verdict_stays_failed(self):
+        self.make_run("rl-silent", 10, "Let me find the POST handler.\n")
+        st = mcp_server.status("rl-silent")
+        self.assertEqual(st["state"], "failed", st)
+        self.assertNotIn("verdict", st)
+
+    def test_a_review_run_that_exited_clean_with_no_verdict_is_failed(self):
+        # T3REVIEW: rc 0 is not evidence a review happened. The dispatcher
+        # re-routes on failed, and "done" would have let it merge unreviewed.
+        self.make_run("t3-none", 0, "I read every file and it all looks fine.\n")
+        st = mcp_server.status("t3-none")
+        self.assertEqual(st["state"], "failed", st)
+        self.assertEqual(st["detail"], "no-verdict")
+
+    def test_a_review_run_that_stated_its_verdict_is_done(self):
+        self.make_run("t3-ok", 0, self.READY)
+        st = mcp_server.status("t3-ok")
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "done")
+
+    def test_a_writer_run_is_never_graded_on_a_verdict(self):
+        # The rule belongs to role=review. An implement run has no verdict and
+        # must not be failed for it (its evidence is its diff, and NOOPCOMMIT
+        # owns that verdict).
+        self.make_run("writer", 0, "REPORT a · completed · - · - · - · -\n",
+                      review=False)
+        st = mcp_server.status("writer")
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "done")
+
+    def test_a_dry_run_review_is_not_a_verdict_less_failure(self):
+        self.make_run("t3-dry", 0, "would run: opencode run --agent t3-reviewer\n",
+                      dry_run=True)
+        st = mcp_server.status("t3-dry")
+        self.assertEqual(st["state"], "completed", st)
+
+    def test_an_echoed_brief_template_is_not_a_verdict(self):
+        # Every review brief ends by naming the field list; quoting the shape is
+        # not stating a verdict, and must not read as one (the brief-echo escape
+        # that SPAWNFIX3c closed for REPORT).
+        self.make_run("t3-echo", 0,
+                      "VERDICT: <ready|fix-first|NOT READY> + findings\n")
+        st = mcp_server.status("t3-echo")
+        self.assertEqual(st["state"], "failed", st)
+
+    def test_a_backticked_verdict_quote_is_not_a_verdict(self):
+        self.make_run("t3-quote", 0, "The contract wants `VERDICT: ready`.\n")
+        st = mcp_server.status("t3-quote")
+        self.assertEqual(st["state"], "failed", st)
+
+    def test_a_reported_failed_run_is_not_recovered_by_its_verdict(self):
+        # A REPORT that says it failed is a complete run that failed on purpose:
+        # the recovery is for a run that died before it could report.
+        self.make_run("rl-reported", 8,
+                      self.FINDINGS + "REPORT rl · failed · - · - · verdict missing · -\n")
+        st = mcp_server.status("rl-reported")
+        self.assertEqual(st["state"], "failed", st)
+
+    def test_a_cancelled_review_run_is_never_recovered(self):
+        path = self.make_run("rl-cancel", 1, self.FINDINGS)
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"cancelled": True, "rc": None, "ended": time.time()})
+        st = mcp_server.status("rl-cancel")
+        self.assertEqual(st["state"], "canceled", st)
 
 
 if __name__ == "__main__":

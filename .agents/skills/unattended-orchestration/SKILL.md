@@ -107,6 +107,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
 - R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner; CAO separate. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
+- R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)
 
 ### orch (L2)
 

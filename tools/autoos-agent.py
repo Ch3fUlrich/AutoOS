@@ -278,6 +278,12 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 # reported NO-OP (exit 5) instead of a leak.
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
+# SB-A (D-103) item 1 (CANCELORPHAN): the detached MCP runner is a session of its
+# own, but the client this spawner starts leads a SECOND one, so a `kill` on the
+# runner reaches nothing that matters. The runner names the file, this writes the
+# client's pgid into it, and `cancel` kills both groups.
+WORKER_PGRP_ENV = "AUTOOS_WORKER_PGRP"
+WORKER_PGRP_FILE = "pgrp.json"
 
 # KEYDENY3b item 1: the spawn gate is spelled two ways in opencode v2.0.16 — its
 # rename map is {bash: "shell", task: "subagent", apply_patch: "patch"}, so the
@@ -444,6 +450,10 @@ WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
 # AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
 # here: the child gets the minted key, never the path to the file it came from.
 WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
+                     # SB-A (D-103) item 1: the runner names the file run_client
+                     # writes the client's pgid into, or `cancel` cannot reach the
+                     # group the runner's own session does not cover.
+                     "AUTOOS_WORKER_PGRP",
                      "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
                      "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
                      "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
@@ -4305,6 +4315,54 @@ def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
     return sorted(found)
 
 
+def sandbox_ref_heads(sandbox: str) -> dict:
+    """``{refname: sha}`` for every ref the sandbox clone carries."""
+    out = subprocess.run(["git", "-C", sandbox, "for-each-ref",
+                          "--format=%(refname) %(objectname)"],
+                         capture_output=True, text=True)
+    heads = {}
+    for line in out.stdout.splitlines():
+        name, _, sha = line.partition(" ")
+        if name and sha.strip():
+            heads[name] = sha.strip()
+    return heads
+
+
+def sandbox_committed_work(sandbox: str, base: str, branch: str, start: dict) -> list:
+    """Every ref the run moved off the start sha, as ``"ref sha subject"`` lines.
+
+    SB-A (D-103) item 2 (NOOPCOMMIT): the no-change verdict read the uncommitted
+    porcelain and `<start-sha>..<sandbox-branch>`, so a worker that committed in
+    its own sandbox on a branch it made — or on a detached HEAD — was graded
+    "NO-OP (agent changed nothing)" with a real commit sitting in the clone. The
+    start snapshot (taken before the client runs) is what makes this cheap and
+    honest: a `--local` clone carries every branch of the parent, so "differs
+    from the start sha" alone would report pre-existing lanes as this run's work,
+    and a ref reset back to the start sha is still no work at all.
+    """
+    end = sandbox_ref_heads(sandbox)
+    found = []
+    moved = set()
+    for name in sorted(end):
+        if end[name] == start.get(name) or end[name] == base:
+            continue
+        moved.add(end[name])
+        found.append(sandbox_ref_subject(sandbox, name, end[name]))
+    head = subprocess.run(["git", "-C", sandbox, "rev-parse", "-q", "--verify", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    tip = end.get("refs/heads/" + branch)
+    if head and head != base and head != tip and head not in moved:
+        found.append(sandbox_ref_subject(sandbox, "HEAD-detached", head))
+    return found
+
+
+def sandbox_ref_subject(sandbox: str, ref: str, sha: str) -> str:
+    """One line naming a ref, its short sha and its subject (worker text)."""
+    out = subprocess.run(["git", "-C", sandbox, "log", "-1", "--format=%h %s", sha],
+                         capture_output=True, text=True)
+    return "%s %s" % (ref, out.stdout.strip() or sha[:10])
+
+
 # The return contract (docs/agent-protocol.md): a finished worker prints a
 # REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).
 # Prose that merely mentions a report is not one; neither is a word that only
@@ -4412,7 +4470,8 @@ def has_report(output: str, brief: str = "") -> bool:
 
 
 def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
-                    diffstat: str = "", reflog: str = "", brief: str = ""):
+                    diffstat: str = "", reflog: str = "", brief: str = "",
+                    extra: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
@@ -4440,12 +4499,19 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
 
     `brief` (item 1) is the text this run sent the client: has_report() must not
     read the worker's own instructions back to it as its report.
+
+    SB-A (D-103) item 2 (NOOPCOMMIT): `extra` is what sandbox_committed_work
+    found by comparing every ref (and a detached HEAD) to the start sha — a
+    commit on a branch the worker made is a change, even though the porcelain is
+    clean and `<start-sha>..<sandbox-branch>` is empty.
     """
     if route.get("review"):
         return None, ""
     read_only = bool(route.get("read_only"))
-    if read_only and (changed or ahead or reflog):
+    if read_only and (changed or ahead or reflog or extra):
         detail = diffstat or "(no diff stat)"
+        if extra:
+            detail += "; commits it left on another ref: %s" % extra
         if reflog:
             detail += ("; commits its reflog still shows, beyond the base: %s "
                        "(commit then reset; the sandbox reflog is the only witness)"
@@ -4455,6 +4521,10 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
             "(exit %d) - its deliverable was the report, never the edit: %s"
             % (EXIT_READ_ONLY_WRITE, detail))
     if not changed and not ahead:
+        if extra:
+            # SB-A (D-103) item 2 (NOOPCOMMIT): the commit is there, the
+            # porcelain and `<start-sha>..<branch>` just never looked at it.
+            return None, ""
         if not has_report(output, brief):
             return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
         if read_only:
@@ -4731,26 +4801,73 @@ def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
 
 
 
+def kill_groups(pgids, grace=5.0) -> None:
+    """SIGTERM every named process group, then SIGKILL whatever survives `grace`.
+
+    SB-A (D-103) item 1 (CANCELORPHAN): a worker's client is started in its own
+    session, so it leads a group the spawner's runner is NOT in, and a child that
+    outlives it is reparented to systemd --user — but reparenting never changes a
+    pgid, so a group kill still reaches it. Sending the signal to each group
+    first and polling them together is what keeps one 5 s window instead of one
+    per group.
+    """
+    if os.name == "nt":
+        return
+    live = []
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        live.append(pgid)
+    deadline = time.time() + grace
+    while live and time.time() < deadline:
+        time.sleep(0.05)
+        still = []
+        for pgid in live:
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                continue
+            still.append(pgid)
+        live = still
+    for pgid in live:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def kill_group(pgid, grace=5.0) -> None:
+    """Stop one process group: SIGTERM, then SIGKILL past the grace."""
+    kill_groups([pgid], grace=grace)
+
+
 def _terminate_group(proc, pgid) -> None:
     """Stop whatever is left of the client's process group (best effort)."""
     if os.name == "nt":
         subprocess.call(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+    kill_group(pgid)
+
+
+def record_worker_group(pgid) -> None:
+    """Write the client's process group where a canceller can find it.
+
+    The MCP runner cannot see it: the client lives in a session of its own, one
+    the runner's group does not cover. SB-A (D-103) item 1 measured a canceled
+    run whose `opencode run` and child `opencode serve --stdio` (~480 MB) kept
+    running for exactly that reason. Best effort, and only when the runner asked
+    by naming the file: an interactive `autoos-agent.py run` has no canceller.
+    """
+    path = os.environ.get(WORKER_PGRP_ENV)
+    if not path or pgid is None:
         return
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            return
-        time.sleep(0.05)
     try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump({"pgid": int(pgid)}, fh)
+    except (OSError, TypeError, ValueError):
         pass
 
 
@@ -4820,12 +4937,13 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        pgid = None
+        pgid = None  # Windows reaps with `taskkill /T`, which walks the tree
     else:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
+    record_worker_group(pgid)
     tail = bytearray()
     raw_tail = bytearray()
     found = []
@@ -5574,6 +5692,13 @@ def cmd_run(args, cfg: dict) -> int:
         isolate_clone(source, sb["path"], sb["branch"])
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
+        # SB-A (D-103) item 2 (NOOPCOMMIT): the ref tips as the clone stands up.
+        # A `--local` clone carries every branch of the parent, so the run's own
+        # commits are only identifiable against this baseline, and the baseline
+        # cannot be taken later. One `for-each-ref`; a review run is exempt from
+        # the sandbox verdict, so it does not pay for it (like the reflog).
+        if not plan["route"].get("review"):
+            sb["refs"] = sandbox_ref_heads(sb["path"])
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
         # later read sees only what the run appended. Kept in the dict, which a
         # provider-stop fallthrough re-run inherits with the sandbox itself.
@@ -5802,9 +5927,25 @@ def cmd_run(args, cfg: dict) -> int:
         print("\nsandbox changes (uncommitted):\n" + redact_output(changed or "  (none)"))
         if ahead:
             print("sandbox commits:\n" + redact_output(ahead))
+        # SB-A (D-103) item 2 (NOOPCOMMIT): neither read above sees a commit on a
+        # branch the worker made, and a detached HEAD hides both. Only the run
+        # that looked like no work at all pays for the third read.
+        off_ref = (sandbox_committed_work(sb["path"], sb["base"], branch, sb["refs"])
+                   if not changed and not ahead and sb.get("refs") is not None else [])
+        if off_ref:
+            print("sandbox commits off the run branch:\n"
+                  + redact_output("\n".join("  " + ln for ln in off_ref)))
         q = shlex.quote(sb["path"])
         print("review:  git -C %s diff" % q)
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
+        for ln in off_ref:
+            ref, _, rest = ln.partition(" ")
+            if ref.startswith("refs/heads/"):
+                print("take it: git fetch %s %s   (the worker's own branch)"
+                      % (q, ref[len("refs/heads/"):]))
+            else:
+                print("take it: git -C %s branch <name> %s   (detached HEAD)"
+                      % (q, rest.split()[0]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
@@ -5820,7 +5961,8 @@ def cmd_run(args, cfg: dict) -> int:
             # read-only run pays for the extra git call.
             sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
             reflog=", ".join(reset_away),
-            brief=plan.get("brief") or "")
+            brief=plan.get("brief") or "",
+            extra="; ".join(off_ref))
         leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
                            sandbox=sb["path"])
         if leak:

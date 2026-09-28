@@ -60,7 +60,6 @@ import io
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -547,7 +546,14 @@ def run_job(path: str) -> int:
         # runner above already got a scrubbed env, so this is the same scrub run
         # a second time rather than a copy of the caller's tokens.
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
+                             # SB-A (D-103) item 1 (CANCELORPHAN): the CLI starts
+                             # its client in a session of its own, so this runner's
+                             # group — the one `cancel` kills — does not cover it.
+                             # Naming the file is how `cancel` learns that pgid.
+                             env=agent.spawner_child_env(
+                                 extra={"AUTOOS_TASK_DIR": path,
+                                        "AUTOOS_WORKER_PGRP":
+                                            os.path.join(path, agent.WORKER_PGRP_FILE)}),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)
@@ -579,6 +585,19 @@ def _alive(pid) -> bool:
         return False
 
 
+def _read_tail(path: str) -> str:
+    """The last ``_TAIL_BYTES`` of the run's output.log, or ""."""
+    log_path = os.path.join(path, "output.log")
+    try:
+        with io.open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _TAIL_BYTES))
+            return fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     """Parse the tail of output.log for QUESTION/REPORT blocks.
 
@@ -588,14 +607,8 @@ def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     ``_state()`` can report it as ``input_required`` with ``detail="ended"``
     and ``respond()`` can refuse an already-exited worker.
     """
-    log_path = os.path.join(path, "output.log")
-    try:
-        with io.open(log_path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - _TAIL_BYTES))
-            tail = fh.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _read_tail(path)
+    if not tail:
         return {}
 
     result = {}
@@ -637,6 +650,77 @@ def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     return result
 
 
+# The verdict line a review run's brief asks for ("VERDICT: ready / fix-first /
+# NOT READY + findings"), optionally markdown-wrapped, anchored at the line start
+# so a sentence that merely mentions a verdict does not read as one.
+_VERDICT_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?VERDICT(?:\*\*)?\s*[:\-]?\s*(.+?)\s*$")
+
+# The words that make a verdict a verdict. Ordered longest-first so "not ready"
+# is not read as "ready" by an earlier entry.
+_VERDICT_WORDS = sorted(
+    ("not ready", "fix-first", "fix first", "changes-requested", "changes requested",
+     "needs-work", "needs work", "approved", "approve", "passed", "reject", "blocked",
+     "ready", "pass", "lgtm", "ship", "block"),
+    key=len, reverse=True)
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def review_verdict(text: str) -> str | None:
+    """The verdict a reviewer stated in its own transcript, or None.
+
+    SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code says
+    whether a process ran, and a review run's deliverable is its verdict, so the
+    transcript has to be read. The LAST verdict wins — a reviewer that changed
+    its mind said so. A value that opens with a bracket is a template
+    ("VERDICT: <ready|fix-first|NOT READY>"), which is the brief quoted back, not
+    a decision: the same escape SPAWNFIX3c closed for REPORT headings.
+    """
+    found = None
+    for line in (text or "").splitlines():
+        m = _VERDICT_LINE_RE.search(_ANSI_RE.sub("", line))
+        if not m:
+            continue
+        value = m.group(1).strip().strip("*_` ").strip()
+        if not value or value[0] in "<[({":
+            continue
+        low = value.lower()
+        if any(low.startswith(word) for word in _VERDICT_WORDS):
+            found = value
+    return found
+
+
+def _is_review_run(job: dict) -> bool:
+    """True when this run was routed as a review, from the job the spawner wrote.
+
+    Reads both shapes a caller can send (a card dict, or the `k=v,...` text the
+    CLI takes) and the argv the runner was started with, because the route dict
+    this server stores carries no review flag of its own.
+    """
+    req = job.get("request") or {}
+    card = req.get("card")
+    if isinstance(card, str):
+        try:
+            card = routing.parse_card(card)
+        except (ValueError, KeyError, TypeError):
+            card = {}
+    if isinstance(card, dict) and card.get("role") == "review":
+        return True
+    if isinstance(card, dict) and card.get("kind") == "review":
+        return True
+    if str(req.get("tier") or "") == "3":
+        return True
+    argv = [str(a) for a in (job.get("argv") or [])]
+    for i, arg in enumerate(argv[:-1]):
+        following = argv[i + 1]
+        if arg == "--tier" and following == "3":
+            return True
+        if arg == "--card" and ("role=review" in following or "kind=review" in following):
+            return True
+    return False
+
+
 def _state(path: str) -> dict:
     # Spec 9: `state` is the A2A lifecycle name, `detail` the pre-A2A value
     # (starting/running/done/cancelled/lost) - the rename loses nothing. A pid
@@ -668,6 +752,8 @@ def _state(path: str) -> dict:
 
     # stdout channel: detect QUESTION/REPORT in output.log for workers
     # that cannot use the ask-back helper (e.g. qoder).
+    recovered = None
+    note = None
     if ex is not None and not ex.get("cancelled"):
         channel = _stdout_channel(path, ex)
         report = channel.get("report")
@@ -675,6 +761,23 @@ def _state(path: str) -> dict:
             state, detail, question = "input_required", "ended", channel["question"]
         elif report and report.get("status") == "failed" and state == "completed":
             state, detail = "failed", "reported-failed"
+        if (state != "input_required" and detail != "reported-failed"
+                and _is_review_run(job) and "--dry-run" not in (job.get("argv") or [])):
+            # SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code
+            # never saw the verdict. A reviewer that stated one and then died was
+            # thrown away as incomplete; a reviewer that exited 0 having said
+            # nothing was counted as done and never re-routed.
+            verdict = review_verdict(_read_tail(path))
+            if verdict is not None:
+                recovered = verdict
+                if state == "failed" and report is None:
+                    state, detail = "completed", "verdict-recovered"
+                    note = ("verdict recovered, no REPORT: the reviewer died (rc %s) "
+                            "after it stated its verdict, so the work is kept"
+                            % ex.get("rc"))
+            elif state == "completed":
+                state, detail = "failed", "no-verdict"
+                note = "no verdict: a review run that stated none did not review"
 
     out = {"id": job.get("id"), "state": state, "detail": detail,
            "client": (job.get("request") or {}).get("client") or "opencode",
@@ -683,6 +786,10 @@ def _state(path: str) -> dict:
         out["question"] = question
     if report is not None:
         out["report"] = report
+    if recovered is not None:
+        out["verdict"] = recovered
+    if note is not None:
+        out["note"] = note
     if ex is not None:
         out["rc"] = ex.get("rc")
         out["secs"] = round((ex.get("ended") or time.time()) - (job.get("started") or 0))
@@ -753,10 +860,21 @@ def cancel(run_id: str) -> dict:
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(job["pid"])], capture_output=True)
     else:
+        # SB-A (D-103) item 1 (CANCELORPHAN): killing the runner alone left the
+        # client (`opencode run`) and its child (`opencode serve --stdio`,
+        # reparented to systemd --user, ~480 MB) running. A group is addressed by
+        # pgid and reparenting never changes it, so both groups are killed — the
+        # runner's own and the one run_client recorded — with SIGTERM escalating
+        # to SIGKILL past the grace.
+        pgids = [int(job["pid"])]
+        recorded = _read_json(os.path.join(path, agent.WORKER_PGRP_FILE)) or {}
         try:
-            os.killpg(int(job["pid"]), signal.SIGTERM)  # the runner leads its own session
-        except OSError:
-            pass
+            client_pgid = int(recorded.get("pgid"))
+        except (TypeError, ValueError):
+            client_pgid = 0
+        if client_pgid > 1 and client_pgid != pgids[0]:
+            pgids.append(client_pgid)
+        agent.kill_groups(pgids)
     return _state(path)
 
 
@@ -819,8 +937,9 @@ def serve() -> None:
 
     @app.tool(name="cancel")
     def _cancel(run_id: str) -> dict:
-        """Stop a working or input_required agent (SIGTERM to its process
-        group)."""
+        """Stop a working or input_required agent: SIGTERM to its runner's and
+        its client's whole process groups, SIGKILL to whatever survives the
+        grace."""
         return cancel(run_id)
 
     @app.tool(name="respond")
