@@ -182,8 +182,11 @@ printed. The order is:
   967be39d. At 150k that leaves ~95k of work per session, so the handoffs, not the work, were what
   cost. The number lives in the registry, never in prose: a new `claude-sonnet-1m` `handoff_caps` row
   (sonnet, `window` 1000000, `cap_tokens` 250000 / `cap_fraction` 0.25 — the invariant
-  `tools/registry.py validate` asserts). Lane CAPL2. §8 goes after the 55.5k itself; lower this row
-  again once R3/R4 land and a measured relaunch costs < ~20k.
+  `tools/registry.py validate` asserts). `cap_for` matches by substring and the FIRST row wins, and a
+  trailing `[1m]` is stripped before matching, so the row must be inserted **before** the `*` 200k-class
+  row — appended after it, sonnet would silently keep matching `*` and stay at 150k. The test pins a
+  `…sonnet…[1m]` id resolving to 250000, not to the wildcard. Lane CAPL2. §8 goes after the 55.5k
+  itself; lower this row again once R3/R4 land and a measured relaunch costs < ~20k.
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
   stays gateway-only, so the metric needs no gateway.
   - Its numerator is the orchestrator sessions' weighted tokens: every usage record in the Claude
@@ -329,7 +332,7 @@ CLAUDE.md. The system prompt is not ours; the other two are, and both are cut pe
 | R4 relaunch | `relaunch-line`, run.json schema + example | tools/autoos-agent.py, configuration/run.example.json (new), tests |
 | R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
 | R5b cap | shared opus/fable row 350k (D-044), DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
-| CAPL2 | §5 new `claude-sonnet-1m` handoff_caps row 250k/0.25 (D-085) + DEFAULT_CAPS fallback | catalog/ai-registry.json, tools/autoos_context.py, tests |
+| CAPL2 | §5 new `claude-sonnet-1m` handoff_caps row 250k/0.25 (D-085), inserted **before** the `*` row, + the same ordering in DEFAULT_CAPS; test pins a sonnet id resolving to 250000 | catalog/ai-registry.json, tools/autoos_context.py, tests |
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources | SKILL.md, references/ |
 | R9 baseline | §8 per-role strict `--mcp-config` files + the flags that pass them, the always-loaded trim, the `baseline` measurement | configuration/mcp/ — one `<role>.json.example` per role (new), tools/autoos-agent.py (relaunch-line, run), tools/autoos_tokenrate.py, AGENTS.md, CLAUDE.md, tests |
 
