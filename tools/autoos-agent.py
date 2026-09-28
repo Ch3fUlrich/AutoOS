@@ -1019,25 +1019,25 @@ def review_status(text, registry):
             "hint": REVIEW_ENTRY_HINT}
 
 
-def cmd_review_status(args) -> int:
-    """Report whether a lane record carries both reviews a ready lane needs.
+def read_lane_record(path):
+    """A lane record's text and the label to name it with; `-` is stdin.
 
-    Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
-    read -- a typo'd path is not a lane that needs reviewing, and a caller that
-    waits on 1 would wait forever on that mistake.
+    OSError (a typo'd path) is the caller's to report: rc 2, not rc 1 -- "the
+    gate could not run" is a different next action from "not ready yet".
     """
-    path = args.record
-    try:
-        if path == "-":
-            text, label = sys.stdin.read(), "<stdin>"
-        else:
-            with io.open(path, encoding="utf-8") as fh:
-                text, label = fh.read(), path
-    except OSError as exc:
-        print("review-status: %s" % exc, file=sys.stderr)
-        return 2
-    registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry)
+    if path == "-":
+        return sys.stdin.read(), "<stdin>"
+    with io.open(path, encoding="utf-8") as fh:
+        return fh.read(), path
+
+
+def print_review_report(label, report):
+    """The review-status report, shared by `review-status` and `ready`.
+
+    One owner on purpose: the line an orchestrator reads to decide what to do
+    next must not drift between the gate that tells it to go and the gate that
+    refuses to write the claim down.
+    """
     print("review-status: %s -- %d review entr%s"
           % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
     for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
@@ -1048,7 +1048,125 @@ def cmd_review_status(args) -> int:
     if not report["entries"]:
         print("  note: write one line per review, e.g.: %s" % report["hint"])
     print("ready: %s" % ("yes" if report["ready"] else "no"))
+
+
+def cmd_review_status(args) -> int:
+    """Report whether a lane record carries both reviews a ready lane needs.
+
+    Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
+    read -- a typo'd path is not a lane that needs reviewing, and a caller that
+    waits on 1 would wait forever on that mistake.
+    """
+    try:
+        text, label = read_lane_record(args.record)
+    except OSError as exc:
+        print("review-status: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print_review_report(label, report)
     return 0 if report["ready"] else 1
+
+
+def remote_branch_tip(repo, branch):
+    """``(sha, error)`` -- what ``origin`` says ``refs/heads/<branch>`` points at.
+
+    ``(None, None)`` means the remote ANSWERED and the branch simply is not there:
+    the work lives only in someone's checkout, which is exactly what a `ready`
+    line must not claim. A non-None ``error`` is git failing to answer at all (no
+    ``origin`` remote, not a checkout, an unreachable host) -- "the gate could not
+    run", which is a different next action and a different exit code.
+
+    The timeout is not decoration: the real origin is a network remote, and a
+    gate that hangs takes the lane's session with it.
+    """
+    ref = "refs/heads/%s" % branch
+    try:
+        proc = subprocess.run(["git", "-C", repo, "ls-remote", "origin", ref],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, "%s" % exc
+    if proc.returncode != 0:
+        return None, ((proc.stderr or proc.stdout or "").strip()
+                      or "git ls-remote exited %d" % proc.returncode)
+    for line in proc.stdout.splitlines():
+        sha, _sep, name = line.partition("\t")
+        if name.strip() == ref and sha.strip():
+            return sha.strip(), None
+    return None, None
+
+
+def append_inbox_line(path, line):
+    """Append exactly one line to a controller's inbox, creating it if missing.
+
+    Append-only because the inbox is a log: it holds orders other agents already
+    acted on, and rewriting it to add a line deletes that history. A file whose
+    last byte is not a newline is terminated first, so the new line is never
+    glued to the old one.
+    """
+    needs_newline = False
+    if os.path.isfile(path) and os.path.getsize(path):
+        with io.open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            needs_newline = fh.read(1) not in (b"\n", b"\r")
+    with io.open(path, "a", encoding="utf-8", newline="\n") as fh:
+        if needs_newline:
+            fh.write("\n")
+        fh.write(line + "\n")
+
+
+def cmd_ready(args) -> int:
+    """Write the `ready` line an orchestrator used to type by hand.
+
+    Three gates, in this order, each naming itself when it fails: the record
+    carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
+    for ``--branch``, and only then is the line appended to the inbox. The rule
+    moved into code because the hand-written claim was wrong once -- L1-main
+    refused a `ready` line whose record had no reviews (inbox 00:31:52Z).
+
+    Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
+    met, 2 a gate could not be read (unreadable record, git failure, unwritable
+    inbox)."""
+    try:
+        text, label = read_lane_record(args.record)
+    except OSError as exc:
+        print("ready: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print_review_report(label, report)
+    if not report["ready"]:
+        print("ready: not appended -- the record does not carry both reviews "
+              "(see %s)" % REVIEW_ENTRY_HINT)
+        return 1
+    tip, git_error = remote_branch_tip(args.repo or os.getcwd(), args.branch)
+    if git_error:
+        print("ready: cannot read origin/%s: %s" % (args.branch, git_error), file=sys.stderr)
+        return 2
+    if tip is None:
+        print("ready: not pushed -- origin has no refs/heads/%s; push the lane "
+              "before declaring it ready" % args.branch)
+        return 1
+    if tip != args.sha:
+        print("ready: not pushed -- %s is at %s on origin, not %s"
+              % (args.branch, tip, args.sha))
+        return 1
+    line = "%s ready %s %s reviews: %s | %s" % (
+        _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
+        args.branch, args.sha,
+        report["cross_family"]["detail"], report["final"]["detail"])
+    if args.dry_run:
+        print("ready: --dry-run, nothing appended to %s" % args.inbox)
+        print("  %s" % line)
+        return 0
+    try:
+        append_inbox_line(args.inbox, line)
+    except OSError as exc:
+        print("ready: cannot write %s: %s" % (args.inbox, exc), file=sys.stderr)
+        return 2
+    print("ready: appended to %s" % args.inbox)
+    print("  %s" % line)
+    return 0
 
 
 def reviewer_run_override(review, client, cfg, tier, model, override, free):
@@ -3476,6 +3594,26 @@ def main(argv=None) -> int:
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+    ready_p = sub.add_parser(
+        "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
+                      "hand: gate on review-status and on --sha being the tip of "
+                      "origin/--branch, then append one line to the controller's "
+                      "inbox (REVGATE)")
+    ready_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
+    ready_p.add_argument("--branch", required=True,
+                         help="the lane branch, checked as refs/heads/<branch> on origin")
+    ready_p.add_argument("--sha", required=True,
+                         help="the commit the lane is ready at; must equal origin's tip for --branch")
+    ready_p.add_argument("--inbox", required=True,
+                         help="the controller's inbox file to append the ready line to "
+                              "(created if missing, never rewritten)")
+    ready_p.add_argument("--registry",
+                         help="registry to resolve model families against "
+                              "(default: catalog/ai-registry.json)")
+    ready_p.add_argument("--repo",
+                         help="git checkout to ask origin about (default: the cwd)")
+    ready_p.add_argument("--dry-run", action="store_true",
+                         help="print the line, append nothing")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
@@ -3485,6 +3623,8 @@ def main(argv=None) -> int:
         return cmd_route(args)
     if args.cmd == "review-status":
         return cmd_review_status(args)
+    if args.cmd == "ready":
+        return cmd_ready(args)
     if args.cmd == "ps":
         return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
