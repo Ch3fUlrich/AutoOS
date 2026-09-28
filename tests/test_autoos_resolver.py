@@ -2183,9 +2183,23 @@ class GatewayOrderTests(unittest.TestCase):
         # models through paid APIs (no cheaperinference/claude-*, no
         # cheaperinference/gpt-*): too expensive" - "DROP the review combo on
         # cheaperinference/claude-sonnet-5".
+        #
+        # AUTHORS (S1) 2026-09-28 rewrote the two models-table limbs as the leg
+        # test they were standing in for. "claude-sonnet-5 is not in models" was
+        # never the rule; "nothing routes to it" is, and registering the
+        # orchestrator's own model as an AUTHOR id -- so `review-status` can read
+        # a record the Sonnet final wrote instead of refusing it -- says nothing
+        # about legs. An author row carries no provider and no route names it;
+        # what keeps Claude and GPT off a paid API is policy.leg_rules
+        # deny-claude-paid-api / deny-gpt-paid-api, checked by registry rule 9.
         registry = self.registry()
-        self.assertNotIn("claude-sonnet-5", registry["models"])
-        self.assertNotIn("gpt-5.6-terra", registry["models"])
+        legs = {leg for route in registry["routes"].values()
+                for leg in (route.get("legs") or [])
+                + list(route.get("unavailable_legs") or {})}
+        for mid in ("claude-sonnet-5", "gpt-5.6-terra"):
+            self.assertEqual([leg for leg in sorted(legs)
+                              if leg.split("/", 1)[1:2] == [mid]], [],
+                             "%s is an author id, never a routable leg" % mid)
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 self.assertFalse(leg.startswith("cheaperinference/claude"), leg)

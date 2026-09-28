@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the orchestrator's own models are known review authors (AUTHORS (S1), 2026-09-28)
+
+- **`catalog/ai-registry.json:models`**: `claude-opus-5-5`, `claude-sonnet-5`, `claude-fable-5-1`,
+  `claude-haiku-4-5`, each `family: anthropic`. Measured: `autoos-agent.py ready` and
+  `review-status` refused a lane record its own orchestrator wrote — *"author claude-opus-5-5 is
+  not a model, leg, route or reviewer the registry knows, and not a family it declares"* — so
+  records borrowed `claude-opus-4-6`, which is a false statement about who wrote the diff and
+  makes the gate's detail line useless in an audit. `author_family`
+  (`tools/autoos_resolver.py`) reads the `models` table first, so the smallest fix is data, not
+  code: an author row carries no provider and no route names it, so none of the four is a
+  routable leg (`test_an_orchestrator_author_is_not_a_leg_of_any_route` pins that, and
+  `policy.leg_rules` `deny-claude-paid-api` still keeps Claude off a paid API).
+- **`tools/registry.py` rule 12**: `validate` checks `policy.handoff_caps` — every row's
+  `cap_tokens == round(window * cap_fraction)`, and a `match: ["*"]` fallback row exists.
+  `tools/autoos_context.py` reads `cap_tokens` and never recomputes it, so a row whose pair
+  disagreed stated two caps at once and the lane handed off at the stale one; with no `*` row a
+  model no other row names silently got that tool's hand-maintained `DEFAULT_CAPS` instead of
+  the policy. Rule 12 red first in `HandoffCapsPolicyTests`.
+
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and

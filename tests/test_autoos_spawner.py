@@ -8504,6 +8504,66 @@ class ReviewStatusTests(unittest.TestCase):
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
                 self.assertEqual(report["cross_family"]["family"], family)
 
+    # The models an orchestrator session actually runs, spelled as its own client
+    # reports them. They are authors, never routes: no provider serves them here,
+    # no route leg names them, and the resolver cannot send work to any of them.
+    ORCHESTRATOR_AUTHORS = ("claude-opus-5-5", "claude-sonnet-5",
+                            "claude-fable-5-1", "claude-haiku-4-5")
+
+    def test_the_real_registry_knows_every_orchestrator_model_as_an_anthropic_author(self):
+        # AUTHORS (S1) measured 2026-09-28: `ready` and `review-status` refused an
+        # orchestrator-written record outright -- "author claude-opus-5-5 is not a
+        # model, leg, route or reviewer the registry knows, and not a family it
+        # declares" -- so lanes borrowed `claude-opus-4-6`, which is a false
+        # statement about who wrote the diff and it makes the gate's own detail
+        # line unreadable for a real audit.
+        real = self.real_registry()
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                family, why_not = self.agent.resolver.author_family(author, real)
+                self.assertEqual(family, "anthropic", why_not)
+
+    def test_an_orchestrator_author_reviewed_by_the_paid_muse_is_cross_family(self):
+        # The point of the four ids above: a lane an Opus 5.5 session wrote is
+        # reviewable by Muse without anyone editing the author field to a lie.
+        real = self.real_registry()
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=%s "
+                     "reviewer=omniroute/spark-1.3-contributor verdict=ship\n" % author)
+                    + FINAL_LINE, real)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                self.assertEqual(report["cross_family"]["family"], "meta")
+
+    def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
+        # Known is not routable, and this pins the difference: a route leg whose
+        # model half is one of these ids would put the orchestrator's own
+        # subscription model into gateway traffic, which the "Claude budget"
+        # leg rules deny (registry rule 9) -- so guard the absence here, next to
+        # the rows that made them known.
+        real = self.real_registry()
+        legs = [leg for route in real["routes"].values()
+                for leg in (route.get("legs") or [])
+                + list(route.get("unavailable_legs") or {})]
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                self.assertEqual([leg for leg in legs
+                                  if leg.split("/", 1)[1:2] == [author]], [])
+
+    def test_an_anthropic_reviewer_of_an_orchestrator_author_is_not_cross_family(self):
+        # Known is not the same as independent: Haiku is the anthropic family's
+        # own first-pass fallback, so an Opus-authored lane it reviewed stays NOT
+        # READY -- adding the authors must not open that door.
+        real = self.real_registry()
+        for reviewer in ("haiku", "claude-haiku-4-5", "claude-sonnet-5"):
+            with self.subTest(reviewer=reviewer):
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+                     "reviewer=%s verdict=ship\n" % reviewer) + FINAL_LINE, real)
+                self.assertFalse(report["ready"], report)
+                self.assertIn("same family", report["cross_family"]["detail"])
+
 
 class ReadyCommandTests(unittest.TestCase):
     """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
