@@ -119,6 +119,57 @@ repo's `opencode.jsonc` and says "No MCP servers configured". Ask for this
 directory instead:
 `opencode api GET "/api/mcp?location%5Bdirectory%5D=$PWD"`.
 
+### Bridge benchmark (D9) — `tools/check-omnigraph-bridge.sh` / `.ps1`
+
+D9 in the spec: the catalog may start the bridge with `npx` only if **16 bridges
+started in parallel each answer `health` in under 2 s with zero npm cache-lock
+errors** — because N clients opening this repo spawn N `npx` processes unpacking
+into one npm cache. The benchmark measures that and nothing else: it handshakes
+each bridge over stdio (`initialize` → `notifications/initialized` →
+`tools/call health` → `tools/call query` with the `whoami` Project read), times
+spawn → health, checks the returned `p.slug` against the graph id in `.mcp.json`,
+and counts `EEXIST` / `ENOTEMPTY` / `lock` lines on stderr.
+
+```bash
+# The live decision run: cold first, then warm.
+OMNIGRAPH_BASE_URL=<omnigraph-url> OMNIGRAPH_TOKEN=... \
+    tools/check-omnigraph-bridge.sh --cold     # one fresh npm cache for the wave
+OMNIGRAPH_BASE_URL=<omnigraph-url> OMNIGRAPH_TOKEN=... \
+    tools/check-omnigraph-bridge.sh --warm     # primes the default cache, then 16
+# Windows: tools\check-omnigraph-bridge.ps1 --cold
+```
+
+Exit 0 = D9 met, 1 = a bridge died, health was slow, the slug was a different
+graph, or npm logged a lock error (each named in the report); 2 = unusable input;
+130 = interrupted by Ctrl-C — nothing is scored, every bridge it started and
+everything those bridges spawned is killed, and only an "interrupted" line goes
+to stderr.
+`--json` gives the machine-readable form. The token comes from `$OMNIGRAPH_TOKEN`
+only and is never printed; the bridge command, the graph id and the base-url
+default are read from `.mcp.json`, so the pin is never spelled twice.
+
+`--fake-server` answers the two paths the bridge really calls
+(`GET <base>/healthz`, `POST <base>/graphs/<id>/query`) from a local stub, and
+with `--bridge-cmd "python3 tests/fixtures/omnigraph_bridge_stub.py"` the whole
+run needs no npm and no network — that pair is what CI gates, in
+`tests/linux/18-mcp-wiring.sh`.
+
+Measured 2026-09-27 on the coding host (6 cores, Node 24) with `--fake-server`,
+so npm resolution is timed with **network excluded**; the operator's live run
+against `<omnigraph-url>` is still owed before D9 closes:
+
+| wave | min | median | max | healthy | whoami | lock errors |
+|---|---|---|---|---|---|---|
+| `--cold`, 4 parallel | 9130 ms | 9255 ms | 14223 ms | 4/4 | 4/4 | 0 |
+| `--warm`, 16 parallel | 5808 ms | 6700 ms | 7281 ms | 16/16 | 16/16 | 0 |
+
+Every bridge answered and every slug was correct, but the startup cost alone is
+3–7× the limit and **zero lock errors says contention is not the problem** — it
+is per-bridge npm resolution. On this host that fails D9 and points at the
+pre-installed alternative: install the pinned client once (`npm i -g
+@modernrelay/omnigraph-mcp@0.8.0`, which provides `omnigraph-mcp`) and re-run the
+same benchmark against it with `--bridge-cmd omnigraph-mcp`.
+
 ### What broke on 2026-09-24
 
 "omnigraph is not working, other sessions cannot connect" turned out to be
