@@ -113,18 +113,19 @@ names a marker mid-sentence still stops the run. A prefix may also never name on
 spec §0's other one-list rules, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUME`,
 `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
 is held` is an order wearing its own first clause as a speaker, not an acknowledgement
-(R2a4). An acknowledgement then exempts only an order word its own record closes: a word
-from §0's third list, `autoos_heartbeat.CLOSING_WORDS` (`lifted`, `ended`, `cancelled`,
-`canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`, `resolved`), must
-follow that order word within 3 words and carry no negation — §0's fourth list,
-`autoos_heartbeat.NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`, `without`, and
-the `un-` prefix on the closing word), vetoes the close. Whichever of the two comes
-first decides, so a close ahead of a later negation still closes
-(`→ done: PAUSE lifted, not because the operator forgot`). So `→ done: PAUSE lifted`
-reports a stop that ended while `→ done: applied the fix. PAUSE all lanes until
-further notice`, `→ done: noted. PAUSE over the weekend` and `→ done: PAUSE was not
-lifted` are orders still in force (R2a5, the Sonnet review of R2a4; R2a6, the Muse review
-of R2a5) — and `lesson:` is the
+(R2a4). What an acknowledgement may then exempt — `autoos_heartbeat.CLOSING_WORDS` and
+its 3-word window, the `autoos_heartbeat.NEGATION_WORDS` veto, and the way a `RESUME`
+reads that same window the other way round through the
+`REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition of the closing list — is
+RESTART spec §0's rule (`docs/plans/2026-09-28-restart-spec.md`), which is its one home
+and is not restated here; in code it is `autoos_heartbeat._gives_order` for a stop word
+and `_resumes` for a release, both reading `_order_word_is_negated` and
+`_order_word_is_closed`. So `→ done: PAUSE lifted` and `→ done: RESUME acknowledged`
+report what already happened, while `→ done: PAUSE lifted but not confirmed`,
+`→ done: noted. PAUSE over the weekend` and
+`→ done: applied the fix already; RESUME was never issued, still holding` are still in
+force (R2a5, the Sonnet review of R2a4; R2a6, the Muse review of R2a5; R2a7, the Sonnet
+review of R2a6) — and `lesson:` is the
 one marker that exempts a whole record, because a lesson reports on the code and never
 addresses the run.
 

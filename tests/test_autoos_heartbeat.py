@@ -521,6 +521,83 @@ class PauseStateTests(unittest.TestCase):
         for word in ("note", "notebook", "amount", "nope", "none", "nevertheless"):
             self.assertIsNone(hb._NEGATION_RE.search(word), word)
 
+    # R2a7 (the Sonnet review of R2a6, S1, two HIGHs, safety): (1) the RESUME half of
+    # `pause_state` was ungated — a bare `_RESUME_RE.search` — so a *reported* release,
+    # `→ done: applied the fix already; RESUME was never issued, still holding`, lifted a
+    # stop nobody lifted. A RESUME now counts only as an order under the same ack and
+    # negation rules a PAUSE is read by, and a negated release never counts. (2) A
+    # closing word closed an order even when the negation came *after* it —
+    # `PAUSE lifted but not confirmed` — because the window scan returned at the first
+    # closing word. A close now needs the whole window unnegated. The asymmetry is
+    # unchanged: a wrong veto costs one wasted heartbeat and a RESUME, a wrong
+    # exemption loses the stop itself.
+
+    def test_a_negation_after_the_closing_word_keeps_the_order_open(self):
+        for text in ("→ done: PAUSE lifted but not confirmed",
+                     "→ done: PAUSE lifted, not really",
+                     "→ ack: PAUSE cleared, unconfirmed by ops"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_closing_word_with_no_negation_in_the_window_still_closes(self):
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged"):
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_resume_that_was_never_issued_does_not_lift_the_stop(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z → done: applied the fix already; "
+                    "RESUME was never issued, still holding")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_plain_resume_after_a_pause_lifts_it(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z operator: RESUME all lanes")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_an_acknowledged_resume_still_lifts_it(self):
+        # A closing word that reports a release *landing* does not undo it:
+        # `→ done: RESUME acknowledged` says the run was released, so it clears.
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z L1: → done: RESUME acknowledged")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_negated_or_undone_resume_never_lifts_the_stop(self):
+        for text in ("→ main: RESUME was not issued",
+                     "operator: no RESUME given yet",
+                     "operator: don't RESUME anything",
+                     "→ done: RESUME cancelled by the operator",
+                     "lesson: the RESUME line was written too early"):
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_un_shaped_word_vetoes_the_close_and_that_is_the_accepted_cost(self):
+        # The wide `un-` veto reads a word that merely starts with those letters as a
+        # negation: the real corpus's `→ done: freeze cleared (2/4 units, 6.73GB)` now
+        # reports an order still in force. Deliberate — the narrow reading that fixes it
+        # is the one that loses `PAUSE cleared, unconfirmed by ops`, and a held lane costs
+        # one heartbeat while a wrongly-released one is the lost order.
+        self.assertTrue(hb._gives_order("→ done: freeze cleared (2/4 units, 6.73GB)"))
+
+    def test_the_release_gate_is_the_stop_gate_applied_to_the_resume_word(self):
+        # One shared exemption, not a second copy of it: the release gate reads the same
+        # negation and closing-word helpers, and its exempt-closing list is a partition
+        # of §0's `CLOSING_WORDS` — no word joins or leaves the exemption by hand.
+        self.assertTrue(hb._resumes("operator: RESUME all lanes"))
+        self.assertFalse(hb._resumes("→ done: RESUME was never issued"))
+        self.assertEqual(set(hb.UNDOING_CLOSING_WORDS) & set(hb.REPORTING_CLOSING_WORDS), set())
+        self.assertEqual(set(hb.CLOSING_WORDS),
+                         set(hb.UNDOING_CLOSING_WORDS) | set(hb.REPORTING_CLOSING_WORDS))
+        self.assertIn("|".join(hb.UNDOING_CLOSING_WORDS), hb._UNDOING_CLOSING_RE.pattern)
+
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a
         # continuation) is never scanned for an order, marker or no marker.

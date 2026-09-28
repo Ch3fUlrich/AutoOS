@@ -79,19 +79,32 @@ code from state the session keeps small at every wave. Then the context cap drop
   **An acknowledgement then exempts only an order word its own record closes — one
   more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`,
   `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`,
-  `resolved`), which must follow the order word within 3 words and carry no negation:
-  the fourth one-list rule, `NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`,
-  `without`, plus `un-` on the closing word itself), vetoes a close, so
-  `→ done: PAUSE lifted`
+  `resolved`), which must follow the order word within 3 words while *the whole window
+  stays unnegated*: the fourth one-list rule, `NEGATION_WORDS` (`not`, `cannot`, `n't`,
+  `never`, `no`, `without`, and `un-` on any word of the window), vetoes a close wherever
+  it stands — before the closing word, after it, or on it — so `→ done: PAUSE lifted`
   reports a stop that ended while `→ done: applied the fix. PAUSE
-  all lanes until further notice`, `→ done: noted. PAUSE over the weekend` and
-  `→ done: PAUSE was not lifted` are all orders still in force (R2a5, the Sonnet review
-  of R2a4: gating the record whole on the marker lost that order; R2a6, the Muse review
-  of R2a5: the generic words `over`, `done`, `noted` were vocabulary inside order
-  sentences, and a negated closing word states the opposite of a close). The close is
-  what decides first: a closing word ahead of a later negation still closes the order,
-  because the exemption reads the run of words straight after the order word and
-  `→ done: PAUSE lifted, not because the operator forgot` reports a stop that ended.
+  all lanes until further notice`, `→ done: noted. PAUSE over the weekend`,
+  `→ done: PAUSE was not lifted` and `→ done: PAUSE lifted but not confirmed` are all
+  orders still in force (R2a5, the Sonnet review of R2a4: gating the record whole on the
+  marker lost that order; R2a6, the Muse review of R2a5: the generic words `over`, `done`,
+  `noted` were vocabulary inside order sentences, and a negated closing word states the
+  opposite of a close; R2a7, the Sonnet review of R2a6: the window scan stopped at the
+  first closing word, so a negation that came *after* it — `lifted but not confirmed`,
+  `cleared, unconfirmed by ops` — closed a stop nobody confirmed lifted. An `un-`-shaped
+  word that is only vocabulary (`units`, `until`) vetoes a close too: measured on the real
+  corpus that is one record reclassified and no inbox flipped, the spurious hold this rule
+  is allowed to cost, never a lost order). A *release* word reads the same window the
+  other way round: `RESUME` counts only where it is itself an order — no negation within 3
+  words on either side of it, marked record or not, and no *undoing* close after it. For
+  that, `CLOSING_WORDS` partitions in two, derived rather than hand-copied:
+  `REPORTING_CLOSING_WORDS` (`acknowledged`, `acked`, `cleared`, `resolved`) report a
+  release landing, so `→ done: RESUME acknowledged` lifts a stop, while
+  `UNDOING_CLOSING_WORDS` (the rest) undo one, so `→ done: RESUME cancelled` leaves the
+  stop in force — and a negated release does too, which is the shape R2a7's HIGH found:
+  `→ done: applied the fix already; RESUME was never issued, still holding`
+  (R2a7, HIGH: `pause_state` matched a bare `RESUME` ungated, and a release nobody
+  gave is the lost order every rule here exists to prevent).
   And `lesson:`
   is the one marker that exempts a whole record because a lesson reports on the code,
   never to the run.** Elsewhere in the line a marker is

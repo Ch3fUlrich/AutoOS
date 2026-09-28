@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a RESUME is gated the way a PAUSE is, and a negation anywhere in the closing window keeps the order open (RESTART R2a7, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a6, S1, safety): two HIGHs,
+  both in the direction that loses a stop. **(1) The ungated RESUME.** `pause_state`
+  gated its PAUSE half on the R2a5/R2a6 ack rules but took its RESUME half on a bare
+  `_RESUME_RE.search`, so
+  `→ done: applied the fix already; RESUME was never issued, still holding` written after
+  `→ done: PAUSE all lanes until further notice` reported `active: False` — a release
+  nobody gave. A RESUME now counts only where it is itself an order, through the same
+  `_ack_marker` / `_order_word_is_negated` / `_order_word_is_closed` helpers the PAUSE
+  half uses (`_resumes`), never a second copy of the rule. Two readings of that window
+  differ, each toward holding the stop: a negation vetoes a *release* in every record
+  shape (`operator: no RESUME given yet` clears nothing), where for a stop word it vetoes
+  only the close (`PAUSE NOW, no launches` stays a hard stop); and `CLOSING_WORDS` is
+  partitioned, derived rather than hand-copied, into `REPORTING_CLOSING_WORDS`
+  (`acknowledged`, `acked`, `cleared`, `resolved`), which report a release landing so
+  `→ done: RESUME acknowledged` still clears, and `UNDOING_CLOSING_WORDS` (the rest),
+  which undo one so `→ done: RESUME cancelled` holds. A `lesson:` record releases nothing.
+  **(2) The close that outran its own negation.** `_order_word_is_closed` returned at the
+  first closing word, so a negation standing *after* it closed the order anyway:
+  `PAUSE lifted but not confirmed`, `PAUSE lifted, not really` and
+  `PAUSE cleared, unconfirmed by ops` all reported a stop that ended. The veto now reads
+  the whole `_CLOSING_WINDOW` on either side of the order word before any close is
+  accepted, and `un-` is a prefix negation on any word of the window — R2a6's
+  `_NEGATED_CLOSING_RE` (which only caught `un-` on a closing word itself) is now
+  `_NEGATION_PREFIX_RE`. So `→ done: PAUSE lifted, not because the operator forgot`,
+  which R2a6 documented as closed, is deliberately an order still in force: an `un-` or
+  `no`-shaped word that is only vocabulary can veto a close and hold a lane one heartbeat
+  longer, and a spurious order remains the accepted cost while a lost one is not.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2036
+  records**, 864 of them acknowledgements, 161 quoting an order word, 7 carrying `PAUSE`,
+  **0 carrying `RESUME`**): pause-order records **7 before and 7 after**, `pause_state`
+  identical on all 10 files (**3 active** both ways), **0 records reclassified by the
+  RESUME gate**. Exactly one record changes `_gives_order` verdict at all —
+  `→ done: freeze cleared (2/4 units, 6.73GB)` — because `units` wears the `un-` prefix;
+  it names no `PAUSE`, so no inbox flips. The corpus is again no evidence for either fix:
+  it never writes a RESUME line, so the release half is covered only by the unit tests.
+- **Docs:** RESTART spec §0 is the one home for the rule (window, veto, stop/release
+  partition); `docs/routing.md` and the docstrings point at it and at
+  `_gives_order`/`_resumes` instead of restating it, and §0's "whichever of the two comes
+  first decides" sentence is replaced by the whole-window rule it describes.
+
 ### Fixed — no generic closing words and no negated close, so an acknowledgement stops swallowing live orders (RESTART R2a6, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Muse review of R2a5, S1, safety): R2a5's

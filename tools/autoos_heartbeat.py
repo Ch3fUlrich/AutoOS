@@ -76,6 +76,17 @@ _ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE
 CLOSING_WORDS = ("lifted", "ended", "cancelled", "canceled", "removed",
                  "released", "acknowledged", "acked", "cleared", "resolved")
 _CLOSING_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(CLOSING_WORDS), re.IGNORECASE)
+# Which of those words only *report* an order landing, and which undo it. On a stop word
+# both kinds close — `PAUSE acknowledged` and `PAUSE cancelled` each end the stop. On a
+# release word they pull opposite ways: `RESUME acknowledged` says the release landed, so
+# it lifts the stop, while `RESUME cancelled` says it was withdrawn, so it does not
+# (R2a7, the Sonnet review of R2a6: the RESUME half has to read the same words the other
+# way round). The two are a partition of `CLOSING_WORDS`, derived rather than hand-copied.
+REPORTING_CLOSING_WORDS = ("acknowledged", "acked", "cleared", "resolved")
+UNDOING_CLOSING_WORDS = tuple(w for w in CLOSING_WORDS
+                              if w not in REPORTING_CLOSING_WORDS)
+_UNDOING_CLOSING_RE = re.compile(r"\b(?:%s)\b" % "|".join(UNDOING_CLOSING_WORDS),
+                                 re.IGNORECASE)
 # The negation words (RESTART spec §0) — the fourth one-list rule, and the veto on the
 # list above. A closing word with a negation in front of it closes nothing:
 # `PAUSE was not lifted`, `PAUSE isn't cleared`, `PAUSE never released` all report a
@@ -91,10 +102,15 @@ _NEGATION_RE = re.compile(r"\b(?:%s)\b|%s\Z"
                                      if w != _NEGATION_CLITIC),
                              re.escape(_NEGATION_CLITIC)),
                           re.IGNORECASE)
-# …and the negation that is a prefix rather than a word of its own: `PAUSE unlifted`
-# says the stop was never lifted, so a closing word wearing `un-` is no closing word.
-_NEGATED_CLOSING_RE = re.compile(r"\Aun(?:%s)\Z" % "|".join(CLOSING_WORDS),
-                                 re.IGNORECASE)
+# …and the negation that is a prefix rather than a word of its own. `un-` on a closing
+# word was R2a6's case (`PAUSE unlifted`); R2a7 widens it to the prefix standing on any
+# word of the window, because `PAUSE cleared, unconfirmed by ops` reports the same stop
+# `PAUSE was not confirmed cleared` does. The widening is one-sided on purpose: an
+# `un-`-shaped word that is only vocabulary (`until`, `units`) can veto a close and hold
+# a lane one heartbeat longer, and that is the accepted cost — measured on the real
+# corpus, one record changes class (`freeze cleared (2/4 units, 6.73GB)`) and no inbox
+# flips.
+_NEGATION_PREFIX_RE = re.compile(r"\Aun[A-Za-z]", re.IGNORECASE)
 # How many words may stand between the order word and its closing word — enough to
 # cover the shapes the writers use ("PAUSE was cleared at 12:00"), no further.
 _CLOSING_WINDOW = 3
@@ -194,22 +210,43 @@ def _acknowledgement(text: str) -> bool:
     return _ack_marker(text) is not None
 
 
-def _order_word_is_closed(text: str, at: int) -> bool:
-    """True when an *unnegated* `CLOSING_WORDS` word stands within `_CLOSING_WINDOW`
-    words of the order word that ends at `at` — `PAUSE lifted`, `PAUSE was cleared at
+def _is_negation(word: str) -> bool:
+    """True when `word` (one trimmed word from a window) negates: a `NEGATION_WORDS`
+    word, a clitic hanging off it (`won't`), or the `un-` prefix."""
+    return _NEGATION_RE.search(word) is not None or _NEGATION_PREFIX_RE.match(word) is not None
+
+
+def _order_word_is_negated(text: str, start: int, end: int) -> bool:
+    """True when a negation stands within `_CLOSING_WINDOW` words on *either* side of the
+    order word `text[start:end]` — `PAUSE lifted but not confirmed`, `no RESUME given`.
+
+    The whole window is read before a closing word is accepted (R2a7, the Sonnet review of
+    R2a6, HIGH): stopping at the first closing word closed `PAUSE lifted, not really` and
+    `PAUSE cleared, unconfirmed by ops`, and a stop nobody confirmed lifted is a lost order.
+    """
+    words = text[:start].split()[-_CLOSING_WINDOW:] + text[end:].split()[:_CLOSING_WINDOW]
+    return any(_is_negation(word.strip(_WORD_TRIM)) for word in words)
+
+
+def _order_word_is_closed(text: str, start: int, end: int,
+                          closing_re: re.Pattern = _CLOSING_WORD_RE) -> bool:
+    """True when `closing_re`'s unnegated closing word stands within `_CLOSING_WINDOW`
+    words after the order word `text[start:end]` — `PAUSE lifted`, `PAUSE was cleared at
     12:00`, `PAUSE, cancelled`.
 
-    A `NEGATION_WORDS` word between the two vetoes the close, and so does an `un-`
-    prefix on the closing word itself: `PAUSE was not lifted`, `PAUSE isn't cleared`,
-    `PAUSE unlifted` report a stop that is still holding (R2a6, the Muse review of
-    R2a5 — the generic words the review struck from `CLOSING_WORDS` are what made the
-    first two shapes readable as closed at all).
+    A `NEGATION_WORDS` word anywhere in that window, on either side of the closing word,
+    vetoes the close, and so does an `un-` prefix on it: `PAUSE was not lifted`,
+    `PAUSE isn't cleared`, `PAUSE unlifted`, `PAUSE lifted but not confirmed` all report a
+    stop that is still holding (R2a6, the Muse review of R2a5 — the generic words the
+    review struck from `CLOSING_WORDS` are what made the first two shapes readable as
+    closed at all; R2a7 widened the veto to the whole window). `closing_re` is
+    `CLOSING_WORDS` for a stop word and `UNDOING_CLOSING_WORDS` for a release word, which
+    the words that only report a landing leave counting.
     """
-    for word in text[at:].split()[:_CLOSING_WINDOW]:
-        word = word.strip(_WORD_TRIM)
-        if _NEGATION_RE.search(word) or _NEGATED_CLOSING_RE.match(word):
-            return False
-        if _CLOSING_WORD_RE.fullmatch(word):
+    if _order_word_is_negated(text, start, end):
+        return False
+    for word in text[end:].split()[:_CLOSING_WINDOW]:
+        if closing_re.fullmatch(word.strip(_WORD_TRIM)):
             return True
     return False
 
@@ -232,9 +269,40 @@ def _gives_order(text: str) -> bool:
     if marker is not None:
         if marker in NEVER_ORDER_MARKERS:
             return False
-        return any(not _order_word_is_closed(text, match.end())
+        return any(not _order_word_is_closed(text, match.start(), match.end())
                    for match in _ORDER_WORD_RE.finditer(text))
     return _ORDER_WORD_RE.search(text) is not None
+
+
+def _resumes(text: str) -> bool:
+    """True when the record body `text` gives a RESUME that lifts a stop (R2a7, the Sonnet
+    review of R2a6, HIGH: `pause_state` took the RESUME half on a bare word match, so
+    `→ done: applied the fix already; RESUME was never issued, still holding` un-stopped a
+    run that was never released).
+
+    The exemption is the one `_gives_order` runs — `_ack_marker`, `_order_word_is_negated`
+    and `_order_word_is_closed`, never a second copy of the rule — applied to the RESUME
+    word and read strictly, because the asymmetry points the other way for a release: a
+    release nobody gave loses the stop, a release wrongly refused costs one wasted
+    heartbeat and one re-issued RESUME. So a negated RESUME counts in no record shape,
+    marked or not (`operator: no RESUME given yet`), where for a stop word a negation only
+    vetoes the *close* and never the order (`PAUSE NOW, no launches` is a hard stop). And a
+    closing word that only reports the release landing (`REPORTING_CLOSING_WORDS`) leaves it
+    counting — `→ done: RESUME acknowledged` clears — while an undoing one does not
+    (`→ done: RESUME cancelled` holds). A `lesson:` record releases nothing: like
+    `_gives_order`, it reports on the code and never addresses the run.
+    """
+    marker = _ack_marker(text)
+    if marker in NEVER_ORDER_MARKERS:
+        return False
+    for match in _RESUME_RE.finditer(text):
+        start, end = match.start(), match.end()
+        if _order_word_is_negated(text, start, end):
+            continue
+        if _order_word_is_closed(text, start, end, _UNDOING_CLOSING_RE):
+            continue
+        return True
+    return False
 
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
@@ -319,17 +387,23 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
 
     PAUSE is active when the newest line whose text contains the word PAUSE
     is newer than the newest line containing the word RESUME, or there is no
-    RESUME line at all. A line older than `since` (the session start, see
+    RESUME line at all. Both halves are gated on their word being an order in its own
+    record — `_gives_order` for the PAUSE, `_resumes` for the RESUME, the same exemption
+    read off the same helpers (R2a7, the Sonnet review of R2a6: a bare RESUME match let
+    `→ done: applied the fix already; RESUME was never issued, still holding` lift a stop
+    that was never lifted). A line older than `since` (the session start, see
     session_start()) never counts — the relaunch after a pause is its resume. A
     PAUSE is skipped only where the record closes it: an acknowledgement — a body
     that opens with an `ACK_MARKERS` marker, at the head or at the head after one
     `_speaker_prefix` (see `_acknowledgement`) — exempts that order word only when an
-    unnegated `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words, so
-    `→ done: PAUSE lifted` and `→ main: PAUSE acknowledged` report a stop that ended,
-    `→ done: noted. PAUSE over the weekend` and `→ done: PAUSE was not lifted` are
-    orders still in force (R2a6, the Muse review of R2a5: the generic words `over`,
-    `done`, `noted` closed orders nobody closed, and a negated closing word — `was not
-    lifted`, `isn't cleared` — did too; see `_order_word_is_closed`), while
+    unnegated `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words *and* no
+    negation stands anywhere in that window, so `→ done: PAUSE lifted` and
+    `→ main: PAUSE acknowledged` report a stop that ended, while
+    `→ done: noted. PAUSE over the weekend`, `→ done: PAUSE was not lifted` and
+    `→ done: PAUSE lifted but not confirmed` are orders still in force (R2a6, the Muse
+    review of R2a5: the generic words `over`, `done`, `noted` closed orders nobody closed,
+    and a negated closing word — `was not lifted`, `isn't cleared` — did too; R2a7 for the
+    negation *after* the closing word; see `_order_word_is_closed`), while
     `→ done: applied the fix. PAUSE all lanes until further notice`
     gives a fresh order and wins (R2a5, the Sonnet review of R2a4: gating the whole
     record on the marker lost that order, and a lost order is the one unacceptable
@@ -359,7 +433,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
         if parsed is None:
             continue
         when, text = parsed
-        if _RESUME_RE.search(text) and (newest_resume is None or when > newest_resume):
+        if _resumes(text) and (newest_resume is None or when > newest_resume):
             newest_resume = when
         if since is not None and when < since:
             continue
