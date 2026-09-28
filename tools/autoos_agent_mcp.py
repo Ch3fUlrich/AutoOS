@@ -423,6 +423,12 @@ def spawn(req: dict) -> dict:
         return _refused("cwd %s is not a directory" % cwd)
     refused = preflight(argv, cwd, budget_env)
     if refused:
+        # CLAUDEBUDGET-g item A: this is also where the last-mile gate reaches the
+        # MCP path. `preflight` IS the CLI's own dry run, and the CLI checks the
+        # final plan with the shared `claude_plan_refusal` before it prints
+        # "would run:", so a model that only the reviewer resolution or the
+        # resolver's route made Claude is refused here, before this server has a
+        # run dir to write -- and again in the runner, on the plan it launches.
         return _refused(refused)
     max_attempts = 5
     for attempt in range(max_attempts):

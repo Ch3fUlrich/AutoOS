@@ -651,16 +651,32 @@ def free_slot_refusal(plan: dict, policy: dict | None, directory: str | None = N
 CLAUDE_ENV_PREFIX = "AUTOOS_CLAUDE"
 
 
+def model_route_id(value) -> str:
+    """The route/model id a model spelling denotes: no `omniroute/` prefix, no
+    `#effort` suffix (CLAUDEBUDGET-g item C).
+
+    The launcher and the gate used to normalise by hand in five places, and the
+    spellings differ by path: `build_plan` hands the client `omniroute/<combo>`
+    (or that plus `#<rung>` from the effort stamp), a card names the bare combo,
+    a registry row names whatever the operator typed. Two spellings of one route
+    read as two values, so a route the resolution already priced looked like a
+    caller's unknown model -- this is the one function both sides call.
+    """
+    text = str(value or "").strip()
+    if text.startswith("omniroute/"):
+        text = text[len("omniroute/"):]
+    return text.partition("#")[0].strip()
+
+
 def _combo_of(model: str) -> str:
     """The route id a configured model string names, if it names one.
 
     A gateway model string is `omniroute/<combo>#<effort>` (opencode.jsonc spells
-    its defaults that way), and a card's combo is the bare id. Anything else --
+    its defaults that way), and a card's combo is the bare id -- both reduce to
+    the id through `model_route_id`, the one normaliser. Anything else --
     "sonnet", "groq/openai/gpt-oss-120b" -- is a model, not a combo, and yields "".
     """
-    base = model.partition("#")[0]
-    if base.startswith("omniroute/"):
-        base = base[len("omniroute/"):]
+    base = model_route_id(model)
     return base if "/" not in base else ""
 
 
@@ -691,18 +707,19 @@ def _gateway_client(client_name: str) -> bool:
     return True if client is None else client.gateway
 
 
-def _native_model_name(client_name: str, source: str | None) -> bool:
+def _native_model_name(source: str | None) -> bool:
     """Whether this value is a vendor-native model id rather than a route id.
 
-    Two values never name a gateway route: a client default compiled into the
-    adapter (`clients.QODER_DEFAULT_MODEL` — code, not operator data), and a
-    caller's `--model` on a client that runs on its own account and passes the
-    string to its own CLI verbatim. For those the name is the whole evidence;
-    everything else is a route the registry has to price.
+    CLAUDEBUDGET-g item A (review finding 1): only the defaults compiled into the
+    adapter are. A caller's `--model` on an own-account client is the same kind of
+    string -- qoder, agy and claude pass it to their own CLI verbatim -- and that
+    is exactly why it cannot be priced by name: the name is the caller's, and a
+    client that runs on the operator's own account answers with whatever it is
+    handed. Reading "Efficient" as *not Claude* because no marker matched is a
+    guess on the side that spends. A compiled default is code this host reviewed,
+    so its name is evidence; a named string is not.
     """
-    if (source or "").startswith("clients."):
-        return True
-    return source == "--model" and not _gateway_client(client_name)
+    return (source or "").startswith("clients.")
 
 
 def spawn_spends_claude(client_name: str, model, registry: dict,
@@ -718,9 +735,11 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
     not free. CLAUDEBUDGET-f item 1/5 removed the exception that used to price it
     as free whenever the caller named the string itself (`--model`, a registry
     `clients` row): an attacker could name an all-Claude combo the registry does
-    not carry and be told the run costs nothing. The name still decides for the
-    two values that are not routes at all (`_native_model_name`) — reading a bare
-    model id as an unknown combo would refuse every qoder run on a name.
+    not carry and be told the run costs nothing. CLAUDEBUDGET-g item A removed the
+    mirror of that exception on the own-account side, where the same trick worked
+    on a bare name. The name still decides for a default compiled into the adapter
+    (`_native_model_name`) — reading `Qwen3.8-Flash` as an unknown combo would
+    bench every qoder worker on a string no registry row describes.
     """
     if resolver.is_claude_client(client_name):
         return True
@@ -732,7 +751,7 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
     if combo:
         route = (registry.get("routes") or {}).get(combo)
         if route is None:
-            if _native_model_name(client_name, source):
+            if _native_model_name(source):
                 return _leg_is_claude(model, registry)
             return None
         # A combo route is what the gateway resolves; it falls through past a
@@ -883,12 +902,18 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
         eff, source = effective_spawn_model(client_name, model, card, registry, cfg,
                                            tier, free, free_model, clean)
     except ValueError as exc:
-        # The card or the tier is refused by the router itself, in words that
-        # carry the next steps — and a run that cannot be planned spends nothing,
-        # so the budget adds no answer here, only the citation that it did not
-        # price the spawn.
-        return ("%s (claude_budget: nothing was priced, so nothing was spent)"
-                % exc), None
+        # CLAUDEBUDGET-g item B (review finding 5): a card or tier the *router*
+        # refuses is a routing error, and it has to leave as one. HEAD answered it
+        # with a `claude_budget:` refusal on every host, budget or not: a different
+        # door than the one that actually refused, the next steps hidden behind a
+        # policy that had no opinion, and a behavior change for every non-budget
+        # run. Out of budget mode the router's own exception goes back to the
+        # caller, which is where the "(see: … list)" advice lives; in budget mode
+        # the run is still refused, but the first words name the error.
+        if not resolver.claude_budget_of(registry)["on"]:
+            raise
+        return ("routing error: %s (claude_budget: nothing was priced, so nothing "
+                "was spent)" % exc), None
     spends = spawn_spends_claude(client_name, eff, registry, source)
     if spends is False:
         return None, None
@@ -919,6 +944,127 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
             "the MCP request's claude_reason (a card's own critical=true does "
             "not)." % (client_name, eff, source, gate,
                        resolver.CLAUDE_CRITICAL_ENV), None)
+
+
+def plan_launch_models(plan, args=None, cfg: dict | None = None,
+                      registry: dict | None = None) -> list:
+    """``[(value, source)]`` the FINAL plan can answer with (CLAUDEBUDGET-g item A).
+
+    The spawn gate reads the *flags*; this reads what the flags became. Three
+    rewrites happen after it and none of them is visible in a flag: the reviewer
+    resolution swaps in the model the review list picked
+    (`reviewer_run_override`), a v2 card runs on whatever combo the resolver
+    settled on (`_resolve_route_v2`), and `--free` replaces the model with the
+    promo one. So the authority prices everything the launch itself carries:
+
+      * each ``--model`` token of the argv — the string the client process gets;
+      * the plan's route combo, which for a gateway client is what the gateway
+        resolves to its legs (an all-Claude route is a Claude spend even where no
+        argv token names a model);
+      * the tier agent's own model in opencode.jsonc, which the argv normally
+        repeats — and where it does not, the run carries a spelling no resolution
+        ever priced.
+
+    An argv value that IS the resolution's own answer keeps that resolution's
+    source, so a default compiled into the adapter is still read by name; every
+    other value is priced as a caller-named model, the strict reading.
+    """
+    client = (plan or {}).get("client") or getattr(args, "client", None) or ""
+    try:
+        eff, eff_source = effective_spawn_model(
+            client, getattr(args, "model", None), getattr(args, "card", None),
+            registry, cfg, getattr(args, "tier", None),
+            bool(getattr(args, "free", False)),
+            getattr(args, "free_model", None) or DEFAULT_FREE_MODEL,
+            bool(getattr(args, "clean", False)))
+    except ValueError:
+        # The resolution refused; the plan is what it is, and every value in it is
+        # priced as caller-named.
+        eff = eff_source = None
+    out = []
+    seen = set()
+
+    def add(value, source):
+        text = str(value or "").strip()
+        if text and (model_route_id(text), source) not in seen:
+            seen.add((model_route_id(text), source))
+            out.append((text, source))
+
+    cmd = (plan or {}).get("cmd") or []
+    for index, token in enumerate(cmd[:-1]):
+        if token == "--model":
+            value = cmd[index + 1]
+            same = bool(eff) and model_route_id(value) == model_route_id(eff)
+            add(value, eff_source if same else "--model")
+    # The route combo is what the gateway resolves, so it is a launch model for a
+    # gateway client -- and for nothing else: an own-account client never receives
+    # it, and `--free` replaces it with the promo model before the argv is built.
+    # Pricing it anyway would bench a free run for a route it does not run.
+    if _gateway_client(client) and not bool(getattr(args, "free", False)):
+        add(((plan or {}).get("route") or {}).get("combo"), "route combo")
+    agent = (plan or {}).get("agent")
+    if agent:
+        add(((cfg or {}).get("agents") or {}).get(agent, {}).get("model"),
+            "opencode.jsonc agent %s" % agent)
+    if not out:
+        # Nothing in the argv names a model, so the client answers with its own
+        # default, and that is what gets priced -- under whatever named it, so a
+        # resolution that said `--model` is still read strictly. Only when even
+        # the default is unknown is the run unpriced, which under a budget is a
+        # refusal, not a free pass.
+        add(eff, eff_source or "no model in the final plan")
+    if not out:
+        out.append(("", "no model in the final plan"))
+    return out
+
+
+def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | None = None,
+                        cfg: dict | None = None) -> tuple:
+    """``(refusal, note)`` for the launch this plan describes: the last-mile gate.
+
+    CLAUDEBUDGET-g item A (Muse#high on 2dff253..4fc082b, findings 1/2/3/6): the
+    early gate proves the model the *flags* imply, and the flags are not the last
+    word — a reviewer override, a resolver-routed v2 combo, or a registry clients
+    row can all replace it after the gate has said "free". A gate that prices an
+    earlier resolution is a gate on a value the run will never use. This one runs
+    on the final plan, immediately before the client is started, in `cmd_run`'s own
+    launch loop (so a fallthrough re-plan passes it too) and in the MCP spawn path
+    through the CLI it invokes; the early gate stays, for the fast message that
+    comes before any planning.
+
+    Like the early gate it reads the model, not the client name, and refuses both a
+    Claude answer and one that cannot be priced — an own-account client handed a
+    model string no registry row describes answers with whatever it is handed, so
+    under a budget "the name has no Claude marker in it" is not evidence of free.
+    """
+    env = os.environ if env is None else env
+    if registry is None:
+        registry = load_live_registry()
+    if not resolver.claude_budget_of(registry)["on"]:
+        # Nothing to enforce, and nothing to mislabel: out of budget mode the plan
+        # launches exactly as it did before this gate existed.
+        return None, None
+    client = plan.get("client") or getattr(args, "client", None) or "opencode"
+    spends = []
+    for value, source in plan_launch_models(plan, args, cfg, registry):
+        verdict = spawn_spends_claude(client, value, registry, source)
+        if verdict is not False:
+            spends.append((value, source, verdict))
+    if not spends:
+        return None, None
+    allowed, gate = resolver.claude_allowed("spawn", env, registry)
+    named = ", ".join("%s (from %s)" % (value, source) for value, source, _ in spends)
+    if allowed:
+        # The record cites the authority and the value it let through — the same
+        # rule as the early gate, on the model the run really starts on.
+        return None, "%s (final plan for %s: %s)" % (gate, client, named)
+    return ("claude_budget: the plan %s is about to launch carries %s, which this "
+            "budget holds for finals and nothing declares: %s. This is the last "
+            "gate, after every model the flags implied was rewritten (the "
+            "reviewer resolution, the resolver's route, --free). Declare this run "
+            "with %s=<why> in the orchestrator's environment, or the MCP request's "
+            "claude_reason, or name a model the registry can price." % (
+                client, named, gate, resolver.CLAUDE_CRITICAL_ENV), None)
 
 
 def strip_claude_env(env: dict) -> dict:
@@ -1741,7 +1887,7 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
     if not entry["model"].partition("#")[0].startswith("omniroute/"):
         return entry["model"], None, "reviewer-model: %s" % asked
     return (resolve_model(cfg, tier, False, entry["model"]),
-            entry["model"].partition("#")[0].replace("omniroute/", "", 1),
+            model_route_id(entry["model"]),
             "reviewer-model: %s" % asked)
 
 
@@ -1805,7 +1951,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         reason = "resolver-v2 (ignoring defer until %s via --no-defer): %s" % (
             result["defer_until"], result["reason"])
     if override and model:  # an explicit --model wins over the resolver's route, and says so
-        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+        combo, reason = model_route_id(model), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
     # An authored review card runs its reviewer, not just any survivable route
@@ -1901,7 +2047,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     override = args.model if client.gateway else None
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
-        combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
+        combo = model_route_id(model) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3, "read_only": read_only_run(args, None),
@@ -1914,7 +2060,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
-        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+        combo, reason = model_route_id(model), reason + "+model"
     review = resolve_review_plan(card)
     model, reviewer_combo, reviewer_note = reviewer_run_override(
         review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
@@ -4167,8 +4313,13 @@ def cmd_run(args, cfg: dict) -> int:
             model=args.model, card=args.card, cfg=cfg, tier=args.tier,
             free=bool(args.free), free_model=args.free_model,
             clean=bool(args.clean))
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         return refuse("cannot read the Claude budget: %s" % exc)
+    except ValueError as exc:
+        # CLAUDEBUDGET-g item B (finding 5): a card or tier the router itself
+        # refuses is the routing error it always was, in the router's own words
+        # with the router's own next step. Only the budget speaks as a budget.
+        return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     if budget_refusal is not None:
         return refuse(budget_refusal)
     if budget_note is not None:
@@ -4255,6 +4406,19 @@ def cmd_run(args, cfg: dict) -> int:
               "opencode-only, but every client gets the containment prompt line and the "
               "post-run leak check (exit 7)." % client.name)
     if args.dry_run:
+        # CLAUDEBUDGET-g item A: the last-mile gate, on the plan this process would
+        # hand the client. The early gate proved the *flags*; a reviewer override,
+        # the resolver's v2 route and --free have rewritten the model since, so the
+        # value the run answers with only exists here. A dry run is checked too,
+        # because a dry run is exactly what the MCP spawn path preflights with: an
+        # override that turns the plan Claude has to be refused before a caller
+        # reads "would run:" and hands the child its key.
+        last_mile_refusal, last_mile_note = claude_plan_refusal(
+            args, plan, cfg=cfg, registry=registry)
+        if last_mile_refusal is not None:
+            return refuse(last_mile_refusal)
+        if last_mile_note is not None:
+            print("claude-budget: %s" % last_mile_note, file=sys.stderr)
         if plan["sandbox"]:
             print("would run: git clone --local %s %s && git switch -c %s" % (ROOT, plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))
@@ -4358,6 +4522,20 @@ def cmd_run(args, cfg: dict) -> int:
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
     while True:
+        # CLAUDEBUDGET-g item A: the authority. Checked on every plan this run is
+        # about to launch, here and not only at the dry-run branch above, because a
+        # provider-stopped fallthrough re-plans *after* the early gate ran, and the
+        # route it falls through to is a different model. A refusal stops the run
+        # before the worker record, the clone and the child: 2 is the code a refused
+        # card or route already returns.
+        launch_refusal, launch_note = claude_plan_refusal(args, plan, cfg=cfg,
+                                                         registry=registry)
+        if launch_refusal is not None:
+            print("autoos-agent: %s" % launch_refusal, file=sys.stderr)
+            rc = 2
+            break
+        if launch_note is not None:
+            print("claude-budget: %s" % launch_note, file=sys.stderr)
         # SPAWNFREE (S2) item 2: a fallthrough re-run is a fresh start on the
         # same shared free account, so it passes the same gate (the first
         # attempt passed it before the clone was made). Breaking here still
