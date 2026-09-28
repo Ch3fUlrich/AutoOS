@@ -520,12 +520,16 @@ PY
 }
 
 catalog_detect_installed() {
-    local i
+    # One npm snapshot for the whole scan (detect_installed_status), dropped at
+    # the end so the next scan - or a real run's is_installed - asks npm again.
+    local i _AUTOOS_NPM_CACHE=1
+    unset _AUTOOS_NPM_LS_STATE _AUTOOS_NPM_LS
     for ((i=0; i<${#CAT_ID[@]}; i++)); do
         if catalog_is_tombstone "$i"; then CAT_INSTALLED[i]=0; continue; fi
         detect_installed_status "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"
         if [[ "$INSTALLED_STATUS" == installed ]]; then CAT_INSTALLED[i]=1; else CAT_INSTALLED[i]=0; fi
     done
+    unset _AUTOOS_NPM_LS_STATE _AUTOOS_NPM_LS
 }
 
 catalog_has_profile() {
