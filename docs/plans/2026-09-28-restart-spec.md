@@ -135,10 +135,9 @@ printed. The order is:
 
 ## 5. Context cap and the metric
 
-- **Cap:** D-040 names the Opus orchestrators. The registry row `claude-opus-1m` today matches
-  `["opus","fable"]`, so the lane first splits it: `claude-opus-1m` (`["opus"]`) goes to `cap_tokens`
-  350000 / `cap_fraction` 0.35 (source D-040), and a new `claude-fable-1m` (`["fable"]`) keeps 600000
-  until the router decides. That default is reversible and is asked as a `Q:` line. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
+- **Cap:** per orchestrator role, not per model (router D-044): the shared registry row
+  `claude-opus-1m` (`["opus","fable"]`) goes to `cap_tokens` 350000 / `cap_fraction` 0.35 (source
+  D-040, D-044). If Fable's before/after numbers show a quality loss, the row is split then. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
   pinned tests change in the same lane. `tools/registry.py validate` asserts
   `cap_tokens == window × cap_fraction`.
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
@@ -209,7 +208,7 @@ part by sha, which proves lineage but can no longer rebuild the bytes.
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
 | R4 relaunch | `relaunch-line`, run.json schema + example | tools/autoos-agent.py, configuration/run.example.json (new), tests |
 | R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
-| R5b cap | split the opus/fable row, opus 350k, DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
+| R5b cap | shared opus/fable row 350k (D-044), DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources | SKILL.md, references/ |
 
 Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
@@ -220,7 +219,7 @@ items per worker run.
 | v2 Sonnet finding | v3 resolution |
 |---|---|
 | blobs store raw inbox/brief text | §6 Redaction through autoos_redact; R7 after REDACTMERGE |
-| opus row also matches fable | §5 split the row; fable stays 600k, asked as Q: |
+| opus row also matches fable | §5 router D-044: cap is per role, row stays shared, both 350k |
 | `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it, test per marker |
 | torn appends by concurrent writers | §0 last line without newline ignored; malformed reported |
 | R2/R5 over 3 items | R2a/R2b, R5a/R5b |
