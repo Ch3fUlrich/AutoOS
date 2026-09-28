@@ -20,7 +20,7 @@ for this run and are cited as `file:line` per the brief:
   from the brief's scrubbed description rather than from a checkout file.
 
 Placeholder rule (hard): `<push service>`, `<management host>`, and
-`example.internal` below are placeholders, never product names or addresses.
+`example.com` below are placeholders, never product names or addresses.
 
 ## 1. Summary
 
