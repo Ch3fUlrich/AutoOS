@@ -65,6 +65,17 @@ Three subcommands:
         2026-09-27). ``model`` is the client's own spelling and is deliberately
         not resolved against providers/models; ``leg`` is the gateway path and
         is resolved with the same rule 1 predicate everything else uses.
+    12. policy.risk_rules, policy.risk_audit_percent and policy.review_counts
+        are shapes tools/autoos_risk.py and the resolver can actually apply
+        (RISKTIER-a, operator Q-013 2026-09-28; fields widened by RISKTIER-a2):
+        every rule's ``type`` is one classify() implements, it carries the fields
+        that type reads and no others — ``exclude`` (a path_glob's second glob)
+        and ``min_deleted_lines`` (a diff_deletion's numstat threshold) among them
+        — a glob/regex rule has a non-empty ``pattern`` (an added_regex
+        one compiles), the audit percent is an int 0-100, and each review count
+        is a non-negative int with a boolean ``final``. classify() raises on an
+        unknown type rather than ignoring it, so this is what keeps such a rule
+        out of the committed registry.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -2420,6 +2431,163 @@ def _check_reviewers(registry) -> list:
 
 
 # ===========================================================================
+# rule 12 - the risk policy is a policy tools/autoos_risk.py can actually apply
+# ===========================================================================
+
+# The rule types `autoos_risk.classify()` implements. A rule of any other type
+# is data without a reader: the registry would say "high risk" about a shape no
+# code looks at, and the diff would be classified as if the rule did not exist.
+_RISK_RULE_TYPES = ("path_glob", "diff_deletion", "added_regex", "registry_policy")
+# Rule types whose whole match is their pattern, so a missing one matches nothing.
+_RISK_PATTERN_TYPES = ("path_glob", "added_regex")
+# Every field `classify()` reads for a given type, beyond the shared three. A
+# field outside its type's set is inert: `paths` on a path_glob looks like a
+# scope and is not one, and a stray key says nothing at all.
+# (RISKTIER-a2: `exclude` is the second glob a path_glob reads — the tracked
+# `.env.example` template a `**/.env.*` rule must not catch — and
+# `min_deleted_lines` is the numstat threshold a diff_deletion reads.)
+_RISK_RULE_FIELDS = {
+    "path_glob": {"pattern", "exclude"},
+    "diff_deletion": {"min_deleted_lines"},
+    "added_regex": {"pattern", "paths"},
+    "registry_policy": set(),
+}
+# Spec 4: the only two risk classes a card can carry.
+_RISK_CLASSES = ("normal", "high")
+
+
+def _check_risk_policy(registry) -> list:
+    """rule 12 - policy.risk_rules / risk_audit_percent / review_counts are the
+    shapes the classifier and the resolver read (RISKTIER-a, operator Q-013
+    2026-09-28).
+
+    `autoos_risk.classify()` raises on an unknown rule type rather than skipping
+    it, and this check is what keeps such a rule out of the committed registry in
+    the first place. The same reasoning covers a pattern-less glob (matches
+    nothing, silently), a regex that does not compile (raises at classify time on
+    someone else's machine), an audit percent outside 0-100 (a sample that is
+    either never drawn or always), and a review count that is negative or
+    non-integer (the resolver would ask for a fraction of a reviewer).
+
+    Like rule 11, this stays clock-free and never reads availability: the audit
+    draw is a property of a sha the caller supplies, not of the registry.
+    """
+    problems = []
+    policy = _section(registry, "policy")
+
+    rules = policy.get("risk_rules")
+    if rules is None:
+        problems.append("risk_rules: policy.risk_rules is missing - the classifier "
+                        "has no rules to apply to a diff")
+    elif not isinstance(rules, list):
+        problems.append("risk_rules: policy.risk_rules must be a list")
+    else:
+        for index, rule in enumerate(rules):
+            label = "policy.risk_rules[%d]" % index
+            if not isinstance(rule, dict):
+                problems.append("risk_rules: %s is not an object" % label)
+                continue
+            rule_type = rule.get("type")
+            if rule_type not in _RISK_RULE_TYPES:
+                problems.append(
+                    "risk_rules: %s has unknown type %r - tools/autoos_risk.py "
+                    "classify() applies %s and raises on anything else"
+                    % (label, rule_type, ", ".join(_RISK_RULE_TYPES)))
+            else:
+                allowed = ({"type", "reason", "source"}
+                           | _RISK_RULE_FIELDS[rule_type])
+                for field in sorted(set(rule) - allowed):
+                    problems.append(
+                        "risk_rules: %s.%s is not read by a %s rule - classify() "
+                        "ignores it, so the rule does not say what it looks like "
+                        "it says (a %s rule carries %s)"
+                        % (label, field, rule_type, rule_type,
+                           ", ".join(sorted(_RISK_RULE_FIELDS[rule_type]))
+                           or "no further fields"))
+            for field in ("reason", "source"):
+                value = rule.get(field)
+                if not isinstance(value, str) or not value:
+                    problems.append("risk_rules: %s.%s must be a non-empty string"
+                                    % (label, field))
+            pattern = rule.get("pattern")
+            if rule_type in _RISK_PATTERN_TYPES and (
+                    not isinstance(pattern, str) or not pattern):
+                problems.append("risk_rules: %s (%s) needs a non-empty pattern - "
+                                "without one it matches nothing" % (label, rule_type))
+            if rule_type == "added_regex" and isinstance(pattern, str) and pattern:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    problems.append("risk_rules: %s pattern %r does not compile (%s)"
+                                    % (label, pattern, exc))
+            if "paths" in rule and (not isinstance(rule["paths"], str)
+                                    or not rule["paths"]):
+                problems.append("risk_rules: %s.paths must be a non-empty string "
+                                "(added_regex only)" % label)
+            if "exclude" in rule and (not isinstance(rule["exclude"], str)
+                                      or not rule["exclude"]):
+                problems.append("risk_rules: %s.exclude must be a non-empty glob "
+                                "(path_glob only) - an empty one excludes nothing, "
+                                "which is the opposite of why the field is there"
+                                % label)
+            threshold = rule.get("min_deleted_lines")
+            if "min_deleted_lines" in rule and (
+                    isinstance(threshold, bool)
+                    or not isinstance(threshold, int)
+                    or threshold < 0):
+                problems.append("risk_rules: %s.min_deleted_lines must be an int "
+                                ">= 0, got %r - classify() compares it against the "
+                                "diff's own deleted-line count" % (label, threshold))
+
+    percent = policy.get("risk_audit_percent")
+    if percent is None:
+        problems.append("risk_audit_percent: policy.risk_audit_percent is missing - "
+                        "the audit would fall back to the code's default instead of "
+                        "the operator's sampling rate")
+    else:
+        entry = percent if isinstance(percent, dict) else {}
+        value = entry.get("value", percent) if isinstance(percent, dict) else percent
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+            problems.append("risk_audit_percent: policy.risk_audit_percent must be an "
+                            "int 0-100, got %r" % (value,))
+        source = entry.get("source")
+        if not isinstance(source, str) or not source:
+            problems.append("risk_audit_percent: policy.risk_audit_percent.source must "
+                            "be a non-empty string (D20)")
+
+    counts = policy.get("review_counts")
+    if counts is None:
+        problems.append("review_counts: policy.review_counts is missing - the resolver "
+                        "would review by its own hard-coded counts, not by policy")
+    elif not isinstance(counts, dict):
+        problems.append("review_counts: policy.review_counts must be an object keyed "
+                        "by risk class")
+    else:
+        for risk_class in sorted(set(counts) - set(_RISK_CLASSES) - {"$comment"}):
+            problems.append("review_counts: policy.review_counts.%s is not a risk "
+                            "class (spec 4: %s)" % (risk_class, " | ".join(_RISK_CLASSES)))
+        for risk_class in _RISK_CLASSES:
+            entry = counts.get(risk_class)
+            label = "policy.review_counts.%s" % risk_class
+            if not isinstance(entry, dict):
+                problems.append("review_counts: %s must be an object" % label)
+                continue
+            cross_family = entry.get("cross_family")
+            if (isinstance(cross_family, bool) or not isinstance(cross_family, int)
+                    or cross_family < 0):
+                problems.append("review_counts: %s.cross_family must be an int >= 0, "
+                                "got %r" % (label, cross_family))
+            if not isinstance(entry.get("final"), bool):
+                problems.append("review_counts: %s.final must be a boolean, got %r"
+                                % (label, entry.get("final")))
+            source = entry.get("source")
+            if not isinstance(source, str) or not source:
+                problems.append("review_counts: %s.source must be a non-empty string "
+                                "(D20)" % label)
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -2438,6 +2606,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_reviewers(registry))
+    problems.extend(_check_risk_policy(registry))
     return problems
 
 
