@@ -5,6 +5,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — no generic closing words and no negated close, so an acknowledgement stops swallowing live orders (RESTART R2a6, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a5, S1, safety): R2a5's
+  exemption was still wide enough to lose an order two ways. **(1) Generic words.**
+  `over`, `done` and `noted` sat in `CLOSING_WORDS` and they are ordinary vocabulary
+  *inside* an order sentence, so `→ done: noted. PAUSE over the weekend`,
+  `→ done: PAUSE done by 18:00` and `→ main: PAUSE noted for all lanes` each read as
+  the report of a stop that never ended. The list now holds only words that state one
+  thing — that the order is over (`lifted`, `ended`, `cancelled`, `canceled`, `removed`,
+  `released`, `acknowledged`, `acked`, `cleared`, `resolved`). **(2) Negation.** A
+  closing word with a negation in front of it says the opposite:
+  `→ done: PAUSE was not lifted`, `→ done: PAUSE isn't cleared` and
+  `→ main: PAUSE never released` report a stop still holding, yet all three were
+  exempted. The new §0 list `NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`,
+  `without`)
+  vetoes a close when one of its words stands between the order word and the closing
+  word, `n't` matching at the end of the word it hangs on (so `won't` is caught too),
+  and `_NEGATED_CLOSING_RE` vetoes the prefix shape (`PAUSE unlifted`). `cannot` is on
+  the list because the shape was found while spot-checking the veto —
+  `→ done: PAUSE cannot be lifted` negates the close and spelled it as one word, so the
+  five words the brief named would have left that order lost.
+  `_order_word_is_closed` returns on the first word that decides either way, so a real
+  close ahead of a later negation still closes (`PAUSE lifted, not because …`).
+  Asymmetry unchanged (R2a4/R2a5): a veto past a genuine close costs a **spurious**
+  order — one wasted heartbeat and a RESUME — a lost one lets workers run against a
+  stop the operator gave.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1987 records**, 846 of them acknowledgements and 52 of those quoting an
+  order word): pause-order records **7 before and 7 after**, **0 PAUSE-bearing records
+  changed classification**, and `pause_state` identical on all 7 files (the three
+  active files' winning texts exactly 80 chars, truncated as specified). The corpus is
+  again silent on the defect — exactly one record flips verdict at all, a `→ done:` ack
+  whose *HOLD* was closed by `noted` alone, and it is not a PAUSE line, so it moves no
+  lane. The words the corpus really closes with are `lifted` (2), `cleared` (1) and
+  `noted` (1); two acks carry a negation inside the 3-word window and both were already
+  orders. Fixtures carry what the corpus has not (AGENTS.md §5).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the narrowed
+  `CLOSING_WORDS`, names `NEGATION_WORDS` as §0's fourth one-list rule and the veto in
+  one sentence; `docs/routing.md` cites the same two lists; the `CLOSING_WORDS`,
+  `_order_word_is_closed`, `_gives_order` and `pause_state` docstrings say what the
+  filter now does.
+- **Tests** (red before the code: 4 failed, 87 passed in `tests/test_autoos_heartbeat.py`
+  against `git show HEAD:` of the module — the four generic-word and negation shapes,
+  and the list-membership guard, each failing on the reproduced defect):
+  `→ done: noted. PAUSE over the weekend` / `PAUSE done by 18:00` /
+  `PAUSE noted for all lanes` / `→ ack: PAUSE over the weekend, → main held` → order;
+  `PAUSE was not lifted` / `isn't cleared` / `never released` / `unlifted` /
+  `won't be removed until I say so` / `cannot be lifted` → order; the three genuine
+  closes the brief names (`PAUSE lifted`, `PAUSE acknowledged`, `STOP cancelled`) plus
+  `PAUSE ended` → report;
+  the list guards (no generic word in `CLOSING_WORDS`, `_NEGATION_RE` built from
+  `NEGATION_WORDS`, `note`/`notebook`/`amount`/`nope`/`none`/`nevertheless` not read as
+  negations). Two
+  pre-existing fixtures that had relied on the struck words (`→ ack: PAUSE noted`,
+  `→ ack: PAUSE over`) now write a kept closing word, so each still tests the shape it
+  names. `tests/test_autoos_heartbeat.py` 86 → 91; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 215 passed.
+
 ### Fixed — an acknowledgement exempts only the order word it closes, so an order after an ack is still an order (RESTART R2a5, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a4, HIGH, safety):

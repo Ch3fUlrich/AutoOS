@@ -77,14 +77,24 @@ code from state the session keeps small at every wave. Then the context cap drop
   orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
   wide list costs a spurious order at worst, and `hold on: → main merged` is one).
   **An acknowledgement then exempts only an order word its own record closes — one
-  more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`, `over`,
-  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`,
-  `done`, `cleared`, `resolved`), which must follow the order word within 3 words, so
-  `→ done: PAUSE lifted` reports a stop that ended while `→ done: applied the fix. PAUSE
-  all lanes until further notice` is a fresh order (R2a5, the Sonnet review of R2a4:
-  gating the record whole on the marker lost that order), and `lesson:` is the one
-  marker that exempts a whole record because a lesson reports on the code, never to the
-  run.** Elsewhere in the line a marker is
+  more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`,
+  `resolved`), which must follow the order word within 3 words and carry no negation:
+  the fourth one-list rule, `NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`,
+  `without`, plus `un-` on the closing word itself), vetoes a close, so
+  `→ done: PAUSE lifted`
+  reports a stop that ended while `→ done: applied the fix. PAUSE
+  all lanes until further notice`, `→ done: noted. PAUSE over the weekend` and
+  `→ done: PAUSE was not lifted` are all orders still in force (R2a5, the Sonnet review
+  of R2a4: gating the record whole on the marker lost that order; R2a6, the Muse review
+  of R2a5: the generic words `over`, `done`, `noted` were vocabulary inside order
+  sentences, and a negated closing word states the opposite of a close). The close is
+  what decides first: a closing word ahead of a later negation still closes the order,
+  because the exemption reads the run of words straight after the order word and
+  `→ done: PAUSE lifted, not because the operator forgot` reports a stop that ended.
+  And `lesson:`
+  is the one marker that exempts a whole record because a lesson reports on the code,
+  never to the run.** Elsewhere in the line a marker is
   vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say so` is still an
   order (R2a review, MEDIUM). §1 and §3 cite that one list.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that

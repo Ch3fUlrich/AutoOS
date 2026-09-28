@@ -110,7 +110,9 @@ class PauseStateTests(unittest.TestCase):
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_ack_is_not_a_pause_order(self):
-        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE noted")
+        # The fixture names the *marker*, so its order word is closed by a word from
+        # §0's narrow list — `noted` closed one until R2a6 removed it as vocabulary.
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE cleared")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_relaunched_is_not_a_pause_order(self):
@@ -417,7 +419,7 @@ class PauseStateTests(unittest.TestCase):
         for text in ("→ done: PAUSE lifted",
                      "→ main: PAUSE acknowledged",
                      "L1-main: → done: PAUSE was cleared at 12:00",
-                     "from L0 (operator): → ack: PAUSE over"):
+                     "from L0 (operator): → ack: PAUSE removed"):
             self.assertTrue(hb._acknowledgement(text), text)
             self.assertFalse(hb._gives_order(text), text)
             write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
@@ -455,6 +457,69 @@ class PauseStateTests(unittest.TestCase):
             self.assertIsNone(hb._CLOSING_WORD_RE.fullmatch(word + "NESS"), word)
         for marker in hb.NEVER_ORDER_MARKERS:
             self.assertIn(marker, hb.ACK_MARKERS, marker)
+
+    # R2a6 (the Muse review of R2a5, S1, safety): an acknowledgement still lost an order
+    # two ways. (1) `over`, `done` and `noted` are ordinary vocabulary in an order
+    # sentence, not closings — `PAUSE over the weekend` orders a stop and
+    # `PAUSE done by 18:00` orders a task, so a generic word in `CLOSING_WORDS`
+    # swallowed both. (2) A *negated* closing word closes nothing:
+    # `PAUSE was not lifted` reports a stop that is still holding. The asymmetry is
+    # unchanged — a spurious order costs one wasted heartbeat and a RESUME, a lost one
+    # lets workers run on against a stop the operator really gave.
+
+    def test_a_generic_word_never_closes_an_order(self):
+        for text in ("→ done: noted. PAUSE over the weekend",
+                     "→ done: PAUSE done by 18:00",
+                     "→ main: PAUSE noted for all lanes",
+                     "→ ack: PAUSE over the weekend, → main held"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_negated_closing_word_never_closes_an_order(self):
+        for text in ("→ done: PAUSE was not lifted",
+                     "→ done: PAUSE isn't cleared",
+                     "→ main: PAUSE never released",
+                     "→ ack: PAUSE unlifted",
+                     "→ done: PAUSE was not lifted, every lane still held",
+                     "→ operator: PAUSE won't be removed until I say so",
+                     "→ done: PAUSE cannot be lifted, all lanes held"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_genuine_closing_word_still_closes(self):
+        # The other side: narrowing the list must not turn a report into an order.
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged",
+                     "→ done: STOP cancelled",
+                     "→ ack: PAUSE ended"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_closing_words_hold_no_generic_word(self):
+        # §0: the exemption is narrow by construction — a word that is plain
+        # vocabulary in an order sentence never sits in the list.
+        for word in ("over", "done", "noted"):
+            self.assertNotIn(word, hb.CLOSING_WORDS, word)
+        for word in ("lifted", "ended", "cancelled", "canceled", "removed", "released",
+                     "acknowledged", "acked", "cleared", "resolved"):
+            self.assertIn(word, hb.CLOSING_WORDS, word)
+
+    def test_negation_words_are_the_one_list_the_veto_uses(self):
+        # §0: one home beside the other three lists — the veto is built from
+        # NEGATION_WORDS, never restated, and it reads the negation of a contraction.
+        whole_words = [w for w in hb.NEGATION_WORDS if w != hb._NEGATION_CLITIC]
+        self.assertIn("|".join(whole_words), hb._NEGATION_RE.pattern)
+        for word in ("not", "cannot", "n't", "never", "no", "without"):
+            self.assertIn(word, hb.NEGATION_WORDS, word)
+        for word in ("not", "cannot", "never", "no", "without",
+                     "isn't", "wasn't", "won't", "couldn't"):
+            self.assertIsNotNone(hb._NEGATION_RE.search(word), word)
+        for word in ("note", "notebook", "amount", "nope", "none", "nevertheless"):
+            self.assertIsNone(hb._NEGATION_RE.search(word), word)
 
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a

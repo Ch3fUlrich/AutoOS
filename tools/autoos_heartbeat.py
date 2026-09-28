@@ -67,11 +67,34 @@ _ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE
 # notice` — and a lost order is the one unacceptable outcome here (R2a5, the Sonnet
 # review of R2a4: gating the whole record on the ack swallowed exactly that).
 # Case-insensitive like ORDER_WORDS, but bounded: the exemption is narrow, the order
-# is what survives.
-CLOSING_WORDS = ("lifted", "ended", "over", "cancelled", "canceled", "removed",
-                 "released", "acknowledged", "acked", "noted", "done", "cleared",
-                 "resolved")
+# is what survives. Narrow in vocabulary too (R2a6, the Muse review of R2a5) — a word
+# may only close an order when it cannot also be ordinary prose *inside* an order
+# sentence. `over`, `done` and `noted` sat here and are gone, because they made
+# `→ done: noted. PAUSE over the weekend`, `→ done: PAUSE done by 18:00` and
+# `→ main: PAUSE noted for all lanes` read as reports of a stop that never ended. What
+# is left states one thing only: that the order is over.
+CLOSING_WORDS = ("lifted", "ended", "cancelled", "canceled", "removed",
+                 "released", "acknowledged", "acked", "cleared", "resolved")
 _CLOSING_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(CLOSING_WORDS), re.IGNORECASE)
+# The negation words (RESTART spec §0) — the fourth one-list rule, and the veto on the
+# list above. A closing word with a negation in front of it closes nothing:
+# `PAUSE was not lifted`, `PAUSE isn't cleared`, `PAUSE never released` all report a
+# stop that is *still* holding, so the order survives (R2a6). `n't` is a clitic rather
+# than a word, so it is matched at the end of the word it hangs on — `isn't`, `wasn't`,
+# and `won't` alike; `cannot` is on the list because it is a negation of the close
+# spelled as one word, and `→ done: PAUSE cannot be lifted` is the same lost order as
+# `was not lifted`.
+NEGATION_WORDS = ("not", "cannot", "n't", "never", "no", "without")
+_NEGATION_CLITIC = "n't"
+_NEGATION_RE = re.compile(r"\b(?:%s)\b|%s\Z"
+                          % ("|".join(re.escape(w) for w in NEGATION_WORDS
+                                     if w != _NEGATION_CLITIC),
+                             re.escape(_NEGATION_CLITIC)),
+                          re.IGNORECASE)
+# …and the negation that is a prefix rather than a word of its own: `PAUSE unlifted`
+# says the stop was never lifted, so a closing word wearing `un-` is no closing word.
+_NEGATED_CLOSING_RE = re.compile(r"\Aun(?:%s)\Z" % "|".join(CLOSING_WORDS),
+                                 re.IGNORECASE)
 # How many words may stand between the order word and its closing word — enough to
 # cover the shapes the writers use ("PAUSE was cleared at 12:00"), no further.
 _CLOSING_WINDOW = 3
@@ -172,12 +195,21 @@ def _acknowledgement(text: str) -> bool:
 
 
 def _order_word_is_closed(text: str, at: int) -> bool:
-    """True when a `CLOSING_WORDS` word stands within `_CLOSING_WINDOW` words of the
-    order word that ends at `at` — `PAUSE lifted`, `PAUSE was cleared at 12:00`,
-    `PAUSE, cancelled`.
+    """True when an *unnegated* `CLOSING_WORDS` word stands within `_CLOSING_WINDOW`
+    words of the order word that ends at `at` — `PAUSE lifted`, `PAUSE was cleared at
+    12:00`, `PAUSE, cancelled`.
+
+    A `NEGATION_WORDS` word between the two vetoes the close, and so does an `un-`
+    prefix on the closing word itself: `PAUSE was not lifted`, `PAUSE isn't cleared`,
+    `PAUSE unlifted` report a stop that is still holding (R2a6, the Muse review of
+    R2a5 — the generic words the review struck from `CLOSING_WORDS` are what made the
+    first two shapes readable as closed at all).
     """
     for word in text[at:].split()[:_CLOSING_WINDOW]:
-        if _CLOSING_WORD_RE.fullmatch(word.strip(_WORD_TRIM)):
+        word = word.strip(_WORD_TRIM)
+        if _NEGATION_RE.search(word) or _NEGATED_CLOSING_RE.match(word):
+            return False
+        if _CLOSING_WORD_RE.fullmatch(word):
             return True
     return False
 
@@ -188,8 +220,8 @@ def _gives_order(text: str) -> bool:
     A record with no acknowledgement marker at its head gives one wherever an
     `ORDER_WORDS` word appears — the wide reading of R2a4: an order that wears its
     own first clause as a speaker is still an order. A marked record exempts an
-    order word **only** where a closing word follows it within `_CLOSING_WINDOW`
-    words, so `→ done: PAUSE lifted` reports a stop that ended while
+    order word **only** where an unnegated closing word follows it within
+    `_CLOSING_WINDOW` words, so `→ done: PAUSE lifted` reports a stop that ended while
     `→ done: applied R2a4 fix. PAUSE all lanes until further notice` gives a fresh
     one (R2a5, the Sonnet review of R2a4: gating the whole record on the marker lost
     that order, and a lost order is the one unacceptable outcome here). The one
@@ -291,10 +323,14 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     session_start()) never counts — the relaunch after a pause is its resume. A
     PAUSE is skipped only where the record closes it: an acknowledgement — a body
     that opens with an `ACK_MARKERS` marker, at the head or at the head after one
-    `_speaker_prefix` (see `_acknowledgement`) — exempts that order word only when
-    a `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words, so
-    `→ done: PAUSE lifted` and `→ main: PAUSE acknowledged` report a stop that
-    ended, while `→ done: applied the fix. PAUSE all lanes until further notice`
+    `_speaker_prefix` (see `_acknowledgement`) — exempts that order word only when an
+    unnegated `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words, so
+    `→ done: PAUSE lifted` and `→ main: PAUSE acknowledged` report a stop that ended,
+    `→ done: noted. PAUSE over the weekend` and `→ done: PAUSE was not lifted` are
+    orders still in force (R2a6, the Muse review of R2a5: the generic words `over`,
+    `done`, `noted` closed orders nobody closed, and a negated closing word — `was not
+    lifted`, `isn't cleared` — did too; see `_order_word_is_closed`), while
+    `→ done: applied the fix. PAUSE all lanes until further notice`
     gives a fresh order and wins (R2a5, the Sonnet review of R2a4: gating the whole
     record on the marker lost that order, and a lost order is the one unacceptable
     outcome; see `_gives_order`). A `lesson:` record (`NEVER_ORDER_MARKERS`) is
