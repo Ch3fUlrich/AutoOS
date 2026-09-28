@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the usage report prices the operator's DeepSeek cap (DSGUARD, 2026-09-28)
+
+- **`tools/autoos_usage.py`** (spend guard): a `paid_spend` section, asked for
+  by `--spend-since [DATE]` (bare flag: the 1st of the current month UTC) or
+  `--balance-usd N` — `autoos-agent.py usage --since 1h --spend-since
+  --balance-usd 19.99`. It bills the watched paid provider's rows at the
+  registry's per-token `price_in`/`price_out`
+  (`catalog/ai-registry.json:234-235`: 3e-07 / 1.2e-06, i.e. $0.30 in / $1.20
+  out per 1M — the data was already there, nothing was added to the registry)
+  times the factor of `providers.deepseek.windows`
+  (`catalog/ai-registry.json:1857-1955`, source
+  `https://api-docs.deepseek.com/quick_start/pricing`) **at each row's own
+  timestamp**, through `autoos_resolver.price_factor` — the same function the
+  router uses to pick a cheap hour, so the guard and the router cannot
+  disagree about what an hour costs. `WARN` at spend >= 20 USD (the operator's
+  monthly cap) or a caller-measured balance below 5 USD, in the text and in
+  `warnings`. The spend window reaches the row fetch back past `--since` (the
+  month so far versus the last hour of traffic); when the walk stops at the
+  page cap the block says `incomplete`, so a partial window reads as a floor
+  and not as a total. The threshold comparison uses the rounded, reported
+  figure: a cap missed by 1e-15 of float drift is a cap the operator believed
+  was held. Still opt-in — `usage --json` without either flag keeps the shape
+  it has always had, and no deeper paging happens for nothing.
+  `load_prices` became `price_source_name` + `prices_from_registry` +
+  `read_registry` so the price table and the windows come from one parse.
+- **`docs/routing.md`**: the two flags and what they warn about.
+- **`tests/`**: `SpendTests` in `tests/test_autoos_usage.py` (21 cases, injected
+  rows only — the gateway is never contacted, and no test reads a real key):
+  the factor math below/at/above 20 USD, the off-peak half price versus the
+  peak hour, an uncovered hour billed at full price, another provider's rows
+  excluded, an unpriced model counted as a gap rather than as free, the default
+  month-start window, a spend window deeper than `--since`, the paging cap
+  making the figure a floor, the balance floor at and above 5 USD, both warnings
+  at once, bad `--spend-since`/`--balance-usd` exiting 2 before any fetch, the
+  key never echoed, and two pins on the shipped registry (the per-token price
+  and the `price_factor` window set).
+- Lesson: the unit is the whole bug in a spend guard — the registry is USD
+  *per token*, so the off-peak factor is what a naive per-1M reading would
+  silently double or halve, and only a test that names the peak hour and its
+  complement catches it.
+- Open: only DeepSeek is guarded (the provider is a constant, `SPEND_PROVIDER`);
+  `price_cache_read` is not billed; the balance must be measured by the caller —
+  the gateway's own `GET /user/balance` is not read here.
 ### Fixed — DeepSeek answers again, and the resolver's effort rung finally reaches the client (DSBACK, 2026-09-28)
 
 - **`catalog/ai-registry.json`**: `providers.deepseek.available` flips

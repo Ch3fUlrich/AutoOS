@@ -4,6 +4,7 @@ provider, combo, lane and model. The operator-facing name is the subcommand:
 
     autoos-agent.py usage --since 1h [--by provider,combo,lane,model] [--json]
     autoos-agent.py usage --since 24h --by provider --cost   # the spend guard
+    autoos-agent.py usage --since 1h --spend-since --balance-usd 19.99   # the cap
 
 It pages GET /api/usage/call-logs with the manage-scoped key the ai-stack
 installer left on the host, aggregates the rows client-side and prints one
@@ -60,9 +61,22 @@ An estimate, not an invoice - it prices what the gateway reported it served,
 and free tiers are priced 0 in the registry, so a $0 line can mean "free" or
 "no price on file".
 
-Exit codes: 0 ok; 2 bad input (--since/--by); 3 gateway unreachable, HTTP
-error (401/403 named as auth failures), a non-array response, or the key file
-missing/empty. The failure line names the cause and never the key.
+Paid spend (--spend-since, --balance-usd, DSGUARD): the operator caps DeepSeek
+spend at 20 USD a month, so the report can carry a `paid_spend` block for that
+one paid provider - tokens * the registry's per-token price * the factor in
+providers.deepseek.windows at each row's own timestamp (the same
+autoos_resolver.price_factor the router uses to pick a cheap hour). The window
+starts at --spend-since, defaulting to the 1st of the current month UTC, and is
+read deeper than --since when it reaches further back; the row fetch stops at
+the page cap, so an incomplete window reports a floor, never a total. WARN lines
+are raised when spend >= 20 USD, or when --balance-usd (a balance the caller
+measured at the gateway) is below 5 USD. Off unless one of the two flags is
+given: `usage --json` keeps the shape it always had.
+
+Exit codes: 0 ok; 2 bad input (--since/--by/--spend-since/--balance-usd); 3
+gateway unreachable, HTTP error (401/403 named as auth failures), a non-array
+response, or the key file missing/empty. The failure line names the cause and
+never the key.
 
 HTTP is urllib (stdlib) only; tests inject `fetch`, never the live gateway.
 """
@@ -78,12 +92,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import autoos_resolver as resolver  # tools/ is on sys.path for every caller
+
 DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
 MAX_PAGES = 20
 TIMEOUT_S = 15
 DIMENSIONS = ("provider", "combo", "lane", "model")
 UNTAGGED_LANE = "(untagged)"
+
+# DSGUARD: the one paid provider the operator budgets in dollars per month, the
+# cap itself, and the balance floor under which the next top-up is late.
+SPEND_PROVIDER = "deepseek"
+SPEND_PROVIDER_LABEL = "DeepSeek"
+SPEND_WARN_USD = 20.0      # the operator's monthly DeepSeek cap
+BALANCE_FLOOR_USD = 5.0    # warn before the balance runs out mid-lane
 
 # Registry path for cost lookup
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,34 +117,29 @@ class UsageError(Exception):
     """A one-line, key-free failure cause (exit 3)."""
 
 
-def load_prices(path=None):
-    """(--cost) the price table and the name of the file it was read from.
+def price_source_name(path=None):
+    """The name the report carries for its price file - repo-relative when the
+    file is in the repo, absolute otherwise, None when it cannot be read.
 
     The name travels with the report: numbers a reader cannot trace are not a
-    spend guard. A missing file yields no prices and a null source, so the
-    report never claims the registry priced what it could not read."""
+    spend guard, and a report must never claim a registry priced what it could
+    not read."""
     resolved = Path(path) if path else REGISTRY_PATH
     if not resolved.is_file():
-        return {}, None
+        return None
     try:
-        name = str(resolved.relative_to(ROOT))
+        return str(resolved.relative_to(ROOT))
     except ValueError:
-        name = str(resolved)
-    return load_registry_prices(resolved), name
+        return str(resolved)
 
 
-def load_registry_prices(path=None):
-    """{model id: (price_in, price_out)} in USD PER TOKEN, from the registry's
-    `models` section. The prices are already per token - the contributor's
-    $0.10 per 1M is 1e-07 here - so multiply by the token count and nothing
-    else. An unreadable or absent file prices nothing ({}), which the report
-    shows as a 0 cost rather than a failure: the token counts stay true.
+def prices_from_registry(registry):
+    """{model id: (price_in, price_out)} in USD PER TOKEN, from a parsed
+    registry's `models` section. The prices are already per token - the
+    contributor's $0.10 per 1M is 1e-07 here - so multiply by the token count
+    and nothing else. A model with no price on file is simply absent, which the
+    report shows as a 0 cost rather than a failure: the tokens stay counted.
     """
-    try:
-        with (Path(path) if path else REGISTRY_PATH).open(encoding="utf-8") as fh:
-            registry = json.load(fh)
-    except (OSError, ValueError):
-        return {}
     prices = {}
     for model_id, model in (registry.get("models") or {}).items():
         if isinstance(model, dict) and model.get("price_in") is not None \
@@ -131,6 +149,26 @@ def load_registry_prices(path=None):
             except (TypeError, ValueError):
                 pass
     return prices
+
+
+def load_registry_prices(path=None):
+    """The price table read straight from a registry file ({} when unreadable)."""
+    return prices_from_registry(read_registry(path))
+
+
+def read_registry(path=None):
+    """The parsed registry as a dict; {} when it cannot be read or parsed.
+
+    Shared by the price table and the price windows: one file, one reader, so
+    a spend figure and a routing decision can never be built from two
+    differently-broken parses of the same bytes.
+    """
+    try:
+        with (Path(path) if path else REGISTRY_PATH).open(encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return registry if isinstance(registry, dict) else {}
 
 
 def price_for(model, prices):
@@ -151,6 +189,86 @@ def price_for(model, prices):
         if tail in prices:
             return prices[tail]
     return None
+
+
+def month_start(now):
+    """The first instant of `now`'s UTC calendar month - the spend window's default."""
+    return now.astimezone(datetime.timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def is_spend_row(row, provider=SPEND_PROVIDER):
+    """True when the gateway billed this row to the watched paid provider."""
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("provider") or "").strip().lower() == provider
+
+
+def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=None,
+               price_source=None, complete=True):
+    """The DSGUARD block: what this month's paid calls cost, and what to warn about.
+
+    Each row costs tokens * the registry's per-token price * the provider's
+    window factor at the row's own timestamp. The factor comes from
+    autoos_resolver.price_factor - the same code the router uses to decide when
+    to send work to DeepSeek (providers.<id>.windows), so the guard and the
+    router can never disagree about what an hour costs. A row whose model has no
+    price on file adds 0 and is counted in models_unpriced, so a low figure
+    reads as low spend or as a gap, never silently as either.
+
+    The comparison is against the rounded, reported figure: a cap missed by
+    1e-15 of float drift is a cap the operator believed was held.
+    """
+    window_source = {"providers": dict(registry.get("providers") or {})}
+    window_source["providers"].setdefault(provider, {})
+    spend = 0.0
+    calls = tokens_in = tokens_out = 0
+    unpriced = set()
+    for r in rows:
+        if not is_spend_row(r, provider):
+            continue
+        ts = row_timestamp(r)
+        if ts is not None and ts < since:
+            continue
+        tokens = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
+        tin = _as_int(tokens.get("in"))
+        tout = _as_int(tokens.get("out"))
+        calls += 1
+        tokens_in += tin
+        tokens_out += tout
+        pair = price_for(r.get("model"), prices)
+        if not pair:
+            if r.get("model"):
+                unpriced.add(r.get("model"))
+            continue
+        # No parseable timestamp means an in-flight row: bill it at full price.
+        factor = resolver.price_factor(provider, window_source, ts) if ts else 1.0
+        spend += (tin * pair[0] + tout * pair[1]) * factor
+
+    spend = round(spend, 6)
+    warnings = []
+    if spend >= SPEND_WARN_USD:
+        warnings.append("%s spend $%.2f since %s reached the %.0f USD cap"
+                        % (SPEND_PROVIDER_LABEL, spend,
+                           since.strftime("%Y-%m-%dT%H:%M:%SZ"), SPEND_WARN_USD))
+    if balance is not None and balance < BALANCE_FLOOR_USD:
+        warnings.append("%s balance $%.2f is below the %.0f USD floor"
+                        % (SPEND_PROVIDER_LABEL, balance, BALANCE_FLOOR_USD))
+    return {
+        "provider": provider,
+        "since": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "calls": calls,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "spend_usd": spend,
+        "threshold_usd": SPEND_WARN_USD,
+        "balance_usd": balance,
+        "balance_threshold_usd": BALANCE_FLOOR_USD,
+        "models_unpriced": len(unpriced),
+        "price_source": price_source,
+        "complete": bool(complete),
+        "warnings": warnings,
+    }
 
 
 def parse_since(text, now):
@@ -351,7 +469,8 @@ def totals(rows, prices=None):
     return t
 
 
-def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source=None):
+def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source=None,
+                 spend=None):
     kept = [r for r in rows
             if not (row_timestamp(r) is not None and row_timestamp(r) < cutoff)]
     report = {
@@ -365,7 +484,30 @@ def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source
         unpriced = {r.get("model") for r in kept if isinstance(r, dict)
                     and r.get("model") and price_for(r.get("model"), prices) is None}
         report["cost"] = {"source": price_source, "models_unpriced": len(unpriced)}
+    if spend is not None:
+        report["paid_spend"] = spend
     return report
+
+
+def render_spend_text(spend):
+    """The paid-spend section: the figure, its caveats, then the WARN lines."""
+    lines = ["", "paid spend (%s) since %s" % (SPEND_PROVIDER_LABEL, spend["since"]),
+             "  %d calls, %d tokens in, %d tokens out -> $%.4f (priced from %s)"
+             % (spend["calls"], spend["tokens_in"], spend["tokens_out"],
+                spend["spend_usd"], spend["price_source"] or "no readable registry")]
+    if spend["models_unpriced"]:
+        lines.append("  %d model(s) had no price on file and count as 0"
+                     % spend["models_unpriced"])
+    if spend["balance_usd"] is not None:
+        lines.append("  balance: $%.2f (measured by the caller); warns below $%.2f"
+                     % (spend["balance_usd"], spend["balance_threshold_usd"]))
+    lines.append("  warns at $%.2f of spend" % spend["threshold_usd"])
+    if not spend["complete"]:
+        lines.append("  incomplete: the fetch stopped at the %d-page cap, so the figure "
+                     "is a floor, not the total" % MAX_PAGES)
+    for warning in spend["warnings"]:
+        lines.append("  WARN: %s" % warning)
+    return lines
 
 
 def render_text(report, dims):
@@ -392,6 +534,9 @@ def render_text(report, dims):
     if report["truncated"]:
         lines.append("note: stopped at the %d-page cap; older rows may be missing - narrow --since"
                      % MAX_PAGES)
+    spend = report.get("paid_spend")
+    if spend is not None:
+        lines.extend(render_spend_text(spend))
     for dim in dims:
         lines.append("")
         lines.append(dim)
@@ -426,7 +571,16 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                     help="add estimated cost_in/cost_out (USD) per group, priced from "
                          "the registry's price_in/price_out")
     ap.add_argument("--registry", default=None,
-                    help="price source for --cost (default: catalog/ai-registry.json)")
+                    help="price source for --cost and the paid-spend section "
+                         "(default: catalog/ai-registry.json)")
+    ap.add_argument("--spend-since", nargs="?", const="", default=None, metavar="SINCE",
+                    help="add the paid-spend section: %s spend since this date (ISO-8601 UTC or a "
+                         "relative window; the flag alone means the 1st of this month UTC)"
+                         % SPEND_PROVIDER_LABEL)
+    ap.add_argument("--balance-usd", default=None, metavar="USD",
+                    help="the %s balance the caller measured at the gateway; adds the paid-spend "
+                         "section and WARNs below %.0f USD" % (SPEND_PROVIDER_LABEL,
+                                                               BALANCE_FLOOR_USD))
     args = ap.parse_args(argv)
 
     dims = [d.strip() for d in args.by.split(",") if d.strip()]
@@ -445,6 +599,30 @@ def main(argv=None, *, fetch=None, env=None, now=None):
               % args.since, file=sys.stderr)
         return 2
 
+    # DSGUARD: the spend window usually reaches further back than --since (the
+    # month so far, versus the last hour of traffic), so it is resolved here and
+    # takes the deeper of the two cutoffs for the fetch below.
+    spend_on = args.spend_since is not None or args.balance_usd is not None
+    spend_cutoff = balance = None
+    if spend_on:
+        if args.spend_since:
+            try:
+                spend_cutoff = parse_since(args.spend_since, now)
+            except ValueError:
+                print("autoos-usage: bad --spend-since %r (ISO-8601 UTC, a relative window "
+                      "like 30m, 6h, 2d, or the flag alone for the 1st of this month)"
+                      % args.spend_since, file=sys.stderr)
+                return 2
+        else:
+            spend_cutoff = month_start(now)
+        if args.balance_usd is not None:
+            try:
+                balance = float(args.balance_usd)
+            except ValueError:
+                print("autoos-usage: bad --balance-usd %r (a number of USD, as measured "
+                      "at the gateway)" % args.balance_usd, file=sys.stderr)
+                return 2
+
     path = key_file_path(env)
     try:
         key = read_manage_key(path)
@@ -456,14 +634,23 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     gateway = (env.get("AUTOOS_OMNIROUTE_URL") or DEFAULT_GATEWAY).rstrip("/")
     fetch = fetch or urllib_fetch
     try:
-        rows, pages, truncated = fetch_window(fetch, gateway, key, cutoff)
+        rows, pages, truncated = fetch_window(fetch, gateway, key,
+                                              min(cutoff, spend_cutoff)
+                                              if spend_on else cutoff)
     except UsageError as e:
         print("autoos-usage: %s" % e, file=sys.stderr)
         return 3
 
-    prices, price_source = load_prices(args.registry) if args.cost else (None, None)
+    priced = args.cost or spend_on
+    registry = read_registry(args.registry) if priced else {}
+    prices = prices_from_registry(registry)
+    price_source = price_source_name(args.registry) if priced else None
+    spend = paid_spend(rows, prices, registry, spend_cutoff, balance=balance,
+                       price_source=price_source, complete=not truncated) if spend_on else None
     report = build_report(rows, dims, cutoff, pages, truncated,
-                          prices=prices, price_source=price_source)
+                          prices=prices if args.cost else None,
+                          price_source=price_source if args.cost else None,
+                          spend=spend)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
