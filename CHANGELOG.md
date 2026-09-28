@@ -67,6 +67,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   config; one case fails the suite if any installer calls an `mcp-*` postInstall
   from another component; and the Antigravity merge is now proven on a real
   `mcp_config.json` that already holds the user's own server.
+### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
+- **`tests/test_autoos_spawner.py`**: **`LeakStrictnessTests`** (new, 8 cases) drives the real `parent_snapshot`/`parent_leak` against real temp repositories across the exemption boundary — a sibling worktree's own branch moving is exempt; a worktree added mid-run is not; a worktree inside the sandbox is not; a commit on a branch created during the run is a leak either way HEAD then goes. `IsolateContainmentTests` gains four fake-worker modes for the evasions (decoy branch, backdated committer date, `switch -c` + ff back, commit on a new branch) and the three flipped expectations above. 13 red before the fix, 417 green after on the file; `python3 -m pytest -q tests/` 1831 passed, 4 skipped.
+### Changed - `omnigraph-client` joins the Linux `server` profile (Q-001, 2026-09-28)
+
+- **`catalog/linux.json`**: the operator lifted the Q-001 hold at 04:50Z, so a
+  headless server pre-ticks the Omnigraph bridge like every other profile. The
+  component still skips with a hint when the `omnigraph_url` answer or the
+  `omnigraph_token` key is missing, so a server with no graph configured gains a
+  `skipped` line and nothing else — no failure, no file written. `catalog/macos.json`
+  is untouched: the macOS catalog has no `server` profile.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the catalog case asserted the
+  opposite ("the server profile is on hold") and now asserts the exact profile
+  list per catalog, so the Linux/macOS difference is stated rather than implied;
+  one new end-to-end case runs `--profile server --dry-run --yes` with no URL
+  configured and requires the plan to carry the component, the skip-with-hint line
+  to appear, and exit 0.
+- Docs: `docs/omnigraph.md` names the four Linux profiles and says why macOS has
+  three; the open question in `docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md`
+  is marked resolved with its reasoning.
 
 ### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
 
