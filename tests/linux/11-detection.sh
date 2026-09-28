@@ -281,7 +281,7 @@ if it "npm detection: a real run's is_installed asks npm fresh every time; a dry
     else fail "real-run npm calls=$real (want 2), dry-run npm calls=$dry (want 1)"; fi
 fi
 
-if it "npm detection: no npm is not-detected, a hung npm or bad JSON is unknown, cached or not"; then
+if it "npm detection: no npm is not-detected; bad JSON or null dependencies is unknown, cached or not"; then
     tmp="$(mktemp -d)"
     problems=""
     for cache in 0 1; do
@@ -289,6 +289,10 @@ if it "npm detection: no npm is not-detected, a hung npm or bad JSON is unknown,
                 _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
                 detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"
         [[ -z "$got" || "$got" == not-detected ]] || problems+="[cache=$cache no npm: $got] "
+        npm_stub "$tmp" '{"dependencies":null}'
+        got="$( PATH="$tmp/bin:$PATH"; _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
+                detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"
+        [[ "$got" == unknown ]] || problems+="[cache=$cache null dependencies: $got] "
         npm_stub "$tmp" 'not json'
         got="$( PATH="$tmp/bin:$PATH"; _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
                 detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"

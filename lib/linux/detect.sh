@@ -521,7 +521,7 @@ PY
             OK) INSTALLED_STATUS="$(printf '%s' "${_AUTOOS_NPM_LS#OK$'\n'}" | python3 -c '
 import json,sys
 try: print("installed" if sys.argv[1] in json.load(sys.stdin).get("dependencies",{}) else "not-detected")
-except (ValueError, AttributeError): print("unknown")' "$package")" ;;
+except (ValueError, AttributeError, TypeError): print("unknown")' "$package")" ;;
             *) INSTALLED_STATUS=unknown ;;
         esac
         return 0
@@ -545,7 +545,7 @@ try:
         r=probe(['npm','ls','-g','--depth=0','--json']); installed=bool(r and package in json.loads(r.stdout).get('dependencies',{}))
     else: known=False
     print('installed' if installed else 'not-detected' if known else 'unknown')
-except (subprocess.TimeoutExpired,OSError,ValueError): print('unknown')
+except (subprocess.TimeoutExpired,OSError,ValueError,AttributeError,TypeError): print('unknown')
 PY
 )"
 }

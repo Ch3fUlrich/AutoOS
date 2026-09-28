@@ -370,6 +370,8 @@ declare -a CAT_INSTALLED=()
 
 catalog_probe_installed() {
     CAT_INSTALLED=()
+    # A fresh npm snapshot per probe (WS-NPMCACHE): never one a caller left behind.
+    unset _AUTOOS_NPM_LS_STATE _AUTOOS_NPM_LS
     local i
     for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
         # A retired id is never "installed": the ✓ would advertise machinery
