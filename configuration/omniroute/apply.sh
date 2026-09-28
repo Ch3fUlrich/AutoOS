@@ -903,6 +903,27 @@ import urllib.request
 
 gateway = sys.argv[1]
 key = os.environ["AUTOOS_PROBE_KEY"]
+
+
+def first_model(resp):
+    """The first chunk that names a model: SSE `data:` lines, or one JSON
+    document when a gateway ignores `stream`. Stops there — the probe asks
+    which leg served, not for the whole answer."""
+    for raw in resp:
+        line = raw.decode("utf-8", "replace").strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            chunk = json.loads(line)
+        except ValueError:
+            continue
+        if chunk.get("model"):
+            return chunk["model"]
+    return "?"
+
+
 for name in sys.argv[2:]:
     body = json.dumps({
         "model": name,
@@ -910,13 +931,16 @@ for name in sys.argv[2:]:
         # 2048, not 256: reasoning models (spark) spend tokens on hidden
         # thinking first and answer "empty" when the budget is tiny.
         "max_tokens": 2048,
+        # Streamed: Muse's first byte outlives a whole-body wait (measured
+        # 2026-09-28), and clients stream anyway.
+        "stream": True,
     }).encode()
     req = urllib.request.Request(
         gateway + "/v1/chat/completions", data=body, method="POST",
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
-            served = json.loads(resp.read().decode()).get("model", "?")
+            served = first_model(resp)
         print("  + %-12s served by %s" % (name, served))
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:200].replace("\n", " ")

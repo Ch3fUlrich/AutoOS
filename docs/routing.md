@@ -67,6 +67,24 @@ date even when `--since` is an hour, and prints `WARN` at 20 USD of spend
 the gateway — is below 5 USD. A window that hit the paging cap says
 `incomplete`: the figure is a floor, not a total.
 
+Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
+<position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).
+It prints the records after a position, oldest first, each headed by its
+`<timestamp>#<ordinal>` position, so a relaunched orchestrator resumes at its
+card's `last-event` instead of opening a 50k-token inbox. The RUN dir is
+`$AUTOOS_RUN_DIR` only (`<RUN>/inbox/<name>.md`, or `--file PATH`); a bare UTC
+stamp re-reads its whole second and a late append (an older timestamp written
+after a newer one) is returned and flagged `(late)`, because reading is
+at-least-once. An inbox with no timestamped record exits 1 — never "no events".
+A line that looks like a stamp but does not parse (a minute-precision one, say
+`2026-09-27T03:55Z → done: …`) is still an acknowledgement, so it prints on
+stdout too, in file order, tagged `(malformed line N)` with the lines under it —
+no position, because it is not a record — beside a stderr notice that counts
+them. The notice is made only for an entry the window actually printed: one
+behind `--since` says nothing, and one dropped with the record it rode on by
+`--max-records` is named in the cut line instead ("cut N earlier records and M
+malformed entries").
+
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
 tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).

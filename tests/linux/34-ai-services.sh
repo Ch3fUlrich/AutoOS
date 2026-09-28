@@ -2282,7 +2282,7 @@ if it "aistack: compose template keeps the hardening contract"; then
     if (( rc == 0 )); then pass; else fail "$out"; fi
 fi
 
-if it "aistack: compose.yml sets the chat admission gate and carries no NODE_OPTIONS"; then
+if it "aistack: omniroute compose.yml sets the chat admission gate, the response-start timeout and carries no NODE_OPTIONS"; then
     f="$AISTACK/compose.yml"
     # The omniroute block: from its service header to the next service.
     omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
@@ -2291,10 +2291,21 @@ if it "aistack: compose.yml sets the chat admission gate and carries no NODE_OPT
         || { ok=0; echo "MAX_HEAVY not set to default 6" >&2; }
     grep -q 'OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}' <<<"$omni" \
         || { ok=0; echo "QUEUE_MS not set to default 60000" >&2; }
+    # Muse's first byte is slow (measured 2026-09-28: 3-32 s at
+    # minimal/low/medium; the high leg overruns the image's own 30 s
+    # response-start ceiling). Unset ships 30000 -> 504.
+    grep -q 'OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: ${OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS:-180000}' <<<"$omni" \
+        || { ok=0; echo "DIRECT_HEADERS_TIMEOUT_MS not set to default 180000" >&2; }
     # OMNIROUTE_MEMORY_MB is the heap knob (the entrypoint appends it to
     # NODE_OPTIONS; last flag wins). A NODE_OPTIONS in compose would fight it.
     grep -qE '^ +NODE_OPTIONS:' <<<"$omni" && { ok=0; echo "NODE_OPTIONS must not be in compose (OMNIROUTE_MEMORY_MB is the heap knob)" >&2; }
-    if (( ok )); then pass; else fail "compose.yml chat admission gate"; fi
+    if (( ok )); then pass; else fail "omniroute compose.yml chat admission gate"; fi
+fi
+
+if it "aistack: stack.env.example documents the omniroute response-start timeout as a commented default"; then
+    f="$AISTACK/stack.env.example"
+    if grep -q '^# OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=180000' "$f"; then pass
+    else fail "OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS default not documented"; fi
 fi
 
 if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"; then
