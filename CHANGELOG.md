@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
+
+Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the
+same shape as FF1c item 3 one step away from where that fix looked:
+
+- **The parent was walked through** (LOW): `provision_runtime_dir` judged the
+  leaf (symlink / not-a-dir / another uid) but only asked `os.path.isdir` about
+  its parent — which follows a symlink. A pre-existing
+  `…/state/runtimes -> somewhere else`, or one owned by another account on a
+  shared host, was created *and* chmod'd from underneath, exactly the leak the
+  leaf check exists to stop. The parent is now `lstat`'ed under the same three
+  rules, through one helper (`_provision_path_usable`) so leaf and parent cannot
+  drift apart. Tests: `ChildRuntimeDirTests.test_provisioning_refuses_a_parent_*`
+  (both red before the change).
+- **A `--free` fallthrough re-run lost its own directories** (LOW): the re-plan
+  mints a fresh run id and the private `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME` are
+  named after it, but only the *first* launch site provisioned them. The
+  survivor of a provider-stopped attempt therefore ran with an XDG dir nobody
+  created — which the client makes itself, outside the 0700 rule. A non-isolate
+  run has no clone to touch the disk, so nothing else masked it. The re-run
+  site provisions both. Test:
+  `ChildRuntimeDirTests.test_a_fallthrough_rerun_provisions_its_own_dirs`.
+
 ### Fixed — git still read the operator's global config, and `extra` skipped the scrub (FF1c, D-106)
 
 Muse#high over 6bdeca5..ce65d22 confirmed all six FF1b fixes and opened four more.

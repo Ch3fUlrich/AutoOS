@@ -497,6 +497,24 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> di
     return env
 
 
+def _provision_path_usable(st, path: str, what: str) -> str | None:
+    """Why an already-present `path` may not be provisioned through, or None.
+
+    The same three rules judge the leaf and its parent (FF1c item 3, and the
+    parent half the Sonnet review of FF1 asked for): ``makedirs`` and ``chmod``
+    both follow a symlink, and a directory belonging to another uid is somebody
+    else's tree on a shared host — tightening it is a denial of service on its
+    real owner, writing into it is the leak.
+    """
+    if stat.S_ISLNK(st.st_mode):
+        return "%s is a symlink" % what
+    if not stat.S_ISDIR(st.st_mode):
+        return "%s is not a directory" % what
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return "%s is owned by uid %d" % (what, st.st_uid)
+    return None
+
+
 def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
     """Create the worker's private ``XDG_RUNTIME_DIR``: empty, mode 0700.
 
@@ -512,6 +530,11 @@ def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
     state tree is reachable by more than one account, that is both a write into
     someone else's directory and a denial of service on it. Same for a leaf of
     another owner, and for a leaf that is not a directory at all.
+
+    The parent is judged by the same rule (FF1 Sonnet LOW): ``os.path.isdir``
+    follows a symlink, so a parent that is a link — or a directory of another
+    uid — was walked through and chmod'd from underneath, which is the leaf bug
+    one level up and the only path the leaf check could not see.
     """
     if not path or not os.path.isabs(path):
         return None
@@ -520,22 +543,25 @@ def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
     except OSError:
         st = None                    # absent: the normal case
     if st is not None:
-        if stat.S_ISLNK(st.st_mode):
-            print("autoos-agent: refusing to provision %s: it is a symlink"
-                  % path, file=sys.stderr)
-            return None
-        if not stat.S_ISDIR(st.st_mode):
-            print("autoos-agent: refusing to provision %s: not a directory"
-                  % path, file=sys.stderr)
-            return None
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            print("autoos-agent: refusing to provision %s: owned by uid %d"
-                  % (path, st.st_uid), file=sys.stderr)
+        why = _provision_path_usable(st, path, "it")
+        if why is not None:
+            print("autoos-agent: refusing to provision %s: %s" % (path, why),
+                  file=sys.stderr)
             return None
         os.chmod(path, 0o700)        # ours already: re-tighten, idempotent
         return path
     try:
         parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            pst = None               # absent too: makedirs creates it
+        if pst is not None:
+            why = _provision_path_usable(pst, parent, "its parent")
+            if why is not None:
+                print("autoos-agent: refusing to provision %s (%s): %s"
+                      % (path, parent, why), file=sys.stderr)
+                return None
         if not os.path.isdir(parent):
             # 0700 on the parent too — makedirs(mode) only ever applies it to
             # the leaf, and a world-readable sibling is the same leak.
@@ -5495,6 +5521,14 @@ def cmd_run(args, cfg: dict) -> int:
                 # fallthrough must not be the site that inherits the caller's
                 # tokens back in.
                 env = worker_env(plan, key if uses_key else None)
+                # FF1 Sonnet LOW: the re-plan minted a fresh run id, and the
+                # private runtime/config dirs are named after it — so the
+                # re-run's dirs are the ones that do not exist yet. The first
+                # launch provisioned the stopped attempt's; without this the
+                # fallthrough worker runs with an XDG dir nobody created (and
+                # may create itself, outside the 0700 rule).
+                provision_runtime_dir(env.get("XDG_RUNTIME_DIR"))
+                provision_runtime_dir(env.get("XDG_CONFIG_HOME"))
                 register_secret_env(env)
         if not fell_through:
             break

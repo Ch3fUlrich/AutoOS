@@ -10845,6 +10845,40 @@ class ChildRuntimeDirTests(unittest.TestCase):
                         "the runtimes parent is world-readable: %o"
                         % stat.S_IMODE(os.stat(parent).st_mode))
 
+    def test_provisioning_refuses_a_parent_that_is_a_symlink(self):
+        # FF1 Sonnet LOW: the leaf got this treatment in FF1c, the parent did
+        # not — os.path.isdir follows a link, so the create-and-chmod below it
+        # walked straight through a parent somebody else placed in the state
+        # tree and tightened *their* directory from underneath.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = os.path.join(tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        os.chmod(elsewhere, 0o755)
+        link = os.path.join(tmp, "runtimes")
+        os.symlink(elsewhere, link)
+        target = os.path.join(link, "run-1")
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.islink(link), "the parent link was replaced")
+        self.assertEqual([], os.listdir(elsewhere),
+                         "the leaf was created through the parent link")
+        self.assertEqual(0o755, stat.S_IMODE(os.stat(elsewhere).st_mode),
+                         "the parent chmod landed through the link, on a "
+                         "directory it never owned")
+
+    def test_provisioning_refuses_a_parent_it_does_not_own(self):
+        # The other half of the same rule: a parent of another uid is somebody
+        # else's tree, and the leaf inside it is the write, not the chmod.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        parent = os.path.join(tmp, "runtimes")
+        os.mkdir(parent)
+        target = os.path.join(parent, "run-1")
+        with mock.patch.object(os, "getuid", lambda: 999999):
+            self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertFalse(os.path.exists(target), "the leaf was created anyway")
+
     def test_provisioning_creates_the_leaf_itself_not_through_a_parent_link(self):
         # os.mkdir is the atomic half: no O_CREAT-after-O_EXCL window on the
         # leaf, and an existing competitor's dir is caught, not merged into.
@@ -10879,6 +10913,36 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertNotEqual("/home/dev/.config", config)
         self.assertTrue(os.path.isdir(config), config)
         self.assertEqual(0o700, stat.S_IMODE(os.stat(config).st_mode))
+
+    def test_a_fallthrough_rerun_provisions_its_own_dirs(self):
+        # FF1 Sonnet LOW: the re-plan mints a fresh run id, and the private XDG
+        # dirs are named after it — so the dirs that do not exist are exactly
+        # the re-run's. The first launch site provisioned the stopped attempt's
+        # pair and nothing did the second, leaving the fallthrough worker with
+        # an XDG dir it would have to create itself, outside the 0700 rule.
+        # Non-isolate and --free: no clone, so nothing else touched the disk.
+        import stat
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], 1,
+            args_over={"free": True, "free_model": FREE_MODELS[0],
+                       "isolate": False},
+            policy={"free_client_models": {"opencode": FREE_MODELS}})
+        self.assertEqual(0, rc, out + err)
+        self.assertEqual(2, calls["n"], "one stop should mean one re-run: %s" % out)
+        first, rerun = calls["envs"][0], calls["envs"][1]
+        for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+            self.assertTrue(rerun.get(name), "%s missing on the re-run: %s"
+                            % (name, sorted(rerun)))
+            self.assertNotEqual(first[name], rerun[name],
+                                "%s: the re-run reused the stopped attempt's dir"
+                                % name)
+            self.assertTrue(os.path.isdir(rerun[name]),
+                            "%s was never created for the re-run: %s"
+                            % (name, rerun[name]))
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(rerun[name]).st_mode),
+                             "%s: %o" % (name, stat.S_IMODE(
+                                 os.stat(rerun[name]).st_mode)))
+            self.assertEqual([], os.listdir(rerun[name]), name)
 
 
 class PushFenceHonestyTests(unittest.TestCase):
