@@ -7222,6 +7222,40 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
     }
+    foreach ($pat in @($fences.read_deny_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer read fence missing: $pat"
+    }
+    foreach ($pat in @($fences.bash_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer shell allow missing: $pat"
+    }
+    foreach ($pat in @($fences.read_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer read allow missing: $pat"
+    }
+    # KEYDENY: a fence is a decision over a path, not a list of names — last
+    # matching rule wins, so walk the rules and keep the final verdict. Fixture
+    # paths only; the suite never opens a real key file.
+    foreach ($path in @('configuration/api-keys.yml',
+                        '/home/x/.config/autoos/ai-stack/client.key',
+                        '/home/x/.config/autoos/ai-stack/manage.key')) {
+        $readVerdict = ''; $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+            if ($rule.action -eq 'shell' -and ("cat " + $path) -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
+    }
+    $example = 'configuration/api-keys.example.yml'
+    $readVerdict = ''; $shellVerdict = ''
+    foreach ($rule in $t3) {
+        if ($rule.action -eq 'read' -and $example -like $rule.resource) { $readVerdict = $rule.effect }
+        if ($rule.action -eq 'shell' -and ("cat " + $example) -like $rule.resource) { $shellVerdict = $rule.effect }
+    }
+    Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
+    Assert-Equal $shellVerdict 'allow' 't3-reviewer is denied cat of the key example'
     foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
         Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"
     }

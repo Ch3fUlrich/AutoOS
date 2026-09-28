@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
+
+`catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is
+`configuration/api-keys.yml`, and the gateway keys `~/.config/autoos/ai-stack/client.key` /
+`manage.key` were not fenced at all — a spawned leaf could `Read` and `cat` all three; they are
+now denied for read and shell everywhere (with `*api-keys.example*` allowed through the same
+deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
+allowed every `read`, carries the `read_deny_all` patterns as denies.
+
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 
 A7b retired the component's *work* and left a live row holding a pointer: the

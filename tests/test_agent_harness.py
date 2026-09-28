@@ -4,6 +4,7 @@ Run from the repo root:
 
     python3 tests/test_agent_harness.py
 """
+import fnmatch
 import importlib.util
 import json
 import os
@@ -47,6 +48,38 @@ def read_ordered(path):
 def harness_data():
     with open(HARNESS, encoding="utf-8") as handle:
         return json.load(handle)
+
+
+# The files a spawned leaf must never see. Fixture paths only — no real key
+# file is opened by this suite, the fence is decided on the name alone.
+KEY_PATHS = [
+    "configuration/api-keys.yml",
+    "/home/x/.config/autoos/ai-stack/client.key",
+    "/home/x/.config/autoos/ai-stack/manage.key",
+]
+KEY_EXAMPLE = "configuration/api-keys.example.yml"
+
+
+def fence_verdict(pattern_map, value):
+    """The verdict a rendered fence map gives `value`: last glob match wins.
+
+    This is opencode's own rule shape (opencode.jsonc: "last matching rule
+    wins"), which is why an allow_all pattern is emitted after deny_all by
+    _rebuild_patterns/_role_bash. `*` spans path separators — the harness's
+    pattern idiom, since `*api_keys*` has to fence
+    `cat /home/x/secrets/api_keys.conf` as well as a bare relative path.
+    """
+    verdict = pattern_map.get("*", "allow")
+    for pattern, effect in pattern_map.items():
+        if pattern != "*" and fnmatch.fnmatch(value, pattern):
+            verdict = effect
+    return verdict
+
+
+def leaf_bash_maps(doc, harness):
+    for name, role in harness["roles"].items():
+        if role["leaf"]:
+            yield name, doc["agent"][name]["permission"]["bash"]
 
 
 class CheckTests(unittest.TestCase):
@@ -324,6 +357,42 @@ class OpencodeMergeTests(unittest.TestCase):
                 self.assertNotEqual(bash.get(pattern), "deny", pattern)
             for pattern in harness["fences"]["bash_allow_all"]:
                 self.assertEqual(bash[pattern], "allow", pattern)
+
+    def test_a_leaf_is_denied_read_and_cat_of_every_real_key_file(self):
+        # KEYDENY: the fence spelled the key file `*api_keys*` (underscore)
+        # while the real one is configuration/api-keys.yml, and the gateway's
+        # client.key/manage.key were not fenced at all — so a leaf could Read
+        # and `cat` the keys. Decided on the rendered map, not on file
+        # contents: no key file is opened here.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            self.assertTrue(list(leaf_bash_maps(doc, harness)), "no leaf role renders")
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                top_bash = doc["permission"]["bash"]
+                for path in KEY_PATHS:
+                    self.assertEqual(fence_verdict(read_map, path), "deny",
+                                     "%s may Read %s" % (name, path))
+                    self.assertEqual(fence_verdict(bash_map, "cat " + path), "deny",
+                                     "%s may cat %s" % (name, path))
+                    self.assertEqual(fence_verdict(top_bash, "cat " + path), "deny",
+                                     "top level may cat %s" % path)
+
+    def test_a_leaf_may_still_read_and_cat_the_key_example(self):
+        # The template has to stay readable — same deny-then-allow mechanism
+        # as *.env.example*, allow winning because it is emitted last.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                self.assertEqual(fence_verdict(read_map, KEY_EXAMPLE), "allow",
+                                 "%s is denied the example" % name)
+                self.assertEqual(fence_verdict(bash_map, "cat " + KEY_EXAMPLE), "allow",
+                                 "%s is denied cat of the example" % name)
 
     def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
         harness = harness_data()

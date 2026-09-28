@@ -41,6 +41,9 @@
       "docker rm*": "deny",
       "*auth.json*": "deny",
       "*api_keys*": "deny",
+      "*api-keys*": "deny",
+      "*client.key*": "deny",
+      "*manage.key*": "deny",
       "*.env*": "deny",
       "env": "deny",
       "env *": "deny",
@@ -50,7 +53,8 @@
       "*.local/share/opencode*": "deny",
       "set": "deny",
       "cat /proc/*": "deny",
-      "*.env.example*": "allow"
+      "*.env.example*": "allow",
+      "*api-keys.example*": "allow"
     },
     "skill": "allow",
     "read": {
@@ -59,8 +63,12 @@
       "*.env.*": "deny",
       "*auth.json": "deny",
       "*api_keys*": "deny",
+      "*api-keys*": "deny",
+      "*client.key*": "deny",
+      "*manage.key*": "deny",
       "*.claude.json*": "deny",
-      "*.env.example": "allow"
+      "*.env.example": "allow",
+      "*api-keys.example*": "allow"
     }
   },
   "instructions": [
@@ -100,6 +108,9 @@
           "docker rm*": "deny",
           "*auth.json*": "deny",
           "*api_keys*": "deny",
+          "*api-keys*": "deny",
+          "*client.key*": "deny",
+          "*manage.key*": "deny",
           "*.env*": "deny",
           "env": "deny",
           "env *": "deny",
@@ -119,7 +130,8 @@
           "*git *checkout*": "allow",
           "*git *switch*": "allow",
           "*git *restore*": "allow",
-          "*.env.example*": "allow"
+          "*.env.example*": "allow",
+          "*api-keys.example*": "allow"
         }
       }
     },
@@ -151,6 +163,9 @@
           "docker rm*": "deny",
           "*auth.json*": "deny",
           "*api_keys*": "deny",
+          "*api-keys*": "deny",
+          "*client.key*": "deny",
+          "*manage.key*": "deny",
           "*.env*": "deny",
           "env": "deny",
           "env *": "deny",
@@ -170,7 +185,8 @@
           "*git *checkout*": "allow",
           "*git *switch*": "allow",
           "*git *restore*": "allow",
-          "*.env.example*": "allow"
+          "*.env.example*": "allow",
+          "*api-keys.example*": "allow"
         }
       }
     },
@@ -202,6 +218,9 @@
           "docker rm*": "deny",
           "*auth.json*": "deny",
           "*api_keys*": "deny",
+          "*api-keys*": "deny",
+          "*client.key*": "deny",
+          "*manage.key*": "deny",
           "*.env*": "deny",
           "env": "deny",
           "env *": "deny",
@@ -221,7 +240,8 @@
           "*git *checkout*": "deny",
           "*git *switch*": "deny",
           "*git *restore*": "deny",
-          "*.env.example*": "allow"
+          "*.env.example*": "allow",
+          "*api-keys.example*": "allow"
         }
       },
       "tools": {
@@ -258,6 +278,9 @@
           "docker rm*": "deny",
           "*auth.json*": "deny",
           "*api_keys*": "deny",
+          "*api-keys*": "deny",
+          "*client.key*": "deny",
+          "*manage.key*": "deny",
           "*.env*": "deny",
           "env": "deny",
           "env *": "deny",
@@ -277,7 +300,8 @@
           "*git *checkout*": "deny",
           "*git *switch*": "deny",
           "*git *restore*": "deny",
-          "*.env.example*": "allow"
+          "*.env.example*": "allow",
+          "*api-keys.example*": "allow"
         }
       },
       "tools": {

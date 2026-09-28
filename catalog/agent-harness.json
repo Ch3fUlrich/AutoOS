@@ -30,6 +30,9 @@
       "docker rm*",
       "*auth.json*",
       "*api_keys*",
+      "*api-keys*",
+      "*client.key*",
+      "*manage.key*",
       "*.env*",
       "env",
       "env *",
@@ -53,17 +56,22 @@
       "*git *restore*"
     ],
     "bash_allow_all": [
-      "*.env.example*"
+      "*.env.example*",
+      "*api-keys.example*"
     ],
     "read_deny_all": [
       "*.env",
       "*.env.*",
       "*auth.json",
       "*api_keys*",
+      "*api-keys*",
+      "*client.key*",
+      "*manage.key*",
       "*.claude.json*"
     ],
     "read_allow_all": [
-      "*.env.example"
+      "*.env.example",
+      "*api-keys.example*"
     ]
   },
   "mcp_servers": {

@@ -127,6 +127,9 @@
         { "action": "shell", "resource": "docker rm*", "effect": "deny" },
         { "action": "shell", "resource": "*auth.json*", "effect": "deny" },
         { "action": "shell", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "shell", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "shell", "resource": "*client.key*", "effect": "deny" },
+        { "action": "shell", "resource": "*manage.key*", "effect": "deny" },
         { "action": "shell", "resource": "*.env*", "effect": "deny" },
         { "action": "shell", "resource": "env", "effect": "deny" },
         { "action": "shell", "resource": "env *", "effect": "deny" },
@@ -147,6 +150,7 @@
         { "action": "shell", "resource": "*git *switch*", "effect": "deny" },
         { "action": "shell", "resource": "*git *restore*", "effect": "deny" },
         { "action": "shell", "resource": "*.env.example*", "effect": "allow" },
+        { "action": "shell", "resource": "*api-keys.example*", "effect": "allow" },
         // MCP write tools bypass the edit/write deny: serena is deny-by-default
         // with a read-only allow list; memory-graph and browser-code writes off.
         { "action": "serena_*", "resource": "*", "effect": "deny" },
@@ -171,7 +175,21 @@
         { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" },
         // A leaf never spawns: the spawner's MCP tools (autoos-agent_spawn and
         // friends, registered for every agent) are off here too.
-        { "action": "autoos-agent_*", "resource": "*", "effect": "deny" }
+        { "action": "autoos-agent_*", "resource": "*", "effect": "deny" },
+        // The read_deny_all fences (catalog/agent-harness.json) as `read`
+        // denies: `read: * allow` above left the real key files —
+        // configuration/api-keys.yml and the gateway client.key/manage.key —
+        // readable by a leaf. Last match wins, so the allows come after.
+        { "action": "read", "resource": "*.env", "effect": "deny" },
+        { "action": "read", "resource": "*.env.*", "effect": "deny" },
+        { "action": "read", "resource": "*auth.json", "effect": "deny" },
+        { "action": "read", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "read", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "read", "resource": "*client.key*", "effect": "deny" },
+        { "action": "read", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "read", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" },
+        { "action": "read", "resource": "*api-keys.example*", "effect": "allow" }
       ]
     }
   },
