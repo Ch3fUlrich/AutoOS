@@ -102,6 +102,7 @@ class CapTests(unittest.TestCase):
             ("fable", 1000000, 600000),
             ("spark", 1000000, 300000),
             ("gemini", 1000000, 200000),
+            ("sonnet", 1000000, 250000),
             ("*", 200000, 150000),
         ])
 
@@ -111,8 +112,13 @@ class CapTests(unittest.TestCase):
         self.assertEqual(ctx.cap_for("muse-spark-1.3", ctx.DEFAULT_CAPS), 300000)
         self.assertEqual(ctx.cap_for("gemini-3.1-pro", ctx.DEFAULT_CAPS), 200000)
 
-    def test_sonnet_falls_through_to_the_200k_default(self):
-        self.assertEqual(ctx.cap_for("claude-sonnet-4-5", ctx.DEFAULT_CAPS), 150000)
+    def test_sonnet_l2_hands_off_at_250k(self):
+        # routing-00 D-085: sonnet L2 orchestrators (1M window) hand off at 250k.
+        self.assertEqual(ctx.cap_for("claude-sonnet-5", ctx.DEFAULT_CAPS), 250000)
+        self.assertEqual(ctx.cap_for("claude-sonnet-5[1m]", ctx.DEFAULT_CAPS), 250000)
+
+    def test_200k_class_falls_through_to_the_default(self):
+        self.assertEqual(ctx.cap_for("claude-haiku-4-5", ctx.DEFAULT_CAPS), 150000)
         self.assertEqual(ctx.cap_for("some-unknown-model", ctx.DEFAULT_CAPS), 150000)
 
     def test_match_is_case_insensitive_substring(self):
@@ -172,6 +178,12 @@ class RegistryCapsTests(unittest.TestCase):
             self.assertEqual(ctx.cap_for("claude-opus-4-6", caps), 123)
             self.assertEqual(ctx.cap_for("fable-1", caps), 123)
             self.assertEqual(ctx.cap_for("claude-sonnet-4-5", caps), 150000)
+
+    def test_live_registry_gives_sonnet_250k(self):
+        caps, source = ctx.load_caps()
+        self.assertEqual(source, "policy")
+        self.assertEqual(ctx.cap_for("claude-sonnet-5", caps), 250000)
+        self.assertEqual(ctx.cap_for("claude-haiku-4-5", caps), 150000)
 
     def test_missing_registry_falls_back_to_default(self):
         """Missing registry file -> DEFAULT_CAPS with source 'default'."""
