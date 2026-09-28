@@ -151,7 +151,7 @@ def run_of(session_id) -> str:
 # cap itself, and the balance floor under which the next top-up is late.
 SPEND_PROVIDER = "deepseek"
 SPEND_PROVIDER_LABEL = "DeepSeek"
-SPEND_WARN_USD = 20.0      # the operator's monthly DeepSeek cap
+SPEND_WARN_USD = 20.0      # the warning line; the hard cap is providers.<id>.monthly_cap_usd
 BALANCE_FLOOR_USD = 5.0    # warn before the balance runs out mid-lane
 
 # Registry path for cost lookup
@@ -235,6 +235,18 @@ def price_for(model, prices):
         if tail in prices:
             return prices[tail]
     return None
+
+
+def monthly_cap_usd(registry, provider=SPEND_PROVIDER):
+    """providers.<provider>.monthly_cap_usd as a float: the hard monthly cap a paid
+    caller must stay under (WS-DSCALL, 2026-09-28). SPEND_WARN_USD stays the
+    warning line. ValueError when the cap is absent or not a positive number."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    cap = entry.get("monthly_cap_usd") if isinstance(entry, dict) else None
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        raise ValueError("providers.%s.monthly_cap_usd is missing or not a positive number"
+                         % provider)
+    return float(cap)
 
 
 def month_start(now):

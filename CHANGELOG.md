@@ -5,6 +5,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — memoised identical dry runs and split part 13 across two shards (WS-PART13)
+
+- **`tests/linux/13-end-to-end-dry-run-only.sh`**: identical `setup.sh` runs are
+  served from a memo (`memo_dry_run`, keyed on argv + every `AUTOOS_*` variable
+  + `PATH` + the e2e/real home mode), so the repeated `--profile ai-coding` and
+  `--check-catalog` runs happen once. Filesystem-asserting tests and the
+  determinism pair keep real runs; a guard test pins the keying.
+- **`tests/linux/41-end-to-end-retirement.sh`** (new): the four retirement tests
+  moved out of part 13 onto their own shard (`g 41` in `tests/ci-shards.txt`),
+  so the two halves run in parallel.
+
+### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
+
+- **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid
+  completion through the OmniRoute gateway, asked for the allowed registry leg
+  with `max_tokens` 4096; never local Ollama. Which served models count is
+  `catalog/ai-registry.json`'s call: exactly a leg of route `deepseek-v4.1-flash`
+  that `policy.leg_rules` allows, checked as served (via
+  `tools/registry.leg_denied`), so V4 Pro, a dated snapshot or another provider
+  never passes. Keys come from `configuration/api-keys.yml` in-process, never
+  argv, scrubbed from errors.
+- **Monthly DeepSeek cap, fail-closed:** `providers.deepseek.monthly_cap_usd: 25`
+  (with `monthly_cap_source`; schema entry; `tools/registry.py` requires a positive
+  number and a source) is read through the one reader
+  `autoos_usage.monthly_cap_usd`. `deepseek_call.py` is orchestrator-only: before
+  each call it reads this month's spend from the gateway's call logs and refuses
+  (exit 3) at or above the cap or when the spend cannot be read.
+  `SPEND_WARN_USD` (20) stays the warning line.
+- **OpenRouter dropped** from the helper: `providers.openrouter` has no credit
+  (BYOK answered 401), so there is nothing to fall back to.
+- **`deepseek_review.sh`, `deepseek_chunked_review.sh`** call it instead of
+  opencode in WSL, whose `--file` silently reviewed only the first ~1,000 lines
+  and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
+  Re-created from the operator's local work (2026-09-25) and reworked for the
+  DSBACK policy (2026-09-28).
+- **WS-DSCALL-LOW:** `main()` refuses `--max-tokens` below the 4096 floor (exit 2, before any key or network access); a truncated call-log walk is tested to refuse the cap.
+
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
+- **RESTART spec v3.6** (RSTAMEND5, 2026-09-28): **`docs/plans/2026-09-28-restart-spec.md`** resolves the Muse FIX-FIRST on v3.5 with one correction to §5's *mechanism*, its numbers untouched. v3.5 claimed hand-off caps are keyed by **(family, role)** and that `cap_for` reads a `role` field from §4's `run.json`; lane CAPD088 builds no such thing and none is planned. §5 now states what CAPD088 does: operator **D-088** (orchestration sessions 500k, workers min(40 % of window, 400k), supersedes D-085/CAPL2's interim 250k) is implemented as **model-family rows used as the role proxy** — opus, fable and sonnet **500k** (those families only run long sessions as orchestrators), spark and gemini **400k**, and the 200k class **80k** (the worker agents) — because `tools/autoos_context.py` `cap_for(model)` takes a model id and **no role argument**. `catalog/ai-registry.json` `policy.handoff_caps` is the one home for the numbers, and the comment at `DEFAULT_CAPS` (the unreadable-registry fallback) mirrors the same rows in the same order; §4's `role` field selects a §8 MCP document and nothing else, so it is no longer an input to any cap. What follows from that: the CAPD088 delivery row says family rows rather than a (family, role) key, the lane order drops CAPD088's dependency on R4, the Order and invariant bullets speak of families (tests pin each *family's* id resolving to its own number, not the wildcard; `validate`'s `cap_tokens == window × cap_fraction` invariant is stated per family row — 400000/0.4 on a 1M-window worker family, 80000/0.4 on a 200k-class family, 500000/0.5 on a 1M-window orchestration family), and the v2 D-044 row and the v3.4 CAPD088 row stop calling the cap "per role". The only `role` left in the spec is §4/§8's: the `run.json` field that selects `configuration/mcp/<role>.json`. The three §5 obligations that survive are the row **order** (`cap_for` is first-match-wins and strips a trailing `[1m]`, so every new row goes before the `*` row), the **invariant**, and **revisit** — §8's baseline protocol (the non-sidechain first assistant turn's `input + cache_creation + cache_read` on a fixed `Reply OK` probe, pinned model and role document, 3 runs, the median, reported per role to L0) is what measures what a session pays to start, D-085's ~15 min handoff and **55.5k** fresh sonnet start stand as *why* a cap is a number at all, and the 55.5k is §8's pre-R9 anchor, not a cap. v3.5's resolutions stand: a `ready <branch> <sha>` record is an open order until §7's one closing rule closes it, so an unanswered ready stays live whatever its position and counts in `kept N records: no covering done`; §7 is that rule's one home, §3's open-readies scan points at it; every inbox writer is locked, `append_inbox_line` holds the lock for every Python caller (`autoos-agent.py ready` already writes through it), a bare `echo … >> inbox` is forbidden and R8's grep reaches shell recipes only; rotate acquires exclusive with a 30 s timeout and exits 2 having moved nothing, an appender waits 10 s then appends anyway and reports `inbox: lock timeout`.
+### Added — the orchestrator's own models are known review authors (AUTHORS (S1), 2026-09-28)
+
+- **`catalog/ai-registry.json:models`**: `claude-opus-5-5`, `claude-sonnet-5`, `claude-fable-5-1`,
+  `claude-haiku-4-5`, each `family: anthropic`. Measured: `autoos-agent.py ready` and
+  `review-status` refused a lane record its own orchestrator wrote — *"author claude-opus-5-5 is
+  not a model, leg, route or reviewer the registry knows, and not a family it declares"* — so
+  records borrowed `claude-opus-4-6`, which is a false statement about who wrote the diff and
+  makes the gate's detail line useless in an audit. `author_family`
+  (`tools/autoos_resolver.py`) reads the `models` table first, so the smallest fix is data, not
+  code: an author row carries no provider and no route names it, so none of the four is a
+  routable leg (`test_an_orchestrator_author_is_not_a_leg_of_any_route` pins that, and
+  `policy.leg_rules` `deny-claude-paid-api` still keeps Claude off a paid API).
+- **`tools/registry.py` rule 13**: `validate` checks `policy.handoff_caps` — every row's
+  `cap_tokens == round(window * cap_fraction)`, and a `match: ["*"]` fallback row exists.
+  `tools/autoos_context.py` reads `cap_tokens` and never recomputes it, so a row whose pair
+  disagreed stated two caps at once and the lane handed off at the stale one; with no `*` row a
+  model no other row names silently got that tool's hand-maintained `DEFAULT_CAPS` instead of
+  the policy. Rule 13 red first in `HandoffCapsPolicyTests`.
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
@@ -146,6 +224,144 @@ carrier. All of them are in `tools/autoos-agent.py` unless named.
   slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
   `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
   `task_dir` is what links the two ids meanwhile.
+### Changed — hand-off caps: orchestrators 500k, workers min(40% of window, 400k) (CAPD088, operator D-088, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps` and **`tools/autoos_context.py`** `DEFAULT_CAPS`:
+  Opus 500k (was 600k), Fable 500k (was 600k), Sonnet 500k (was CAPL2's interim 250k) - orchestration
+  sessions, 1M window; Muse Spark 400k (was 300k), Gemini 400k (was 200k), the 200k class 80k (was
+  150k) - worker agents. Rows key on model family as the role proxy (comment at `DEFAULT_CAPS`).
+### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
+
+`catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is
+`configuration/api-keys.yml`, and the gateway keys `~/.config/autoos/ai-stack/client.key` /
+`manage.key` were not fenced at all — a spawned leaf could `Read` and `cat` all three; they are
+now denied for read and shell everywhere (with `*api-keys.example*` allowed through the same
+deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
+allowed every `read`, carries the `read_deny_all` patterns as denies.
+
+- KEYDENY2 (2026-09-28, same lane): that shell **allow** was matched against the whole command
+  line, not a path, so `cat configuration/api-keys.yml configuration/api-keys.example.yml`,
+  `cp configuration/api-keys.yml /tmp/api-keys.example/x` and `cat /tmp/api-keys.example/stolen`
+  all resolved to `allow` — a substring allow can never fence a command line. Both shell allows
+  are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
+  the template with the read tool, and the read allow is narrowed to the exact suffix
+  `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
+
+- **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
+  was red before its fix** (72 red of 108 in `tests/test_autoos_risk.py`). The one
+  failure mode this module may not have is a diff that reads `normal` because the
+  reader never saw it; five of the six were exactly that.
+- **A rename kept only the name it moved to.** `git mv AGENTS.md docs/AGENTS.md`
+  reports one changed path, so a rule on `AGENTS.md` watched a policy file walk out
+  of the class that guards it. `changed_files` now carries `old_path`, every
+  `path_glob` is tested against both names, and the reason line says which moved:
+  `policy: AGENTS.md -> docs/AGENTS.md`.
+- **Secrets were path-only.** `**/*.key` and `**/*secret*` catch a file named for
+  what it holds and nothing else, so a key added to `notes.txt` was `normal`. Five
+  `added_regex` content rules now read the ADDED lines for the high-confidence
+  shapes (`-----BEGIN … PRIVATE KEY-----`, `AKIA…{16}`, `ghp_…{36}`, `sk-…{20,}`,
+  `xox[baprs]-`), and `**/*.pem`, `**/.env`, `**/.env.*` join the path rules. A new
+  `exclude` field on `path_glob` keeps the tracked `.env.example` templates out of
+  it — AGENTS.md rule 1 says commit those, and a rule that punished honest
+  templates is a rule that gets switched off. `tools/registry.py` rule 12 knows
+  both new fields. (Test fixtures assemble these shapes at runtime, so no tracked
+  file ever holds a literal key; the public scrub scan stays green.)
+- **`high` risk was cheaper to review than `normal`.** The RISKTIER-a registry
+  declared `review_counts.high` as 1 cross-family + the final, while operator Q-013
+  (common.md, D-060) says two diverse cheap cross-family reviews and, for high, the
+  same two *plus* the Sonnet final. `high` is now `cross_family: 2, final: true`,
+  which also agrees with the resolver's own D2 fallback constants it had been
+  overriding.
+- **`--sha HEAD` exited 2, and one commit had two audit answers.** `HEAD`, a branch
+  or a tag is not hex, so the draw raised while the diff classified perfectly; and
+  `audit()` buckets 12 hex digits, so `28ada0a` and the 40 digits of the same commit
+  could land in different buckets — a caller who learns the friendlier spelling.
+  `assess` now resolves the rev with `git rev-parse --verify <rev>^{commit}` (a tree
+  or blob is refused) and uses that hex everywhere, reporting it as `sha` /
+  `commit:` so a lane records which commit the answer is about.
+- **The diff was parsed line-and-tab, which git quotes.** `--name-status` C-quotes a
+  path containing a tab or a newline — and escapes the tab with the very character
+  the parser splits on, so the path arrived wrapped in quotes and matched no glob.
+  `changed_files` and the new `deleted_lines` read `-z` and split on NUL (a rename's
+  two paths by the arity its status declares, so a file named `A100` is never
+  mistaken for a status). The same quoting hits the `+++` header of `git diff -U0`:
+  an awkward filename left `current` unset for the file's whole body and dropped
+  every added line in it, `sudo` included. Added lines are now unquoted too.
+- **The rule table's gaps, and how much a change deletes.** `**/*.sql`,
+  `**/setup*`, `**/bootstrap*`, `**/Install*` (case-sensitive, so it is not the
+  existing `**/install*`) and `docs/**/*spec*.md` joined the globs; the generic
+  `diff_deletion` rule gained `min_deleted_lines: 200`, because a change that
+  deletes 240 lines from a file that *survives* is a large deletion and only a whole
+  file disappearing used to read as one. Corpus: `f5744611` (679 lines removed, no
+  file lost) flips `normal` → `high`; `967021cb8`, which edits
+  `stack.env.example`, stays `normal`.
+- Tests: 108 in `tests/test_autoos_risk.py` (was 82), wired into both harnesses
+  already. No CLI surface changed but the `risk` verb's output, which now leads with
+  the resolved commit.
+
+### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
+
+- **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the
+  registry's `policy.risk_rules` were data no code read. `tools/autoos_risk.py`
+  (stdlib, pure, one injectable git runner) now applies every rule to the diff at
+  `merge-base(base, sha)`: `path_glob` and `diff_deletion` (the two declared
+  shapes), plus the two the operator asked for — `added_regex`, an added line
+  matching a pattern (`\bsudo\b`, case-sensitive and deliberately textual: a test
+  that only *mentions* sudo raises the class), and `registry_policy`, which loads
+  `catalog/ai-registry.json` at both ends and compares only its `policy` object,
+  so a models-only edit is not a routing-policy edit. `audit(sha, percent)` is
+  `int(sha[:12], 16) % 100 < percent`: a property of the commit, so re-running
+  after an unlucky draw cannot shop for a friendlier bucket. Any git failure
+  raises `RiskError` (exit 2) — an unreadable diff never reads as `normal`.
+- **`tools/registry.py` rule 12** validates the new shapes, and refuses a rule
+  field its type does not read. A `paths` on a `path_glob` looks like a scope and
+  is not one; `classify()` ignores it silently, so validate says it out loud.
+  `policy.risk_rules` grows the 17 operator rules; `risk_audit_percent` (20) and
+  `review_counts` (normal 2 cross-family / high 1 + final) carry their source.
+- **`tools/autoos_resolver.py:_review_policy()`** reads the count from
+  `policy.review_counts[risk].cross_family` and the Sonnet close from `final`,
+  falling back to D2's constants when a registry predates the field — tested both
+  ways. The zero-reviewer case now genuinely means zero (the cap is checked
+  before the pick, not after).
+- **Two silent-`normal` bugs found while reviewing this** (both red before the
+  fix, `tests/test_autoos_risk.py`): a developer's `diff.noprefix=true` removes
+  the `b/` the `+++` header is read through, so *every* added line vanishes and a
+  sudo change classifies as normal; and git escapes an added line that starts
+  with a plus by doubling it, so a line of `+++++ x` in a test fixture was
+  dropped as a header. The default runner now pins `core.quotepath`,
+  `diff.noprefix`, `color.diff` and `--no-ext-diff`, and the parser tells a
+  header from content by hunk position.
+- **CLI**: `python3 tools/autoos-agent.py risk --sha <sha> [--base origin/main]
+  [--repo .] [--json]`. Wiring that class into `ready`/`review-status` is the
+  sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
+  harnesses.
+
+### Fixed — one machine-wide tool_calls overlay, and a loud reason when it is missing (OVERLAYHOME, 2026-09-28)
+
+The overlay lived at `<checkout>/logs/routing/measured.json`. At 12:5xZ the main
+checkout had none, so `route` skipped every agentic leg as `tool_calls: ...
+unproven` and returned `input_required` — it looked like a fleet-wide outage.
+
+- **`tools/autoos_overlay.py`** (new): the one path — `$AUTOOS_MEASURED_OVERLAY`,
+  else `${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+  `%LOCALAPPDATA%\autoos\measured.json`) — plus load with a read-only legacy
+  fallback (one stderr note; the old file is never deleted), an atomic mode-600
+  save, `status` and the missing-overlay reason.
+- **Readers**: `tools/autoos-agent.py` (`route`, `run`/`spawn` routing,
+  `propose_reprobe`) and `tools/autoos_agent_mcp.py` read through it. With no
+  overlay anywhere, an agentic card that fails on tool_calls says `no tool_calls
+  overlay found at <path> (run tools/probe-toolcalls.py or set
+  AUTOOS_MEASURED_OVERLAY)`. `heartbeat --json` gains `overlay: {path, present,
+  age_hours}`.
+- **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
+  `probe-effort`) default to the new path; the first run reads the legacy file so
+  its verdicts carry over (only when `--overlay` is not given). The
+  read-modify-write holds a lock on `<overlay>.lock` and merges only this run's
+  changes into the file as it is now, so probes running at once lose nothing.
+- `$AUTOOS_MEASURED_OVERLAY` is expanded (`~`, `$VAR`) and made absolute. The
+  loud reason is gated on the resolver's structured `unproven_toolcalls` flag,
+  not on reason text.
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and

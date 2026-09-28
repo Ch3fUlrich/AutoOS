@@ -89,6 +89,7 @@ Usage:
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
     python3 tools/autoos-agent.py ps --tree                          # runs under their parent
+    python3 tools/autoos-agent.py risk --sha <sha> --base origin/main   # the diff's risk class
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
@@ -181,10 +182,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
+import autoos_overlay as overlay_mod  # noqa: E402
 import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
+import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
@@ -205,7 +208,10 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # operator request 2026-09-26: propose a tool-calling re-probe whenever a real
 # run's gate contradicts the recorded status of its route's legs.
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
-MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+# OVERLAYHOME (2026-09-28): one tool_calls overlay per machine, not per checkout
+# (tools/autoos_overlay.py). The old per-checkout file is a read-only fallback.
+MEASURED_OVERLAY_PATH = overlay_mod.default_path()
+LEGACY_OVERLAY_PATH = overlay_mod.legacy_path(ROOT)
 # REVROUTE (S2) item 3: the spawner's own transient note about which provider
 # just told it a reset time. Git-ignored beside measured.json - the registry is
 # the operator's file, this one is the machine's observation, and a record whose
@@ -1378,6 +1384,48 @@ def print_review_report(label, report):
     print("ready: %s" % ("yes" if report["ready"] else "no"))
 
 
+def cmd_risk(args) -> int:
+    """Classify a commit's diff by risk (RISKTIER-a, operator Q-013/D-060).
+
+    The writer does not grade its own work: the class comes from the diff, read
+    against `policy.risk_rules` by tools/autoos_risk.py. The rev is resolved to one
+    commit hex first, so `--sha HEAD`, a branch and the full sha all classify the
+    same commit the same way. Prints
+
+        commit: 59aa3a9794f4d81a1a67241a202eb4fb7de3e527
+        risk: high
+          reason: secrets handling: configuration/api-keys.yml
+        audit: no (20%)
+
+    on stdout; `--json` prints the whole assessment (reasons, the resolved commit,
+    the audit draw and the changed files) instead. Exit 0 classified, 2 the diff or
+    the registry could not be read — an unclassified diff is never reported as
+    `normal`, because a secrets change that reads as low risk gets one cheap
+    review.
+    """
+    try:
+        registry = load_registry(args.registry or REGISTRY_PATH)
+    except (OSError, ValueError) as exc:
+        print("risk: cannot read the registry %s: %s" % (args.registry or REGISTRY_PATH, exc),
+              file=sys.stderr)
+        return 2
+    try:
+        out = risk.assess(args.repo, args.base, args.sha, registry)
+    except risk.RiskError as exc:
+        print("risk: %s" % exc, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+    print("commit: %s" % out["sha"])
+    print("risk: %s" % out["risk"])
+    for reason in out["reasons"]:
+        print("  reason: %s" % reason)
+    print("audit: %s (%d%%)" % ("yes" if out["audit"] else "no",
+                                out["audit_percent"]))
+    return 0
+
+
 def cmd_review_status(args) -> int:
     """Report whether a lane record carries both reviews a ready lane needs.
 
@@ -1630,11 +1678,12 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         registry = dict(registry)
         registry["routes"] = {rid: route for rid, route in (registry.get("routes") or {}).items()
                               if rid not in exclude_routes}
-    overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    overlay, overlay_missing_at = load_measured_overlay()
     track_record = track.load(TRACK_RECORD)
     client_state = measure_mod.client_state(clients)
     result = route_plan_for(parsed_card, args.task, ROOT, DEFAULT_ORCHESTRATOR_MODEL,
-                            now, registry, overlay, track_record, client_state)
+                            now, registry, overlay, track_record, client_state,
+                            overlay_missing_at=overlay_missing_at)
 
     if result["state"] == "input_required":
         raise RouteInputRequired(result["reason"])
@@ -2065,6 +2114,7 @@ def heartbeat_state(inbox: str | None, transcript: str | None, repos: list | Non
     else:
         rc = 0
     data = {"pause": pause, "repos": repo_rows, "context": ctx_data, "over_cap": over_cap,
+            "overlay": overlay_mod.status(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH),
             "exit_code": rc}
     return data, rc
 
@@ -2076,7 +2126,8 @@ def cmd_heartbeat(args) -> int:
     data, rc = heartbeat_state(args.inbox, args.transcript, args.repos, args.cap)
     if args.json:
         print(json.dumps({k: data[k] for k in
-                          ("pause", "repos", "context", "over_cap", "exit_code")}))
+                          ("pause", "repos", "context", "over_cap", "exit_code",
+                           "overlay")}))
         return rc
     pause = data["pause"]
     if pause["active"]:
@@ -2124,17 +2175,19 @@ def load_registry(path: str) -> dict:
         return json.load(fh)
 
 
-def load_overlay(path: str) -> dict:
-    """logs/routing/measured.json if present, else {} (spec 3.1: git-ignored)."""
-    if not os.path.isfile(path):
-        return {}
-    with io.open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+def load_measured_overlay() -> tuple:
+    """(overlay, missing_at): the machine-wide overlay, else the legacy per-checkout
+    one (with a stderr note), else ({}, MEASURED_OVERLAY_PATH) so `route` can say
+    so out loud instead of calling every agentic leg "unproven" (OVERLAYHOME)."""
+    missing = None
+    if overlay_mod.found(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH) is None:
+        missing = MEASURED_OVERLAY_PATH
+    return overlay_mod.load(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH), missing
 
 
 def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
-                   client_state: dict) -> dict:
+                   client_state: dict, overlay_missing_at: str | None = None) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
@@ -2154,8 +2207,16 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
-    return resolver.plan(normalized, features, client_state, registry, overlay,
-                         track_record, orchestrator_model, now)
+    result = resolver.plan(normalized, features, client_state, registry, overlay,
+                           track_record, orchestrator_model, now)
+    # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
+    # the machine's missing data, not the legs' verdict - say which.
+    if (overlay_missing_at and result.get("state") == "input_required"
+            and result.get("unproven_toolcalls")):
+        result = dict(result)
+        result["reason"] = "%s; %s" % (overlay_mod.missing_reason(overlay_missing_at),
+                                       result["reason"])
+    return result
 
 
 def cmd_route(args) -> int:
@@ -2176,7 +2237,7 @@ def cmd_route(args) -> int:
     repo = args.repo or ROOT
     try:
         registry = load_live_registry()
-        overlay = load_overlay(MEASURED_OVERLAY_PATH)
+        overlay, overlay_missing_at = load_measured_overlay()
     except (OSError, ValueError) as exc:
         return refuse("cannot load routing data: %s" % exc)
     track_record = track.load(TRACK_RECORD)
@@ -2184,7 +2245,8 @@ def cmd_route(args) -> int:
     try:
         result = route_plan_for(args.card, args.brief or "", repo,
                                 args.orchestrator_model, now, registry, overlay,
-                                track_record, client_state)
+                                track_record, client_state,
+                                overlay_missing_at=overlay_missing_at)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
@@ -3448,7 +3510,8 @@ def record_probe_proposal(path: str, entry: dict) -> bool:
 
 
 def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
-                    proposals_path: str, sandbox_path: str) -> None:
+                    proposals_path: str, sandbox_path: str,
+                    legacy_path: str | None = None) -> None:
     """Compute and log a probe proposal for a finished run's track entry.
 
     Never raises and never touches the run's exit code: a registry that
@@ -3464,13 +3527,14 @@ def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
               % (registry_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
         return
     overlay = {}
-    if os.path.isfile(overlay_path):
+    used = overlay_mod.found(overlay_path, legacy_path)
+    if used is not None:
         try:
-            with io.open(overlay_path, encoding="utf-8") as fh:
+            with io.open(used, encoding="utf-8") as fh:
                 overlay = json.load(fh)
         except (OSError, ValueError) as exc:
             print("autoos-agent: probe proposal skipped (cannot load %s): %s"
-                  % (overlay_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+                  % (used, getattr(exc, "strerror", None) or exc), file=sys.stderr)
             return
     try:
         proposal = probe_proposal(entry["route"], entry["gate"], entry["failure_class"], registry, overlay)
@@ -4511,7 +4575,7 @@ def cmd_run(args, cfg: dict) -> int:
             tracked = redact_record(tracked)
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
-                            PROBE_PROPOSALS_LOG, sb["path"])
+                            PROBE_PROPOSALS_LOG, sb["path"], LEGACY_OVERLAY_PATH)
     # SPAWNREDACT item 2: tell the caller its worker's output was altered,
     # once, after every stream of this run has been written.
     report_redactions()
@@ -4746,6 +4810,27 @@ def _parser_route(sub):
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
 
 
+def _parser_risk(sub):
+    risk_p = sub.add_parser(
+        "risk", help="classify a commit's diff as normal or high risk from "
+                     "policy.risk_rules (RISKTIER-a): the writer does not grade "
+                     "its own work, the diff does")
+    risk_p.add_argument("--sha", required=True,
+                        help="the commit to classify: any rev git resolves to a "
+                             "commit (HEAD, a branch, a short sha); resolved with "
+                             "rev-parse --verify before the audit draw")
+    risk_p.add_argument("--base", default="origin/main",
+                        help="the diff's other end, compared at its merge base "
+                             "with --sha (default: %(default)s)")
+    risk_p.add_argument("--repo", default=".",
+                        help="git checkout to read the diff from (default: the cwd)")
+    risk_p.add_argument("--registry",
+                        help="registry holding policy.risk_rules "
+                             "(default: catalog/ai-registry.json)")
+    risk_p.add_argument("--json", action="store_true",
+                        help="print the whole assessment as one JSON object")
+
+
 def _parser_review_status(sub):
     review_status_p = sub.add_parser(
         "review-status", help="read a lane record and report whether it carries both "
@@ -4814,6 +4899,7 @@ VERB_PARSERS = {
     "context": _parser_context,
     "heartbeat": _parser_heartbeat,
     "route": _parser_route,
+    "risk": _parser_risk,
     "review-status": _parser_review_status,
     "ready": _parser_ready,
     "inbox": _parser_inbox,
@@ -4833,6 +4919,7 @@ VERB_HANDLERS = {
     "ready": lambda args, cfg: cmd_ready(args),
     "review-status": lambda args, cfg: cmd_review_status(args),
     "route": lambda args, cfg: cmd_route(args),
+    "risk": lambda args, cfg: cmd_risk(args),
     "run": lambda args, cfg: cmd_run(args, cfg),
 }
 

@@ -453,7 +453,7 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
 
 
 def usable_legs(route, card, features, client_state, registry, overlay,
-               client="opencode", now=None):
+               client="opencode", now=None, toolcalls_skips=None):
     """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
     operator decision): the serving legs of `route` that also pass every
     *per-leg* filter, and why each rejected leg did not.
@@ -576,6 +576,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if agentic and not proven:
             reasons.append("tool_calls: %s/%s is %s"
                            % (provider_id, model_id, value))
+            # OVERLAYHOME: a structured record of the skip, so a caller can
+            # tell "no overlay" apart without parsing reason text.
+            if toolcalls_skips is not None:
+                toolcalls_skips.add(leg)
 
         bound = registry["models"][model_id].get("client_bound")
         if bound:
@@ -606,7 +610,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
 
 def filter_routes(card, features, client_state, registry, overlay,
-                  client="opencode", now=None):
+                  client="opencode", now=None, toolcalls_skips=None):
     """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
     amended by FT (2026-09-26 operator decision): "a leg that is
     rate-limited or unproven makes the combo fall through to the next proven
@@ -670,7 +674,8 @@ def filter_routes(card, features, client_state, registry, overlay,
             reasons.append(client_reason)
 
         usable, skipped, _ = usable_legs(route, card, features, client_state,
-                                        registry, overlay, client, now)
+                                        registry, overlay, client, now,
+                                        toolcalls_skips)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -1138,12 +1143,41 @@ _REQUIRED_CARD_KEYS = ("kind", "mode", "risk")
 # free < cheap < mid < frontier (spec 3.1); used to find "the next class up".
 _CLASS_ORDER = ("free", "cheap", "mid", "frontier")
 
-# D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
-# Sonnet close.
+# D2's numbers, kept only as the fallback for a registry that declares no
+# policy.review_counts (RISKTIER-a): normal risk gets 1 cross-family API review,
+# high risk gets 2 plus a Sonnet close.
 _REVIEW_COUNTS = {"normal": 1, "high": 2}
 # The high-risk closer is a Claude client run (Agent-tool Sonnet), not a
 # registry route, so it has its own key beside the reviewer routes.
 _CLOSER = {"client": "claude", "model": "sonnet"}
+
+
+def _review_policy(risk, registry):
+    """`(cross_family_count, final?)` for a risk class (RISKTIER-a).
+
+    `policy.review_counts.<risk>` is what a class costs; the constants above are
+    the fallback for a registry that predates the field, so the field's absence
+    changes no routing. An unknown class still raises, and a declared count that
+    is not a non-negative int raises too -- a resolver that guessed at "1.5
+    reviewers" would review less than the policy asked for and say nothing.
+    """
+    if risk not in _REVIEW_COUNTS:
+        raise ValueError("unknown card risk %r" % (risk,))
+    entry = (((registry or {}).get("policy") or {}).get("review_counts")
+             or {}).get(risk)
+    if entry is None:
+        return _REVIEW_COUNTS[risk], risk == "high"
+    if not isinstance(entry, dict):
+        raise ValueError("policy.review_counts.%s is not an object: %r" % (risk, entry))
+    count = entry.get("cross_family", _REVIEW_COUNTS[risk])
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("policy.review_counts.%s.cross_family must be an int "
+                         ">= 0, got %r" % (risk, count))
+    final = entry.get("final", risk == "high")
+    if not isinstance(final, bool):
+        raise ValueError("policy.review_counts.%s.final must be a boolean, got %r"
+                         % (risk, final))
+    return count, final
 
 
 def _leg_model_id(leg):
@@ -1222,10 +1256,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     shortfall in ``reason`` rather than silently reviewing with fewer eyes.
     """
     risk = card["risk"]
-    try:
-        needed = _REVIEW_COUNTS[risk]
-    except KeyError:
-        raise ValueError("unknown card risk %r" % (risk,))
+    needed, final = _review_policy(risk, registry)
 
     pool = scores if len(scores) > 1 else _score_candidates(
         survivors, bucket_name, card, features, client_state, registry,
@@ -1241,13 +1272,16 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     picked = []
     excluded = {chosen_family}
     for score in ranked:
+        # The cap is checked BEFORE the append: a policy that asks for zero
+        # cross-family reviewers means zero, not one (the append-then-check shape
+        # this replaced returned one — tests/test_autoos_resolver.py).
+        if len(picked) >= needed:
+            break
         family = family_key(_model_family(score["leg"], registry))
         if family in excluded:
             continue
         picked.append(score["route"])
         excluded.add(family)
-        if len(picked) == needed:
-            break
 
     if len(picked) < needed:
         reason = "only %d of %d distinct-family reviewer(s) available: %s" % (
@@ -1255,7 +1289,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     else:
         reason = "cross-family reviewer(s): %s" % ", ".join(picked)
 
-    closer = dict(_CLOSER) if risk == "high" else None
+    closer = dict(_CLOSER) if final else None
     return {"routes": list(picked), "closer": closer, "reason": reason}
 
 
@@ -1691,13 +1725,17 @@ def plan(card, features, client_state, registry, overlay, track_record,
             raise ValueError("missing card key %r" % key)
 
     now = _now_or_default(now)
+    toolcalls_skips = set()
     survivors, removed = filter_routes(card, features, client_state, registry,
-                                       overlay, client, now)
+                                       overlay, client, now, toolcalls_skips)
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
         result = no_route(removed)
         result["bucket"] = bucket_name
+        # True when a leg was skipped as not proven for tool calls, so the
+        # caller can name a missing overlay without parsing the reason.
+        result["unproven_toolcalls"] = bool(toolcalls_skips)
         return result
 
     override_route, override_reason = apply_override(card, survivors, removed)

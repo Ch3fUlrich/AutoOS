@@ -67,6 +67,15 @@ date even when `--since` is an hour, and prints `WARN` at 20 USD of spend
 the gateway — is below 5 USD. A window that hit the paging cap says
 `incomplete`: the figure is a floor, not a total.
 
+Tool-calling overlay: the probes write their verdicts (`measured.json`) to one
+file per machine — `$AUTOOS_MEASURED_OVERLAY`, else
+`${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+`%LOCALAPPDATA%\autoos\measured.json`) — and `route`/`run`/the MCP tool read it
+from there, falling back to an old `<checkout>/logs/routing/measured.json` with
+a note; with neither, `route` says `no tool_calls overlay found at <path>`
+instead of calling every agentic leg unproven, and `heartbeat --json` reports it
+under `overlay`.
+
 Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
 <position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).
 It prints the records after a position, oldest first, each headed by its
