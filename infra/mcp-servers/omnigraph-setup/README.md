@@ -165,9 +165,9 @@ So agents write to local `main` and stay dumb about branches; the sync creates
 - The full production send/merge procedure — canary-first, the embedding
   reconciliation (standardize on CPU-capable `nomic-embed-text`), risks and
   rollback — is in
-  [REMOTE-SYNC-TEST-PLAN.md](https://github.com/Ch3fUlrich/agent-skills/blob/main/docs/REMOTE-SYNC-TEST-PLAN.md) (archived in retired agent-skills repo).
+  REMOTE-SYNC-TEST-PLAN (retired agent-skills repo, history; see [SYNC-MANUAL.md](SYNC-MANUAL.md)).
 
-See [`../servers/omnigraph/README.md`](../servers/omnigraph/README.md) and the [structured-memory skill](https://github.com/Ch3fUlrich/agent-skills/blob/main/skills/structured-memory/SKILL.md) (archived in retired agent-skills repo).
+See [`../servers/omnigraph/README.md`](../servers/omnigraph/README.md) and the [structured-memory skill](../../../.agents/skills/structured-memory/SKILL.md).
 
 ## Automatic dedup (server-side)
 
