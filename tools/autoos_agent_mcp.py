@@ -340,7 +340,8 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
 
 
 def spawn_budget_env(req: dict) -> dict:
-    """The env for the CLI processes THIS spawn starts (its preflight and its runner).
+    """The env entries to add for the CLI processes THIS spawn starts (its
+    preflight and its runner), on top of the scrubbed child env.
 
     `claude_reason` (CLAUDEBUDGET-d item 3) is the orchestrator's declaration for
     one spawn, so it has to reach the gate the CLI re-reads on the way in -- and
@@ -348,19 +349,25 @@ def spawn_budget_env(req: dict) -> dict:
     server where every later caller inherits it. It does not go further: the
     spawner strips every `AUTOOS_CLAUDE*` key out of the worker's own env
     (`strip_claude_env`), so a worker never holds a declaration to pass down.
+
+    FF1 (D-106) crosses it: this returns the *delta* to hand to
+    `agent.spawner_child_env(extra=...)`, never a copy of `os.environ` — the
+    fence is the only place a child's environment is chosen, and a wholesale
+    copy would put the server's tokens back into the child.
     """
-    env = dict(os.environ)
     reason = str(req.get("claude_reason") or "").strip()
-    if reason:
-        env[agent.resolver.CLAUDE_CRITICAL_ENV] = reason
-    return env
+    return {agent.resolver.CLAUDE_CRITICAL_ENV: reason} if reason else {}
 
 
 def preflight(argv: list, cwd: str, env: dict | None = None):
     """The CLI's own dry run: every refusal (promo, flag clashes, route) comes back now."""
     dry = argv if "--dry-run" in argv else argv[:-1] + ["--dry-run", argv[-1]]
+    # FF1b item 6: a child of ours, so a chosen env — the caller's GitHub,
+    # provider and cloud tokens have nothing to do with resolving a plan.
+    # CLAUDEBUDGET: `env` is this spawn's declaration delta, added *after* the
+    # fence filtered the server's environment.
     r = subprocess.run([sys.executable, AGENT] + dry, cwd=cwd, stdin=subprocess.DEVNULL,
-                       env=env if env is not None else os.environ,
+                       env=agent.spawner_child_env(extra=env),
                        capture_output=True, text=True)
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
@@ -475,9 +482,14 @@ def spawn(req: dict) -> dict:
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
-                            cwd=cwd, env=budget_env,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            # FF1b item 6: the detached runner is a child of
+                            # ours, so it gets the fence — and the runner repeats
+                            # it for the CLI it starts. CLAUDEBUDGET: this spawn's
+                            # declaration rides along as the delta, so it survives
+                            # to the runner and the gate inside its CLI.
+                            cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            env=agent.spawner_child_env(extra=budget_env))
     job["pid"] = proc.pid
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
@@ -517,10 +529,13 @@ def run_job(path: str) -> int:
     job = _read_json(os.path.join(path, "job.json"))
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
-        # at this run dir; the CLI forwards os.environ to the client, so the
+        # at this run dir; the CLI forwards its own chosen env onward, so the
         # worker sees it too.
+        # FF1b item 6: this used to be `dict(os.environ, ...)`. The detached
+        # runner above already got a scrubbed env, so this is the same scrub run
+        # a second time rather than a copy of the caller's tokens.
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             env=dict(os.environ, AUTOOS_TASK_DIR=path),
+                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)

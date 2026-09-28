@@ -530,9 +530,96 @@ def _backup_and_write(path, text, stamp=None):
     return True
 
 
+# FF1 (D-106): a lane sandbox (`.../AutoOS-lanes/<lane>/logs/sandboxes/<run>`) is
+# a throwaway clone a spawned worker edits. Rendering a USER-level config from
+# one bakes paths that are deleted with it into ~/.config/opencode, ~/.openhands,
+# ~/.claude.json — the next session there reads instructions and fences pointing
+# at a directory that no longer exists. So: refuse, and say what to run instead.
+# A non-user target (the tests, a staged directory) is not the hazard and stays
+# allowed, so the fence cannot break a rendering that never reaches a home dir.
+LANE_PATH_MARKERS = ("/AutoOS-lanes/", "/logs/sandboxes/")
+
+
+def case_insensitive_paths():
+    """True where one directory opens under two spellings.
+
+    Windows and macOS format volumes are case-insensitive by default, so
+    `autoos-lanes` and `AutoOS-lanes` reach the same lane there. On a
+    case-sensitive filesystem they are two directories and the fence must not
+    invent a lane out of a name.
+    """
+    return os.name == "nt" or sys.platform == "darwin"
+
+
+def _norm(path, fold=False):
+    """Absolute, slash-separated, links and `..` resolved — the path as the
+    operating system opens it, not as it was typed (FF1b item 5).
+
+    `os.path.abspath` folds `..` lexically and never follows a symlink, so a lane
+    reached through a link (or through a link and back up) read as an ordinary
+    checkout and the fence let the render through.
+    """
+    norm = os.path.realpath(os.path.abspath(str(path)))
+    norm = norm.replace(os.sep, "/").replace("\\", "/")
+    if fold:
+        norm = os.path.normcase(norm).casefold()
+    return norm
+
+
+def is_lane_checkout(path, fold=None):
+    """True when `path` is a checkout that is going away with its sandbox.
+
+    `fold` overrides the platform's case rule (the suite runs on a
+    case-sensitive host and has to be able to prove the Windows/macOS branch).
+    """
+    fold = case_insensitive_paths() if fold is None else fold
+    # The text as given is always judged. It is resolved too — a symlink or a
+    # `..` that walks through one reaches the same directory the OS would open —
+    # unless it is an absolute path on the *other* platform, which would resolve
+    # against this one's cwd and mark every argument a lane from a lane checkout.
+    given = str(path).replace(os.sep, "/").replace("\\", "/")
+    foreign_abs = (len(given) > 2 and given[1] == ":") if os.sep == "/" \
+        else given.startswith("/")
+    forms = [given if not fold else given.casefold()]
+    if not foreign_abs:
+        forms.append(_norm(path, fold))
+    markers = [m if not fold else m.casefold() for m in LANE_PATH_MARKERS]
+    return any(marker in form.rstrip("/") + "/"
+               for form in forms for marker in markers)
+
+
+def is_user_level_target(path, fold=None):
+    """True when `path` sits under a home directory the child agents read from."""
+    fold = case_insensitive_paths() if fold is None else fold
+    target = _norm(path, fold)
+    homes = [os.path.expanduser("~"), os.environ.get("XDG_CONFIG_HOME"),
+             os.environ.get("XDG_DATA_HOME"), os.environ.get("XDG_STATE_HOME")]
+    for home in homes:
+        if not home:
+            continue
+        base = _norm(home, fold)
+        if target == base or target.startswith(base + "/"):
+            return True
+    return False
+
+
+def user_config_fence(repo_root, target, fold=None):
+    """(ok, reason): a user-level config must not be rendered from a lane."""
+    if is_lane_checkout(repo_root, fold) and is_user_level_target(target, fold):
+        return False, ("refusing to write %s into a home directory from the lane "
+                       "sandbox checkout %s — run the installer from the real "
+                       "checkout instead" % (_norm(target, fold),
+                                             _norm(repo_root, fold)))
+    return True, ""
+
+
 def cmd_opencode(args):
     harness = load_harness(args.harness)
     config_path = args.config
+    ok, reason = user_config_fence(args.repo_root, config_path)
+    if not ok:
+        print("agent-harness opencode: refused, %s" % reason)
+        return 1
     existed = os.path.exists(config_path)
     if existed:
         # utf-8-sig: a BOM written by an editor must not make the file "invalid".
@@ -744,6 +831,10 @@ def _settings_status(settings_path, enable, dry_run):
 
 def cmd_openhands(args):
     harness = load_harness(args.harness)
+    ok, reason = user_config_fence(args.repo_root, args.openhands_dir)
+    if not ok:
+        print("agent-harness openhands: refused, %s" % reason)
+        return 1
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))

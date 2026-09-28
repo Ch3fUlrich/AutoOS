@@ -169,6 +169,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -252,6 +253,427 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 # reported NO-OP (exit 5) instead of a leak.
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
+
+# FF1 (D-106): what a spawned worker inherits. The caller's environment on this
+# host carries GitHub, provider and cloud credentials plus an ssh-agent socket,
+# and a worker reads its own env (`env`, `git`, a script it was told to run).
+# So the set is chosen by an ALLOWLIST: a denylist only ever covers the names
+# somebody remembered to write down, and an unlisted name is a name that got
+# through.
+WORKER_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
+                    "SHELL", "NVM_DIR",
+                    # Windows: a process with no SYSTEMROOT cannot start a
+                    # thread, and a client with no USERPROFILE finds no home.
+                    # None of these carry a credential.
+                    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+                    "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
+                    "PROGRAMDATA")
+WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
+# AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
+# here: the child gets the minted key, never the path to the file it came from.
+WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
+                     "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
+                     "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
+                     "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
+                     "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN")
+# Cross-check on top of the allowlist, applied to what the *plan* injects too:
+# no secret-shaped name reaches the child from either side.
+WORKER_ENV_DENY = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                   "SSH_AUTH_SOCK", "SSH_ASKPASS", "AUTOOS_OMNIROUTE_KEY",
+                   # Loader/interpreter injection: a value under any of these
+                   # names repoints what the child executes before its first
+                   # line runs, so no amount of allowlisting the name is safe.
+                   "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                   "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
+                   "NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+                   # git reaching a credential or a helper of the operator's.
+                   "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+                   "GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                   "GIT_DIR", "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_CONFIG",
+                   "SUDO_ASKPASS", "SSH_ASKPASS_REQUIRE",
+                   # Other credential caches the child would read by itself.
+                   "KUBECONFIG", "DOCKER_CONFIG", "NETRC", "_NETRC",
+                   "AUTOOS_KEYS_FILE")
+WORKER_ENV_DENY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+                            "_ACCESS_KEY", "_CREDENTIALS", "_ASKPASS",
+                            "_CONFIG_FILE", "_CONFIG_PATH")
+WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
+                            "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
+                            "GITHUB_", "GITLAB_", "SLACK_",
+                            "LD_", "DYLD_", "GIT_", "SSH_", "KUBE", "DOCKER_")
+# And what the *plan* is allowed to add, on top of clearing the deny check. The
+# allowlist above only ever covered the caller's own exports: plan["env"] was
+# copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
+# owned the child without anyone noticing (FF1b, Muse#high on 362b8af..6bdeca5).
+# This is the list of names the spawner's builders genuinely set; anything else
+# is refused and announced, because a name nobody wrote down here is a name
+# nobody decided the child should have.
+WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
+                            "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                            clients.GEMINI_CUSTOM_HEADERS_ENV)
+WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
+
+# git in the worker must fail rather than ask: askpass helpers that always exit
+# non-zero, no terminal prompt, and a config that cancels any stored credential.
+_GIT_ASKPASS_FALSE = ("/bin/false" if os.path.exists("/bin/false")
+                      else "/usr/bin/false")
+# The only git config the worker may read: these two, cancelling the credential
+# helper and askPass. GIT_CONFIG_COUNT has to equal their number — a parent's
+# leftover GIT_CONFIG_KEY_n/VALUE_n (what `git -c ...` exports, and the
+# orchestrator runs `git -c` a lot) is read by name, so anything past the count
+# would be an unreviewed channel.
+_GIT_GUARD_CONFIG = (("credential.helper", ""), ("core.askPass", ""))
+WORKER_GIT_GUARDS = ((
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", _GIT_ASKPASS_FALSE),
+    # GIT_CONFIG_PARAMETERS is how `git -c key=value` reaches a child git; it
+    # is read before GIT_CONFIG_KEY_n, so forcing it empty is not optional.
+    ("GIT_CONFIG_PARAMETERS", ""),
+    # FF1c item 1: the two numbered channels *cancel* settings, they do not stop
+    # git reading a config. $GIT_CONFIG_GLOBAL overrides both $HOME/.gitconfig
+    # and $XDG_CONFIG_HOME/git/config; naming a dead path is the only way to shut
+    # the file itself, and an inherited HOME reopened it — url.insteadOf (a
+    # remote repointed at the parent), core.sshCommand and core.hooksPath (a
+    # program of the operator's) are all beyond the reach of the guard above.
+    # NOSYSTEM shuts /etc/gitconfig, which the repo's own installers write.
+    ("GIT_CONFIG_GLOBAL", os.devnull),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_COUNT", str(len(_GIT_GUARD_CONFIG))))
+    + tuple(("GIT_CONFIG_KEY_%d" % i, k) for i, (k, _v) in enumerate(_GIT_GUARD_CONFIG))
+    + tuple(("GIT_CONFIG_VALUE_%d" % i, v) for i, (_k, v) in enumerate(_GIT_GUARD_CONFIG))
+)
+# Named off rather than left to the deny patterns, because these are the three
+# ways git reaches a *program* the operator installed (FF1b item 2): an ssh
+# transport, a proxy command, and an askpass helper. The guards above cannot
+# cancel them, and an allowlist miss is silent.
+WORKER_ENV_FORCED_OFF = ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+                         "SSH_ASKPASS", "SUDO_ASKPASS", "GIT_ASKPASS_REQUIRE")
+
+
+def _worker_env_denied(name: str) -> bool:
+    return (name in WORKER_ENV_DENY or
+            name.endswith(WORKER_ENV_DENY_SUFFIXES) or
+            name.startswith(WORKER_ENV_DENY_PREFIXES))
+
+
+def _worker_env_allowed(name: str) -> bool:
+    if _worker_env_denied(name):
+        return False
+    return (name in WORKER_ENV_ALLOW or name in WORKER_ENV_AUTOOS or
+            name.startswith(WORKER_ENV_ALLOW_PREFIXES))
+
+
+def _plan_env_passed(name: str) -> bool:
+    return (name in WORKER_PLAN_ENV_PASSLIST or
+            name.startswith(WORKER_PLAN_ENV_PASSLIST_PREFIXES))
+
+
+def _drop_extra_git_config(env: dict) -> None:
+    """Keep git's numbered config channels to the guards (FF1b item 2).
+
+    GIT_CONFIG_KEY_n/VALUE_n are read *by index*, so a leftover GIT_CONFIG_KEY_3
+    from a parent's `git -c ...` is consulted even with GIT_CONFIG_COUNT right,
+    as long as it is present. Anything at or past the guard count is removed.
+    """
+    for name in list(env):
+        for prefix in ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"):
+            if name.startswith(prefix):
+                tail = name[len(prefix):]
+                if not tail.isdigit() or int(tail) >= len(_GIT_GUARD_CONFIG):
+                    del env[name]
+                break
+
+
+def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
+    """The environment of one spawned worker: an allowlist of the caller's
+    environment, the plan's own passlisted entries, the worker's single gateway
+    ``key``, and the guards that stop git from prompting or reading a stored
+    credential.
+
+    The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
+    added only when this run genuinely goes through the gateway. ``base`` exists
+    so the scrub is testable without touching the real environment.
+    """
+    src = os.environ if base is None else base
+    env = {n: v for n, v in src.items() if _worker_env_allowed(n)}
+    # The operator's session directory (bus, sockets, sometimes the agent's own)
+    # is not the worker's, whatever the XDG_ prefix rule above decided (FF1b
+    # item 4). The plan puts a private one back.
+    env.pop("XDG_RUNTIME_DIR", None)
+    # Same rule, same reason, one round later (FF1c item 1): $XDG_CONFIG_HOME is
+    # not only git's config file, it is where gh, npm, pip and the clients look
+    # for the operator's own settings and any token they stored there. git is
+    # already shut by GIT_CONFIG_GLOBAL above; nothing else is.
+    env.pop("XDG_CONFIG_HOME", None)
+    for n, v in (plan.get("env") or {}).items():
+        # A plan entry is our own code talking, so a name that is not on the
+        # passlist is drift, not an attack — refuse it and say so loudly rather
+        # than let the child quietly run under a repointed PATH or loader.
+        if not _plan_env_passed(n):
+            print("autoos-agent: refused plan env %s: not on the plan passlist"
+                  % n, file=sys.stderr)
+            continue
+        if _worker_env_denied(n):
+            print("autoos-agent: refused plan env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
+    env["PWD"] = plan["cwd"]
+    for n, v in WORKER_GIT_GUARDS:
+        env[n] = v
+    _drop_extra_git_config(env)
+    for n in WORKER_ENV_FORCED_OFF:
+        env.pop(n, None)
+    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    if key:
+        env["AUTOOS_OMNIROUTE_KEY"] = key
+    # CLAUDEBUDGET item 1 (ccf6f84) crossed with FF1 (D-106): this is the one
+    # place a worker's env is built, so the orchestrator's Claude declaration is
+    # stripped *here* rather than at each call site. The allowlist above already
+    # never let an AUTOOS_CLAUDE* in from the caller's environment — this is the
+    # half that stops a plan (or a name added to the prefix later) from carrying
+    # one down the tree.
+    return strip_claude_env(env)
+
+
+def _child_env_passed(name: str) -> bool:
+    """Whether an ``extra`` entry may reach a CLI child (FF1c item 2).
+
+    The plan passlist plus the spawner's own ``AUTOOS_*`` state names — the same
+    decision the plan side makes. ``PATH`` is deliberately *not* in here: it is
+    inheritable, and an extra that repoints it is not something a caller should
+    get to decide on the child's behalf.
+
+    The one exception is the Claude budget declaration (CLAUDEBUDGET item 3,
+    ccf6f84): an MCP caller's ``claude_reason`` is materialized for the CLI
+    processes of *that* spawn only, and the CLI re-reads it at its own gate. It
+    is named here rather than left to a wholesale ``dict(os.environ)``, so the
+    fence stays the only channel a child env is built through. A client worker
+    never gets it — ``worker_env`` strips the namespace on its way out.
+    """
+    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS or
+            name == resolver.CLAUDE_CRITICAL_ENV)
+
+
+def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> dict:
+    """The environment of a child that is *our own CLI*, not a worker.
+
+    The MCP server preflights a plan and runs a detached job, both by exec'ing
+    ``tools/autoos-agent.py``, which scrubs again for the client it launches. The
+    child still gets the same allowlist — a token does not need to travel to the
+    process that only forwards it — plus the one credential the CLI reads
+    directly (``AUTOOS_OMNIROUTE_KEY``, which it mints the worker's client key
+    from) and whatever ``extra`` names for itself. The path to the keys file is
+    not among them: the CLI finds it under ``ROOT``.
+
+    ``extra`` is a caller's own dictionary, which is exactly why it has to clear
+    the same checks as everything else: a bare ``env.update(extra)`` made the
+    whole policy a matter of caller discipline (FF1c item 2).
+    """
+    env = worker_env({"cwd": os.getcwd(), "env": {}}, None, base=base)
+    src = os.environ if base is None else base
+    if src.get("AUTOOS_OMNIROUTE_KEY"):
+        env["AUTOOS_OMNIROUTE_KEY"] = src["AUTOOS_OMNIROUTE_KEY"]
+    # CLAUDEBUDGET item 1/3 (ccf6f84) meeting FF1 (D-106): the budget
+    # declaration is the orchestrator's authority over *one* run, and the CLI
+    # child re-reads it — the MCP server's preflight and detached runner both
+    # reach the last-mile gate inside that CLI. So it is forwarded here, by
+    # name, to our own CLI only. One line above, worker_env stripped the whole
+    # AUTOOS_CLAUDE* namespace out of what a client worker gets, and nothing
+    # else in it is let back in.
+    if src.get(resolver.CLAUDE_CRITICAL_ENV):
+        env[resolver.CLAUDE_CRITICAL_ENV] = src[resolver.CLAUDE_CRITICAL_ENV]
+    for n, v in (extra or {}).items():
+        if _worker_env_denied(n):
+            print("autoos-agent: refused child env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        if not _child_env_passed(n):
+            print("autoos-agent: refused child env %s: not on the child passlist"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
+    return env
+
+
+def _provision_path_usable(st, path: str, what: str) -> str | None:
+    """Why an already-present `path` may not be provisioned through, or None.
+
+    The same three rules judge the leaf and its parent (FF1c item 3, and the
+    parent half the Sonnet review of FF1 asked for): ``makedirs`` and ``chmod``
+    both follow a symlink, and a directory belonging to another uid is somebody
+    else's tree on a shared host — tightening it is a denial of service on its
+    real owner, writing into it is the leak.
+    """
+    if stat.S_ISLNK(st.st_mode):
+        return "%s is a symlink" % what
+    if not stat.S_ISDIR(st.st_mode):
+        return "%s is not a directory" % what
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return "%s is owned by uid %d" % (what, st.st_uid)
+    return None
+
+
+def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
+    """Create the worker's private ``XDG_RUNTIME_DIR``: empty, mode 0700.
+
+    Provisioned at the launch site, not in the plan builder — a dry run writes
+    nothing, and git refuses to clone into a directory that is not empty, so a
+    dir beside the clone would have to come after it. Failing to make it is not
+    fatal: a client with an unusable runtime dir falls back to its own default,
+    which is exactly the state before this change.
+
+    A leaf that is already there is judged, not inherited (FF1c item 3).
+    ``makedirs(exist_ok=True)`` happily walked *through* a pre-existing symlink
+    and then chmod 0700'd whatever it pointed at: on a shared host, where the
+    state tree is reachable by more than one account, that is both a write into
+    someone else's directory and a denial of service on it. Same for a leaf of
+    another owner, and for a leaf that is not a directory at all.
+
+    The parent is judged by the same rule (FF1 Sonnet LOW): ``os.path.isdir``
+    follows a symlink, so a parent that is a link — or a directory of another
+    uid — was walked through and chmod'd from underneath, which is the leaf bug
+    one level up and the only path the leaf check could not see.
+    """
+    if not path or not os.path.isabs(path):
+        return None
+    try:
+        st = os.lstat(path)
+    except OSError:
+        st = None                    # absent: the normal case
+    if st is not None:
+        why = _provision_path_usable(st, path, "it")
+        if why is not None:
+            print("autoos-agent: refusing to provision %s: %s" % (path, why),
+                  file=sys.stderr)
+            return None
+        os.chmod(path, 0o700)        # ours already: re-tighten, idempotent
+        return path
+    try:
+        parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            pst = None               # absent too: makedirs creates it
+        if pst is not None:
+            why = _provision_path_usable(pst, parent, "its parent")
+            if why is not None:
+                print("autoos-agent: refusing to provision %s (%s): %s"
+                      % (path, parent, why), file=sys.stderr)
+                return None
+        if not os.path.isdir(parent):
+            # 0700 on the parent too — makedirs(mode) only ever applies it to
+            # the leaf, and a world-readable sibling is the same leak.
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            os.chmod(parent, 0o700)
+        # mkdir, not makedirs: the leaf is created atomically, so a competitor
+        # that wins the race is seen as an existing entry instead of merged into.
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        # Something appeared in the window between the lstat and the mkdir.
+        # Re-check it under the same rules, once: a racer that pre-creates the
+        # leaf as a symlink must still be refused, not followed.
+        if _retry:
+            print("autoos-agent: refusing to provision %s: still there after "
+                  "a retry" % path, file=sys.stderr)
+            return None
+        return provision_runtime_dir(path, _retry=True)
+    except OSError as exc:
+        print("autoos-agent: could not provision the worker's runtime dir %s: %s"
+              % (path, exc), file=sys.stderr)
+    return path
+
+
+def worker_dir_refusal(path: str) -> str | None:
+    """Why ``path`` cannot serve as the worker's private dir; None if it can.
+
+    Judged by the same rule `provision_runtime_dir` applies, and one level up:
+    a leaf that was never created is only fine if it could have been.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            return "it was never created"
+        return _provision_path_usable(pst, parent, "its parent") or "it was never created"
+    return _provision_path_usable(st, path, "it")
+
+
+def provision_worker_dirs(env: dict) -> bool:
+    """Provision both private XDG dirs a worker launches with; False = refuse it.
+
+    `provision_runtime_dir` returns the path it made usable and None when it
+    REFUSES — a symlink, a tree of another uid, a non-dir leaf, a parent like
+    that, or a racer still there after the retry. Both launch sites used to drop
+    that result (FF1 merge review, rev-merge MED), so the worker started with the
+    very directory the fence had just refused: its sockets, tokens and client
+    state land wherever the link points, and the 0700 chmod punches a hole in a
+    directory it never owned. A directory that merely could not be created keeps
+    the old fallback — the client uses its own default — but only once verified,
+    because an absent or hostile one is the same exposure the refusal was for.
+
+    An env that names no dir (the scrub pops both when the plan has no state
+    tree) is not a refusal: there is nothing to provision.
+    """
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+        path = env.get(name)
+        if not path:
+            continue
+        provision_runtime_dir(path)
+        why = worker_dir_refusal(path)
+        if why is not None:
+            print("autoos-agent: refusing to launch the worker: its %s %s "
+                  "could not be provisioned: %s" % (name, path, why),
+                  file=sys.stderr)
+            return False
+    return True
+
+
+def fence_sandbox_push(sandbox: str) -> None:
+    """Make the obvious push out of an --isolate clone fail: every remote's push
+    URL is disabled, and the clone gets a pre-push hook that exits 1.
+
+    This is an ACCIDENT GUARD, not a containment boundary, and it must not be
+    described as one. `git push --no-verify` skips the hook, `core.hooksPath`
+    points it somewhere else, and `git remote set-url` (or a URL-addressed push,
+    which never consults the disabled pushurl) sidesteps both — all three in one
+    command, with nothing stolen to do it. `tests/test_autoos_spawner.py`
+    `PushFenceHonestyTests.test_a_no_verify_push_is_NOT_blocked_by_the_hook`
+    asserts the bypass works, so a future reader cannot take this for a fence.
+
+    What it is for: a worker that *means* no harm and types `git push` — which a
+    brief that names the parent's path invites, since `pushurl` alone does not
+    cover `git push </parent>`. The containment is elsewhere: the clone is
+    disposable, and the worker's environment (worker_env, FF1b items 1, 2 and 4)
+    carries no credential, no ssh transport and no config channel to push with.
+    """
+    remotes = subprocess.run(["git", "-C", sandbox, "remote"],
+                             capture_output=True, text=True).stdout.split()
+    for remote in remotes:
+        subprocess.run(["git", "-C", sandbox, "remote", "set-url", "--push",
+                        remote, ISOLATE_PUSH_DISABLED], check=True)
+    hooks = os.path.join(sandbox, ".git", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    path = os.path.join(hooks, "pre-push")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\n"
+                 "# autoos --isolate: a worker's work leaves the sandbox by the\n"
+                 "# spawner's take-it step, never by push.\n"
+                 "#\n"
+                 "# This is an ACCIDENT GUARD, not a security boundary:\n"
+                 "# `git push --no-verify` skips it, `core.hooksPath` moves it,\n"
+                 "# and `git remote set-url`/a URL-addressed push walks past the\n"
+                 "# disabled pushurl. Containment is the disposable clone plus\n"
+                 "# an env with no credential in it (tools/autoos-agent.py\n"
+                 "# worker_env). Do not add a check here and call the sandbox\n"
+                 "# sealed.\n"
+                 'echo "autoos: git push is disabled in an --isolate sandbox" >&2\n'
+                 "exit 1\n")
+    os.chmod(path, 0o755)
 
 
 def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
@@ -2490,6 +2912,20 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                                      read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
+    # FF1b item 4: a private, empty XDG_RUNTIME_DIR of its own instead of the
+    # operator's session one (message bus, sockets, sometimes the ssh-agent).
+    # Keyed by run id inside the git-ignored state tree, so a non-isolate run
+    # does not leave a directory in the checkout it works in. Only the *name* is
+    # decided here: provisioning happens at the launch site, because a dry run
+    # writes nothing and git will not clone into a directory that has content.
+    env["XDG_RUNTIME_DIR"] = os.path.join(clients.state_dir(), "runtimes", run_id)
+    # FF1c item 1: the same treatment for the config home. Inheriting the
+    # operator's $XDG_CONFIG_HOME handed the worker git's global config (the
+    # guard above only cancels two settings, it cannot hide a file) along with
+    # wherever else a tool reads a config and finds a token. Private, per run,
+    # inside the same git-ignored state tree; provisioning at the launch site
+    # for the same reason as the runtime dir — a dry run writes nothing.
+    env["XDG_CONFIG_HOME"] = os.path.join(clients.state_dir(), "configs", run_id)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
@@ -4790,10 +5226,11 @@ def cmd_run(args, cfg: dict) -> int:
         if lean_refusal is not None:
             return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
-    # Item 1: the printed env is the child's env, not this process's, so a
-    # declaration that is about to be stripped never looks like it was passed on.
-    env_names = sorted(strip_claude_env(
-        dict(plan["env"], **({"AUTOOS_OMNIROUTE_KEY": ""} if uses_key else {}))))
+    # FF1 (D-106): the dry run names what the child actually gets, so an
+    # operator can see the containment instead of trusting it. Item 1: that is
+    # the *child's* env, not this process's, so a Claude declaration this
+    # orchestrator holds never looks like it was passed on.
+    env_names = sorted(worker_env(plan, "x" if uses_key else None))
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     if route.get("review_plan"):
@@ -4858,11 +5295,11 @@ def cmd_run(args, cfg: dict) -> int:
     # PWD too, not just cwd=: opencode takes the project directory from $PWD,
     # so an inherited PWD sent an isolated worker's writes to the caller's
     # checkout (live 2026-09-24).
-    env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-    env.pop("AUTOOS_OMNIROUTE_KEY", None)
-    # CLAUDEBUDGET-b item 1: this process may hold the orchestrator's Claude
-    # declaration; the worker it is starting may not.
-    env = strip_claude_env(env)
+    # FF1 (D-106): the rest of what the worker gets is chosen, not inherited —
+    # see worker_env, which also strips this process's Claude declaration
+    # (CLAUDEBUDGET item 1) on the way out. The key is minted first so the scrub
+    # can add it.
+    key = None
     if uses_key:
         key = client_key(ROOT)
         if not key:
@@ -4873,7 +5310,14 @@ def cmd_run(args, cfg: dict) -> int:
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
-        env["AUTOOS_OMNIROUTE_KEY"] = key
+    env = worker_env(plan, key)
+    # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
+    # this is the first point past the dry run, where a directory is allowed.
+    # FF1c item 1: the private config home is named in the plan and created
+    # here, under the same rule — a dry run writes nothing.
+    if not provision_worker_dirs(env):
+        # FF1d: a dir the provisioner refused is not a dir to launch into.
+        return 2
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -4920,12 +5364,24 @@ def cmd_run(args, cfg: dict) -> int:
         parent_snap = parent_snapshot()
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--local", ROOT, sb["path"]], check=True)
-        # The orchestrator still fetches from the sandbox path (unchanged);
-        # only the push URL is disabled, so `git push` from the sandbox
-        # cannot update the parent's branches.
-        subprocess.run(["git", "-C", sb["path"], "remote", "set-url", "--push",
-                        "origin", ISOLATE_PUSH_DISABLED], check=True)
+        # The orchestrator still fetches from the sandbox path (unchanged); the
+        # push URLs are disabled and the pre-push hook is installed, so an
+        # unplanned `git push` — to origin or to the parent's absolute path the
+        # containment brief names — fails. ACCIDENT GUARD, not containment: see
+        # fence_sandbox_push. The credentials it cannot use are what really
+        # keeps the parent safe (worker_env, FF1b).
+        fence_sandbox_push(sb["path"])
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
+        # FF1c: the clone gets its own identity, local to itself. The worker's
+        # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
+        # path), so the operator's `user.name` is gone — and a worker that ends
+        # its brief with `git commit` would die on "Author identity unknown",
+        # leaving the run's work uncommitted. Same author the spawner's own
+        # end-of-run commit signs with.
+        for name, value in (("user.name", "autoos-worker"),
+                            ("user.email", WORKER_EMAIL)):
+            subprocess.run(["git", "-C", sb["path"], "config", "--local", name, value],
+                           check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
@@ -5110,10 +5566,23 @@ def cmd_run(args, cfg: dict) -> int:
                 plan = next_plan
                 # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
                 # and session tag), not the stopped route's (qoder review 2026-09-27).
-                env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-                env.pop("AUTOOS_OMNIROUTE_KEY", None)
-                if uses_key:
-                    env["AUTOOS_OMNIROUTE_KEY"] = key
+                # Scrubbed the same way as the first launch (FF1, D-106): the
+                # fallthrough must not be the site that inherits the caller's
+                # tokens back in.
+                env = worker_env(plan, key if uses_key else None)
+                # FF1 Sonnet LOW: the re-plan minted a fresh run id, and the
+                # private runtime/config dirs are named after it — so the
+                # re-run's dirs are the ones that do not exist yet. The first
+                # launch provisioned the stopped attempt's; without this the
+                # fallthrough worker runs with an XDG dir nobody created (and
+                # may create itself, outside the 0700 rule).
+                if not provision_worker_dirs(env):
+                    # FF1d: same rule as the first launch — a refused dir stops
+                    # the re-run (2 is the code a refused card or route gives),
+                    # and the break still announces the stopped attempt's WIP.
+                    rc = 2
+                    break
+                register_secret_env(env)
         if not fell_through:
             break
     # Nothing that runs after here occupies the free leg: whatever is left of the
