@@ -422,21 +422,31 @@
         },
         {
           "id": "agent-skills",
-          "name": "agent-skills + MCP servers",
-          "description": "Wire the MCP stack and vendored skills from this checkout",
+          "name": "agent-skills (retired)",
+          "description": "Retired: its work moved to other components",
           "provider": "custom",
           "package": "agent-skills",
-          "requires": [
-            "git",
-            "nodejs"
-          ],
           "postInstall": "install_agent_skills",
           "profiles": [
             "workstation",
             "ai-coding"
           ],
-          "prompt": "omnigraph_url",
-          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
+          "notes": "Kept so a saved selection or an --only agent-skills run still resolves; its step now only says where the work went. The links are the agent-skill-links component, the MCP wiring is omnigraph-client's and the mcp-* components'."
+        },
+        {
+          "id": "agent-skill-links",
+          "name": "Agent skill links",
+          "description": "Link this checkout's skills into every client's skills dir",
+          "provider": "custom",
+          "package": "agent-skill-links",
+          "postInstall": "install_agent_skill_links",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
+          "notes": "One symlink per skill of this checkout's .agents/skills into Antigravity, Claude Code (user and project scope), ~/.agents/skills and — when codex is present — ~/.codex/skills. Your own skills and links are never touched; a checkout that moved is repointed."
         },
         {
           "id": "omnigraph-client",

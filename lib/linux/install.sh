@@ -38,8 +38,9 @@ omnigraph_url_answer() {
 # omnigraph_base_url: the omnigraph server the clients' bridges point at - the
 # omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
 # side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
-# ONE derivation, used by install_agent_skills and route_zed_to_proxy (the Zed
-# writer once hardcoded the default and ignored the answer).
+# ONE derivation, used by install_omnigraph_client (the Antigravity entry) and
+# route_zed_to_proxy (the Zed writer once hardcoded the default and ignored the
+# answer).
 omnigraph_base_url() {
     local omni
     omni="$(omnigraph_url_answer)"
@@ -304,15 +305,17 @@ custom_is_installed() {
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
         agent-skills)
-            # New location: this checkout's .agents/skills + .mcp.json wiring
-            local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-            if [[ -d "$repo_root/.agents/skills" && -f "$repo_root/.mcp.json" ]]; then
-                return 0
-            fi
-            # Fallback: old external clone (for machines mid-migration)
-            local code_root="$SYS_HOME/Documents/Code"
-            [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
-            [[ -d "$code_root/agent-skills/skills" ]]
+            # The tombstone's work is the link above and the omnigraph/mcp-*
+            # components', so there is never anything left for this id to do —
+            # whatever is on disk. Reporting "installed" is what keeps a saved
+            # selection or an old state file from planning a step that only
+            # prints a retirement line.
+            return 0
+            ;;
+        agent-skill-links)
+            # "Installed" = nothing left to link, checked by the same function the
+            # postInstall asks, so the gate and the writer can never disagree.
+            agent_skill_links_current
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
@@ -3975,8 +3978,8 @@ install_mcp_playwright() {
         # run_post_install contains the step's exit code; this record is here
         # because the step carries on to the Antigravity entry either way, so its
         # own return says nothing about the proxy. The id is the one the fold
-        # looks for, and it matches the id install_agent_skills' guarded call
-        # records — `autoos_record_failure` keeps it to one entry.
+        # looks for, and `autoos_record_failure` keeps it to one entry however
+        # many steps in this component name it.
         register_playwright_lazy_proxy "$playwright_pkg" \
             || autoos_record_failure mcp-playwright
     else
@@ -4171,40 +4174,6 @@ PY
     return 0
 }
 
-# AutoOS's own repo runs the bridge through npx (.mcp.json); the agent-skills
-# checkout and sibling repos run it as a container on the graph server's Docker
-# network. Miss the image, the network or the token and MCP start-up fails with
-# "pull access denied", "fetch failed" or "missing bearer token" respectively —
-# none of which say which of the three it was. AutoOS does not build or start
-# that stack; it reports what is not ready yet.
-omnigraph_readiness() {
-    local dir="$1" ready=1
-    if ! has_cmd docker; then
-        ui_warn "docker is not installed — omnigraph runs as a container."
-        return 1
-    fi
-    if ! docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q '^omnigraph-mcp:latest$'; then
-        ui_warn "omnigraph-mcp:latest is not built. Build it with:"
-        ui_muted "    docker build -t omnigraph-mcp:latest ${dir}/infra/mcp-servers/servers/omnigraph-mcp"
-        ready=0
-    fi
-    if ! docker network ls --format '{{.Name}}' 2>/dev/null | grep -q 'mcp-server'; then
-        ui_warn "no mcp-server Docker network — the graph server stack is not up."
-        ui_muted "    docker compose -f ${dir}/infra/mcp-servers/docker-compose.client.yml up -d"
-        ready=0
-    fi
-    if [[ -z "${OMNIGRAPH_TOKEN:-}" ]] && ! grep -qE '^OMNIGRAPH_TOKEN=.' "$SYS_HOME/.autoos-omnigraph.env" 2>/dev/null; then
-        # Never invent one. An empty bearer fails as "missing bearer token",
-        # which at least names itself; a made-up value fails as a 401 nobody can
-        # explain — and this repository is public, so a real-looking secret in it
-        # is a leak whether or not it happens to work.
-        ui_warn "OMNIGRAPH_TOKEN is not set — the server will reject every call."
-        ui_muted "    it is issued by the graph server, not by AutoOS. Add"
-        ui_muted "    OMNIGRAPH_TOKEN=<token> to ${SYS_HOME}/.autoos-omnigraph.env (mode 600)."
-        ready=0
-    fi
-    (( ready ))
-}
 
 # omnigraph_env_state <file> <base-url> <token> [write|check]
 # Prints "written" or "unchanged": whether the env file holds exactly what a
@@ -4681,6 +4650,38 @@ install_omnigraph_client() {
     OMNIGRAPH_CLIENT_CHANGED=0
     INSTALL_SCRIPT_STATE=""
 
+    local repo_root
+    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+    # The wiring that follows from a server existing at all — approve this
+    # checkout's project servers, call out a user entry that shadows them, drop
+    # the retired tree's leftover — does not need a URL answer, so it runs BEFORE
+    # the gates below: a machine that never answered the prompt still gets a
+    # clean, working Claude Code. What CARRIES the URL and token stays behind
+    # them (A3's "nothing configured, write nothing").
+    #
+    # omnigraph is project scope only, pinned per repo by OMNIGRAPH_GRAPH_ID. A
+    # user-scope entry silently WINS over the project one and answers from the
+    # wrong graph, so this never creates one — it only says how to remove theirs.
+    if mcp_has_server omnigraph; then
+        ui_warn "A user-scope omnigraph server exists. It silently overrides the"
+        ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
+        ui_muted "    claude mcp remove omnigraph --scope user"
+    fi
+    if [[ -f "$repo_root/.mcp.json" ]]; then
+        # Each refusal is this component's own result, under the id being installed.
+        enable_project_mcp_server "$repo_root" omnigraph \
+            || autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        enable_project_mcp_server "$repo_root" autoos-agent \
+            || autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+    else
+        ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
+    fi
+    # A recognised leftover of the retired clone's docker era (its own "not mine,
+    # not touched" rule lives in the helper). graphify's ~/.local/bin link is
+    # cleared by the graphify component, next to the install that path unblocks.
+    remove_stale_homelab_mcp_entry
+
     local base token
     base="$(omnigraph_url_answer)"
     if [[ -z "$base" ]]; then
@@ -4712,6 +4713,32 @@ install_omnigraph_client() {
     omnigraph_install_wrapper || return 1
     omnigraph_retire_rc_token_lines
 
+    # Antigravity has no project scope — its config is the user's own
+    # ~/.gemini/config/mcp_config.json — so its omnigraph entry has to be written
+    # here, and it is the one artifact that carries the resolved URL and token.
+    local omni_pkg omni_spec
+    omni_pkg="$(mcp_package omnigraph)"
+    # The base URL is the user's omnigraph_url answer: it reaches python through
+    # the environment (as in the Zed writer), never spliced into the source. The
+    # token is deliberately today's rule — only an OMNIGRAPH_TOKEN the user
+    # exported themselves: this file is world-readable by default, so a keys-file
+    # secret must not be copied into it.
+    omni_spec="$(OMNI_BASE="$(omnigraph_base_url)" OMNI_PKG="$omni_pkg" python3 -c "
+import json, os
+# bridge 0.8 refuses to start without a graph id (there is no fallback graph
+# any more), so an unset one pins this repo's graph like the other clients.
+env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
+            'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
+if os.environ.get('OMNIGRAPH_TOKEN'):
+    env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
+print(json.dumps({
+    'command': 'npx',
+    'args': ['-y', os.environ['OMNI_PKG']],
+    'env': env_vars
+}))
+")"
+    register_antigravity_mcp_server omnigraph "$omni_spec"
+
     if (( AUTOOS_DRY_RUN )); then
         # A dry run only announces: it never sets the changed flags, so claiming
         # "already installed and current" would report a comparison that did not
@@ -4721,6 +4748,9 @@ install_omnigraph_client() {
     elif (( ! OMNIGRAPH_CLIENT_CHANGED )); then
         ui_info "omnigraph-client: skipped: already installed and current"
         INSTALL_SCRIPT_STATE=skipped
+    fi
+    if (( ! AUTOOS_DRY_RUN )); then
+        ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
     fi
     return 0
 }
@@ -4783,148 +4813,100 @@ replace_or_append_marked_line() {
 }
 
 install_agent_skills() {
-    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    # A tombstone, not an installer (A7b): the id stays known so a saved
+    # selection, a state file and `--only agent-skills` all still resolve, and
+    # the step that carries that id says where every duty went. Each piece has
+    # exactly one home now - agent-skill-links for the skills directories,
+    # omnigraph-client for the MCP wiring and this checkout's project servers,
+    # and the mcp-* components for the servers they each register. Widening a
+    # gate or re-wiring here would put a second owner on work that already has
+    # one, so this returns 0 and touches nothing.
+    ui_muted "agent-skills is retired: its work moved to agent-skill-links, omnigraph-client and the mcp-* components."
+    INSTALL_SCRIPT_STATE=skipped
+    return 0
+}
 
-    local base
-    base="$(omnigraph_base_url)"
-    ui_info "Omnigraph base URL: ${base}"
-
-    write_omnigraph_env "$base"
-
-    # Wire user-scope MCP servers across Claude Code and Antigravity. These are
-    # catalog postInstalls in their own right, called directly here — so they get
-    # the same containment run_post_install gives them (a bare call under
-    # setup.sh's `set -euo pipefail` would abort the whole run). Each records its
-    # own component id, the id install_mcp_playwright already records internally,
-    # so one broken wiring is counted once.
-    install_mcp_graphify   || autoos_record_failure mcp-graphify
-    install_mcp_serena     || autoos_record_failure mcp-serena
-    install_mcp_playwright || autoos_record_failure mcp-playwright
-    install_mcp_context7   || autoos_record_failure mcp-context7
-
-    # omnigraph is the opposite: project scope only, pinned per repo by
-    # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
-    # and answers from the wrong graph, so this never creates one.
-    if mcp_has_server omnigraph; then
-        ui_warn "A user-scope omnigraph server exists. It silently overrides the"
-        ui_warn "per-repo one and answers from the wrong graph. Remove it with:"
-        ui_muted "    claude mcp remove omnigraph --scope user"
+# agent_skill_link_dests [repo_root]
+# Prints the skills directories the clients read, one per line. ONE home for
+# that list: the linker writes exactly these and detection checks exactly these,
+# so a machine can never be told it is finished while one client still sees no
+# skills. ~/.codex is the conditional entry — a directory is created for codex
+# only when the tool is on PATH or its home already exists, because making a home
+# for software the machine does not have is worse than doing nothing.
+agent_skill_link_dests() {
+    local repo_root="${1:-${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+    printf '%s\n' \
+        "$SYS_HOME/.gemini/config/skills" \
+        "$SYS_HOME/.claude/skills" \
+        "$repo_root/.claude/skills" \
+        "$SYS_HOME/.agents/skills"
+    if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
+        printf '%s\n' "$SYS_HOME/.codex/skills"
     fi
-    # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
-    if [[ -f "$repo_root/.mcp.json" ]]; then
-        enable_project_mcp_server "$repo_root" omnigraph || autoos_record_failure agent-skills
-        enable_project_mcp_server "$repo_root" autoos-agent || autoos_record_failure agent-skills
-    else
-        ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
-    fi
+}
 
-    local omni_pkg omni_spec
-    omni_pkg="$(mcp_package omnigraph)"
-    # The base URL is the user's omnigraph_url answer: it reaches python through
-    # the environment (as in the Zed writer), never spliced into the source.
-    omni_spec="$(OMNI_BASE="$base" OMNI_PKG="$omni_pkg" python3 -c "
-import json, os
-# bridge 0.8 refuses to start without a graph id (there is no fallback graph
-# any more), so an unset one pins this repo's graph like the other clients.
-env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
-            'OMNIGRAPH_GRAPH_ID': os.environ.get('OMNIGRAPH_GRAPH_ID') or 'autoos'}
-if os.environ.get('OMNIGRAPH_TOKEN'):
-    env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
-print(json.dumps({
-    'command': 'npx',
-    'args': ['-y', os.environ['OMNI_PKG']],
-    'env': env_vars
-}))
-")"
-    register_antigravity_mcp_server omnigraph "$omni_spec"
+# agent_skill_links_current [repo_root]: the detection gate for the id. Returns 0
+# only when there is nothing left to link — every skill of the source resolves in
+# every destination, or the entry there is the user's own (AGENTS.md hard rule 4:
+# a directory of yours is settled work, never missing work). A dangling link IS
+# missing work: that is the moved-checkout repair, and a gate that called it
+# "installed" would skip the repair forever. A destination that is itself a
+# symlink is the old whole-directory layout: link_skill_dirs refuses to write
+# through it and leaves one warning, so it is settled too — holding it against the
+# machine would re-plan the component on every run and then report it *installed*
+# having done nothing.
+agent_skill_links_current() {
+    local repo_root source_dir dest s_dir name
+    repo_root="${1:-${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+    source_dir="$(autoos_skills_source)"
+    [[ -n "$source_dir" ]] || return 1
+    while IFS= read -r dest; do
+        if [[ -L "$dest" ]]; then continue; fi
+        [[ -d "$dest" ]] || return 1
+        for s_dir in "$source_dir"/*/; do
+            [[ -f "${s_dir}SKILL.md" ]] || continue
+            s_dir="${s_dir%/}"
+            name="${s_dir##*/}"
+            [[ -e "$dest/$name" ]] || return 1
+        done
+    done < <(agent_skill_link_dests "$repo_root")
+    return 0
+}
 
-    # Skills source: this checkout's .agents/skills, or — on a machine mid-way
-    # through the migration, where the vendored copy is not there yet — the
-    # retired clone's skills dir. autoos_skills_source is the one home for that
-    # order, so no client directory can be linked from one and skipped by
-    # another.
-    local skills_source
+# install_agent_skill_links: postInstall for the agent-skill-links catalog entry
+# (Linux and macOS) — the skills-linking duty moved out of the retired
+# agent-skills step, with the same rules: one source (autoos_skills_source, so no
+# client can be linked from the checkout and another from the retired clone) and
+# one link rule (link_skill_dirs, which keeps the user's own files and repairs a
+# dangling AutoOS link). Contains every failure: a destination it could not write
+# is recorded for the summary and the run continues.
+install_agent_skill_links() {
+    INSTALL_SCRIPT_STATE=""
+    local repo_root skills_source dest
+    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     skills_source="$(autoos_skills_source)"
     if [[ -z "$skills_source" ]]; then
         ui_warn "no skills to link: neither $repo_root/.agents/skills nor the retired clone's skills dir exists."
-    fi
-
-    # Wire skills into Antigravity and Claude Code global skills directories
-    local agy_skills="$SYS_HOME/.gemini/config/skills"
-    local claude_skills="$SYS_HOME/.claude/skills"
-    local repo_skills="$skills_source"
-    if [[ -n "$repo_skills" ]]; then
-        if (( AUTOOS_DRY_RUN )); then
-            ui_muted "would link skills from $repo_skills to $agy_skills and $claude_skills"
-        else
-            mkdir -p "$agy_skills" "$claude_skills"
-            local s_dir s_name
-            for s_dir in "$repo_skills"/*; do
-                [[ -d "$s_dir" ]] || continue
-                s_name="$(basename "$s_dir")"
-                if [[ ! -e "$agy_skills/$s_name" ]]; then
-                    ln -snf "$s_dir" "$agy_skills/$s_name" 2>/dev/null || cp -r "$s_dir" "$agy_skills/$s_name"
-                fi
-                if [[ ! -e "$claude_skills/$s_name" ]]; then
-                    ln -snf "$s_dir" "$claude_skills/$s_name" 2>/dev/null || cp -r "$s_dir" "$claude_skills/$s_name"
-                fi
-            done
-            ui_ok "Agent skills linked to Antigravity and Claude Code"
-        fi
-    fi
-
-    # Repo skills into project .claude/skills (Claude Code reads only that
-    # dir). Symlinks, created at install time (never committed - see
-    # .gitignore). Guarded: existing entries win.
-    local repo_claude="$repo_root/.claude/skills"
-    if [[ -d "$repo_skills" ]]; then
-        if (( AUTOOS_DRY_RUN )); then
-            ui_muted "would link repo skills into $repo_claude"
-        else
-            mkdir -p "$repo_claude"
-            for s_dir in "$repo_skills"/*; do
-                [[ -d "$s_dir" ]] || continue
-                s_name="$(basename "$s_dir")"
-                if [[ ! -e "$repo_claude/$s_name" ]]; then
-                    ln -snf "$s_dir" "$repo_claude/$s_name" 2>/dev/null || ui_warn "could not link repo skill $s_name"
-                fi
-            done
-        fi
-    fi
-
-    # Link repo skills into user-scope directories for clients that read from
-    # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
-    # link_skill_dirs handles dry-run, idempotency and never-overwrite rules.
-    if [[ -n "$skills_source" ]]; then
-        link_skill_dirs "$skills_source" "$SYS_HOME/.agents/skills" || true
-        if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
-            link_skill_dirs "$skills_source" "$SYS_HOME/.codex/skills" || true
-        fi
-    fi
-
-    # Check for retired external agent-skills clone and hint it's no longer used
-    local code_root="$SYS_HOME/Documents/Code"
-    [[ -d "$SYS_HOME/Documents/code" ]] && code_root="$SYS_HOME/Documents/code"
-    local old_clone="$code_root/agent-skills"
-    if [[ -d "$old_clone" && ! -L "$old_clone" ]]; then
-        ui_muted "Note: external agent-skills clone at $old_clone is retired; AutoOS now uses the vendored .agents/skills in this checkout."
-    fi
-
-    # Two recognised leftovers from the retired clone and the docker era, each with
-    # its own "not mine, not touched" rule. The graphify-mcp link in ~/.local/bin is
-    # cleared by install_mcp_graphify above — it is the path `uv tool install` wants
-    # to write, so it is decided there, next to the install it unblocks.
-    remove_stale_homelab_mcp_entry
-
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would check the omnigraph image, network and token"
+        INSTALL_SCRIPT_STATE=skipped
         return 0
     fi
-    # Check omnigraph readiness using this repo's infra path
-    if omnigraph_readiness "$repo_root"; then
-        ui_ok "omnigraph prerequisites are all present."
+    # The gate is the same function detection asks (custom_is_installed), and
+    # setup.sh runs this step on a skipped component too — so this is what keeps a
+    # second run from printing links it did not make. A dry run never reaches it:
+    # the check compares on-disk links the mode promises to announce.
+    if (( ! AUTOOS_DRY_RUN )) && agent_skill_links_current "$repo_root"; then
+        ui_info "agent-skill-links: skipped: every client directory is already linked"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
     fi
-    ui_info "Restart Claude Code and Antigravity — MCP servers are only read at session start."
+    while IFS= read -r dest; do
+        link_skill_dirs "$skills_source" "$dest" ||
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-agent-skill-links}"
+    done < <(agent_skill_link_dests "$repo_root")
+    if (( AUTOOS_DRY_RUN )); then
+        ui_info "agent-skill-links: dry run: nothing was linked"
+        INSTALL_SCRIPT_STATE=skipped
+    fi
     return 0
 }
 

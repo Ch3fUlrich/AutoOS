@@ -17,7 +17,23 @@
 
 describe "omnigraph-client"
 
-# oh_pin <pin>: run the component in a sandbox with a URL answer and a token.
+# oh_hermetic_root: A7b moved three repo-scope duties into
+# install_omnigraph_client — name a shadowing user-scope omnigraph, approve this
+# checkout's project MCP servers, clean the retired homelab entry. They have
+# their own cases in 18-mcp-wiring.sh; here the component must point at a scratch
+# checkout that holds no .mcp.json (so the approve step warns and writes nothing)
+# and must never ask the real Claude Code for its server list. Call it inside the
+# subshell: the mcp_has_server override dies with it. tools/ is linked in because
+# the wrapper step installs the tracked script it finds there — a scratch checkout
+# without it is a machine where that step legitimately has nothing to copy.
+OH_REPO="$(mktemp -d)/repo"
+oh_hermetic_root() {
+    mkdir -p "$OH_REPO"
+    [[ -e "$OH_REPO/tools" ]] || ln -s "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools" "$OH_REPO/tools"
+    AUTOOS_ROOT="$OH_REPO"
+    mcp_has_server() { return 1; }
+}
+
 # The pin argument replaces the harness file so a "different pin" case does not
 # have to rewrite a version literal into lib/ (the mcp-pins test forbids that).
 oh_client_sandbox() {
@@ -90,6 +106,7 @@ oh_run_client() {
             [[ "$name" != "$spec" ]] || { printf 'npm stub: unpinned spec %s\n' "$spec" >&2; return 9; }
             oh_fake_npm_install "$prefix" "$name" "$version" "omnigraph-mcp"
         }
+        oh_hermetic_root
         install_omnigraph_client
         printf 'CHANGED %s\nSTATE %s\nFAILURES %s\n' \
             "${OMNIGRAPH_CLIENT_CHANGED:-0}" "${INSTALL_SCRIPT_STATE:-installed}" \
@@ -125,6 +142,7 @@ if it "omnigraph-client: a missing omnigraph_url answer skips with a hint and re
         AUTOOS_KEYS_FILE="$tmp/keys.yml"
         AUTOOS_ANSWERS=([omnigraph_url]="")
         OMNIGRAPH_TOKEN="dummy-token-1234"
+        oh_hermetic_root
         install_omnigraph_client
         printf 'STATE %s\nFAILURES [%s]\n' "${INSTALL_SCRIPT_STATE:-installed}" "${AUTOOS_EXTRA_FAILURES[*]-}"
     ) 2>&1)"; rc=$?
@@ -148,6 +166,7 @@ if it "omnigraph-client: a missing token skips with a hint naming both places an
         # shellcheck disable=SC2016
         AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
         unset OMNIGRAPH_TOKEN
+        oh_hermetic_root
         install_omnigraph_client
         printf 'STATE %s\nFAILURES [%s]\n' "${INSTALL_SCRIPT_STATE:-installed}" "${AUTOOS_EXTRA_FAILURES[*]-}"
     ) 2>&1)"; rc=$?
@@ -172,6 +191,7 @@ if it "omnigraph-client: the token comes from api-keys.yml when the env carries 
         # shellcheck disable=SC2016
         AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
         unset OMNIGRAPH_TOKEN
+        oh_hermetic_root
         install_omnigraph_client >/dev/null
     ) 2>&1)"
     envline="$(grep -c '^OMNIGRAPH_TOKEN=from-keys-file$' "$tmp/.autoos-omnigraph.env" 2>/dev/null || true)"
@@ -204,6 +224,36 @@ if it "omnigraph-client: a full run writes the env file at 600, the pinned bridg
     [[ "$out" == *"CHANGED 1"* ]] || { ok=0; echo "the run did not report a change: $out" >&2; }
     [[ "$out" != *"FAILURES dummy"* ]] || { ok=0; echo "a token leaked into the failure list" >&2; }
     (( ok )) && pass || fail "the full run is wrong ($bridge)"
+fi
+
+if it "omnigraph-client: the full run merges its Antigravity entry and keeps the user's own servers"; then
+    # Antigravity has no project scope, so its omnigraph entry has to be a user
+    # entry — the one duty A7b moved here that no other client of this graph has.
+    # The config is merged (hard rule 4), and the entry carries the resolved URL.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.gemini/config"
+    printf '%s' '{"mcpServers":{"existing":{"command":"node","args":["index.js"]}}}' \
+        >"$tmp/.gemini/config/mcp_config.json"
+    oh_run_client "$tmp" >/dev/null
+    kept="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print(" ".join(sorted(d["mcpServers"])))
+' "$tmp/.gemini/config/mcp_config.json" 2>&1)"
+    url="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print(d["mcpServers"]["omnigraph"]["env"]["OMNIGRAPH_BASE_URL"])
+' "$tmp/.gemini/config/mcp_config.json" 2>&1)"
+    # A second run must not rewrite the entry it already wrote.
+    out2="$(oh_run_client "$tmp")"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$kept" == "existing omnigraph" ]] || { ok=0; echo "servers after the run [$kept]" >&2; }
+    [[ "$url" == "https://graph.example.invalid" ]] || { ok=0; echo "the entry points at [$url]" >&2; }
+    [[ "$out2" == *"already configured in Antigravity"* ]] \
+        || { ok=0; echo "the second run did not report the entry as settled: [${out2:0:400}]" >&2; }
+    (( ok )) && pass || fail "the Antigravity entry is not the component's own"
 fi
 
 if it "omnigraph-client: the second run reports every step skipped or unchanged"; then
@@ -1079,6 +1129,7 @@ if it "omnigraph-client: a retire step that cannot write the rc file warns, reco
             # shellcheck disable=SC2016
             AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
             npm() { :; }
+            oh_hermetic_root
             run_post_install install_omnigraph_client omnigraph-client
             printf 'RUN CONTINUED\nFAILURES %s\n' "${AUTOOS_EXTRA_FAILURES[*]-}"
         ) 2>&1)"; rc=$?
@@ -1188,6 +1239,7 @@ if it "omnigraph-client: a marked-line step that cannot write the rc file warns,
             # shellcheck disable=SC2016
             AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
             npm() { :; }
+            oh_hermetic_root
             run_post_install install_omnigraph_client omnigraph-client
             printf 'RUN CONTINUED\nFAILURES %s\n' "${AUTOOS_EXTRA_FAILURES[*]-}"
         ) 2>&1)"; rc=$?
@@ -1433,6 +1485,7 @@ if it "omnigraph-client: a dry run announces and writes nothing"; then
         # shellcheck disable=SC2016
         AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
         npm() { printf 'NPM RAN\n'; }
+        oh_hermetic_root
         install_omnigraph_client
     ) 2>&1)"
     files="$(find "$tmp" -mindepth 1 | wc -l)"

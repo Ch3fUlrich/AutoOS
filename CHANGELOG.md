@@ -5,6 +5,69 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed - the `agent-skills` step is a tombstone; its twelve duties have homes (A7b, Linux/macOS, 2026-09-28)
+
+- **`catalog/linux.json`, `catalog/macos.json`**: new `agent-skill-links`
+  component (`provider: custom`, `postInstall: install_agent_skill_links`,
+  profiles `workstation` + `ai-coding`). It carries no `requires` — linking a
+  directory of markdown needs neither git nor nodejs, and naming them would drag
+  both into a skills-only run — and no `prompt`, which was never its question.
+  `agent-skills` keeps its id (a saved selection, a state file and
+  `--only agent-skills` all still resolve) and loses the `omnigraph_url` prompt
+  and the `git`/`nodejs` requires it no longer spends.
+- **`lib/linux/install.sh`** (`install_agent_skill_links`,
+  `agent_skill_link_dests`, `agent_skill_links_current`): the skills-linking duty
+  moved here and now goes through `link_skill_dirs` for every destination,
+  replacing the step's own hand-rolled loop. Two behaviour differences, both
+  intended: only a directory holding a `SKILL.md` is a skill (the old loop linked
+  any child directory), and a dangling link this checkout created is *repaired*
+  where the old loop left it — a moved checkout used to mean silently no skills
+  in Antigravity and Claude Code. Nothing is ever *copied* any more: the loop's
+  `ln -snf … || cp -r …` fallback would have written a second, unversioned copy of
+  the skills into the user's home if `ln` failed, and no test ever reached it.
+  `agent_skill_link_dests` is the one home for the destination list, so the
+  writer and the detection gate cannot disagree about what "done" covers, and
+  `~/.codex/skills` is created only where codex is installed or its home exists.
+  `~/.openhands/skills` stays owned by `setup_openhands_config`.
+- **`lib/linux/install.sh`** (`install_omnigraph_client`): took the wiring duties
+  that named this checkout's servers — approve the `.mcp.json` project servers
+  (`omnigraph`, `autoos-agent`), warn about a shadowing user-scope `omnigraph`
+  instead of ever writing one, write Antigravity's `omnigraph` entry (its config
+  has no project scope) and remove the retired tree's user-scope `homelab` entry.
+  The first, second and fourth run **before** the URL/token/npm gates, because a
+  machine that never answered the prompt still wants a clean, working Claude Code;
+  the entry that *carries* the URL and token stays behind them, which is A3's
+  "nothing configured, write nothing" rule. Its refusal to touch a file the run
+  could not back up is recorded under the id being installed, so the summary
+  cannot read "done" over a change that never happened.
+- **Removed from the step that used to do all of this**: the four
+  `install_mcp_*` calls (each is a catalog postInstall with its own profile and
+  `requires`; a second caller double-ran them and counted one broken wiring
+  twice), the retired-clone hint (the clone is a detection fallback in
+  `autoos_skills_source`, not something to advertise) and `omnigraph_readiness`
+  together with its caller — the check that can name a missing token, a rejected
+  token or a missing graph is `tools/check-omnigraph.py`, which the healthchecks
+  already call; an installer guessing at Docker state across a machine it cannot
+  see was the weaker copy of that. The "restart Claude Code and Antigravity" line
+  moved with the work it describes. `docs/catalog.md` follows in the same change.
+- **Detection**: `custom_is_installed` gains `agent-skill-links` (delegating to
+  `agent_skill_links_current`, the same function the postInstall asks) and the
+  retired `agent-skills` id now reports done whatever is on disk, because there
+  is never work left under it. A destination that is itself a symlink — the old
+  whole-directory layout, which AGENTS.md section 8 says is left with one warning
+  — counts as settled: it is a directory of the user's, `link_skill_dirs` will not
+  write through it, and holding it against the machine would re-plan the component
+  every run and then report it *installed* having done nothing.
+- Tests (`tests/linux/18-mcp-wiring.sh`, `13-end-to-end-dry-run-only.sh`,
+  `14-state-verify-and-undo.sh`, `38-omnigraph-client.sh`): the linking cases
+  moved to the new component and gained second-run, keep-yours, dry-run,
+  moved-checkout and one-destination-list assertions; the omnigraph-client block
+  asserts the approvals, the warning-only rule, the homelab cleanup and the
+  blank-URL machine that still gets the repo-scope duties and writes no bridge
+  config; one case fails the suite if any installer calls an `mcp-*` postInstall
+  from another component; and the Antigravity merge is now proven on a real
+  `mcp_config.json` that already holds the user's own server.
+
 ### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
 
 - **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides
