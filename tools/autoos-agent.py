@@ -5002,6 +5002,54 @@ def scope_unit_name(run_id) -> str:
     return "%s%s.scope" % (WORKER_SCOPE_PREFIX, safe)
 
 
+# SB-A3 (D-103) item C: the shape of the id a KILL may be derived from. The
+# spawner mints `<15-char UTC stamp>-<slug of at most RUN_ID_SLUG_CAP>-<6 hex>`
+# (`mint_run_id`), 47 characters at most, which this admits. It is looser than
+# RUN_ID_RE on purpose: RUN_ID_RE decides what may be written into a branch name,
+# this decides what may be signalled, and an id minted before the mint lived in
+# one place still has to be cancellable. The cap is 47 with room, so a padded
+# slug cannot stretch a unit name.
+KILL_RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z0-9-]+$")
+KILL_RUN_ID_MAX = 64
+
+
+def is_killable_run_id(run_id) -> bool:
+    """True for a string that may name a kill: a run id, nothing else."""
+    return (isinstance(run_id, str) and len(run_id) <= KILL_RUN_ID_MAX
+            and bool(KILL_RUN_ID_RE.match(run_id)))
+
+
+def worker_scope_unit(run_id) -> str:
+    """The scope unit run_id's worker is in — derived, never read from a record.
+
+    SB-A3 (D-103) item C: SB-A2 wrote the unit name into `job.json` and had
+    `cancel` stop whatever it found there. `job.json` sits in the run dir, which
+    the runner exports to the worker as AUTOOS_TASK_DIR, and the worker is the
+    same uid as the file — so the process being cancelled owned the pen that
+    named what the killer signalled, and any `--user` unit or another run's scope
+    would do. The name is a pure function of the run id instead; anything that is
+    not a run id is refused before it can become unit syntax.
+    """
+    if not is_killable_run_id(run_id):
+        raise ValueError("refused to derive a scope unit from %r: not a run id "
+                         "(want %s, at most %d chars)"
+                         % (run_id, KILL_RUN_ID_RE.pattern, KILL_RUN_ID_MAX))
+    return "%s%s.scope" % (WORKER_SCOPE_PREFIX, run_id)
+
+
+def scope_unit_is_worker_scope(unit) -> bool:
+    """Is `unit` shaped like a scope this spawner could have created?
+
+    The second gate, for a caller that built the name itself: prefix, suffix, and
+    nothing but unit-safe characters. `foo.service` and `multi-user.target` are
+    not this spawner's; a name with a `;`, a space or a `/` in it is not systemd
+    syntax this process should be handing to `systemctl`.
+    """
+    return (isinstance(unit, str) and 0 < len(unit) <= 141
+            and unit.startswith(WORKER_SCOPE_PREFIX) and unit.endswith(".scope")
+            and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", unit)))
+
+
 def worker_scope_argv(unit, cmd) -> list:
     """`systemd-run --user --scope` around `cmd`: the whole subtree joins the cgroup."""
     return (["systemd-run", "--user", "--scope",
@@ -5078,10 +5126,22 @@ def stop_scope(unit, grace: float = 5.0) -> dict:
     `--collect` unit goes with it. A unit that is unknown (already exited, or a
     run from before this mechanism) is reported, not raised: cancelling a run that
     has ended is a no-op, never a failure.
+
+    A name that is not an `autoos-worker-*.scope` unit is refused with nothing
+    signalled and no `systemctl` call made: this is the gate, not the caller.
     """
     report = {"unit": unit, "stopped": False, "reason": ""}
     if not unit:
         report["reason"] = "no scope unit recorded for this run"
+        return report
+    # SB-A3 (D-103) item C, the second gate: `cancel` derives the name, but a
+    # killer should not signal a unit because a caller said so. Anything that is
+    # not this spawner's own worker scope is refused here, where the caller cannot
+    # talk it past it.
+    if not scope_unit_is_worker_scope(unit):
+        report["refused"] = True
+        report["reason"] = ("refused: %r is not an %s*.scope unit name"
+                            % (unit, WORKER_SCOPE_PREFIX))
         return report
     if _systemctl("status", unit) is None:
         report["reason"] = "systemctl --user is not reachable"

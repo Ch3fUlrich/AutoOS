@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
+
+SB-A2 took the group out of `pgrp.json` and wrote it into `job.json` — but
+`job.json` lives in the run dir, which `run_job` exports to the worker as
+`AUTOOS_TASK_DIR`, and the worker is the same uid as the file. `cancel` then read
+`job["scope"]` and `job["group"]` verbatim, so the process being cancelled could
+still aim the killer at any `--user` unit, at another run's scope, or at any
+process group.
+
+- **`tools/autoos-agent.py`**: `worker_scope_unit(run_id)` derives the unit name
+  `autoos-worker-<run id>.scope` and raises for anything that is not a run id
+  (`is_killable_run_id` / `KILL_RUN_ID_RE`, 64-char cap); `stop_scope()`
+  re-validates the name it is handed (`scope_unit_is_worker_scope`: prefix,
+  `.scope` suffix, unit-safe charset, length) and refuses — with no `systemctl`
+  call — anything else, so the guard lives in the killer, not only at the call
+  site.
+- **`tools/autoos_agent_mcp.py`**: `cancel` never reads a scope from a file. It
+  derives it from the run id it was given and refuses a `job.json` that claims a
+  different run. The fallback group record moved out of the task dir into a
+  runner-private store, `$(state dir)/kill/<run id>.json` (dir 0700, file 0600,
+  atomic write, `kill_store_dir`/`write_kill_record`); `spawn` and `run_job`
+  write it, `cancel` reads only it, and `job.json` carries no `group` any more —
+  its `scope` field stays as information only.
+- **Residual, stated**: a same-uid worker that goes looking can still find the
+  kill store through `AUTOOS_STATE_DIR`; a file cannot be hidden from the uid that
+  owns it. The scope path — derived, no file involved — is the primary and is what
+  a host with a user manager uses.
+- **Tests** (`tests/test_autoos_spawner.py`, `CancelDerivesKillTargetTests`): a
+  rewritten `job.json` scope (`foo.service`, another run's scope) does not change
+  what `cancel` stops; `stop_scope` refuses every non-worker-scope name; a
+  malformed run id is refused at both levels; the group kill reads only the
+  private record (an edited `job.json` group kills nothing); the store is not
+  under `AUTOOS_TASK_DIR`, is not named in the worker env, and is 0700/0600.
+
 ### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
 
 Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated

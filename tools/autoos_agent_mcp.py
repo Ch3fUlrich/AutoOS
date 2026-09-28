@@ -14,12 +14,20 @@ canonical run id (tools/autoos-agent.py mint_run_id) handed to the run as
 child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
     job.json     the request, the canonical run id, the autoos-agent.py argv
-                 (which carries that id as --run-id), pid, route, start time,
-                 and — written by the runner, SB-A2 (D-103) item A/B — the
-                 systemd scope unit the worker runs in and the runner's own
-                 process group with its leader start time. `cancel` reads these
-                 and nothing else; a file or env var the worker could write is
-                 not a channel a killer may take orders from
+                 (which carries that id as --run-id), pid, route, start time, and
+                 the systemd scope unit the worker was launched in — as
+                 information only. SB-A3 (D-103) item C: this file sits in the
+                 directory the runner exports to the worker as AUTOOS_TASK_DIR,
+                 and the worker is the same uid as it, so nothing in here is a
+                 channel `cancel` takes orders from. `cancel` DERIVES the scope
+                 name from the run id (tools/autoos-agent.py
+                 `worker_scope_unit`) and reads the fallback group record from the
+                 runner-private kill store (`kill_store_dir`); a job.json that
+                 names another scope, another group, or another run kills nothing
+    kill/<id>.json  NOT in the run dir: <state dir>/kill/, a sibling of this
+                   tree. The runner's own process group and its leader start
+                   time, 0600, written by the runner alone — the record the
+                   fallback group kill uses where there is no user manager
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
@@ -113,6 +121,62 @@ agent = _load_agent_cli()
 
 def state_root() -> str:
     return os.path.join(clients.state_dir(), "agents")
+
+
+def kill_store_dir() -> str:
+    """The runner-private home of the fallback group record (SB-A3, D-103 item C).
+
+    Deliberately NOT `AUTOOS_TASK_DIR`: the run dir is handed to the worker as an
+    environment variable, the worker is the same uid as everything in it, and a
+    kill record the cancelled process can rewrite is a channel it gives orders
+    through — which is what SB-A's `pgrp.json` and SB-A2's `job.json` group were.
+    This is a sibling of the `agents/` tree, 0700 with 0600 files, written by the
+    server and the runner and by nobody else.
+
+    RESIDUAL, stated rather than papered over: a same-uid worker that goes looking
+    can still find this directory (the state dir is in its environment) and write
+    into it, because a file cannot be hidden from the uid that owns it. What
+    closes that hole is the scope path, which is derived from the run id and
+    depends on no file at all; the private store is only the fallback for a host
+    with no user manager.
+    """
+    return os.path.join(clients.state_dir(), "kill")
+
+
+def kill_store_path(run_id: str) -> str:
+    """The one record file for `run_id`, named so no run id escapes the store."""
+    name = os.path.basename(os.path.normpath(str(run_id or "")))
+    if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("bad run id %r" % (run_id,))
+    return os.path.join(kill_store_dir(), name + ".json")
+
+
+def write_kill_record(run_id: str, group: dict) -> bool:
+    """Record the runner's own group, privately. Best effort, POSIX only."""
+    if os.name == "nt" or not group:
+        return False
+    try:
+        directory = kill_store_dir()
+        os.makedirs(directory, exist_ok=True)
+        os.chmod(directory, 0o700)
+        path = kill_store_path(run_id)
+        tmp = "%s.tmp-%d" % (path, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with io.open(fd, "w", encoding="utf-8") as fh:
+            json.dump(group, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print("autoos-agent: no kill record for %s: %s" % (run_id, exc),
+              file=sys.stderr)
+        return False
+    return True
+
+
+def read_kill_record(run_id: str):
+    try:
+        return _read_json(kill_store_path(run_id))
+    except ValueError:
+        return None
 
 
 def _read_json(path: str):
@@ -511,7 +575,11 @@ def spawn(req: dict) -> dict:
     # its pgid, and its leader start time is only certainly THIS process the
     # instant after the fork. `cancel` refuses to signal a group whose leader has
     # a different start time — the number the kernel recycled is someone else's.
-    job["group"] = {"pgid": proc.pid, "start": agent.proc_start_time(proc.pid)}
+    # SB-A3 (D-103) item C: that record goes to the private store, not to
+    # job.json, because the worker owns job.json's directory and can rewrite what
+    # a killer reads out of it. The runner re-records its own group in run_job.
+    write_kill_record(run_id, {"pgid": proc.pid,
+                               "start": agent.proc_start_time(proc.pid)})
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
     return {"id": run_id, "state": "working", "route": route, "dir": path}
@@ -549,22 +617,32 @@ def run_job(path: str) -> int:
     """The detached runner: one autoos-agent.py run, output and exit code on disk.
 
     SB-A2 (D-103) item A: where the host has a user manager, the worker is
-    launched inside a transient systemd SCOPE named for its run id, and the unit
-    name is recorded here, in job.json — a file in the run dir, outside every
-    sandbox, that no worker sees the path to through its own environment. That is
-    what `cancel` stops, and a cgroup is not escapable by `setsid()`. Where there
-    is no user manager (a container, a CI runner, the test suite) the run starts
-    unwrapped and `cancel` falls back to the verified process-group kill; the
-    residual of that fallback — a worker that leaves the group — is stated in
-    `autoos-agent.kill_verified_groups`, not hidden here.
+    launched inside a transient systemd SCOPE named for its run id. `cancel`
+    derives that name from the run id and stops it — a cgroup is not escapable by
+    `setsid()`, and a name read from a file the worker owns is an order the worker
+    can give (SB-A3, D-103 item C). The unit name is still written to job.json, as
+    information for whoever reads a run dir.
+
+    Where there is no user manager (a container, a CI runner, the test suite) the
+    run starts unwrapped and `cancel` falls back to the verified process-group
+    kill, taken from the private kill record written below — never from job.json.
+    The residual of that fallback (a worker that leaves the group, and a same-uid
+    worker that finds the kill store) is stated in
+    `autoos-agent.kill_verified_groups` and `kill_store_dir`, not hidden here.
     """
+    run_id = os.path.basename(os.path.normpath(path))
     job = _read_json(os.path.join(path, "job.json"))
     cmd = [sys.executable, AGENT] + job["argv"]
     if agent.scope_supported():
-        job["scope"] = agent.scope_unit_name(os.path.basename(os.path.normpath(path)))
+        # derived from the run id, and identical to what `cancel` will derive;
+        # job.json keeps it only so a human reading the dir sees the unit.
+        job["scope"] = agent.scope_unit_name(run_id)
         cmd = agent.worker_scope_argv(job["scope"], cmd)
-    job["group"] = agent.group_record()
+    else:
+        job.pop("scope", None)
+    job.pop("group", None)  # retired channel: SB-A3 item C
     _write_json(os.path.join(path, "job.json"), job)
+    write_kill_record(run_id, agent.group_record())
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
         # at this run dir; the CLI forwards its own chosen env onward, so the
@@ -897,24 +975,45 @@ def cancel(run_id: str) -> dict:
     if st["state"] not in ("working", "input_required"):
         return dict(st, note="not working; nothing to cancel")
     job = _read_json(os.path.join(path, "job.json"))
+    # SB-A3 (D-103) item C: the run dir is keyed by run_id, but the record inside
+    # it claims which run it is. A record that CLAIMS another run is not this
+    # run's business and kills nothing; a thin record that claims nothing (no id
+    # field) is not a claim to refuse either.
+    claimed = [job[key] for key in ("id", "run_id") if job.get(key) is not None]
+    if any(value != run_id for value in claimed):
+        return dict(st, error="job.json in %s describes %s, not run %r: refusing to "
+                              "kill anything" % (path, ", ".join(
+                                  sorted({str(v) for v in claimed})), run_id))
     if not _write_exit(path, {"cancelled": True, "rc": None, "ended": time.time()}):
         return dict(_state(path), note="finished before the cancel landed")
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(job["pid"])], capture_output=True)
         report = {"taskkill": True}
     else:
-        # SB-A2 (D-103) items A and B. The scope is the worker's cgroup, so
-        # stopping it reaches the client and any grandchild that `setsid()`ed out
-        # of a process group — SB-A's pgrp.json channel is gone because the file
-        # it named was writable by the very process group it described. The group
-        # kill still runs: the runner itself sits outside the scope (it is the one
-        # that launched systemd-run), and its leader start time is verified before
-        # anything is signalled. Whatever was refused is reported back, so a
-        # canceled run that killed nothing says so instead of looking reaped.
+        # SB-A2 (D-103) items A and B, as closed by SB-A3 (item C). The scope is
+        # the worker's cgroup, so stopping it reaches the client and any grandchild
+        # that `setsid()`ed out of a process group. Its name is DERIVED from the
+        # run id — never read from job.json, which lives in AUTOOS_TASK_DIR and is
+        # the worker's own file: SB-A's pgrp.json and SB-A2's job.json `scope`/
+        # `group` were both orders the cancelled process could write. The group
+        # kill still runs, from the private kill record: the runner itself sits
+        # outside the scope (it is the one that launched systemd-run), and its
+        # leader start time is verified before anything is signalled. Whatever was
+        # refused is reported back, so a canceled run that killed nothing says so
+        # instead of looking reaped.
         report = {}
-        if job.get("scope"):
-            report["scope"] = agent.stop_scope(job["scope"])
-        group = job.get("group") or {"pgid": job.get("pid"), "start": None}
+        try:
+            unit = agent.worker_scope_unit(run_id)
+        except ValueError as exc:
+            report["scope"] = {"unit": None, "stopped": False, "refused": True,
+                               "reason": str(exc)}
+        else:
+            report["scope"] = agent.stop_scope(unit)
+        group = read_kill_record(run_id)
+        if group is None:
+            group = {"pgid": job.get("pid"), "start": None}
+            report["kill_record"] = ("no runner kill record: only the scope can be "
+                                     "stopped, an unverified pgid is never signalled")
         report["groups"] = agent.kill_verified_groups([group])
     return dict(_state(path), cancel=report)
 
@@ -982,7 +1081,9 @@ def serve() -> None:
         worker was launched in (SIGTERM, then SIGKILL to every process in the
         cgroup) and kills the runner's process group, whose leader start time is
         verified first. Where no user manager is reachable only the verified
-        group kill runs. Reports what it refused to kill."""
+        group kill runs. Reports what it refused to kill. The scope unit is DERIVED
+        from the run id and the group record comes from the runner's private kill
+        store; job.json, which the cancelled worker owns, aims nothing."""
         return cancel(run_id)
 
     @app.tool(name="respond")

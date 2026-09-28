@@ -12901,16 +12901,19 @@ class CancelOrphanTests(unittest.TestCase):
         return proc
 
     def make_run(self, run_id, pid, pgrp=None):
-        """The job record the RUNNER writes: its own group, with the leader's
-        start time (SB-A2 item B). `pgrp` is the retired channel — a run dir that
-        still carries one must be ignored, not read."""
+        """The record the RUNNER writes (SB-A2 item B, SB-A3 item C): the group
+        with the leader's start time lives in the runner-private kill store, never
+        in job.json, which the worker's own process can rewrite. `pgrp` is the
+        retired channel — a run dir that still carries one must be ignored, not
+        read."""
         path = os.path.join(self.tmp, "agents", run_id)
         os.makedirs(path)
         job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
                "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
-               "pid": pid,
-               "group": {"pgid": pid, "start": load_agent().proc_start_time(pid)}}
+               "pid": pid}
         mcp_server._write_json(os.path.join(path, "job.json"), job)
+        mcp_server.write_kill_record(
+            run_id, {"pgid": pid, "start": load_agent().proc_start_time(pid)})
         if pgrp is not None:
             mcp_server._write_json(os.path.join(path, "pgrp.json"), {"pgid": pgrp})
         return path
@@ -13278,9 +13281,12 @@ class CancelChannelTests(unittest.TestCase):
                 self.assertEqual(mcp_server.run_job(path), 0)
             job = mcp_server._read_json(os.path.join(path, "job.json"))
             self.assertNotIn("AUTOOS_WORKER_PGRP", seen["env"], seen["env"])
-            self.assertEqual(job["group"]["pgid"],
-                             mcp_server.agent.group_record()["pgid"], job)
-            self.assertIsInstance(job["group"]["start"], int, job)
+            # SB-A3 item C: the kill record is not in the file the worker owns.
+            self.assertNotIn("group", job, job)
+            record = mcp_server._read_json(mcp_server.kill_store_path(run_id))
+            self.assertEqual(record["pgid"],
+                             mcp_server.agent.group_record()["pgid"], record)
+            self.assertIsInstance(record["start"], int, record)
             if supported:
                 self.assertEqual(job["scope"], "autoos-worker-%s.scope" % run_id, job)
                 self.assertEqual(seen["cmd"][:6],
@@ -13314,9 +13320,9 @@ class CancelChannelTests(unittest.TestCase):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
         try:
-            path = self._make_run("redirect-test", runner, {
-                "group": {"pgid": runner.pid,
-                          "start": load_agent().proc_start_time(runner.pid)}})
+            path = self._make_run("redirect-test", runner, {}, record={
+                "pgid": runner.pid,
+                "start": load_agent().proc_start_time(runner.pid)})
             mcp_server._write_json(os.path.join(path, "pgrp.json"),
                                    {"pgid": bystander.pid})
             st = mcp_server.cancel("redirect-test")
@@ -13334,7 +13340,7 @@ class CancelChannelTests(unittest.TestCase):
                         p.kill()
                 p.wait()
 
-    def _make_run(self, run_id, proc, job_extra):
+    def _make_run(self, run_id, proc, job_extra, record=None):
         path = os.path.join(self.tmp, "agents", run_id)
         os.makedirs(path)
         job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
@@ -13342,6 +13348,8 @@ class CancelChannelTests(unittest.TestCase):
                "pid": proc.pid}
         job.update(job_extra)
         mcp_server._write_json(os.path.join(path, "job.json"), job)
+        if record is not None:
+            mcp_server.write_kill_record(run_id, record)
         return path
 
     @staticmethod
@@ -13361,6 +13369,216 @@ class CancelChannelTests(unittest.TestCase):
         while time.time() < deadline and self._alive(pid):
             time.sleep(0.05)
         return not self._alive(pid)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups and systemd scopes")
+class CancelDerivesKillTargetTests(unittest.TestCase):
+    """SB-A3 (D-103) item C: SB-A2 took the kill decision out of `pgrp.json` and
+    wrote it into `job.json` — a file in the run dir, the very directory the
+    runner hands the worker as AUTOOS_TASK_DIR. Same uid, same file: a worker
+    that rewrote `scope` aimed `cancel` at another run's scope or at any
+    `--user` unit, and one that rewrote `group` aimed it at any process group.
+
+    The rule now is that a killer takes orders from a record the worker cannot
+    write: the scope name is DERIVED from the run id (validated against the run
+    id's shape, and the run being cancelled), and the fallback's group record
+    lives in a runner-private store outside the task dir. `job.json` keeps the
+    scope as information and is read for nothing that gets signalled.
+    """
+
+    RUN_ID = "20260928-223444-sba3-aa6651"
+    OTHER = "20260928-223445-sba3-dead01"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    p.kill()
+            p.wait()
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sleeper(self):
+        """A detached process that leads its own group, like a runner."""
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        self.procs.append(proc)
+        return proc
+
+    def make_run(self, run_id, job_extra=None, record=None):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path, exist_ok=True)
+        job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
+               "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+               "pid": os.getpid()}
+        job.update(job_extra or {})
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
+        if record is not None:
+            mcp_server.write_kill_record(run_id, record)
+        return path
+
+    @staticmethod
+    def _scope_stub(stopped):
+        def stop(unit, **kw):
+            stopped.append(unit)
+            return {"unit": unit, "stopped": True, "reason": "stub"}
+        return stop
+
+    def test_cancel_stops_the_scope_the_run_id_names_not_job_jsons_claim(self):
+        agent = load_agent()
+        for i, claim in enumerate(("foo.service", "multi-user.target",
+                                   "autoos-worker-%s.scope"
+                                   % CancelDerivesKillTargetTests.OTHER,
+                                   "")):
+            run_id = "20260928-223444-sba3-%06x" % i
+            with self.subTest(claim=claim):
+                stopped = []
+                self.make_run(run_id, {"scope": claim})
+                with mock.patch.object(mcp_server.agent, "stop_scope",
+                                       self._scope_stub(stopped)), \
+                     mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                                       lambda groups, **kw: []):
+                    st = mcp_server.cancel(run_id)
+                self.assertEqual(st["state"], "canceled", st)
+                self.assertEqual(stopped, [agent.scope_unit_name(run_id)],
+                                 "cancel stopped a unit that job.json named, not "
+                                 "the one the run id derives")
+
+    def test_cancel_refuses_a_job_record_that_describes_another_run(self):
+        stopped, killed = [], []
+        self.make_run(self.RUN_ID, {"id": self.OTHER, "run_id": self.OTHER,
+                                    "scope": "autoos-worker-%s.scope" % self.OTHER},
+                      record={"pgid": self.sleeper().pid, "start": 1})
+        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)), \
+             mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                               lambda groups, **kw: killed.append(list(groups)) or []):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertIn("error", st, st)
+        self.assertEqual(stopped, [], "cancel stopped a scope for a run id the "
+                                      "record does not belong to")
+        self.assertEqual(killed, [], "cancel killed a group for a run id the "
+                                     "record does not belong to")
+
+    def test_a_bad_run_id_is_refused_before_anything_is_stopped(self):
+        agent = load_agent()
+        for bad in ("", "orphan-test", "20260928-223444-SBA3-aa6651",
+                    "20260928-223444-sba3-aa6651/../other",
+                    "20260928-223444-sba3-aa6651;rm",
+                    "20260928-223444-" + "x" * 64):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    agent.worker_scope_unit(bad)
+        self.assertEqual(agent.worker_scope_unit(self.RUN_ID),
+                         "autoos-worker-%s.scope" % self.RUN_ID)
+        # and through cancel: an existing run whose id is not a run id stops
+        # nothing, because there is no safe name to derive.
+        stopped = []
+        self.make_run("legacy-run-name")
+        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)), \
+             mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                               lambda groups, **kw: []):
+            st = mcp_server.cancel("legacy-run-name")
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertEqual(stopped, [], "cancel derived a unit from a run id that is not one")
+        self.assertTrue(st["cancel"]["scope"]["refused"], st)
+
+    def test_stop_scope_refuses_a_name_that_is_not_a_worker_scope(self):
+        agent = load_agent()
+        calls = []
+
+        class _Out:
+            stdout = "inactive"
+
+        def fake_systemctl(*args, **kw):
+            calls.append(args)
+            return _Out()
+
+        for bad in ("foo.service", "autoos-worker-x.service", "autoos-worker-x",
+                    "other-worker-x.scope", "autoos-worker-x.scope;reboot",
+                    " autoos-worker-x.scope", "autoos-worker-" + "x" * 200 + ".scope"):
+            with self.subTest(bad=bad):
+                with mock.patch.object(agent, "_systemctl", fake_systemctl):
+                    report = agent.stop_scope(bad)
+                self.assertFalse(report["stopped"], report)
+                self.assertTrue(report.get("refused"), report)
+        self.assertEqual(calls, [], "stop_scope signalled a unit it should have refused")
+        with mock.patch.object(agent, "_systemctl", fake_systemctl):
+            ok = agent.stop_scope(agent.scope_unit_name(self.RUN_ID))
+        self.assertFalse(ok.get("refused"), ok)
+        self.assertTrue(calls, "a valid worker scope never reached systemctl")
+
+    def test_the_group_kill_reads_only_the_private_record(self):
+        agent = load_agent()
+        bystander = self.sleeper()
+        runner = self.sleeper()
+        self.make_run(
+            self.RUN_ID,
+            {"group": {"pgid": bystander.pid,
+                       "start": agent.proc_start_time(bystander.pid)}},
+            record={"pgid": runner.pid, "start": agent.proc_start_time(runner.pid)})
+        with mock.patch.object(mcp_server.agent, "stop_scope",
+                               lambda unit, **kw: {"unit": unit, "stopped": True}):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertTrue(self._wait_gone(runner.pid),
+                        "cancel did not kill the group the runner recorded privately")
+        self.assertTrue(self._alive(bystander.pid),
+                        "CANCELORPHAN-in-reverse: cancel killed the group a worker "
+                        "wrote into its own job.json")
+
+    def test_a_job_json_group_edit_kills_nothing(self):
+        agent = load_agent()
+        runner = self.sleeper()
+        self.make_run(self.RUN_ID,
+                      {"group": {"pgid": runner.pid,
+                                 "start": agent.proc_start_time(runner.pid)}})
+        with mock.patch.object(mcp_server.agent, "stop_scope",
+                               lambda unit, **kw: {"unit": unit, "stopped": True}):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertTrue(self._alive(runner.pid),
+                        "cancel killed a group named in the worker-writable job.json")
+
+    def test_the_kill_store_is_outside_the_task_dir_and_unnamed_in_the_worker_env(self):
+        agent = load_agent()
+        self.make_run(self.RUN_ID, record={"pgid": 4242, "start": 1})
+        kill_dir = mcp_server.kill_store_dir()
+        task_dir = os.path.join(self.tmp, "agents", self.RUN_ID)
+        self.assertFalse(os.path.abspath(kill_dir).startswith(os.path.abspath(task_dir)
+                                                              + os.sep), kill_dir)
+        job = mcp_server._read_json(os.path.join(task_dir, "job.json"))
+        self.assertNotIn("group", job, "the kill record still rides in the task dir")
+        self.assertEqual(0o700, os.stat(kill_dir).st_mode & 0o777, kill_dir)
+        record = mcp_server.kill_store_path(self.RUN_ID)
+        self.assertEqual(0o600, os.stat(record).st_mode & 0o777, record)
+        env = agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": task_dir})
+        self.assertEqual(task_dir, env["AUTOOS_TASK_DIR"])
+        for name, value in sorted(env.items()):
+            self.assertNotIn(kill_dir, str(value),
+                             "%s points the worker at the kill store" % name)
+            self.assertNotIn(self.RUN_ID + ".json", str(value), name)
+
+    @staticmethod
+    def _alive(pid):
+        return CancelChannelTests._alive(pid)
+
+    def _wait_gone(self, pid, secs=12):
+        deadline = time.time() + secs
+        while time.time() < deadline and CancelChannelTests._alive(pid):
+            time.sleep(0.05)
+        return not CancelChannelTests._alive(pid)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups")
@@ -13445,8 +13663,12 @@ class VerifiedGroupKillTests(unittest.TestCase):
         mcp_server._write_json(os.path.join(path, "job.json"), {
             "id": "recycled-run", "run_id": "recycled-run", "request": {}, "task": "t",
             "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
-            "pid": runner.pid,
-            "group": {"pgid": runner.pid, "start": self.agent.proc_start_time(runner.pid) + 7}})
+            "pid": runner.pid})
+        # SB-A3 item C: the kill record is the runner's private one; a start time
+        # that no longer matches its leader is what makes cancel skip the group.
+        mcp_server.write_kill_record(
+            "recycled-run", {"pgid": runner.pid,
+                             "start": self.agent.proc_start_time(runner.pid) + 7})
         st = mcp_server.cancel("recycled-run")
         self.assertEqual(st["state"], "canceled", st)
         self.assertTrue(self._alive(runner.pid),
