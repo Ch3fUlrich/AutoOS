@@ -296,8 +296,9 @@ Available standalone MCP components in the catalog:
 - `mcp-graphify`: Codebase knowledge graph queries via `graphify.serve`.
 - `mcp-playwright`: Headless browser automation via `@playwright/mcp`.
 - `mcp-context7`: Real-time documentation lookups via `@upstash/context7-mcp`.
-- `omnigraph-client`: the machine half of `omnigraph` on Linux and macOS — the
-  env file (`~/.autoos-omnigraph.env`, mode 600) holding the server URL and the
+- `omnigraph-client`: the machine half of `omnigraph` on all three platforms —
+  the env file (`~/.autoos-omnigraph.env`, mode 600 on the shell side, user-only
+  ACL on the Windows side) holding the server URL and the
   bearer token, the pinned bridge pre-installed into a private npm prefix, and
   the `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with
   a hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing.
@@ -309,7 +310,7 @@ Available standalone MCP components in the catalog:
   entry stays until the server-side homelab MCP replaces it. Those four
   steps run even when the URL answer is blank — only the artifacts that carry the
   URL and token wait for it. See `docs/omnigraph.md`
-  ("The `omnigraph-client` component").
+  ("The `omnigraph-client` component", "On Windows").
 - `agent-skill-links`: links this checkout's `.agents/skills` into every client's
   skills directory — the table in AGENTS.md section 8 is which directory each
   client reads, and `link_skill_dirs` is the one link rule they all go through.

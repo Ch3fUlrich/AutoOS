@@ -274,6 +274,147 @@ ids become tombstones is a separate, catalog-only edit.
   the two callsites reverted, green here: 41 passed / 0 failed with and without
   `FORCE_COLOR=3`, 46 passed / 0 failed for `--filter='dry run'` both ways,
   `shellcheck -S warning` clean.
+### Fixed — a refused omnigraph env rewrite reports failed; agent-skills needs no git (w1 final review S1, 2026-09-28)
+
+- **`lib/windows/AutoOS.Install.psm1`** (`Install-AutoOSOmnigraphClient`): `Set-AutoOSOmnigraphEnv`
+  answers `'failed'` when it aborts — its backup could not be born protected — and the old token
+  then stays on disk, but the caller only tested `-eq 'written'`, so the run fell through to
+  "skipped: already installed and current". A refused token rotation is not a clean re-run
+  (AGENTS.md §4). It is now propagated exactly like the bridge and wrapper results beside it.
+- **`catalog/windows.json`** (`agent-skills`): dropped `"git"` from `requires`. The clone that
+  needed it was deleted in the A7b rehome; nothing in `Install-AutoOSAgentSkills` runs git.
+- **`tests/run-tests.ps1`**: a case that stubs the module-scope env writer to refuse and asserts
+  the component returns `failed`, not `skipped`, and never prints the "already installed" line.
+  Red before the fix on the state assertion.
+
+### Fixed — the Windows token backup is born protected (w1 cross-family review S1, 2026-09-28)
+
+- **`lib/windows/AutoOS.Install.psm1`** (`Set-AutoOSOmnigraphEnv`, `Copy-AutoOSBackup`,
+  `Write-AutoOSProtectedFile`): the env file itself was born restricted, but the copy of
+  the token it replaces went out through the plain copy helper and was `icacls`'d
+  *afterwards* — so the previous bearer token, live until the server expires it, sat under
+  the profile's inherited ACLs for the length of that window, readable by every other
+  account on a shared or imaged machine. It is the same defect the Linux side closed on
+  2026-09-28 (two entries below); the fix is the same shape. `Write-AutoOSProtectedFile`
+  takes `-SourcePath`: bytes that already exist on disk are read and written into the
+  protected sibling like any other content, and only the source's *times* carry across —
+  its permissions must not, so this cannot take the whole stat. `Copy-AutoOSBackup
+  -Protect` routes a credential's backup through that one writer, which is what keeps the
+  ACL rule in a single home instead of a second copy beside the `Copy-Item`. A backup that
+  cannot be restricted returns `$null` and the env file is left exactly as it was: the
+  alternative is overwriting a user's file with no backup (AGENTS.md §1, §5).
+- **`tests/run-tests.ps1`**: a case that reads the three units' source, in the shape the
+  env-file case already uses — the env writer backs up with `-Protect` and holds no plain
+  copy, the backup helper reaches the protected writer and its one remaining copy
+  statement belongs to the branch the protected one returns ahead of, the writer never
+  re-implements the ACL rule, and the copied bytes land after the protection — plus a
+  behavioural half: the backup is byte-for-byte the previous file and carries its mtime,
+  which is how "we copied the content, not just created the name" stays true if the
+  writer is rewritten. Red before the fix on the `-Protect` assertion.
+- Not changed here, same shape, and `-Protect` now exists for them: the backups taken by
+  `Set-AutoOSClaudeGateway` and `Install-AutoOSOmniRouteRouting`, whose settings files can
+  hold a gateway key. Each is a separate component, so each is its own brief and its own
+  test.
+
+### Added - `omnigraph-client` on Windows, and `agent-skills` stops cloning (A3 Windows twin, 2026-09-28)
+
+The Linux side got its machine component on 2026-09-27/28; Windows had no
+equivalent, so a Windows machine answered the `omnigraph_url` prompt inside
+`agent-skills` and cloned a *second repository* to find the MCP declarations AutoOS
+already ships (SPEC-OMNI D14). Both halves land here, because the clone and the
+component share exactly two facts — the URL answer and the env file — and leaving
+one in place would mean two owners of each.
+
+- **`catalog/windows.json`**: new component `omnigraph-client` — `provider
+  custom`, `postInstall Install-AutoOSOmnigraphClient`, `requires [nodejs]`,
+  `prompt omnigraph_url`, profiles `workstation` / `ai-coding` / `light` (the
+  Linux set minus `server`, which this catalog does not define). The bridge pin is
+  *not* repeated: it is read from `catalog/agent-harness.json` the way Linux reads
+  it, which is what the `mcp pins` group requires. `agent-skills` loses its
+  `prompt` (the answer would otherwise be collected twice, and the two can differ)
+  and its description no longer promises a clone.
+- **`lib/windows/AutoOS.Detect.psm1`**: `Get-AutoOSOmnigraphClientPath` is one
+  home for the layout — env file under `%USERPROFILE%`, private npm prefix under
+  `%LOCALAPPDATA%\autoos\omnigraph-mcp`, wrapper and its `.cmd` under
+  `%USERPROFILE%\.local\bin` — read by the installer, by the detection probe and
+  by the suite. `Get-AutoOSInstalledStatus` grows a `custom` probe for the
+  component: prefix plus shim present means `installed`. That is the *coarse*
+  answer only; the compare of values stays in the postInstall, which `setup.ps1`
+  also runs for a skipped component, so a rotated token or a moved pin is still
+  repaired and the two cannot disagree about what "current" means.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSOmnigraphClient` and its
+  three parts (`Install-AutoOSOmnigraphBridge`,
+  `Install-AutoOSOmnigraphWrapper`, `Set-AutoOSOmnigraphEnv -Token`). A missing
+  URL or token is `skipped` with the remedy named, never a failure and never a
+  guessed value: the token comes from `OMNIGRAPH_TOKEN`, else the git-ignored
+  `configuration/api-keys.yml` key `omnigraph_token` — read through
+  `Get-AutoOSApiKeySetting`, extracted from `Set-AutoOSApiKeyEnv` so the keys-file
+  lookup has one home — and a `REPLACE_WITH_…` template is not a credential. The
+  bridge is `npm install -g --prefix <private prefix> <pinned spec>`, skipped when
+  the prefix already holds that pin and reinstalled when the pin moved; a spec
+  with no `@version` is refused rather than run. The wrapper is **copied**, never
+  linked, and replaced only on a content difference *and* only if it carries the
+  `# AutoOS:omnigraph-mcp-autoos` marker; a file of the user's own there is left
+  alone with a warning, because overwriting one is the defect AGENTS.md §1 and §5
+  exist to prevent. PATH goes through `Add-AutoOSPathEntry` (append only) and only
+  on a Windows host: off Windows the registry scopes are silently ignored, so
+  asking would report a change that cannot happen.
+- **`Write-AutoOSProtectedFile`** (new) + `Protect-AutoOSUserFile`: the token
+  file is not written and then restricted. An empty sibling is created,
+  `icacls /inheritance:r /grant:r` is applied to it *before* any byte lands, then
+  the content goes in and the file is renamed onto the target on the same volume,
+  where the rename carries the DACL and the target path is never itself created
+  with the profile's inherited ACLs. A protection that failed stops the write and
+  returns `failed`; the file it replaces is backed up first and the backup gets the
+  same restriction. `Set-AutoOSOmnigraphEnv` returns `written` / `unchanged` /
+  `failed` so its caller can report a truthful idempotency answer.
+- **`Install-AutoOSAgentSkills`**: the `git clone`/`pull --ff-only` of
+  `Ch3fUlrich/agent-skills` into `Documents\code`, the `omnigraph_url` + env-file
+  duty it also carried, and the `$dest\skills` junction loop that read it are gone;
+  `.mcp.json` project approval and the readiness probe now read this checkout
+  (`-RepoRoot`, and `Write-AutoOSOmnigraphReadiness`'s `-AgentSkillsDir` is renamed
+  to match). The linking duty did **not** go with the clone — AGENTS.md's skill
+  table promises `~/.claude/skills` and `~/.gemini/config/skills` are filled by the
+  installers, so `Sync-AutoOSAgentSkillTargets` now mirrors the resolved skills
+  source (the repo's own `.agents/skills`, or a mid-migration machine's retired
+  checkout) into those two vendor directories as well as the convention ones,
+  through the same `Sync-AutoOSSkillDirs` rules rather than a second bespoke loop.
+  Nothing removes an MCP entry —
+  a user-scope `omnigraph` is still only called out with the command that deletes
+  it, and every other user-scope server (the operator's `homelab` among them) is
+  untouched. A machine that ran the old installer keeps its stale checkout: this
+  lane deletes files nobody asked it to delete.
+- **`tools/omnigraph-mcp-autoos.ps1`**: carried the same Windows wiring. Its
+  bridge path is now the `%LOCALAPPDATA%` prefix (it read a `.local\share` path
+  that nothing on Windows writes — the file was the tracked source of a step that
+  had not landed), it carries the marker line installers match on, and its header
+  says why the path is a second spelling the suite must bind. The suite runs the
+  file and compares the path in its own 127 refusal against what
+  `Get-AutoOSOmnigraphBridgePath` computed, so a drift between the two fails a
+  test instead of failing every client start-up.
+- Tests (`tests/run-tests.ps1`, group `omnigraph-client`, 18 cases): hermetic —
+  `%USERPROFILE%`, `%LOCALAPPDATA%`, `%APPDATA%` and a repo fixture with its own
+  `catalog/agent-harness.json` and `tools/` copy all point into one temp
+  directory, and `npm` is a stub that reproduces the *Windows* prefix layout (the
+  package under `<prefix>\node_modules`, the bin shim in the prefix root) and
+  refuses a call with no `--prefix` or an unpinned spec. Cases: skip-with-hint and
+  nothing written for a missing URL, for a missing token, and for a missing npm;
+  token from env and from `api-keys.yml`; a placeholder is no token; the pinned
+  prefix install and the same pin not reinstalling; a moved pin reinstalling;
+  wrapper and shim placement; the wrapper's own refusal binding to the installer's
+  path; a user wrapper left alone and an older marked AutoOS copy replaced with a
+  backup; the env file born user-only with its backup protected; a second run
+  `skipped` with no new bytes, no new npm call and no new backup, and detected as
+  installed; a rotated token reopening the gate; a dry run announcing everything
+  and writing nothing; `agent-skills` never cloning and `omnigraph_url` owned by
+  one component. `Get-AutoOSConsoleCapture` moved next to the other harness
+  helpers — a script-level function exists only from its definition line forward,
+  and an installer case needed it earlier in the file.
+- Docs: `docs/omnigraph.md` gains an "On Windows" section (the path and ACL
+  differences in one table, why the rc-line retirement and the MCP-entry removal
+  have no Windows counterpart) and names the Windows command in the rotation
+  recipe; `docs/catalog.md` says the component is now on all three platforms and
+  that `agent-skills` clones nothing.
 
 ### Changed — the user-scope `homelab` MCP entry is never removed, only reported (NOHL, 2026-09-28)
 

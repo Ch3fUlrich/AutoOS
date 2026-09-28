@@ -98,6 +98,27 @@ function Assert-NotContains {
     param($Collection, $Item)
     if (@($Collection) -notcontains $Item) { Pass } else { throw "[$Item] should not be present" }
 }
+function Get-AutoOSConsoleCapture {
+    <#
+      .SYNOPSIS Run a scriptblock while Console.Out is redirected, returning what it wrote.
+      .DESCRIPTION
+        Write-AutoOSLine writes via [Console]::WriteLine/Write, not Write-Information,
+        so `6>&1` alone does not capture it (verified: only actual Write-Information/
+        Write-Host output crosses stream 6 - a bare Console.WriteLine bypasses the
+        PowerShell stream pipeline entirely). Redirecting Console.Out for the
+        duration of the call is the only way to capture that text in-process.
+      .NOTE
+        Defined with the other harness helpers: an installer case may need it
+        anywhere in the file, and a script-level function exists only from its
+        definition line forward.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $origOut = [Console]::Out
+    $sw = New-Object IO.StringWriter
+    [Console]::SetOut($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
+    $sw.ToString()
+}
 
 Write-Host (C "AutoOS Windows test suite" '2;38;5;245') -NoNewline
 Write-Host (C "  ($Root)" '2;38;5;245')
@@ -1801,9 +1822,13 @@ Test-Case 'graphify is registered once, at user scope' {
 
 Test-Case 'omnigraph env file and its backup keep only the user''s access (icacls)' {
     # Review finding 2026-09-25: the token file inherited the profile's ACLs.
+    # The write itself moved into Write-AutoOSProtectedFile (the file must be born
+    # restricted, not restricted after the bytes land), so the rule spans both
+    # units: the env writer's unchanged path and backup, and the protected writer.
     $src = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $src += (Get-Command Write-AutoOSProtectedFile).ScriptBlock.ToString()
     $n = ([regex]::Matches($src, 'Protect-AutoOSUserFile')).Count
-    Assert-True ($n -ge 3) "Set-AutoOSOmnigraphEnv protects the file after writes, backup and unchanged path ($n calls)"
+    Assert-True ($n -ge 3) "the token file is protected on fewer than three paths ($n calls)"
     $helper = (Get-Command Protect-AutoOSUserFile -ErrorAction SilentlyContinue)
     Assert-True ($null -ne $helper) 'Protect-AutoOSUserFile missing'
     $body = $helper.ScriptBlock.ToString()
@@ -1930,11 +1955,18 @@ Test-Case 'no bearer token is ever invented' {
 }
 
 Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
-    if ($installSource -notmatch 'agySkills = Join-Path \$env:USERPROFILE ''\.gemini\\config\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Antigravity skills'
+    # The duty predates the clone and outlives it: AGENTS.md's skill table says
+    # ~/.claude/skills and ~/.gemini/config/skills are linked by the installers, so
+    # retiring the clone had to leave the wiring standing. It lives in
+    # Sync-AutoOSAgentSkillTargets now - one home for "which user-scope directory
+    # gets our skills" - and the function that used to spell the paths out itself
+    # names none of them, which is what keeps the two from drifting.
+    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
+    if ($fn -notmatch 'Sync-AutoOSAgentSkillTargets -Source \$skillsSource') {
+        throw 'Install-AutoOSAgentSkills no longer syncs the skill targets'
     }
-    if ($installSource -notmatch 'claudeSkills = Join-Path \$env:USERPROFILE ''\.claude\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Claude Code skills'
+    if ($fn -match 'agySkills = Join-Path') {
+        throw 'the installer spells out a client skills directory again instead of asking the sync helper'
     }
     Pass
 }
@@ -1960,6 +1992,552 @@ Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
     if ((Get-Content (Join-Path $Root 'lib/windows/AutoOS.Detect.psm1') -Raw) -notmatch 'Code\\agent-skills') {
         throw 'Test-AutoOSInstalled does not check both Code and code paths'
     }
+    Pass
+}
+
+# ─── omnigraph-client ───────────────────────────────────────────────────────
+#
+# The Windows twin of `install_omnigraph_client` (lib/linux/install.sh): the
+# component a machine runs to talk to a shared Omnigraph server. Every case is
+# hermetic — %USERPROFILE%, %LOCALAPPDATA% and %APPDATA% point into one temp
+# directory, so does a repo fixture carrying its own catalog/agent-harness.json
+# and its own copy of tools/, and `npm` is a stub on PATH. Nothing here reaches a
+# network, a graph server, or the machine running the suite.
+Describe-Group 'omnigraph-client'
+
+# The observable contract of `npm install -g --prefix P <spec>` on Windows: the
+# package tree under P\node_modules and the bin shim in P itself — which is why
+# %APPDATA%\npm is on every Node machine's PATH (AutoOS.Detect.psm1's shim
+# directory list says so in prose). A stub that landed the Unix `P/bin` shape
+# instead would let an installer pass here and fail on the one platform it runs.
+$script:OmniNpmStub = @'
+$all = @($args)
+$log = $env:AUTOOS_NPM_STUB_LOG
+$prefix = ''
+for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -eq '--prefix') { $prefix = $all[$i + 1] } }
+$spec = $all[$all.Count - 1]
+if ($log) { ($all -join ' ') | Add-Content -LiteralPath $log -Encoding utf8 }
+if (-not $prefix) { [Console]::Error.WriteLine('npm stub: no --prefix'); exit 9 }
+if ($spec -notmatch '@([0-9][^@]*)$') { [Console]::Error.WriteLine("npm stub: unpinned spec $spec"); exit 9 }
+$name = $spec.Substring(0, $spec.LastIndexOf('@'))
+$version = $spec.Substring($spec.LastIndexOf('@') + 1)
+$bin = ($name -split '/')[-1]
+$pkgDir = $prefix
+foreach ($part in (@('node_modules') + ($name -split '/'))) { $pkgDir = Join-Path $pkgDir $part }
+$null = New-Item -ItemType Directory -Path $pkgDir -Force
+'{"name":"' + $name + '","version":"' + $version + '"}' | Set-Content -LiteralPath (Join-Path $pkgDir 'package.json') -Encoding utf8
+$shim = Join-Path $prefix ($bin + '.cmd')
+if (-not (Test-Path -LiteralPath $shim)) { [IO.File]::WriteAllText($shim, "@echo off`r`n") }
+exit 0
+'@
+
+function New-AutoOSOmnigraphClientFixture {
+    <#
+      .SYNOPSIS A temp machine + repo for the omnigraph-client component.
+      .DESCRIPTION
+        Everything the component reads is a parameter of this fixture: the pin in
+        its harness, the omnigraph_url answer, and whether OMNIGRAPH_TOKEN is in
+        the environment. The caller's environment is saved and put back by
+        Remove-AutoOSOmnigraphClientFixture, which also re-initialises the
+        installer against the real repo so a later case cannot inherit this one.
+    #>
+    param([string]$Pin = '', [hashtable]$Answers = $null, [bool]$DryRun = $false, [string]$Token = '')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('autoos-ogc-' + [Guid]::NewGuid().ToString('N'))
+    $ctx = [pscustomobject]@{
+        Tmp = $tmp; Profile = ''; LocalAppData = ''; AppData = ''; Repo = ''; Stub = ''
+        NpmLog = Join-Path $tmp 'npm-calls.txt'
+        KeysFile = ''
+        Saved = @{}
+    }
+    $ctx.Profile       = Join-Path $tmp 'profile'
+    $ctx.LocalAppData  = Join-Path $tmp 'localappdata'
+    $ctx.AppData       = Join-Path $tmp 'appdata'
+    $ctx.Repo          = Join-Path $tmp 'repo'
+    $ctx.Stub          = Join-Path $tmp 'stub'
+    $ctx.KeysFile      = Join-Path $ctx.Repo 'configuration\api-keys.yml'
+    foreach ($d in @($ctx.Profile, $ctx.LocalAppData, $ctx.AppData, $ctx.Stub,
+                     (Join-Path $ctx.Repo 'catalog'), (Join-Path $ctx.Repo 'tools'),
+                     (Join-Path $ctx.Repo 'configuration'))) {
+        $null = New-Item -ItemType Directory -Path $d -Force
+    }
+
+    # The repo fixture: the harness, optionally re-pinned, and the tracked
+    # wrapper. The pin argument exists so a "different pin" case never has to
+    # write a version literal into lib/ (the mcp-pins group forbids that).
+    $harness = Get-Content -LiteralPath (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($Pin) {
+        $pkg = [string]$harness.mcp_servers.omnigraph.package
+        $harness.mcp_servers.omnigraph.package = $pkg.Substring(0, $pkg.LastIndexOf('@')) + '@' + $Pin
+    }
+    $harness | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $ctx.Repo 'catalog\agent-harness.json') -Encoding UTF8
+    Copy-Item -LiteralPath (Join-Path $Root 'tools\omnigraph-mcp-autoos.ps1') `
+              -Destination (Join-Path $ctx.Repo 'tools\omnigraph-mcp-autoos.ps1')
+
+    # The npm stub, and the launcher that puts it on PATH for this platform.
+    [IO.File]::WriteAllText((Join-Path $ctx.Stub 'npm.ps1'), $script:OmniNpmStub)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [IO.File]::WriteAllText((Join-Path $ctx.Stub 'npm.cmd'),
+            ('@echo off', '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0npm.ps1" %*' -join "`r`n"))
+    } else {
+        [IO.File]::WriteAllText((Join-Path $ctx.Stub 'npm'),
+            ('#!/bin/sh', 'exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/npm.ps1" "$@"' -join "`n"))
+        & chmod +x (Join-Path $ctx.Stub 'npm')
+    }
+
+    foreach ($k in @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'APPDATA', 'PATH',
+                    'OMNIGRAPH_TOKEN', 'OMNIGRAPH_GRAPH_ID', 'AUTOOS_NPM_STUB_LOG')) {
+        # StrictMode: an absent variable gives $null here, and reading .Value off it
+        # is an error of its own that would hide the assertion this fixture exists
+        # to let a case make.
+        $item = Get-Item "env:$k" -ErrorAction SilentlyContinue
+        $ctx.Saved[$k] = if ($item) { $item.Value } else { $null }
+    }
+    $env:USERPROFILE  = $ctx.Profile
+    $env:HOME         = $ctx.Profile
+    $env:LOCALAPPDATA = $ctx.LocalAppData
+    $env:APPDATA      = $ctx.AppData
+    $env:PATH = "$($ctx.Stub)$([IO.Path]::PathSeparator)$env:PATH"
+    $env:AUTOOS_NPM_STUB_LOG = $ctx.NpmLog
+    if ($Token) { $env:OMNIGRAPH_TOKEN = $Token } else { Remove-Item env:OMNIGRAPH_TOKEN -ErrorAction SilentlyContinue }
+    Remove-Item env:OMNIGRAPH_GRAPH_ID -ErrorAction SilentlyContinue
+    if (-not $Answers) { $Answers = @{ omnigraph_url = 'https://graph.example.invalid' } }
+    Initialize-AutoOSInstaller -DryRun $DryRun -Answers $Answers -RepoRoot $ctx.Repo
+    $ctx
+}
+
+function Remove-AutoOSOmnigraphClientFixture {
+    param([Parameter(Mandatory)]$Ctx)
+    foreach ($k in @($ctx.Saved.Keys)) {
+        # An unset variable has to be unset again, not left pointing at the temp dir.
+        if ($null -eq $ctx.Saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+        else { Set-Item "env:$k" -Value $ctx.Saved[$k] }
+    }
+    Remove-Item -LiteralPath $ctx.Tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+}
+
+function Get-AutoOSOmnigraphClientDetection {
+    <#
+      .SYNOPSIS Ask the pipeline's gate what it thinks of this component right now.
+      .DESCRIPTION
+        The question setup.ps1 asks before it would run the component at all, so it
+        is what "a second run reports skipped" is really about. A synthetic
+        inventory keeps the call off the module's installed-status cache: the same
+        key is read before and after an install inside one test, and a cached
+        answer would assert nothing about the second one.
+    #>
+    $inv = [pscustomobject]@{ Entries = @(); Paths = @(); Appx = @(); Programs = @(); WingetPackages = @() }
+    Get-AutoOSInstalledStatus -Inventory $inv -Component ([pscustomobject]@{
+        Provider = 'custom'; Package = 'omnigraph-client'; Name = 'Omnigraph MCP client'; Verify = '' })
+}
+
+Test-Case 'omnigraph-client: catalog entry exists, is custom, and its postInstall loads' {
+    $c = @($winCatalog.categories.components | Where-Object { $_.Id -eq 'omnigraph-client' })
+    Assert-Equal $c.Count 1 'exactly one omnigraph-client component'
+    $e = $c[0]
+    Assert-Equal $e.Provider 'custom'
+    Assert-Equal $e.PostInstall 'Install-AutoOSOmnigraphClient'
+    Assert-True (Get-Command $e.PostInstall -ErrorAction SilentlyContinue) 'the postInstall is not a loaded function'
+    Assert-Equal $e.Prompt 'omnigraph_url'
+    Assert-Equal $e.Homepage 'https://www.npmjs.com/package/@modernrelay/omnigraph-mcp'
+    Assert-Contains @($e.Requires) 'nodejs'
+    Pass
+}
+
+Test-Case 'omnigraph-client: profiles exist in this catalog, and match the Linux entry where they can' {
+    # The brief's rule: the same profile set Linux uses, minus what Windows has
+    # no profile for. A component pre-ticked for a profile that does not exist is
+    # invisible, so a capability would silently drop.
+    $profiles = @()
+    if ($winCatalog.PSObject.Properties.Name -contains 'profiles') {
+        $profiles = @($winCatalog.profiles.PSObject.Properties.Name)
+    }
+    $e = @($winCatalog.categories.components | Where-Object { $_.Id -eq 'omnigraph-client' })
+    Assert-Equal $e.Count 1 'no omnigraph-client entry to check profiles on'
+    $e = $e[0]
+    foreach ($p in @($e.Profiles)) { Assert-Contains $profiles $p }
+    $linux = Get-AutoOSCatalog (Join-Path $Root 'catalog\linux.json')
+    $l = @($linux.categories.components | Where-Object { $_.Id -eq 'omnigraph-client' })[0]
+    foreach ($p in @($e.Profiles)) { Assert-Contains @($l.Profiles) $p }
+    foreach ($p in @($l.Profiles)) {
+        if ($p -in $profiles) { Assert-Contains @($e.Profiles) $p }
+    }
+    Pass
+}
+
+Test-Case 'omnigraph-client: no omnigraph_url answer is a skip with a hint, and nothing is written' {
+    # Every case keeps the fixture alive to its last assertion: tearing it down
+    # first unsets USERPROFILE/LOCALAPPDATA, and off Windows those are not set by
+    # the shell at all, so the path helper the assertion needs stops working.
+    $ctx = New-AutoOSOmnigraphClientFixture -Answers @{ omnigraph_url = '' } -Token 'fixture-token-1'
+    try {
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'no omnigraph URL') "no hint printed: $out"
+        Assert-True ($out -match 'omnigraph_url') 'the hint does not name the answer to give'
+        $paths = Get-AutoOSOmnigraphClientPath
+        Assert-True (-not (Test-Path -LiteralPath $paths.EnvFile)) 'the env file was written anyway'
+        Assert-True (-not (Test-Path -LiteralPath $paths.Prefix)) 'the npm prefix was created anyway'
+        Assert-True (-not (Test-Path -LiteralPath $ctx.NpmLog)) 'npm ran anyway'
+        Pass
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a URL with no token skips with the two sources named, never a failure' {
+    # The token is issued by the graph server. Inventing one is both a wrong
+    # answer and, in a public repository, a leak; a missing one is not a defect
+    # on this machine yet, so it is `skipped` and not `failed` (AGENTS.md section 4).
+    $ctx = New-AutoOSOmnigraphClientFixture
+    try {
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'no omnigraph token') "no skip line: $out"
+        Assert-True ($out -match 'OMNIGRAPH_TOKEN') 'the hint does not name the environment variable'
+        Assert-True ($out -match 'omnigraph_token') 'the hint does not name the api-keys.yml key'
+        Assert-True ($out -match 'api-keys\.yml') 'the hint does not name the keys file'
+        Assert-True (-not (Test-Path -LiteralPath (Get-AutoOSOmnigraphClientPath).EnvFile)) 'the env file was written anyway'
+        Pass
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the token comes from the environment, and the env file holds it' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'installed'
+        $paths = Get-AutoOSOmnigraphClientPath
+        Assert-True (Test-Path -LiteralPath $paths.EnvFile -PathType Leaf) 'no env file'
+        $text = [IO.File]::ReadAllText($paths.EnvFile)
+        Assert-True ($text -match 'OMNIGRAPH_BASE_URL=https://graph\.example\.invalid') "base url: $text"
+        Assert-True ($text -match 'OMNIGRAPH_TOKEN=fixture-token-1') 'the token did not land'
+        # The whole point of the wrapper: the token is never printed.
+        Assert-True ($out -notmatch 'fixture-token-1') 'the token was echoed into the log'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the token falls back to api-keys.yml, and a placeholder is no token' {
+    $ctx = New-AutoOSOmnigraphClientFixture
+    try {
+        'omnigraph_token: fixture-token-from-keys' | Set-Content -LiteralPath $ctx.KeysFile -Encoding utf8
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'installed'
+        $text = [IO.File]::ReadAllText((Get-AutoOSOmnigraphClientPath).EnvFile)
+        Assert-True ($text -match 'OMNIGRAPH_TOKEN=fixture-token-from-keys') "keys file not read: $text"
+
+        # A template value that has never been filled in is not a credential.
+        Remove-Item -LiteralPath (Get-AutoOSOmnigraphClientPath).EnvFile -Force
+        'omnigraph_token: REPLACE_WITH_YOUR_TOKEN' | Set-Content -LiteralPath $ctx.KeysFile -Encoding utf8
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'no omnigraph token') "a placeholder was treated as a token: $out"
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a full run pre-installs the pinned bridge into a private prefix' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $paths = Get-AutoOSOmnigraphClientPath
+        $bridge = Get-AutoOSOmnigraphBridgePath
+        $spec = Get-AutoOSMcpPackage -Name 'omnigraph'
+        Assert-True ($paths.Prefix.StartsWith($ctx.LocalAppData)) "prefix outside the temp machine: $($paths.Prefix)"
+        Assert-True (Test-Path -LiteralPath $bridge -PathType Leaf) "no bridge shim at $bridge"
+        $npmArgs = @(Get-Content -LiteralPath $ctx.NpmLog -Encoding UTF8)
+        Assert-Equal $npmArgs.Count 1 "npm was run $($npmArgs.Count) times"
+        Assert-Equal $npmArgs[0] "install -g --prefix $($paths.Prefix) $spec"
+        # The version the prefix actually holds, read back the way the gate reads it.
+        $pkgJson = $bridge
+        $pkgJson = (Split-Path -Parent $bridge)
+        $name = ($spec.Substring(0, $spec.LastIndexOf('@')) -split '/')[-1]
+        $found = $null
+        foreach ($f in @(Get-ChildItem -LiteralPath $pkgJson -Recurse -Filter 'package.json' -ErrorAction SilentlyContinue)) {
+            if ($f.FullName -match [regex]::Escape($name)) { $found = $f.FullName }
+        }
+        Assert-True ($null -ne $found) 'the installed package tree is not under the prefix'
+        $version = (Get-Content -LiteralPath $found -Raw | ConvertFrom-Json).version
+        Assert-Equal $version $spec.Substring($spec.LastIndexOf('@') + 1)
+        Pass
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a pin that moves reinstalls the bridge, the same pin does not' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $spec = Get-AutoOSMcpPackage -Name 'omnigraph'
+        $pin = $spec.Substring($spec.LastIndexOf('@') + 1)
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal (@(Get-Content -LiteralPath $ctx.NpmLog -Encoding UTF8)).Count 1 'the same pin reinstalled'
+
+        # Re-pin the fixture's harness and run again: the installed bridge is the
+        # old pin now, so the gate must open and npm must run a second time.
+        $harnessPath = Join-Path $ctx.Repo 'catalog\agent-harness.json'
+        $h = Get-Content -LiteralPath $harnessPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $name = $h.mcp_servers.omnigraph.package
+        $name = $name.Substring(0, $name.LastIndexOf('@'))
+        $h.mcp_servers.omnigraph.package = "$name@9.9.9-differentpin"
+        $h | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $harnessPath -Encoding UTF8
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ omnigraph_url = 'https://graph.example.invalid' } -RepoRoot $ctx.Repo
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $calls = @(Get-Content -LiteralPath $ctx.NpmLog -Encoding UTF8)
+        Assert-Equal $calls.Count 2 "a moved pin did not reinstall ($($calls -join ' | '))"
+        Assert-True ($out -match 'reinstall') "the reinstall is not announced: $out"
+        Assert-True ($calls[1] -like '*@9.9.9-differentpin') "npm ran the old spec: $($calls[1])"
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the wrapper and its .cmd shim are placed in the user bin dir' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $paths = Get-AutoOSOmnigraphClientPath
+        $src = Join-Path $ctx.Repo 'tools\omnigraph-mcp-autoos.ps1'
+        Assert-True (Test-Path -LiteralPath $paths.Wrapper -PathType Leaf) 'no wrapper copy'
+        Assert-Equal ([IO.File]::ReadAllText($paths.Wrapper)) ([IO.File]::ReadAllText($src))
+        Assert-True (Test-Path -LiteralPath $paths.WrapperCmd -PathType Leaf) 'no .cmd shim'
+        $cmd = [IO.File]::ReadAllText($paths.WrapperCmd)
+        Assert-True ($cmd -match 'omnigraph-mcp-autoos\.ps1') "the shim does not name the script: $cmd"
+        Assert-True ($cmd -match 'AutoOS:omnigraph-mcp-autoos') 'the shim does not carry the AutoOS marker'
+        Pass
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the wrapper finds the bridge exactly where the installer put it' {
+    # tools/omnigraph-mcp-autoos.ps1 is standalone — an MCP client runs it, not
+    # the module — so nothing but a test binds its bridge path to the installer's.
+    # The binding is read off the wrapper's own refusal: run it with no bridge and
+    # it names the path it looked for, then exits 127.
+    $exe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $want = Get-AutoOSOmnigraphBridgePath
+        $run = & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ctx.Repo 'tools\omnigraph-mcp-autoos.ps1') 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        Assert-Equal $code 127 "wrapper exit: $code / $run"
+        $line = @($run -split "`r?`n" | Where-Object { $_ -match 'the pinned bridge is missing at ' })[0]
+        Assert-True ($null -ne $line) "no refusal line: $run"
+        # The line carries the remedy after the path ("… - re-run ./setup.sh …"),
+        # the same shape as the shell twin's refusal, so the path is the part
+        # before that separator and not the rest of the line.
+        $seen = $line.Substring($line.IndexOf('missing at ') + 11)
+        $hint = $seen.IndexOf(' - re-run ')
+        if ($hint -ge 0) { $seen = $seen.Substring(0, $hint) }
+        Assert-Equal $seen.Trim() $want 'the wrapper looks for the bridge somewhere the installer does not write it'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a wrapper of the user''s own is left alone, an older AutoOS copy is replaced' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $paths = Get-AutoOSOmnigraphClientPath
+        $null = New-Item -ItemType Directory -Path $paths.BinDir -Force
+        $mine = "Write-Host 'mine, nothing to do with AutoOS'`n"
+        [IO.File]::WriteAllText($paths.Wrapper, $mine)
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal ([IO.File]::ReadAllText($paths.Wrapper)) $mine 'the user file was overwritten'
+        Assert-True ($out -match 'your own file') "the user's file is not called out: $out"
+        Assert-True ($out -notmatch 'omnigraph-mcp-autoos.*written') 'a copy was announced over a refusal'
+
+        # An older AutoOS copy (it carries the marker) is replaced, after a backup.
+        [IO.File]::WriteAllText($paths.Wrapper, "# AutoOS:omnigraph-mcp-autoos`n# an older AutoOS copy`n")
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $backups = @(Get-ChildItem -LiteralPath $paths.BinDir -Filter 'omnigraph-mcp-autoos.ps1.autoos-backup-*')
+        Assert-Equal $backups.Count 1 'the replaced AutoOS copy was not backed up'
+        Assert-True ((Get-Content -LiteralPath $paths.Wrapper -Raw) -match 'modernrelay|omnigraph-mcp') 'the new copy is not the tracked wrapper'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the env file is born user-only and its backup keeps that access' {
+    # The bytes are a live bearer token, so the file must never exist with the
+    # profile's inherited ACLs and the copy of the token it replaces must not be
+    # more readable than the file it came from (AGENTS.md section 1, and the
+    # 0600-at-creation rule lib/linux/secret_backup.py exists for).
+    $writer = (Get-Command Write-AutoOSProtectedFile).ScriptBlock.ToString()
+    $protectAt = $writer.IndexOf('Protect-AutoOSUserFile')
+    # The sibling is created empty before the ACL lands — that is the design — so
+    # what must not precede the protection is the write that carries $Content.
+    $secretAt = $writer.IndexOf('WriteAllText($temp, $Content')
+    Assert-True ($protectAt -ge 0) 'the protected writer never calls icacls'
+    Assert-True ($secretAt -gt $protectAt) 'the token bytes land before the ACL does'
+    Assert-True ($writer.Contains('WriteAllText($temp, ' + "''" + ',')) 'the sibling is not created empty first'
+    Assert-True ($writer -match 'Move') 'the file is not moved into place, so the target exists unprotected'
+    Assert-True ($writer -notmatch 'WriteAllText\(\$Path') 'the secret is written straight to the target path'
+
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $paths = Get-AutoOSOmnigraphClientPath
+        [IO.File]::WriteAllText($paths.EnvFile, "OMNIGRAPH_BASE_URL=http://old.invalid`nOMNIGRAPH_TOKEN=fixture-token-0`n")
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $backups = @(Get-ChildItem -LiteralPath $ctx.Profile -Force -Filter '.autoos-omnigraph.env.autoos-backup-*')
+        Assert-Equal $backups.Count 1 'the token-bearing file it replaced was not backed up'
+        Assert-True ((Get-Content -LiteralPath $backups[0].FullName -Raw) -match 'fixture-token-0') 'the backup is not the previous content'
+        $body = (Get-Command Protect-AutoOSUserFile).ScriptBlock.ToString()
+        Assert-True ($body -match '/inheritance:r') 'inheritance is not removed'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: the token backup is born protected, never Copy-Item then icacls' {
+    # Cross-family review (Muse) 2026-09-28: the env file itself was born
+    # restricted, but the copy of the token it replaced was made with Copy-Item
+    # and icacls'd afterwards — so the previous bearer token sat readable by
+    # anything holding the profile's inherited ACLs for the length of that
+    # window. The backup goes through the same writer as the file it copies
+    # (AGENTS.md §1, §5).
+    $copier = (Get-Command Copy-AutoOSBackup).ScriptBlock.ToString()
+    $envWriter = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $writer = (Get-Command Write-AutoOSProtectedFile).ScriptBlock.ToString()
+
+    Assert-True ($envWriter -match "Copy-AutoOSBackup[^\r\n]*-Protect") 'the env backup is not taken through the protected path'
+    Assert-True ($envWriter -notmatch 'Copy-Item') 'a copy of the token file remains in the env writer'
+    Assert-True ($copier -notmatch 'Protect-AutoOSUserFile') 'the copier re-implements the ACL rule instead of reusing the writer'
+    $protectedAt = $copier.IndexOf('Write-AutoOSProtectedFile')
+    Assert-True ($protectedAt -ge 0) 'the copier never reaches the born-protected writer'
+    # One copy statement left, and it belongs to the unprotected branch the
+    # protected one returns ahead of — so no token backup can take it.
+    Assert-Equal ([regex]::Matches($copier, 'Copy-Item -LiteralPath').Count) 1 'a second copy statement was added to the backup helper'
+    Assert-True ($copier.IndexOf('Copy-Item -LiteralPath') -gt $protectedAt) 'the plain copy is not the branch after the protected one'
+
+    # Same ordering rule inside the writer, whichever way the bytes arrive: the
+    # sibling is protected empty, and the copied token lands after that.
+    $protectAt = $writer.IndexOf('Protect-AutoOSUserFile')
+    Assert-True ($writer.IndexOf('ReadAllBytes($SourcePath') -gt $protectAt) 'the copied token bytes land before the ACL does'
+
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $paths = Get-AutoOSOmnigraphClientPath
+        $old = [Text.Encoding]::UTF8.GetBytes("OMNIGRAPH_BASE_URL=http://old.invalid`nOMNIGRAPH_TOKEN=fixture-token-0`n")
+        [IO.File]::WriteAllBytes($paths.EnvFile, $old)
+        # An old mtime, so a backup that did not carry the times across reads as
+        # this run's own new file (the copy it replaces is the user's original).
+        $when = (Get-Date).AddMinutes(-5)
+        (Get-Item -LiteralPath $paths.EnvFile -Force).LastWriteTime = $when
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $backups = @(Get-ChildItem -LiteralPath $ctx.Profile -Force -Filter '.autoos-omnigraph.env.autoos-backup-*')
+        Assert-Equal $backups.Count 1 'the previous token was not backed up'
+        $copied = [IO.File]::ReadAllBytes($backups[0].FullName)
+        Assert-True ([Convert]::ToBase64String($copied) -ceq [Convert]::ToBase64String($old)) 'the backup is not the byte-for-byte previous file'
+        $age = [Math]::Abs(((Get-Item -LiteralPath $backups[0].FullName -Force).LastWriteTime - $when).TotalSeconds)
+        Assert-True ($age -lt 2) "the backup did not carry the source's times ($age s off)"
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a second run reports skipped and writes nothing new' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $paths = Get-AutoOSOmnigraphClientPath
+        $before = [IO.File]::ReadAllText($paths.EnvFile)
+        # -Force: a dot-prefixed file is Hidden to PowerShell's provider on both
+        # platforms, and Get-Item without it reports "Could not find item".
+        $mtime = (Get-Item -LiteralPath $paths.EnvFile -Force).LastWriteTime
+        $npmBefore = @(Get-Content -LiteralPath $ctx.NpmLog -Encoding UTF8)
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'already installed and current') "second run: $out"
+        Assert-Equal ([IO.File]::ReadAllText($paths.EnvFile)) $before 'the env file changed on a run that changed nothing'
+        Assert-Equal (Get-Item -LiteralPath $paths.EnvFile -Force).LastWriteTime $mtime 'the env file was rewritten'
+        Assert-Equal (@(Get-Content -LiteralPath $ctx.NpmLog -Encoding UTF8)).Count $npmBefore.Count 'npm ran again'
+        Assert-Equal @(Get-ChildItem -LiteralPath $ctx.Profile -Force -Filter '.autoos-omnigraph.env.autoos-backup-*').Count 0 'a no-change run left a backup'
+        # The gate the pipeline asks before it would run any of this again.
+        Assert-Equal (Get-AutoOSOmnigraphClientDetection) 'installed' 'the component is not detected after a full install'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a rotated token opens the gate and rewrites the env file' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $paths = Get-AutoOSOmnigraphClientPath
+        $env:OMNIGRAPH_TOKEN = 'fixture-token-2'
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'installed'
+        Assert-True ([IO.File]::ReadAllText($paths.EnvFile) -match 'fixture-token-2') "rotation not written: $out"
+        Assert-True ([IO.File]::ReadAllText($paths.EnvFile) -notmatch 'fixture-token-1') 'the old token is still in the file'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: a refused env rewrite fails the component, not skipped' {
+    # Sonnet final review (w1) 2026-09-28: Set-AutoOSOmnigraphEnv answers 'failed'
+    # when it aborts (its backup could not be born protected), and the old token
+    # then stays on disk — but the caller only tested -eq 'written', so the run
+    # fell through to "skipped: already installed and current". A refused token
+    # rotation is not a clean re-run. Stub the writer to refuse and the component
+    # must report failed like a failed bridge or wrapper.
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    $mod = Get-Module AutoOS.Install
+    $saved = $null
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $saved = & $mod { (Get-Item function:Set-AutoOSOmnigraphEnv).ScriptBlock }
+        & $mod { Set-Item function:script:Set-AutoOSOmnigraphEnv {
+            param([string]$BaseUrl, [string]$Token)
+            'failed'
+        } }
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'failed' "a refused env rewrite reported: $out"
+        Assert-True ($out -notmatch 'already installed and current') 'the refused rewrite reported a clean skip'
+    } finally {
+        if ($saved) { & $mod { param($sb) Set-Item function:script:Set-AutoOSOmnigraphEnv $sb } -sb $saved }
+        Remove-AutoOSOmnigraphClientFixture -Ctx $ctx
+    }
+}
+
+Test-Case 'omnigraph-client: a dry run announces every step and writes nothing' {
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1' -DryRun $true
+    try {
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'nothing was written') "the dry run does not say so: $out"
+        Assert-True ($out -notmatch 'already installed') 'a dry run claimed a comparison it never made'
+        $paths = Get-AutoOSOmnigraphClientPath
+        Assert-True (-not (Test-Path -LiteralPath $paths.EnvFile)) 'the dry run wrote the env file'
+        Assert-True (-not (Test-Path -LiteralPath $paths.Wrapper)) 'the dry run placed the wrapper'
+        Assert-True (-not (Test-Path -LiteralPath $paths.Prefix)) 'the dry run created the npm prefix'
+        Assert-True (-not (Test-Path -LiteralPath $ctx.NpmLog)) 'the dry run ran npm'
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'omnigraph-client: npm is not required to be present, and says which component is missing' {
+    # requires: nodejs resolves it first, but -Only omnigraph-client can run on a
+    # machine where npm is not on PATH. A skip that names the remedy beats a
+    # terminating Get-Command error.
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    try {
+        $env:PATH = "$([IO.Path]::PathSeparator)$env:SystemRoot"
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'skipped'
+        Assert-True ($out -match 'nodejs') "the hint does not name the component to install: $out"
+    } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
+}
+
+Test-Case 'agent-skills is never cloned' {
+    # SPEC-OMNI D14: the clone is the defect this lane removes. Asserted on the
+    # installer's own body, so a re-clone anywhere else in the function still
+    # fails, and on the whole lib/ tree, so it cannot come back under a new name.
+    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
+    Assert-True ($fn.Length -gt 0) 'Install-AutoOSAgentSkills is gone from the source'
+    Assert-True ($fn -notmatch "'clone'") 'Install-AutoOSAgentSkills still runs a clone'
+    Assert-True ($fn -notmatch 'agent-skills\.git') 'the retired repository is still named'
+    Assert-True ($fn -notmatch 'Ch3fUlrich') 'a live clone target of the retired tree is still there'
+    Assert-True ($installSource -notmatch 'Ch3fUlrich') 'lib/ still names the retired clone'
+    Pass
+}
+
+Test-Case 'agent-skills: the omnigraph_url prompt belongs to omnigraph-client now' {
+    # An entry with no prompt has no Prompt property at all, and StrictMode makes
+    # reading one an error, so every lookup here goes through PSObject.Properties.
+    $e = @($winCatalog.categories.components | Where-Object { $_.Id -eq 'agent-skills' })[0]
+    $prop = $e.PSObject.Properties['Prompt']
+    $prompt = if ($prop) { [string]$prop.Value } else { '' }
+    Assert-True (-not $prompt) "agent-skills still owns a prompt: $prompt"
+    Assert-True ($e.Description -notmatch 'Clone') "the description still promises a clone: $($e.Description)"
+    # Exactly one component asks the question, or the answer is collected twice and
+    # the second one can differ from the first.
+    $owners = @($winCatalog.categories.components | ForEach-Object {
+        $p = $_.PSObject.Properties['Prompt']
+        if ($p -and $p.Value -eq 'omnigraph_url') { $_.Id }
+    })
+    Assert-Equal ($owners -join ',') 'omnigraph-client'
     Pass
 }
 
@@ -3905,24 +4483,6 @@ Test-Case 'Resolve-AutoOSOllamaBaseUrl: host.docker.internal only when Ollama an
     } finally { $env:OLLAMA_BASE_URL = $saved }
 }
 
-function Get-AutoOSConsoleCapture {
-    <#
-      .SYNOPSIS Run a scriptblock while Console.Out is redirected, returning what it wrote.
-      .DESCRIPTION
-        Write-AutoOSLine writes via [Console]::WriteLine/Write, not Write-Information,
-        so `6>&1` alone does not capture it (verified: only actual Write-Information/
-        Write-Host output crosses stream 6 - a bare Console.WriteLine bypasses the
-        PowerShell stream pipeline entirely). Redirecting Console.Out for the
-        duration of the call is the only way to capture that text in-process.
-    #>
-    param([Parameter(Mandatory)][scriptblock]$Body)
-    $origOut = [Console]::Out
-    $sw = New-Object IO.StringWriter
-    [Console]::SetOut($sw)
-    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
-    $sw.ToString()
-}
-
 # Omnigraph reachability (measured 2026-09-24): the bridge refuses to start
 # without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID (the client only says
 # "Connection closed"), and answers health without a token, so clients show
@@ -3953,7 +4513,9 @@ Test-Case 'the omnigraph user variable is set by name only, never PATH-style who
     $fn = [regex]::Match($installSource, '(?s)function Set-AutoOSOmnigraphEnv \{.*?\n\}').Value
     Assert-True ($fn -match "GetEnvironmentVariable\('OMNIGRAPH_TOKEN', 'User'\)") 'the user variable is not read first'
     Assert-True ($fn -match "SetEnvironmentVariable\('OMNIGRAPH_TOKEN', \`$token, 'User'\)") 'the user variable is not written by name'
-    Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$baseUrl\r?\n') 'the installer does not call it for real'
+    # The one caller is the component that owns the URL answer and the token;
+    # agent-skills used to call it with an invented localhost default.
+    Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$base -Token \$token') 'the installer does not call it for real'
 }
 
 Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
@@ -5685,6 +6247,39 @@ Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
         if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
     } finally {
         Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links repo skills into Claude Code and Antigravity dirs' {
+    # AGENTS.md's skill table promises ~/.claude/skills and ~/.gemini/config/skills
+    # are linked by the installers. Until SPEC-OMNI A3 the only thing feeding them
+    # on Windows was the retired clone's skills directory, so the clone could not
+    # simply be deleted: the duty moved with the source into the one helper that
+    # answers "which user-scope directories get our skills".
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dests = @((Join-Path $homeDir '.claude\skills'), (Join-Path $homeDir '.gemini\config\skills'))
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        foreach ($dest in $dests) {
+            $item = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "$dest was not created" }
+            if ($item.LinkType) { throw "$dest is a $($item.LinkType), not a real directory" }
+            foreach ($n in @('alpha', 'beta')) {
+                $link = Join-Path $dest $n
+                if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) { throw "skill '$n' not linked into $dest" }
+                if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md unreadable through $dest" }
+            }
+            if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked into $dest" }
+        }
+    } finally {
+        foreach ($dest in $dests) { Remove-TestDirLinks -Directory $dest }
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
     Pass
