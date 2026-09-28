@@ -91,7 +91,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_VERSION = "2025-03-26"
-WHOAMI_QUERY = "query whoami() { match { $p: Project } return { $p.slug, $p.repository } }"
+WHOAMI_QUERY = "query whoami() { match { $p: Project } return { $p.slug } }"  # Project has no `repository` property in the live schema
 WHOAMI_SLUG_KEY = "p.slug"
 DEFAULT_PARALLEL = 16
 DEFAULT_LIMIT_MS = 2000
@@ -221,8 +221,8 @@ def _make_handler(server: FakeOmnigraphServer):
             if length:
                 self.rfile.read(length)
             self._reply(200, {
-                "rows": [{WHOAMI_SLUG_KEY: server.slug, "p.repository": "AutoOS"}],
-                "columns": [WHOAMI_SLUG_KEY, "p.repository"],
+                "rows": [{WHOAMI_SLUG_KEY: server.slug}],
+                "columns": [WHOAMI_SLUG_KEY],
             })
 
     return Handler
