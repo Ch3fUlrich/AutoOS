@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added - one canonical run id per spawn, its parent edge, and the route it was scored on (FLEET, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: a spawn minted **two** ids from **two** clocks and nothing tied them
+  together - the `--isolate` clone and its branch were stamped from `datetime.now()` (local time, a
+  slug of the *task*), the worker record minted a separate UTC `stamp-hex6`, and the `logs/agents/`
+  run dir a third, so a console could not say which record, clone, branch and request belonged to one
+  run (FLEETSPEC §5.1/§10 P0). `mint_run_id` mints `YYYYMMDD-HHMMSS-<slug>-<hex6>` **once, in UTC**,
+  the slug the run's title capped at 24 chars of `[a-z0-9-]` (never task text past it: a brief can
+  carry a key), and it is now the clone dir suffix, `agent/<id>`, `logs/workers/<id>.json`, the
+  child's `AUTOOS_AGENT_RUN_ID` and the `X-AutoOS-Run-Id` header sent beside
+  `x-omniroute-session-id` (a fallthrough re-run keeps the first attempt's clone, branch and id - one
+  spawn is one id). A record stores `parent_run_id` (the `AUTOOS_AGENT_RUN_ID` this spawner was
+  itself spawned with, `None` at top level), `host` (`socket.gethostname()`, in the git-ignored
+  record only - never in a committed fixture), `task_dir` (the `AUTOOS_TASK_DIR` run dir the child
+  asks back in, which links the third id) and the resolver's whole `route_plan`; `redact_record` now
+  walks nested values, because the resolver's `reason` carries whatever a probe line said.
+  `ps --tree` prints the spawn tree - children indented under the run that spawned them, an orphan
+  whose parent record is gone a top-level row marked `(parent <id> gone)`, an unvisited row still
+  emitted so a cycle never swallows a run - and `ps --json` rows carry `parent_run_id` untruncated.
+  Old records with none of these fields still list; nothing else renames.
+- **`tests/test_autoos_spawner.py`**: `CanonicalRunIdTests`, `RunIdRecordTests`, `PsTreeTests`
+  (22 cases: the id's shape, its UTC stamp and 24-char cap, no task text past the slug, one id in
+  branch + dir + record + child env, the parent inherited from the spawner's own env, `ps --tree`
+  ordering and the gone-parent row, the host (a fake one, patched in), `route_plan` persisted and
+  redacted, the header injected next to the session tag, an old record still listing). Red before:
+  **20 failed / 584 passed** on `tests/test_autoos_spawner.py tests/test_autoos_track.py`; green
+  after: **604 passed / 0**, with `test_agent_harness.py`, `test_autoos_context.py`,
+  `test_autoos_heartbeat.py`, `test_autoos_usage.py`, `test_autoos_measure.py` and
+  `test_autoos_resolver.py` at 415 passed / 1 skipped. Six pre-existing fakes of `build_plan`'s
+  output gained the `run_id` the plan now carries, `SandboxUniquenessTests` its `t2-` prefix (the
+  slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
+  `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
+  `task_dir` is what links the two ids meanwhile.
+
 ### Fixed — the REST temp files are removed on every exit path, and the gateway's reason survives to the log (MUSEFIX, 2026-09-28)
 
 - **`configuration/omniroute/apply.sh`**: `omni_rest` writes the manage key into a `mktemp` curl `--config` file and the response into a second `mktemp` — a `GET /api/providers` answer is every provider's live `apiKey` — and both were removed only by the statement *after* the call. A run interrupted while a call was in flight therefore left a 0600 file holding the key in `/tmp` on the user's machine, which is what an onboarding run a user gets impatient with looks like. The removal is now trapped for the duration of the call (`trap 'rm -f -- "$cfg" "$out"' INT TERM EXIT`, cleared immediately after — the script sets no trap of its own, so clearing restores "no trap") in the shape `ai-stack.sh` uses for its edge-webhook header file. Measured against the interrupt case, with two temp files live mid-call: before the trap, a `SIGTERM` to the run's process group — the shape of Ctrl-C — killed it at rc 143 with **both files on disk**; with the trap, nothing survives, in either signal shape (a `SIGTERM` aimed at only the script's pid is cleaned up too, by the call's own shell finishing behind it). Outside a call the script still has no trap, so Ctrl-C keeps the default disposition there, exactly as in `ai-stack.sh`.

@@ -2266,8 +2266,12 @@ class SandboxUniquenessTests(unittest.TestCase):
 
     def _two_plans(self, task):
         fixed = datetime.datetime(2026, 9, 26, 12, 0, 0)
-        frozen = types.SimpleNamespace(datetime=type(
-            "FrozenDatetime", (), {"now": staticmethod(lambda: fixed)}))
+        # the fake carries the whole datetime surface build_plan touches:
+        # datetime.datetime.now(timezone.utc) stamps the run id
+        frozen = types.SimpleNamespace(
+            datetime=type("FrozenDatetime", (),
+                          {"now": staticmethod(lambda tz=None: fixed)}),
+            timezone=datetime.timezone)
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
             cfg = self.cli.load_jsonc(str(ROOT / "opencode.jsonc"))
@@ -2282,7 +2286,11 @@ class SandboxUniquenessTests(unittest.TestCase):
 
     def test_the_readable_prefix_is_kept_and_a_short_suffix_added(self):
         first, second = self._two_plans("fix the spawner twice")
-        stamp, slug = "20260926-120000", "fix-the-spawner-twice"
+        # FLEET: the clone and its branch are named by the run id, whose slug is
+        # the title the run is named by - a titleless spawn's title is the tier
+        # plus the task head, so the readable prefix grew the "t2-" it always
+        # showed in `ps`.
+        stamp, slug = "20260926-120000", "t2-fix-the-spawner-twice"
         base = "%s-%s-%s" % (os.path.basename(self.cli.ROOT), stamp, slug)
         self.assertTrue(os.path.basename(first["sandbox"]["path"]).startswith(base + "-"),
                         first["sandbox"]["path"])
@@ -2929,6 +2937,7 @@ class RawTailClassificationTests(unittest.TestCase):
                       "privacy": "public", "review": False, "tier": 2,
                       "card": None},
             "depth": (1, 3), "free": False, "sandbox": None,
+            "run_id": "20260928-092516-test-run-abc123",
             "cwd": os.getcwd(),
         }
         ns = argparse.Namespace(
@@ -3503,6 +3512,7 @@ class RouteCliTests(unittest.TestCase):
             "depth": (1, 3),
             "free": False,
             "sandbox": None,
+            "run_id": "20260928-092516-test-run-abc123",
             "cwd": os.getcwd(),
         }
         ns = argparse.Namespace(
@@ -6222,6 +6232,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=True,
@@ -6307,6 +6318,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -6349,6 +6361,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -6379,6 +6392,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -7972,6 +7986,301 @@ class ReadyCommandTests(unittest.TestCase):
 def _reviewer_client_state():
     return {name: {"installed": True, "signed_in": True, "reason": ""}
             for name in ("opencode", "gemini", "qoder", "claude")}
+
+
+RUN_ID_RE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9-]+)-([0-9a-f]{6})$")
+
+
+class CanonicalRunIdTests(unittest.TestCase):
+    """FLEETSPEC P0 (FLEET): one canonical run id per spawn, minted ONCE in UTC.
+    It names the sandbox branch, the sandbox dir, the worker record and the
+    child's AUTOOS_AGENT_RUN_ID. Before this, the sandbox was stamped in LOCAL
+    time from the task and the worker record minted a second, unrelated UTC id
+    (two unlinked ids for one run)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def _lane(self):
+        return self.cli.session_tag("t", env={}).rsplit("/", 1)[0]
+
+    def _args(self, **overrides):
+        ns = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            title=None)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def _cfg(self, providers=None):
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": providers or {}}
+        cfg["providers"].setdefault("omniroute", {"models": {"t2-worker": {}}})
+        return cfg
+
+    def _overlay(self, plan):
+        return json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}"))
+
+    # --- the id itself -----------------------------------------------------
+    def test_the_id_is_utc_stamped_slug_capped_and_hex6(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("Fix The Router!!", "unused task text", now=now)
+        match = RUN_ID_RE.match(rid)
+        self.assertIsNotNone(match, rid)
+        self.assertEqual(match.group(1), "20260928-092516")   # UTC, not local
+        self.assertEqual(match.group(2), "fix-the-router")
+        self.assertRegex(match.group(3), r"^[0-9a-f]{6}$")
+
+    def test_the_stamp_is_utc_whatever_clock_it_is_given(self):
+        # The old sandbox stamp used datetime.now() (local): a host at UTC+8
+        # named its runs 8 h off every other id on the same machine.
+        plus8 = datetime.timezone(datetime.timedelta(hours=8))
+        rid = self.cli.mint_run_id("T", "T",
+                                   now=datetime.datetime(2026, 9, 28, 17, 25, 16,
+                                                         tzinfo=plus8))
+        self.assertEqual("-".join(rid.split("-")[:2]), "20260928-092516")
+
+    def test_the_slug_is_capped_at_24_chars_of_safe_charset(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id(
+            "run to the end, finish with a commit and the REPORT", "task", now=now)
+        slug = RUN_ID_RE.match(rid).group(2)
+        self.assertLessEqual(len(slug), 24, rid)
+        self.assertRegex(slug, r"^[a-z0-9-]+$")
+        self.assertFalse(slug.endswith("-"), rid)
+
+    def test_no_task_text_reaches_the_id_when_a_title_names_the_run(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("short title",
+                                  "grep zebratoken across the whole repository", now=now)
+        self.assertNotIn("zebra", rid)
+        self.assertIn("short-title", rid)
+
+    def test_a_titleless_spawn_slugs_the_task_instead(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id(None, "Fix THE spawner, please, in the sandbox", now=now)
+        slug = RUN_ID_RE.match(rid).group(2)
+        # the first 24 chars of the task's own slug - a mid-word cut is accepted,
+        # because the cap has to bound a filename, a branch and a header value.
+        self.assertEqual(slug, "fix-the-spawner-please-i")
+        self.assertNotIn("sandbox", rid)
+
+    def test_two_spawns_in_the_same_second_never_share_an_id(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        self.assertNotEqual(self.cli.mint_run_id("same", "same", now=now),
+                            self.cli.mint_run_id("same", "same", now=now))
+
+    # --- one id, four places ----------------------------------------------
+    def test_one_id_names_the_branch_the_dir_the_record_field_and_the_child_env(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = self.cli.build_plan(
+                self._args(title="Fix The Router", isolate=True,
+                           task="a task whose own words must not be used"), self._cfg())
+        rid = plan["run_id"]
+        self.assertTrue(RUN_ID_RE.match(rid), rid)
+        self.assertEqual(plan["sandbox"]["branch"], "agent/%s" % rid)
+        self.assertEqual(os.path.basename(plan["sandbox"]["path"]),
+                         "%s-%s" % (os.path.basename(self.cli.ROOT), rid))
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], rid)
+        # the slug came from the title, never from the task text
+        self.assertIn("fix-the-router", rid)
+
+    def test_a_non_isolated_run_still_mints_one_id_for_the_child(self):
+        plan = self.cli.build_plan(self._args(title="Plain"), self._cfg())
+        self.assertTrue(RUN_ID_RE.match(plan["run_id"]), plan["run_id"])
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], plan["run_id"])
+
+    # --- item 5: the header ----------------------------------------------
+    def test_the_run_id_header_is_injected_next_to_the_session_tag(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.cli.build_plan(self._args(title="Fix The Router!"), self._cfg())
+        headers = self._overlay(plan)["providers"]["omniroute"]["headers"]
+        self.assertEqual(headers["x-omniroute-session-id"],
+                         "%s/fix-the-router" % self._lane())
+        self.assertEqual(headers[self.cli.RUN_ID_HEADER], plan["run_id"])
+
+    def test_a_model_off_the_gateway_gets_neither_header(self):
+        cfg = self._cfg({"other": {"models": {"m": {}}}})
+        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        plan = self.cli.build_plan(self._args(title="T"), cfg)
+        self.assertNotIn("providers", self._overlay(plan))
+
+    def test_the_plan_output_prints_the_run_id(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        match = re.search(r"run-id: (\S+)", r.stdout)
+        self.assertIsNotNone(match, r.stdout)
+        self.assertTrue(RUN_ID_RE.match(match.group(1)), match.group(1))
+
+
+class RunIdRecordTests(_WorkerRecordBase):
+    """FLEETSPEC P0 items 2-4: the worker record carries the canonical run id,
+    its parent edge, the host, and the full route_plan - all redacted."""
+
+    def _plan(self, **over):
+        run_id = "20260928-092516-fix-the-router-abc123"
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                # what build_plan actually hands the child (autoos-agent.py
+                # build_plan: env["AUTOOS_AGENT_RUN_ID"] = run_id)
+                "cmd": [sys.executable, "-c", "pass"],
+                "env": {"AUTOOS_AGENT_DEPTH": "1", "AUTOOS_AGENT_MAX_DEPTH": "3",
+                        "AUTOOS_AGENT_RUN_ID": run_id},
+                "run_id": run_id,
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2,
+                          "route_plan": {"route": "t2-worker", "class": "paid",
+                                         "leg": "p/m", "effort": "low", "p": 0.8,
+                                         "expected_cost": 0.1, "bucket": "S2",
+                                         "skipped_legs": [],
+                                         "reason": "picked with sk-ant-abcdefghij"}},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-test"}
+        plan.update(over)
+        return plan
+
+    def _args(self):
+        return argparse.Namespace(
+            client="opencode", task="do it", free=False, dry_run=False, card=None,
+            clean=False, tier=2, joinable=False, lean=False, isolate=False, auto=True,
+            title="t", model=None, free_model=self.agent.DEFAULT_FREE_MODEL,
+            max_depth=None, allow_training=False, no_defer=False)
+
+    def _cmd_run(self, plan, parent=None, task_dir=None):
+        """Run cmd_run with the client replaced; return (rc, record, child_env).
+
+        `parent`/`task_dir` are what the *spawner's own* environment carries:
+        None removes the variable, so a top-level run is the tested case.
+        """
+        seen = {}
+        additions = {}
+        if parent:
+            additions["AUTOOS_AGENT_RUN_ID"] = parent
+        if task_dir:
+            additions["AUTOOS_TASK_DIR"] = task_dir
+
+        def fake_run(cmd, cwd, child_env, **kw):
+            files = [f for f in os.listdir(self.workers) if f.endswith(".json")]
+            self.assertEqual(len(files), 1, files)
+            with io.open(os.path.join(self.workers, files[0]), encoding="utf-8") as fh:
+                seen["rec"] = json.load(fh)
+            seen["env"] = dict(child_env)
+            return self.agent.ClientExit(0)
+
+        with mock.patch.dict(os.environ, additions), \
+                mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")), \
+                mock.patch("socket.gethostname", return_value="test-host"):
+            # the suite itself may run inside a spawned worker: start from a
+            # known environment, then add only what the test names
+            for name in ("AUTOOS_AGENT_RUN_ID", "AUTOOS_TASK_DIR"):
+                if name not in additions:
+                    os.environ.pop(name, None)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(self._args(), {})
+        return rc, seen.get("rec"), seen.get("env")
+
+    def test_the_record_id_is_the_canonical_run_id_and_the_child_inherits_it(self):
+        rc, rec, child_env = self._cmd_run(self._plan())
+        self.assertEqual(rc, 0)
+        self.assertEqual(rec["id"], "20260928-092516-fix-the-router-abc123")
+        self.assertEqual(child_env["AUTOOS_AGENT_RUN_ID"], rec["id"])
+        self.assertTrue(os.path.isfile(os.path.join(self.workers, rec["id"] + ".json")))
+
+    def test_no_parent_env_is_a_top_level_run(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        self.assertIsNone(rec["parent_run_id"])
+
+    def test_the_parent_edge_comes_from_the_spawner_own_env(self):
+        # the spawner itself was spawned: its own AUTOOS_AGENT_RUN_ID is the parent
+        _rc, rec, _env = self._cmd_run(
+            self._plan(), parent="20260928-080000-parent-run-000aaa")
+        self.assertEqual(rec["parent_run_id"], "20260928-080000-parent-run-000aaa")
+
+    def test_the_run_dir_the_child_asks_back_in_is_recorded(self):
+        _rc, rec, _env = self._cmd_run(
+            self._plan(), task_dir="/tmp/agents/20260928-080000-abcdef")
+        self.assertEqual(rec["task_dir"], "/tmp/agents/20260928-080000-abcdef")
+
+    def test_the_host_is_recorded(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        self.assertEqual(rec["host"], "test-host")
+
+    def test_the_route_plan_is_persisted_and_redacted_like_the_rest(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        plan = rec["route_plan"]
+        self.assertEqual(plan["route"], "t2-worker")
+        self.assertEqual(plan["bucket"], "S2")
+        self.assertEqual(plan["skipped_legs"], [])
+        self.assertNotIn("sk-ant", json.dumps(plan))
+        self.assertIn("[autoos:redacted]", plan["reason"])
+
+    def test_ps_json_rows_carry_the_parent_edge(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = json.loads(r.stdout)["workers"]
+        self.assertIn("parent_run_id", rows[0])
+        self.assertIsNone(rows[0]["parent_run_id"])
+
+    def test_an_old_record_without_the_new_fields_still_lists(self):
+        self.write()  # the pre-FLEET fixture record: no run id, no parent, no host
+        r = run_agent("ps", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = json.loads(r.stdout)["workers"][0]
+        self.assertEqual(row["id"], "w1")
+        self.assertIsNone(row["parent_run_id"])
+
+
+class PsTreeTests(_WorkerRecordBase):
+    """FLEETSPEC P0 item 2: `ps --tree` shows the spawn tree, not a flat list."""
+
+    def stamp(self, minutes_ago):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (now - datetime.timedelta(minutes=minutes_ago)).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
+    def test_children_are_indented_under_their_parent(self):
+        self.write("orch", started=self.stamp(30))
+        self.write("a", started=self.stamp(20), parent_run_id="orch", title="first leg")
+        self.write("b", started=self.stamp(10), parent_run_id="orch", title="second leg")
+        self.write("top", started=self.stamp(5))
+        r = run_agent("ps", "--tree", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        row = lambda w: next(l for l in lines if l.strip().split()[0] == w)
+        at = lambda w: lines.index(row(w))
+        self.assertFalse(row("orch").startswith(" "))
+        self.assertFalse(row("top").startswith(" "))
+        self.assertTrue(row("a").startswith("  "), r.stdout)
+        self.assertTrue(row("b").startswith("  "), r.stdout)
+        # the children follow their parent, and a second top-level run closes
+        # the subtree rather than appearing inside it
+        self.assertTrue(at("orch") < at("a") < at("b") < at("top"), r.stdout)
+
+    def test_a_child_whose_parent_record_is_gone_is_a_top_level_orphan(self):
+        self.write("a", started=self.stamp(10), parent_run_id="gone-orch")
+        r = run_agent("ps", "--tree", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = next(l for l in r.stdout.splitlines() if l.strip().startswith("a "))
+        self.assertFalse(line.startswith("  "), r.stdout)
+        self.assertIn("(parent gone-orch gone)", line)
+
+    def test_the_tree_is_a_decoration_on_ps_and_the_table_stays_flat(self):
+        self.write("orch", started=self.stamp(10))
+        self.write("a", started=self.stamp(5), parent_run_id="orch")
+        flat = run_agent("ps", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(flat.returncode, 0, flat.stderr)
+        self.assertTrue(flat.stdout.splitlines()[1].startswith("orch"), flat.stdout)
 
 
 if __name__ == "__main__":

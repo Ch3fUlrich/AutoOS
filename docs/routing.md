@@ -64,6 +64,19 @@ OmniRoute copies that header into the `session_tag` field of each `call_logs` ro
 are the rows of `/api/usage/call-logs` whose `session_tag` equals the tag (the route has no
 `session_tag` filter param yet — page and match client-side).
 
+Run identity (FLEET): one spawn mints one id, `YYYYMMDD-HHMMSS-<slug>-<hex6>` in UTC
+(`autoos-agent.py` `mint_run_id`), and the same string is the `--isolate` clone's directory suffix,
+its branch `agent/<id>`, the git-ignored record `logs/workers/<id>.json`, the header
+`X-AutoOS-Run-Id` sent beside `x-omniroute-session-id`, and the child's `AUTOOS_AGENT_RUN_ID`. The
+child's own spawns read that variable and store it as their `parent_run_id`, so `autoos-agent.py ps
+--tree` prints the spawn tree (an orphan whose parent record is gone is a top-level row that says
+`(parent <id> gone)`; `ps --json` carries the edge untruncated, the tree being a display of it). A
+record also keeps the host it ran on, the `logs/agents/<id>` run dir it was given
+(`AUTOOS_TASK_DIR`, which the MCP server still names with its own id - `autoos_agent_mcp.py`
+`spawn`), and the resolver's whole `route_plan`, so a run stays auditable after the probes and
+cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
+included.
+
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which
 is load shedding, not a dead leg. 400, 404 and transport errors are drift and are never
