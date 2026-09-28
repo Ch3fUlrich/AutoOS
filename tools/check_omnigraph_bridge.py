@@ -61,6 +61,11 @@ Exit codes:
     1   a bridge died, health was slow, the slug was wrong, or npm logged a
         lock/cache error (each named in the report)
     2   unusable input (no `.mcp.json` to read, an empty graph id, N < 1)
+    130 interrupted by SIGINT (Ctrl-C): the wave was not scored, so no report is
+        printed and only "interrupted" goes to stderr. Every bridge already
+        started — and everything it spawned — is killed before the tool exits.
+        SIGINT is armed on entry even where it was inherited as ignored, so a
+        backgrounded or headless run can be stopped too.
 """
 
 from __future__ import annotations
@@ -73,13 +78,14 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -93,6 +99,13 @@ DEFAULT_TIMEOUT_S = 60.0
 LOCK_PATTERNS = ("EEXIST", "ENOTEMPTY", "lock")
 REDACTED = "<redacted>"
 FAKE_VERSION = "0.8.0-fake"
+# How long a bridge gets to leave on its own at each close() stage, and how
+# often a blocked read loop or the wave checks for a Ctrl-C. Both bound the
+# worst case of an interrupted run, so they must stay small.
+CLOSE_GRACE_S = 2.0
+POLL_S = 0.1
+TASKKILL_TIMEOUT_S = 10.0
+EXIT_INTERRUPTED = 130  # 128 + SIGINT, the shell's own convention
 
 
 class Unusable(Exception):
@@ -215,14 +228,111 @@ def _make_handler(server: FakeOmnigraphServer):
     return Handler
 
 
+# ── process lifecycle: a bridge, and everything it spawned ────────────────────
+
+def popen_session_kwargs() -> dict:
+    """Keyword arguments putting the child in a group of its own.
+
+    The bridge is `npx`, which starts `npm`, which starts `node`: to stop the
+    whole of it the child has to lead a process group, both so a kill can be
+    aimed at that group and so it is never aimed at ours. Ctrl-C also stops
+    reaching the bridges through the terminal, which is what makes this tool's
+    own interrupt handler the one thing that decides when a run is over.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def kill_process_group(proc: subprocess.Popen, sig) -> bool:
+    """Send *sig* to every process in the child's group; True if it landed.
+
+    Only a group the child *leads* may be signalled — anything else is this
+    process's own group, and SIGKILL to that would take the benchmark down with
+    the bridges it was trying to clean up.
+    """
+    if os.name == "nt":
+        return False
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        return False  # already gone and reaped
+    if pgid != proc.pid:
+        return False
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def taskkill_tree(proc: subprocess.Popen) -> None:
+    """Windows: the only simple primitive that reaches a whole child tree."""
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       check=False, timeout=TASKKILL_TIMEOUT_S,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        proc.kill()  # no taskkill, or it hung: at worst the direct child goes
+
+
+def stop_process_tree(proc: subprocess.Popen, force: bool = False) -> None:
+    """Signal the child *and everything it spawned*.
+
+    `force=False` asks politely (SIGTERM to the group; TerminateProcess is as
+    far as Windows gets before the taskkill fallback); `force=True` ends it.
+    """
+    if os.name == "nt":
+        if force:
+            taskkill_tree(proc)
+        else:
+            proc.terminate()
+        return
+    if force:
+        if not kill_process_group(proc, signal.SIGKILL):
+            proc.kill()
+    else:
+        if not kill_process_group(proc, signal.SIGTERM):
+            proc.terminate()
+
+
+def await_exit(proc: subprocess.Popen, timeout: float = CLOSE_GRACE_S) -> bool:
+    """True once the child is reaped. Waiting is the point — an unreaped child
+    stays a zombie, and a zombie still holds its pid."""
+    try:
+        proc.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def arm_interrupt_handler() -> None:
+    """Make Ctrl-C reachable even where it arrives as 'ignored'.
+
+    A child that a non-interactive shell puts in the background inherits SIGINT
+    as SIG_IGN, and CPython then leaves it alone instead of installing its own
+    handler — so a benchmark started by a wrapper or a headless lane could not
+    be interrupted at all (AGENTS.md §6). Restoring the default handler puts
+    KeyboardInterrupt back in the main thread, which is what stops the wave. A
+    handler someone else installed deliberately is left alone.
+    """
+    try:
+        if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+    except (AttributeError, OSError, ValueError):
+        pass  # no SIGINT here, or not the main thread: nothing to arm
+
+
 # ── the MCP stdio client ──────────────────────────────────────────────────────
 
 class McpStdioClient:
     """Newline-delimited JSON-RPC over one child process's stdio."""
 
-    def __init__(self, cmd: list[str], env: dict, deadline: float, token: str | None):
+    def __init__(self, cmd: list[str], env: dict, deadline: float, token: str | None,
+                 stop: threading.Event | None = None):
         self.deadline = deadline
         self.token = token
+        self.stop = stop if stop is not None else threading.Event()
         self.stderr_lines: list[str] = []
         self._stdout_queue: queue.Queue = queue.Queue()
         self._next_id = 0
@@ -230,7 +340,7 @@ class McpStdioClient:
         try:
             self.proc = subprocess.Popen([executable, *cmd[1:]], env=env,
                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE)
+                                         stderr=subprocess.PIPE, **popen_session_kwargs())
         except OSError as exc:
             raise BridgeError(f"cannot start bridge: {exc}")
         threading.Thread(target=self._pump_stdout, daemon=True).start()
@@ -271,9 +381,13 @@ class McpStdioClient:
             if remaining <= 0:
                 raise BridgeError("no answer before the timeout")
             try:
-                message = self._stdout_queue.get(timeout=remaining)
+                # Polled in short slices rather than one blocking get(remaining):
+                # an interrupted run must abandon a bridge that never answers.
+                message = self._stdout_queue.get(timeout=min(remaining, POLL_S))
             except queue.Empty:
-                raise BridgeError("no answer before the timeout")
+                if self.stop.is_set():
+                    raise BridgeError("interrupted before the bridge answered")
+                continue
             if message is None:
                 raise BridgeError(f"bridge exited rc={self.proc.poll()} before answering")
             if message.get("id") != want_id:
@@ -298,18 +412,23 @@ class McpStdioClient:
         return tool_payload(result, self.token)
 
     def close(self) -> None:
+        """Leave nothing of this bridge behind: its tree first, then its pid.
+
+        Every stage is bounded, because close() runs on the interrupt path — a
+        bridge that ignores SIGTERM (a wedged npm will) must still be gone a few
+        seconds after Ctrl-C.
+        """
         try:
             self.proc.stdin.close()
         except OSError:
             pass
-        try:
-            self.proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        if await_exit(self.proc):
+            return
+        stop_process_tree(self.proc)          # SIGTERM the group
+        if await_exit(self.proc):
+            return
+        stop_process_tree(self.proc, force=True)  # SIGKILL the group / taskkill /T /F
+        await_exit(self.proc)  # a killed child is a zombie until it is reaped
 
 
 def tool_payload(result: dict, token: str | None):
@@ -359,16 +478,22 @@ def count_lock_errors(lines: list[str]) -> dict:
 
 
 def run_bridge(index: int, cmd: list[str], env: dict, graph_id: str,
-               timeout: float, limit_ms: float, token: str | None) -> dict:
+               timeout: float, limit_ms: float, token: str | None,
+               stop: threading.Event | None = None) -> dict:
     """One bridge: handshake, health (timed), whoami. Never raises."""
+    stop = stop if stop is not None else threading.Event()
     started = time.monotonic()
     deadline = started + timeout
     record = {"bridge": index, "latency_ms": None, "health_ok": False,
               "whoami_ok": False, "reasons": [], "server_version": "",
               "lock_errors": count_lock_errors([])}
+    if stop.is_set():
+        # An interrupted wave must not start the bridges still queued behind it.
+        record["reasons"].append("interrupted before this bridge was started")
+        return record
     client = None
     try:
-        client = McpStdioClient(cmd, env, deadline, token)
+        client = McpStdioClient(cmd, env, deadline, token, stop)
         client.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
             "clientInfo": {"name": "check-omnigraph-bridge", "version": "1"}})
@@ -405,21 +530,52 @@ def run_bridge(index: int, cmd: list[str], env: dict, graph_id: str,
     return record
 
 
-def prime_bridge(cmd, env, graph_id, timeout, token) -> None:
+def prime_bridge(cmd, env, graph_id, timeout, token, stop=None) -> None:
     """--warm: one sequential bridge first so the measured wave hits a filled cache.
 
     Its own record is dropped — it measures the cache fill, not the wave."""
-    run_bridge(0, cmd, env, graph_id, timeout, float("inf"), token)
+    run_bridge(0, cmd, env, graph_id, timeout, float("inf"), token, stop)
 
 
 def benchmark(cmd: list[str], env: dict, graph_id: str, parallel: int, timeout: float,
-              limit_ms: float, warm: bool, token: str | None) -> list[dict]:
-    if warm:
-        prime_bridge(cmd, env, graph_id, timeout, token)
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        return list(pool.map(
-            lambda i: run_bridge(i, cmd, env, graph_id, timeout, limit_ms, token),
-            range(1, parallel + 1)))
+              limit_ms: float, warm: bool, token: str | None,
+              stop: threading.Event | None = None) -> tuple[list[dict], bool]:
+    """Run the wave and return (records, interrupted).
+
+    The wait is `futures` + a short poll, not `Executor.map`: map blocks until
+    every bridge is done, so a Ctrl-C would sit out the full --timeout for each
+    hung bridge and then exit as if nothing had happened. Setting `stop` (which
+    is what SIGINT does in main) makes every worker abandon its read loop, close
+    its client — killing that bridge's whole process group — and the queued
+    bridges are cancelled before they can start.
+    """
+    stop = stop if stop is not None else threading.Event()
+    records: list[dict] = []
+    futures: list = []
+    pool = ThreadPoolExecutor(max_workers=parallel)
+    try:
+        try:
+            if warm:
+                prime_bridge(cmd, env, graph_id, timeout, token, stop)
+            futures = [pool.submit(run_bridge, i, cmd, env, graph_id, timeout,
+                                   limit_ms, token, stop)
+                       for i in range(1, parallel + 1)]
+            while not stop.is_set():
+                pending = [f for f in futures if not f.done()]
+                if not pending:
+                    break
+                wait(pending, timeout=POLL_S)
+        except KeyboardInterrupt:
+            stop.set()  # the main thread is where SIGINT lands
+        if stop.is_set():
+            for future in futures:
+                future.cancel()
+        records = [f.result() for f in futures if f.done() and not f.cancelled()]
+    finally:
+        # On the interrupt path the workers still have to finish killing their
+        # bridges, so do not block here — the interpreter joins them at exit.
+        pool.shutdown(wait=not stop.is_set(), cancel_futures=True)
+    return records, stop.is_set()
 
 
 # ── the report ────────────────────────────────────────────────────────────────
@@ -588,6 +744,7 @@ def make_env(base_url: str, graph_id: str, token: str | None, mode: str,
 
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
+    arm_interrupt_handler()
     try:
         validate(args)
         mode = args.mode or "warm"
@@ -598,6 +755,8 @@ def main(argv=None) -> int:
 
     token = os.environ.get("OMNIGRAPH_TOKEN") or None
     npm_cache = ""
+    stop = threading.Event()
+    interrupted = False
     try:
         with contextlib.ExitStack() as stack:
             if mode == "cold":
@@ -610,8 +769,9 @@ def main(argv=None) -> int:
             else:
                 base_url = settings["base_url"]
             env = make_env(base_url, settings["graph_id"], token, mode, npm_cache)
-            records = benchmark(settings["cmd"], env, settings["graph_id"], args.parallel,
-                                args.timeout, args.limit_ms, mode == "warm", token)
+            records, interrupted = benchmark(
+                settings["cmd"], env, settings["graph_id"], args.parallel,
+                args.timeout, args.limit_ms, mode == "warm", token, stop)
             report = summarise(records, args.parallel, mode, settings["graph_id"],
                                args.limit_ms, base_url, settings["cmd"],
                                bool(args.fake_server), npm_cache)
@@ -621,6 +781,13 @@ def main(argv=None) -> int:
     finally:
         if npm_cache and not args.npm_cache:
             shutil.rmtree(npm_cache, ignore_errors=True)
+
+    if interrupted:
+        # Nothing here is a measurement — every bridge that had not finished was
+        # abandoned, so a scored report would be a lie. Its own exit code says so.
+        print("interrupted: the benchmark stopped early and every bridge it started "
+              "was killed; nothing was scored", file=sys.stderr)
+        return EXIT_INTERRUPTED
 
     print(json.dumps(report, indent=2) if args.json else render_table(report))
     return 0 if report["ok"] else 1

@@ -140,7 +140,10 @@ OMNIGRAPH_BASE_URL=<omnigraph-url> OMNIGRAPH_TOKEN=... \
 ```
 
 Exit 0 = D9 met, 1 = a bridge died, health was slow, the slug was a different
-graph, or npm logged a lock error (each named in the report); 2 = unusable input.
+graph, or npm logged a lock error (each named in the report); 2 = unusable input;
+130 = interrupted by Ctrl-C — nothing is scored, every bridge it started and
+everything those bridges spawned is killed, and only an "interrupted" line goes
+to stderr.
 `--json` gives the machine-readable form. The token comes from `$OMNIGRAPH_TOKEN`
 only and is never printed; the bridge command, the graph id and the base-url
 default are read from `.mcp.json`, so the pin is never spelled twice.

@@ -18,8 +18,8 @@ Set FAKE_BRIDGE_MODE to bend the contract for a specific test:
   leak_token    log the bearer token on stderr (verbose npm), then answer normally
   slow          take ~40 ms to answer health
   hang          spawn a grandchild, then wedge forever ignoring SIGTERM — the shape
-                of a hung `npx` that left an `npm`-started `node` behind. Its own pid
-                and the grandchild's go to $FAKE_BRIDGE_PID_FILE for the test to watch.
+                of a hung `npx` that left an `npm`-started `node` behind. Each bridge
+                appends its pid and the grandchild's to $FAKE_BRIDGE_PID_FILE.
 
 Run from the repo root (not useful on its own):
 
@@ -125,9 +125,10 @@ def hang_with_a_grandchild():
     """Wedge forever, holding a descendant process open behind us.
 
     A separate process, not a thread: `npx` -> `npm` -> `node` has exactly this
-    shape, and it is why killing the bridge's direct child is not enough. Both
-    pids go to $FAKE_BRIDGE_PID_FILE so the test can watch them after the tool
-    has returned.
+    shape, and it is why killing the bridge's direct child is not enough. Each
+    bridge appends one line, "<own pid> <grandchild pid>", to
+    $FAKE_BRIDGE_PID_FILE, so a test can watch every bridge a wave started after
+    the tool has returned.
     """
     if os.name != "nt":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)  # only a killpg kills us
@@ -136,7 +137,7 @@ def hang_with_a_grandchild():
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     pid_file = os.environ.get("FAKE_BRIDGE_PID_FILE")
     if pid_file:
-        with open(pid_file, "w", encoding="utf-8") as fh:
+        with open(pid_file, "a", encoding="utf-8") as fh:
             fh.write(f"{os.getpid()} {grandchild.pid}\n")
     while True:
         time.sleep(3600)
