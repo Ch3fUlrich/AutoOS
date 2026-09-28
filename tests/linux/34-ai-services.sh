@@ -254,7 +254,7 @@ if [[ "${1:-} ${2:-}" == "combo list" ]]; then
     exit 0
 fi
 if [[ "${1:-} ${2:-}" == "providers available" ]]; then
-    printf '  Loaded env from /home/s/.omniroute/.env\n'
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
     python3 - "$d/builtins.txt" <<'PY'
 import json, sys
 rows = [{"id": s, "name": s, "category": "api-key", "alias": s}
@@ -515,7 +515,7 @@ PY
 fi
 if [[ "${1:-} ${2:-}" == "providers available" ]]; then
     # The real CLI prints its .env banner, then the JSON document.
-    printf '  Loaded env from /home/s/.omniroute/.env\n'
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
     # no_available: the banner with no document after it - what a CLI that
     # cannot answer the question at all looks like.
     [[ -f "$d/no_available" ]] && exit 0
