@@ -99,3 +99,6 @@ Windows CI is off. Every Windows change needs an operator run of `tests/run-test
 ## Open (operator)
 
 - `omnigraph-client` in the `server` profile, i.e. headless servers get an agent MCP bridge?
+  Resolved 2026-09-28 04:50Z: **yes** — Linux `server` profile carries the component. A server
+  with no `omnigraph_url` answer or token still reports `skipped`, so the profile costs nothing
+  where no graph is configured. macOS keeps its three profiles (no `server` profile there).
