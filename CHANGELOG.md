@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the rc-line writer is contained and byte-safe; one value rule for all three readers (A3 review 2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): both of its
+  heredocs read and wrote the rc file as strict UTF-8 *text*, unguarded. On an
+  undecodable `.bashrc`/`.zshrc` the python died — aborting the run outright
+  where errexit was live (measured: under `set -euo pipefail` the step never
+  returned), and where `run_post_install` contained it, printing a traceback into
+  the log, **announcing "replaced the … line" for a file it had not touched**,
+  and recording nothing. A refused write was the same story. Editing one line of
+  a dotfile also re-encoded the whole thing, converting every CRLF neighbour to
+  LF. Both edits now go through one helper, `autoos_rc_edit_lines` — the
+  byte-safe, contained form the retire step had already learned, and which gave
+  up its private copy of that python. A file that cannot be written is a warning
+  plus `autoos_record_failure`, the run continues, and a replacement line keeps
+  the newline of the line it replaced.
+- The same helper's `replace` mode now leaves **one** line. With two stale
+  AutoOS lines in one file it wrote two copies of the new one — reachable for
+  the first time through the version bump below.
+- **The rc tag went `AutoOS:omnigraph-env-v2` → `-v3`**, with the tag held in one
+  function (`omnigraph_rc_marker`). A bump is *required* whenever the rc line's
+  shape changes: the writer recognises a line by the tag alone, so a changed body
+  under an unchanged tag leaves every machine already carrying the old line
+  sitting on it, while the gate — which compares the whole line — never reads
+  current again. The tag without its `-vN` tail is still the older-line marker,
+  so this one bump replaces v1 and v2 alike.
+- **One value rule, three readers.** `KEY= value` produced a token with a leading
+  space in `tools/omnigraph-mcp-autoos.sh` and a trimmed one in the `.ps1` twin,
+  so one env file yielded different tokens per platform; a quoted value that was
+  quoted *after* a space was never unquoted at all. The rule is *whitespace round
+  a value is not part of it, then one layer of matching quotes goes*, applied
+  identically by the shell wrapper, its PowerShell twin (which already had it)
+  and the rc line install.sh writes — verified for all three under bash, zsh and
+  `pwsh` in one test. Whitespace a quoted value keeps *inside* its quotes
+  survives, as it must.
+
 ### Fixed — the `omnigraph-client` gate compares the values it would write; the retire step is contained and byte-safe (A3 review S2, 2026-09-28)
 
 - **`lib/linux/install.sh`**: `omnigraph_client_is_current` (the skip gate
