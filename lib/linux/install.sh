@@ -5020,6 +5020,13 @@ install_graphify_tool() {
         return 1
     fi
     if ! has_cmd uv; then
+        if (( AUTOOS_DRY_RUN )); then
+            # In a plan, uv is only *planned* — its own component runs earlier in this
+            # same pass and installs nothing yet, so refusing here would fail a dry run
+            # the real run goes on to satisfy (CI 36360904338).
+            ui_muted "would install the pinned graphify tool once the uv component puts uv on PATH: uv tool install ${pkg}"
+            return 0
+        fi
         ui_warn "uv is not on PATH - cannot install the pinned graphify tool. Install the uv component first, then re-run."
         return 1
     fi
