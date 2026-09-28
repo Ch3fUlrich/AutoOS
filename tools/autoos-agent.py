@@ -278,6 +278,17 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 # reported NO-OP (exit 5) instead of a leak.
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
+# SB-A2 (D-103) item A/B replaced SB-A's channel. SB-A had `run_client` write the
+# client's pgid into `<run-dir>/pgrp.json`, whose path arrived as the env var
+# AUTOOS_WORKER_PGRP: the worker shares the uid of the run dir, so a worker could
+# write any pgid it liked into the file `cancel` kills from — including its own
+# parent's or a bystander's — and an env var is visible in `/proc/<pid>/environ`.
+# What `cancel` reads now is written by the RUNNER, outside the sandbox:
+#   * a systemd transient scope (`autoos-worker-<run-id>.scope`), a cgroup, so
+#     `setsid()`/`setpgid()` leaves a process in it — the primary mechanism;
+#   * the runner's own process group plus the leader's start time, for hosts with
+#     no user manager (containers, CI, the test suite).
+WORKER_SCOPE_PREFIX = "autoos-worker-"
 
 # KEYDENY3b item 1: the spawn gate is spelled two ways in opencode v2.0.16 — its
 # rename map is {bash: "shell", task: "subagent", apply_patch: "patch"}, so the
@@ -444,6 +455,11 @@ WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
 # AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
 # here: the child gets the minted key, never the path to the file it came from.
 WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
+                     # SB-A2 (D-103) item A: AUTOOS_WORKER_PGRP is gone. It named
+                     # the file `cancel` killed a group from, and the worker — same
+                     # uid, same run dir — could rewrite it. The runner records the
+                     # scope unit and the group in job.json instead; nothing a
+                     # worker can see or write decides what a cancel signals.
                      "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
                      "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
                      "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
@@ -4319,6 +4335,64 @@ def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
     return sorted(found)
 
 
+def sandbox_ref_heads(sandbox: str) -> dict:
+    """``{refname: sha}`` for every ref the sandbox clone carries."""
+    out = subprocess.run(["git", "-C", sandbox, "for-each-ref",
+                          "--format=%(refname) %(objectname)"],
+                         capture_output=True, text=True)
+    heads = {}
+    for line in out.stdout.splitlines():
+        name, _, sha = line.partition(" ")
+        if name and sha.strip():
+            heads[name] = sha.strip()
+    return heads
+
+
+def sandbox_committed_work(sandbox: str, base: str, branch: str, start: dict) -> list:
+    """Every ref the run moved off the start sha, as ``"ref sha subject"`` lines.
+
+    SB-A (D-103) item 2 (NOOPCOMMIT): the no-change verdict read the uncommitted
+    porcelain and `<start-sha>..<sandbox-branch>`, so a worker that committed in
+    its own sandbox on a branch it made — or on a detached HEAD — was graded
+    "NO-OP (agent changed nothing)" with a real commit sitting in the clone. The
+    start snapshot (taken before the client runs) is what makes this cheap and
+    honest: a `--local` clone carries every branch of the parent, so "differs
+    from the start sha" alone would report pre-existing lanes as this run's work,
+    and a ref reset back to the start sha is still no work at all.
+
+    SB-A2 (D-103) item C completes that comparison: it is against the FULL start
+    SET of tips (and the start HEAD, which is `base`), not the sha each name held.
+    A worker that only `git switch`ed onto a ref that already existed — another
+    lane in the clone — moved no tip at all, yet the per-name read saw a name it
+    had never seen and billed the pre-existing commit as this run's work. A tip
+    that existed when the run started is not work, whichever name points at it now.
+    """
+    end = sandbox_ref_heads(sandbox)
+    known = {sha for sha in (start or {}).values()}
+    if base:
+        known.add(base)
+    found = []
+    moved = set()
+    for name in sorted(end):
+        if end[name] in known:
+            continue
+        moved.add(end[name])
+        found.append(sandbox_ref_subject(sandbox, name, end[name]))
+    head = subprocess.run(["git", "-C", sandbox, "rev-parse", "-q", "--verify", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    tip = end.get("refs/heads/" + branch)
+    if head and head not in known and head != tip and head not in moved:
+        found.append(sandbox_ref_subject(sandbox, "HEAD-detached", head))
+    return found
+
+
+def sandbox_ref_subject(sandbox: str, ref: str, sha: str) -> str:
+    """One line naming a ref, its short sha and its subject (worker text)."""
+    out = subprocess.run(["git", "-C", sandbox, "log", "-1", "--format=%h %s", sha],
+                         capture_output=True, text=True)
+    return "%s %s" % (ref, out.stdout.strip() or sha[:10])
+
+
 # The return contract (docs/agent-protocol.md): a finished worker prints a
 # REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).
 # Prose that merely mentions a report is not one; neither is a word that only
@@ -4426,7 +4500,8 @@ def has_report(output: str, brief: str = "") -> bool:
 
 
 def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
-                    diffstat: str = "", reflog: str = "", brief: str = ""):
+                    diffstat: str = "", reflog: str = "", brief: str = "",
+                    extra: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
@@ -4454,12 +4529,19 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
 
     `brief` (item 1) is the text this run sent the client: has_report() must not
     read the worker's own instructions back to it as its report.
+
+    SB-A (D-103) item 2 (NOOPCOMMIT): `extra` is what sandbox_committed_work
+    found by comparing every ref (and a detached HEAD) to the start sha — a
+    commit on a branch the worker made is a change, even though the porcelain is
+    clean and `<start-sha>..<sandbox-branch>` is empty.
     """
     if route.get("review"):
         return None, ""
     read_only = bool(route.get("read_only"))
-    if read_only and (changed or ahead or reflog):
+    if read_only and (changed or ahead or reflog or extra):
         detail = diffstat or "(no diff stat)"
+        if extra:
+            detail += "; commits it left on another ref: %s" % extra
         if reflog:
             detail += ("; commits its reflog still shows, beyond the base: %s "
                        "(commit then reset; the sandbox reflog is the only witness)"
@@ -4469,6 +4551,10 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
             "(exit %d) - its deliverable was the report, never the edit: %s"
             % (EXIT_READ_ONLY_WRITE, detail))
     if not changed and not ahead:
+        if extra:
+            # SB-A (D-103) item 2 (NOOPCOMMIT): the commit is there, the
+            # porcelain and `<start-sha>..<branch>` just never looked at it.
+            return None, ""
         if not has_report(output, brief):
             return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
         if read_only:
@@ -4745,27 +4831,359 @@ def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
 
 
 
+def proc_start_time(pid) -> int | None:
+    """Field 22 (starttime, clock ticks since boot) of /proc/<pid>/stat, or None.
+
+    SB-A2 (D-103) item B: this is the one number that tells a pgid the runner
+    recorded apart from the same number the kernel handed to an unrelated process
+    after pid wrap. It is read for the group LEADER only, because a leader's
+    death is what frees the number.
+    """
+    if os.name == "nt":
+        return None
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        with io.open("/proc/%d/stat" % pid, encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    # Field 2 (comm) is parenthesised and can hold spaces and ')', so count the
+    # fields from the far end of it: what follows is field 3 onward.
+    tail = data.rsplit(") ", 1)
+    if len(tail) != 2:
+        return None
+    fields = tail[1].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])       # field 22 overall, fields[0] is field 3
+    except ValueError:
+        return None
+
+
+def group_record(pid=None) -> dict:
+    """`{"pgid", "start"}` for the group `pid` leads — the runner's own record.
+
+    Written into job.json by the runner (never inside the sandbox, never through
+    an env var), which is what `cancel` verifies a kill against.
+    """
+    if os.name == "nt":
+        return {}
+    try:
+        pgid = os.getpgid(int(pid) if pid else 0)
+    except OSError:
+        return {}
+    return {"pgid": pgid, "start": proc_start_time(pgid)}
+
+
+def kill_groups(pgids, grace=5.0) -> list:
+    """SIGTERM every named process group, then SIGKILL whatever survives `grace`.
+
+    SB-A (D-103) item 1 (CANCELORPHAN): a worker's client is started in its own
+    session, so it leads a group the spawner's runner is NOT in, and a child that
+    outlives it is reparented to systemd --user — but reparenting never changes a
+    pgid, so a group kill still reaches it. Sending the signal to each group
+    first and polling them together is what keeps one 5 s window instead of one
+    per group.
+
+    SB-A2 (D-103) item B: two groups are never signalled, and this is the last
+    gate — the guard lives here, not only at the call site, because the caller
+    can be wrong. `pgid <= 1` is init and the kernel thread groups. The caller's
+    OWN group is the process answering `cancel`: the MCP server, which would
+    otherwise SIGTERM itself along with every other run it hosts. Returns the
+    refused `[(pgid, reason)]` so the caller can report what it did not kill.
+    """
+    refused = []
+    if os.name == "nt":
+        return refused
+    own = os.getpgrp()
+    live = []
+    for pgid in pgids:
+        try:
+            pgid = int(pgid)
+        except (TypeError, ValueError):
+            continue
+        if pgid <= 1:
+            refused.append((pgid, "pgid <= 1 is init or a kernel thread group"))
+            continue
+        if pgid == own:
+            refused.append((pgid, "the canceller's own process group"))
+            continue
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        live.append(pgid)
+    deadline = time.time() + grace
+    while live and time.time() < deadline:
+        time.sleep(0.05)
+        still = []
+        for pgid in live:
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                continue
+            still.append(pgid)
+        live = still
+    for pgid in live:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return refused
+
+
+def kill_verified_groups(groups, grace=5.0) -> list:
+    """Kill only the groups whose leader is provably the process that was recorded.
+
+    `groups` is what the runner wrote in job.json: `[{"pgid": int, "start": int}]`.
+    One report per entry: `{"pgid", "action": "killed"|"skipped", "reason"}`.
+    Without a recorded start time, or with a leader whose start time differs from
+    it, NOTHING is signalled: the group is gone or recycled, and a recycled pgid
+    belongs to a process this run has no claim on.
+
+    RESIDUAL, stated rather than papered over: this is a *process-group* kill, so
+    a worker that calls `setsid()`/`setpgid()` moves itself out of reach, and so
+    does one reparented out of a group the runner never recorded. Nothing in the
+    fallback catches it — the mechanism that does is the systemd scope (item A),
+    which is a cgroup and cannot be escaped by changing a process group. `cancel`
+    uses the scope whenever `scope_supported()` says a user manager is reachable,
+    and this function only when it is not.
+    """
+    reports, to_kill = [], []
+    for group in groups or []:
+        try:
+            pgid = int(group.get("pgid"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        start = group.get("start")
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "no recorded leader start time: the group "
+                                      "cannot be told from a recycled pgid"})
+            continue
+        now = proc_start_time(pgid)
+        if now is None:
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "the group leader is gone: nothing to kill"})
+            continue
+        if now != start:
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "the recorded pgid was recycled: leader start "
+                                      "time %d is not the recorded %d" % (now, start)})
+            continue
+        to_kill.append(pgid)
+        reports.append({"pgid": pgid, "action": "killed",
+                        "reason": "leader start time matches the record"})
+    for pgid, reason in kill_groups(to_kill, grace=grace):
+        for report in reports:
+            if report["pgid"] == pgid and report["action"] == "killed":
+                report["action"], report["reason"] = "skipped", reason
+    return reports
+
+
+def kill_group(pgid, grace=5.0) -> None:
+    """Stop one process group: SIGTERM, then SIGKILL past the grace."""
+    kill_groups([pgid], grace=grace)
+
+
 def _terminate_group(proc, pgid) -> None:
     """Stop whatever is left of the client's process group (best effort)."""
     if os.name == "nt":
         subprocess.call(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
+    kill_group(pgid)
+
+
+def scope_unit_name(run_id) -> str:
+    """The transient scope unit a worker run is launched in (SB-A2 item A).
+
+    Only `[A-Za-z0-9_-]` survives — a unit name is systemd syntax, and the run id
+    is a string this function did not choose. The `.scope` suffix is part of the
+    name so `systemctl --user` addresses the unit it created and not a service of
+    the same stem.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(run_id or "run"))[:120]
+    return "%s%s.scope" % (WORKER_SCOPE_PREFIX, safe)
+
+
+# SB-A3 (D-103) item C: the shape of the id a KILL may be derived from. The
+# spawner mints `<15-char UTC stamp>-<slug of at most RUN_ID_SLUG_CAP>-<6 hex>`
+# (`mint_run_id`), 47 characters at most, which this admits. It is looser than
+# RUN_ID_RE on purpose: RUN_ID_RE decides what may be written into a branch name,
+# this decides what may be signalled, and an id minted before the mint lived in
+# one place still has to be cancellable. The cap is 47 with room, so a padded
+# slug cannot stretch a unit name.
+KILL_RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z0-9-]+$")
+KILL_RUN_ID_MAX = 64
+
+
+def is_killable_run_id(run_id) -> bool:
+    """True for a string that may name a kill: a run id, nothing else."""
+    return (isinstance(run_id, str) and len(run_id) <= KILL_RUN_ID_MAX
+            and bool(KILL_RUN_ID_RE.match(run_id)))
+
+
+def worker_scope_unit(run_id) -> str:
+    """The scope unit run_id's worker is in — derived, never read from a record.
+
+    SB-A3 (D-103) item C: SB-A2 wrote the unit name into `job.json` and had
+    `cancel` stop whatever it found there. `job.json` sits in the run dir, which
+    the runner exports to the worker as AUTOOS_TASK_DIR, and the worker is the
+    same uid as the file — so the process being cancelled owned the pen that
+    named what the killer signalled, and any `--user` unit or another run's scope
+    would do. The name is a pure function of the run id instead; anything that is
+    not a run id is refused before it can become unit syntax.
+    """
+    if not is_killable_run_id(run_id):
+        raise ValueError("refused to derive a scope unit from %r: not a run id "
+                         "(want %s, at most %d chars)"
+                         % (run_id, KILL_RUN_ID_RE.pattern, KILL_RUN_ID_MAX))
+    return "%s%s.scope" % (WORKER_SCOPE_PREFIX, run_id)
+
+
+def scope_unit_is_worker_scope(unit) -> bool:
+    """Is `unit` shaped like a scope this spawner could have created?
+
+    The second gate, for a caller that built the name itself: prefix, suffix, and
+    nothing but unit-safe characters. `foo.service` and `multi-user.target` are
+    not this spawner's; a name with a `;`, a space or a `/` in it is not systemd
+    syntax this process should be handing to `systemctl`.
+    """
+    return (isinstance(unit, str) and 0 < len(unit) <= 141
+            and unit.startswith(WORKER_SCOPE_PREFIX) and unit.endswith(".scope")
+            and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", unit)))
+
+
+def worker_scope_argv(unit, cmd) -> list:
+    """`systemd-run --user --scope` around `cmd`: the whole subtree joins the cgroup."""
+    return (["systemd-run", "--user", "--scope",
+             "--unit", unit[:-len(".scope")] if unit.endswith(".scope") else unit,
+             "--collect", "--"] + list(cmd))
+
+
+_SCOPE_SUPPORTED: bool | None = None
+
+
+def scope_supported(force: bool = False) -> bool:
+    """Can this host launch (not merely contain) a `systemd-run --user --scope`?
+
+    Cached, and probed by launching the real thing to a no-op command: a container
+    can ship both binaries and have no user manager, and a worker that never
+    started is worse than a worker in the fallback. `force=True` re-probes — the
+    unit tests change PATH under it.
+    """
+    global _SCOPE_SUPPORTED
+    if _SCOPE_SUPPORTED is None or force:
+        _SCOPE_SUPPORTED = _probe_scope()
+    return _SCOPE_SUPPORTED
+
+
+def _probe_scope() -> bool:
+    """Launch a real scope around a no-op and see whether it works.
+
+    The site below is audited as an exception on purpose: `systemd-run` reaches
+    the user manager over the session bus, and the bus address
+    (``DBUS_SESSION_BUS_ADDRESS``, ``XDG_RUNTIME_DIR``) is exactly what
+    ``worker_env`` strips for a client. A probe that scrubbed them would report
+    "no scope here" on a host that has one, and every worker would take the
+    fallback whose kill cannot follow a `setsid()` child.
+    """
+    if os.name == "nt":
+        return False
+    if not (shutil.which("systemd-run") and shutil.which("systemctl")):
+        return False
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        return False
+    argv = worker_scope_argv(scope_unit_name("probe-%d" % os.getpid()),
+                             [sys.executable, "-c", "pass"])
     try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            return
-        time.sleep(0.05)
+        # the probe keeps the caller's session-bus address, which the worker scrub
+        # drops on purpose; it runs `python -c pass` and nothing else. subprocess-audit: ok
+        return subprocess.call(argv, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _systemctl(*args):
+    """`systemctl --user ...`, or None when the manager cannot be reached at all.
+
+    Audited exception, same reason as `_probe_scope`: signalling a unit is the
+    spawner's own plumbing, spoken to the caller's user manager over the caller's
+    session bus. It carries no credential onward and runs no worker code.
+    """
     try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+        # subprocess-audit: session-bus plumbing, not a child that forwards a token
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def stop_scope(unit, grace: float = 5.0) -> dict:
+    """Kill every process inside the worker's transient scope, then release the unit.
+
+    `--kill-whom=all` signals the whole cgroup, so a member that `setsid()`ed out
+    of its process group is still reached — the escape the group-kill fallback
+    cannot cover. SIGTERM, then SIGKILL past the grace, then `stop` so the
+    `--collect` unit goes with it. A unit that is unknown (already exited, or a
+    run from before this mechanism) is reported, not raised: cancelling a run that
+    has ended is a no-op, never a failure.
+
+    A name that is not an `autoos-worker-*.scope` unit is refused with nothing
+    signalled and no `systemctl` call made: this is the gate, not the caller.
+    """
+    report = {"unit": unit, "stopped": False, "reason": ""}
+    if not unit:
+        report["reason"] = "no scope unit recorded for this run"
+        return report
+    # SB-A3 (D-103) item C, the second gate: `cancel` derives the name, but a
+    # killer should not signal a unit because a caller said so. Anything that is
+    # not this spawner's own worker scope is refused here, where the caller cannot
+    # talk it past it.
+    if not scope_unit_is_worker_scope(unit):
+        report["refused"] = True
+        report["reason"] = ("refused: %r is not an %s*.scope unit name"
+                            % (unit, WORKER_SCOPE_PREFIX))
+        return report
+    if _systemctl("status", unit) is None:
+        report["reason"] = "systemctl --user is not reachable"
+        return report
+    out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+    state = out.stdout.strip() if out else ""
+    if state != "active":
+        # SB-A4 item 3: `stopped` here means "there is nothing running in it",
+        # which the canceller did not do. `was_active` is what tells an honest
+        # caller that no kill was delivered by this call.
+        report.update({"stopped": True, "was_active": False,
+                       "reason": "the scope is already %s" % (state or "unknown")})
+        return report
+    for sig in ("SIGTERM", "SIGKILL"):
+        _systemctl("kill", "--kill-whom=all", "--signal=%s" % sig, unit)
+        deadline = time.time() + (grace if sig == "SIGTERM" else 5.0)
+        while time.time() < deadline:
+            out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+            if not out or out.stdout.strip() != "active":
+                break
+            time.sleep(0.1)
+    out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+    state = out.stdout.strip() if out else ""
+    _systemctl("stop", unit)
+    report["was_active"] = True
+    report["stopped"] = state != "active"
+    report["reason"] = ("the scope is %s" % (state or "gone")) if report["stopped"] \
+        else "the scope is still active after SIGKILL to every process in it"
+    return report
 
 
 def _trim_tail(buf: bytearray, chunk: bytes) -> None:
@@ -4806,6 +5224,12 @@ class ClientExit(int):
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
+    The client leads a session of its own on purpose — but that is exactly the
+    group a canceller cannot reach from the runner, so `cancel` stops the systemd
+    SCOPE this process was launched inside (SB-A2 item A), which is a cgroup and
+    holds a setsid() child anyway. Nothing here writes a file for `cancel` to
+    read: the worker shares the uid of every path it could be given.
+
     capture=True (CAPTURE_CLIENTS only): the child's stdout+stderr are merged,
     streamed to our stdout line by line (unbuffered), the last TAIL_LIMIT bytes
     are kept on ClientExit.tail, and the first headless-refusal line seen
@@ -4834,7 +5258,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        pgid = None
+        pgid = None  # Windows reaps with `taskkill /T`, which walks the tree
     else:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
@@ -5588,6 +6012,13 @@ def cmd_run(args, cfg: dict) -> int:
         isolate_clone(source, sb["path"], sb["branch"])
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
+        # SB-A (D-103) item 2 (NOOPCOMMIT): the ref tips as the clone stands up.
+        # A `--local` clone carries every branch of the parent, so the run's own
+        # commits are only identifiable against this baseline, and the baseline
+        # cannot be taken later. One `for-each-ref`; a review run is exempt from
+        # the sandbox verdict, so it does not pay for it (like the reflog).
+        if not plan["route"].get("review"):
+            sb["refs"] = sandbox_ref_heads(sb["path"])
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
         # later read sees only what the run appended. Kept in the dict, which a
         # provider-stop fallthrough re-run inherits with the sandbox itself.
@@ -5816,9 +6247,25 @@ def cmd_run(args, cfg: dict) -> int:
         print("\nsandbox changes (uncommitted):\n" + redact_output(changed or "  (none)"))
         if ahead:
             print("sandbox commits:\n" + redact_output(ahead))
+        # SB-A (D-103) item 2 (NOOPCOMMIT): neither read above sees a commit on a
+        # branch the worker made, and a detached HEAD hides both. Only the run
+        # that looked like no work at all pays for the third read.
+        off_ref = (sandbox_committed_work(sb["path"], sb["base"], branch, sb["refs"])
+                   if not changed and not ahead and sb.get("refs") is not None else [])
+        if off_ref:
+            print("sandbox commits off the run branch:\n"
+                  + redact_output("\n".join("  " + ln for ln in off_ref)))
         q = shlex.quote(sb["path"])
         print("review:  git -C %s diff" % q)
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
+        for ln in off_ref:
+            ref, _, rest = ln.partition(" ")
+            if ref.startswith("refs/heads/"):
+                print("take it: git fetch %s %s   (the worker's own branch)"
+                      % (q, ref[len("refs/heads/"):]))
+            else:
+                print("take it: git -C %s branch <name> %s   (detached HEAD)"
+                      % (q, rest.split()[0]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
@@ -5834,7 +6281,8 @@ def cmd_run(args, cfg: dict) -> int:
             # read-only run pays for the extra git call.
             sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
             reflog=", ".join(reset_away),
-            brief=plan.get("brief") or "")
+            brief=plan.get("brief") or "",
+            extra="; ".join(off_ref))
         leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
                            sandbox=sb["path"])
         if leak:
