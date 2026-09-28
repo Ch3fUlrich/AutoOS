@@ -9994,11 +9994,29 @@ class WriteRoleIsolationTests(unittest.TestCase):
         self.assertIn("allow_shared_checkout", msg)
 
     def test_the_override_releases_the_refusal(self):
+        # SB-C2 item 3: the writer's escape hatch is closed. The flag used to
+        # release a tier-1 write role from the shared-worktree refusal; only an
+        # orchestrator may name a shared checkout now (a leaf cannot spawn at
+        # all — KEYDENY3 — so a write card passing it is refused, not released).
+        with self.assertRaises(ValueError) as ctx:
+            mcp_server.build_argv(
+                {"task": "t", "tier": 1, "isolate": False, "cwd": str(ROOT),
+                 "allow_shared_checkout": True})
+        self.assertIn("orchestrator-only", str(ctx.exception))
+
+    def test_an_orchestrator_override_is_accepted_and_recorded(self):
         argv, route = mcp_server.build_argv(
-            {"task": "t", "tier": 1, "isolate": False, "cwd": str(ROOT),
+            {"task": "t", "card": {"role": "orchestrate"}, "cwd": str(ROOT),
              "allow_shared_checkout": True})
+        self.assertTrue(route["shared_checkout_override"])
         self.assertNotIn("--isolate", argv)
-        self.assertNotIn("default_isolate", route)
+
+    def test_spawn_rejects_a_write_role_override(self):
+        out = mcp_server.spawn({"task": "t", "tier": 1, "isolate": False,
+                                "cwd": str(ROOT),
+                                "allow_shared_checkout": True})
+        self.assertEqual(out["state"], "rejected")
+        self.assertIn("orchestrator-only", out["error"])
 
     def test_a_write_role_in_another_tree_may_stay_in_place(self):
         other = tempfile.mkdtemp()
@@ -12339,6 +12357,55 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
                       "--dry-run", "--card", "role=review", "t", env=clean_env())
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(self.UNKNOWN_COMBO, r.stderr)
+
+    # --- SB-C2 item 4: a bare name the registry PRICES is not unknowable ------
+
+    def test_deepseek_flash_bare_name_resolves_to_a_priced_leg(self):
+        """deepseek-flash is the allowed paid bulk leg under DSGUARD's $25 cap
+        (providers.deepseek.monthly_cap_usd), and its registry row carries the
+        very price the spend guard bills. Naming it bare — no route of that id,
+        just the priced model row, reached directly or through a family alias
+        spelling that is also a row — must not read as the unknown-combo
+        refusal, in budget mode."""
+        cli = self.cli()
+        registry = self.shipped()
+        self.assertTrue(registry["policy"]["claude_budget"]["mode"] == "budget"
+                        or cli.resolver.claude_budget_of(registry)["on"],
+                        "the shipped registry must be in budget mode for this test")
+        for name in ("deepseek-flash",            # the native id, models row
+                     "deepseek-v4-flash",          # the vendor alias, own row
+                     "omniroute/deepseek-flash#low"):  # prefixed+stamped
+            with self.subTest(name=name):
+                refusal, note = cli.claude_spawn_refusal(
+                    "opencode", {}, registry, model=name)
+                self.assertIsNone(refusal, "%s: %s" % (name, refusal))
+
+    def test_a_bare_claude_family_name_without_the_word_still_refuses(self):
+        """The priced-row pass is for rows the registry can price; a Claude
+        spelling is caught by the marker check whatever the caller means, and
+        an anthropic-FAMILY row with no marker in its name still reads as
+        Claude (SB-C2 item 1's markers, on the gate side)."""
+        import copy
+        cli = self.cli()
+        registry = self.shipped()
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, registry, model="opus-5")
+        self.assertIsNotNone(refusal)
+        self.assertIn("claude_budget", refusal)
+        registry = copy.deepcopy(registry)
+        registry["models"]["mule-9"] = {"family": "anthropic",
+                                        "price_in": 3e-07, "price_out": 1.2e-06}
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, registry, model="mule-9")
+        self.assertIsNotNone(refusal, "an anthropic-family priced row read as free")
+        self.assertIn("claude_budget", refusal)
+
+    def test_a_bare_name_the_registry_carries_no_row_for_is_still_refused(self):
+        cli = self.cli()
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, self.shipped(), model="definitely-not-a-model")
+        self.assertIsNotNone(refusal)
+        self.assertIn("definitely-not-a-model", refusal)
 
     # --- item 2: the tier agent model is consulted before any client default ---
 

@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Claude-family spelling escape, wrapper-only peer origin, orchestrator-only shared checkout, deepseek-flash priced (SB-C2, 2026-09-28)
+
+Four items from the SB-C2 brief, all red-then-green against HEAD:
+
+- **deny-claude-paid-api spelling escape (HIGH)** (`catalog/ai-registry.json`):
+  the rule matched only `*/claude-*`, so a third-party leg named by its family
+  word alone — `openrouter/anthropic/opus-5`, `bluesminds/sonnet-5`,
+  `free-ai/haiku-4-5`, `zen/fable-5` — escaped it and was usable the moment the
+  budget gate said yes. Added `deny-claude-family-{opus,sonnet,haiku,fable}`
+  (`*/*<word>*`, the CLAUDE_MODEL_MARKERS the gate itself reads) and
+  `deny-anthropic-paid` (`anthropic/*`; `anthropic` is not one of the two seat
+  rows, `cc/*` and `antigravity/*`, whose allows precede every family deny).
+  Placed after the seats, before every provider wildcard allow, so first-match-
+  wins still allows a seat leg and a family deny can never be outranked. A
+  registry sweep confirmed no *non-Claude* model/leg name carries opus/sonnet/
+  haiku/fable, so no carve-out was needed (pinned by
+  `test_no_registered_non_claude_name_carries_a_family_word`).
+- **classify_origin wrapper-only `from=` (MED)** (`tools/skill-rules.py`): R-worker-11
+  read `from=` anywhere in the text, so a compaction request could be dressed as
+  a peer by quoting the marker in its own body. Only a `from=` attribute on a
+  *leading* `<cross-session-message …>` wrapper tag counts now; quoted text, code
+  spans and body `from=` are ignored. Documented residual (stated in the rule
+  docstring): a real peer message that arrives without the wrapper reads as
+  harness-compaction — the safe miss, since complying is the correct action for a
+  self-managed context anyway. The fixture carries all three SB-C2 cases.
+- **SPAWNISO override is orchestrator-only (MED)** (`tools/autoos_agent_mcp.py`):
+  `allow_shared_checkout` was SB-C's writer escape hatch, but a leaf cannot spawn
+  at all (KEYDENY3), so it made the shared-worktree hole explicit. The MCP spawn
+  now refuses `allow_shared_checkout=True` unless the card's role is `orchestrate`,
+  and records an accepted override as `shared_checkout_override` on the run's route.
+- **deepseek-flash priced and resolvable (REGISTRY GAP, L1-main)**: the D-102 gate
+  refused `deepseek-flash` by bare name as unpriceable, though it is the allowed
+  paid bulk leg under DSGUARD's $25 cap. Added `price_source` to
+  `models.deepseek-flash` citing the numbers it already carries — `price_in 3e-07 /
+  price_out 1.2e-06 / price_cache_read 6e-09`, reused from `models.deepseek-v4-flash`
+  (the retired llm-models.json sibling) and the exact prices `autoos_usage`/
+  `deepseek_call.check_cap` bill — no invented number. The gate's unknown-combo
+  branch now reads a priced registry model row (bare name and the `deepseek-v4-flash`
+  alias, with `omniroute/…#effort` normalised) instead of refusing; an anthropic-
+  family row still reads as Claude, and a string with no row at all still fails
+  closed. `tools/registry.py` exempted `price_source` from rule 5 so its dated
+  attribution passes the check.
+
 ### Fixed — spawn isolation, compaction rule, and the zen Claude leg hole (SB-C, 2026-09-28)
 
 Three items from the SB-C brief:

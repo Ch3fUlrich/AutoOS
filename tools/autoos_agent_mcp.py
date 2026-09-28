@@ -376,18 +376,31 @@ def build_argv(req: dict, run_id: str | None = None,
     # the caller's own worktree. The refusal, not a silent force, because asking
     # for no isolation is a statement the caller may have a reason for — and the
     # override flag is where it says so.
+    # SB-C2 item 3 (SPAWNISO explicit): the override flag was reachable by any
+    # tier-1 caller, and a card's role is the caller's own text. Only the
+    # orchestrator runs shared checkouts — leaves cannot spawn at all (KEYDENY3),
+    # and a tier-1 WRITE card that names the flag is refused, so the escape
+    # hatch exists only for the role that has no other tree to work in. The
+    # acceptance is recorded in the run's route (shared_checkout_override).
+    if req.get("allow_shared_checkout"):
+        if (card or {}).get("role") != "orchestrate":
+            raise ValueError(
+                "allow_shared_checkout is orchestrator-only: the card's role is "
+                "%r, not orchestrate. A write-role spawn gets a clone "
+                "(isolate, the default); leaves cannot spawn at all (KEYDENY3), "
+                "so only the tier-1 orchestrator names a shared checkout."
+                % ((card or {}).get("role") or "implement"))
+        route["shared_checkout_override"] = True
     if run_tier == 1 and not req.get("isolate") and is_write_role(req):
         where = cwd or req.get("cwd")
-        if req.get("allow_shared_checkout"):
-            route["shared_checkout_override"] = True
-        elif (req.get("isolate") is False and where
-              and worktree_of(where) == worktree_of(os.getcwd())):
+        if (req.get("isolate") is False and where
+                and worktree_of(where) == worktree_of(os.getcwd())):
             raise ValueError(
                 "a write-role card at tier 1 cannot run in the caller's own "
                 "worktree (%s): it edits the checkout this server sits in, where "
                 "the git-ignored key files live. Ask for isolate (the default "
-                "when you ask for nothing) to fork a clone, or pass "
-                "allow_shared_checkout=True if running in place is meant." % where)
+                "when you ask for nothing); the allow_shared_checkout override "
+                "is orchestrator-only (SB-C2) and never releases this." % where)
         elif req.get("isolate") is not False:
             # Nothing was said for a writer: give it a clone, as a spawned tier
             # gets one. An explicit False against ANOTHER tree is honoured —
@@ -857,8 +870,10 @@ def serve() -> None:
         clone holds committed files only. It is the DEFAULT for a write-role card
         at tier 1 too (SB-C: `role=implement, complexity=hard` routes to tier 1),
         and asking for `isolate=False` there is refused while `cwd` is the caller's
-        own worktree — only `role=orchestrate` (or `allow_shared_checkout=True`)
-        runs in place. lean: no serena/playwright
+        own worktree — only `role=orchestrate` runs in place (SB-C2:
+        `allow_shared_checkout=True` is orchestrator-only too — a write-role
+        card passing it is refused, and an accepted override is recorded as
+        `shared_checkout_override` on the route). lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is

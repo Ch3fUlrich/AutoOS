@@ -1203,6 +1203,98 @@ class LegRulesTests(unittest.TestCase):
         leg must be gated via unavailable_legs)."""
         self.assertEqual(registry.check_registry(self.reg), [])
 
+    # --- SB-C2 item 1: the Claude-family spellings that dodge */claude-* -----
+
+    DENIED_FAMILY_LEGS = {
+        "openrouter/anthropic/opus-5": "deny-claude-family-opus",
+        "bluesminds/sonnet-5": "deny-claude-family-sonnet",
+        "free-ai/haiku-4-5": "deny-claude-family-haiku",
+        "zen/fable-5": "deny-claude-family-fable",
+        # the anthropic provider id is not a seat row anywhere in the shipped
+        # rules: the two Claude seats are cc/* and antigravity/*, both allows
+        # ABOVE the denies. A model half that carries no family word at all is
+        # still denied by the provider rule.
+        "anthropic/mule-9": "deny-anthropic-paid",
+    }
+
+    def test_claude_family_names_without_the_word_claude_are_denied(self):
+        """SB-C2 (rev-sbc, spelling escape): deny-claude-paid-api matches only
+        `*/claude-*`, so a third-party leg named by its family word alone
+        (opus/sonnet/haiku/fable) escaped the leg rules and became usable the
+        moment the budget gate said yes. Each is now denied, and the deny that
+        fires is a family rule -- not some later provider wildcard."""
+        for leg, rule_id in self.DENIED_FAMILY_LEGS.items():
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    rule_id, leg)
+
+    def test_the_subscription_seats_still_match_their_allows_first(self):
+        """The family denies sit AFTER the two seat allows: a seat leg is the
+        operator's own Claude on a subscription/free sign-in, and first-match-
+        wins must keep saying allow for it."""
+        for leg in ("cc/claude-opus-4-6", "cc/opus-4-6",
+                    "antigravity/claude-opus-4-6-thinking",
+                    "antigravity/opus-4-6-thinking"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), False)
+
+    def test_non_claude_models_on_those_providers_stay_allowed(self):
+        """The family denies name Claude words, not providers: the same
+        providers' ordinary models keep whatever verdict they had -- a zen free
+        model still hits its client-bound allow, not a family deny."""
+        allowed = {
+            "zen/muse-spark-1.3-contributor": "allow-opencode-zen-client-bound",
+            "bluesminds/glm-4.7": None,
+            "free-ai/qwen3.8-27b": None,
+            "openrouter/deepseek/deepseek-v4.1-flash":
+                "allow-openrouter-deepseek-v4.1-flash",
+        }
+        for leg, rule_id in allowed.items():
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), False)
+                got = (registry.leg_rule_for(leg, self.reg) or {}).get("id")
+                self.assertEqual(got, rule_id, leg)
+
+    def test_the_family_denies_precede_every_provider_wildcard_allow(self):
+        """Position is the rule: each new deny must sit above every provider-
+        wide allow (`x/*` with a wildcard-only model half) that would otherwise
+        match first, and below the two seat allows."""
+        rules = self.reg["policy"]["leg_rules"]
+        index = {r.get("id"): i for i, r in enumerate(rules)}
+        denies = list(self.DENIED_FAMILY_LEGS.values()) + ["deny-claude-paid-api"]
+        seats = ["allow-claude-code-subscription", "allow-antigravity-signin"]
+        for seat in seats:
+            for deny in denies:
+                self.assertLess(index[seat], index[deny],
+                                "seat %s must match before deny %s" % (seat, deny))
+        wildcards = [r for r in rules
+                     if r.get("allow") is True and r.get("id") not in seats
+                     and str(r.get("match", "")).endswith("/*")]
+        self.assertTrue(wildcards, "no provider-wide allow to order against")
+        for rule in wildcards:
+            for deny in denies:
+                self.assertLess(index[deny], index[rule["id"]],
+                                "deny %s must precede wildcard allow %s"
+                                % (deny, rule["id"]))
+
+    def test_no_registered_non_claude_name_carries_a_family_word(self):
+        """The sweep the brief asks for BEFORE the rules were added, pinned
+        forever: every model id and every route leg naming opus/sonnet/haiku/
+        fable is also spelled claude/anthropic, so no legitimate non-Claude
+        model in the registry needed an explicit carve-out. A future entry
+        that trips this is a name to check by hand, not a rule to widen."""
+        fam = re.compile(r"(opus|sonnet|haiku|fable)", re.IGNORECASE)
+        claude = re.compile(r"(claude|anthropic)", re.IGNORECASE)
+        reg = self.reg
+        names = list(reg["models"])
+        names += [leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if isinstance(leg, str)]
+        offenders = sorted({n for n in names if fam.search(n)
+                            and not claude.search(n)})
+        self.assertEqual(offenders, [])
+
 
 class MonthlyCapTests(unittest.TestCase):
     """WS-DSCALL (2026-09-28): providers.<id>.monthly_cap_usd is the paid cap a
