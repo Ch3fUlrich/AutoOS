@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — role launch-profile templates rendered from the harness fences, with scope and contradiction tests (ORCH-A1 phase 1)
+
+- **`configuration/launch-profiles/<role>.settings.example.json`** (new, six
+  roles): per-role pre-reviewed grant bundles (spec
+  `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §2–§3).
+  Coordinator roles pre-grant lane-branch push and `gh workflow run`;
+  `l1-routing` alone adds the gateway `apply.sh` run grant; leaves carry no
+  pre-grant. Every profile denies push-to-`main` (fence set, not one string),
+  secret access and `~/.claude.json` writes, with `permissionPrompts: none`
+  (fail closed). Runtime `<role>.settings.json` files are git-ignored.
+- **`tools/launch_profiles.py`** (new): the one home of the deny render —
+  `read_deny_all` plus the secret/credential entries of `bash_deny_all`
+  plus the profile-specific always-deny entries. `render --check` fails
+  naming each drifted template, in the `tools/registry.py` style. No
+  `--dangerously-skip-permissions` anywhere; consumption (`--settings`
+  wiring), fleet cutover and REVIVE stay later lanes.
+- **`tests/test_launch_profiles.py`** (new, stdlib unittest): branch-scope
+  and secret-scope tables over the rendered matchers (documented matcher
+  model: `Bash(prefix:*)` / glob and `Read/Edit` path-glob forms, deny
+  wins) and the A1-D5 contradiction test (a contradictory `allow` still
+  decides `deny`; precedence re-checked at CLI 2.1.283/2.1.267 —
+  `claude --help` prints no precedence rule). Wired into the Linux suite
+  (`tests/linux/33-documentation.sh` "launch profiles: ...").
+
 ### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
 
 - **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid

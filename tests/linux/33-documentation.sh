@@ -659,6 +659,13 @@ if it "registry: no generated file drifts"; then
     rm -f "$tmp_ide"
 fi
 
+# ORCH-A1 phase 1: role launch profiles are rendered from the harness
+# fences (tools/launch_profiles.py render --check) and the rendered matchers
+# pass the branch-scope, secret-scope and always-deny contradiction tables.
+if it "launch profiles: rendered from the harness fences, scope tables green (ORCH-A1 phase 1)"; then
+    out="$(python3 tests/test_launch_profiles.py 2>&1 && python3 tools/launch_profiles.py render --check 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-toolcalls.py: tool-calling probe writes the overlay (routing v2 spec 3.1, 5.3, 10).
 if it "probe-toolcalls: tool-calling probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_toolcalls.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
