@@ -1,0 +1,67 @@
+{
+  "$comment": "Test fixture only — never installed, never read by setup.sh's real CATALOG. One tombstone entry beside ordinary ones, so the retired-id mechanism can be asserted without marking any real component retired.",
+  "platform": "linux",
+  "profiles": {
+    "workstation": "Everything a daily driver needs.",
+    "light": "The small set that runs on a single-board machine.",
+    "custom": "Choose by hand."
+  },
+  "categories": [
+    {
+      "id": "core",
+      "name": "Demo Core",
+      "components": [
+        {
+          "id": "keep-demo",
+          "name": "Kept Component",
+          "description": "An ordinary entry beside the tombstone.",
+          "provider": "custom",
+          "package": "keep-demo",
+          "verify": "true",
+          "profiles": ["workstation", "light"]
+        },
+        {
+          "id": "retired-demo",
+          "name": "Retired Component",
+          "description": "A tombstone: the id stays known, nothing installs.",
+          "provider": "custom",
+          "package": "retired-demo",
+          "tombstone": true,
+          "note": "wired by keep-demo now",
+          "homepage": "https://example.invalid/retired-demo",
+          "profiles": ["workstation", "light"]
+        }
+      ]
+    },
+    {
+      "id": "extras",
+      "name": "Demo Extras",
+      "components": [
+        {
+          "id": "pulled-demo",
+          "name": "Would Be Pulled",
+          "description": "The dependency the tombstone must not drag in.",
+          "provider": "custom",
+          "package": "pulled-demo",
+          "profiles": []
+        },
+        {
+          "id": "prompted-demo",
+          "name": "Asks A Question",
+          "description": "Carries the prompt the tombstone borrows.",
+          "provider": "custom",
+          "package": "prompted-demo",
+          "prompt": "demo_url",
+          "profiles": []
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "demo_url": {
+      "question": "DEMO PROMPT — which URL?",
+      "default": "https://example.invalid",
+      "help": "Fixture prompt; never answered by a tombstone."
+    }
+  }
+}
