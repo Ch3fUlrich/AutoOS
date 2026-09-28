@@ -3,9 +3,9 @@
 Status: **approved design, revised after the AutoOS review (SPEC-OMNI, 2026-09-27).**
 Plan: [`2026-09-27-omnigraph-mcp-catalog-plan.md`](./2026-09-27-omnigraph-mcp-catalog-plan.md).
 
-**This repo is public. The spec is site-free on purpose:** every host, address, domain, VM id and
-path is a placeholder (`<omnigraph-url>`, `<server-vm>`, `<lan-cidr>`, `<tailnet-cidr>`,
-`<registry>`, `<ci-runner>`). Real values and the deployment-side tasks live in the operator's
+**This repo is public. The spec is site-free on purpose:** every host, address, domain, VM id,
+path and account is a placeholder (`<omnigraph-url>`, `<server-vm>`, `<lan-cidr>`,
+`<tailnet-cidr>`, `<owner>`). Real values and the deployment-side tasks live in the operator's
 private infrastructure repo, never here.
 
 ## Why
@@ -28,7 +28,7 @@ The operator is also moving the central Omnigraph server off the coding machine
 | D6/D7 | Clients reach the server at `<omnigraph-url>` (HTTPS through the operator's reverse proxy) with a **bearer token**. The API is limited to `<lan-cidr>` and `<tailnet-cidr>` by the proxy. There is **no browser SSO on the API**, because MCP clients can't do it. |
 | D8 | Token source on each machine: the git-ignored `configuration/api-keys.yml`. The server side has its own copy in the private repo, and one rotation procedure updates both. |
 | D9 | **Client bridge:** use npx only if **16 bridges started in parallel each answer `health` in < 2 s** with zero npm cache-lock errors. Otherwise use a pre-installed, pinned bridge started directly. |
-| D10/D11 | Images are built by **Forgejo CI on a LAN runner** (`<ci-runner>`) and pushed to `<registry>`, project `autoos`: private, robot accounts, git-SHA tags, never `latest`. GitHub CI must pass without LAN access. |
+| D10/D11 | Images are built by **GitHub Actions on GitHub-hosted runners** and pushed to **`ghcr.io/<owner>/omnigraph-viewer:<sha>`** (SHA tags, never a floating tag) with the automatic `GITHUB_TOKEN` (`permissions: packages: write`). There is **no LAN runner and no operator-provided registry** on this path. **Harbor + the local Forgejo runner remain available for local test builds only** (not tracked here, not the deployment source). GitHub CI must pass without LAN access. |
 | D12 | **Serena:** already `uvx` stdio and pinned in the catalog, so the job is to verify it. The central SSE container is dropped on the deployment side, not here. |
 | D13 | **graphify:** move from pinned `uv run` to **`uv tool install 'graphifyy[mcp]==<pin>'`** (idempotent), so that `graphify-mcp` is on PATH on Linux and Windows. |
 | D14 | homelab MCP is not an AutoOS component. AutoOS only removes stale entries it recognises (see §C). **Removal deferred 2026-09-28 by operator decision:** nothing removes it; a recognised leftover is only reported (§C). |
@@ -76,12 +76,15 @@ Targets:
 
 ## D. Images and graph list (review items 3, 4, 5)
 
-- No catalog entry for server images. The images are defined by `infra/mcp-servers/servers/*`
-  (viewer; optionally a cluster-config image) and built by `.forgejo/workflows/omnigraph-images.yml`
-  in its own file. The registry host and robot credentials exist **only as Forgejo secrets/vars**.
-- `infra/mcp-servers/cluster/` holds **`cluster.example.yaml` + the schema only**. The live
-  `cluster.yaml` (graph names, hosts, storage) is never tracked here. It reaches the deployment from
-  the operator's private repo.
+- No catalog entry for server images. The viewer image is defined by
+  `infra/mcp-servers/servers/omnigraph-viewer` and built by
+  `.github/workflows/omnigraph-images.yml` on a GitHub-hosted runner, which pushes SHA tags to
+  `ghcr.io/<owner>/omnigraph-viewer` with the automatic `GITHUB_TOKEN`. No LAN runner and no
+  operator-provided registry secret is involved. Harbor + the local Forgejo runner stay available
+  for local test builds only, and are not the tracked deployment path.
+- `infra/mcp-servers/cluster/` holds **`cluster.yaml.example` + `cluster.schema.json` only**. The
+  live `cluster.yaml` (graph names, hosts, storage) is never tracked here. It reaches the
+  deployment from the operator's private repo.
 
 ## E. Secret scan (review item 15)
 
