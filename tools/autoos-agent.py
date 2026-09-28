@@ -63,6 +63,8 @@ Usage:
     python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
     python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh for quoting bugs"
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
+    python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
+    python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
     python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -70,6 +72,7 @@ Usage:
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
+    python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
@@ -93,12 +96,22 @@ branch reflog (commit-then-reset) or moved side refs - or a tracked file outside
 before - the one exemption being a ref that is another lane's own worktree branch at both ends of the run, and an
 orchestrator that merged or fast-forwarded this parent mid-run is expected to see it: freeze the parent (skill
 R-coord-01). The shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6, 8, 10 and 11); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
 output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
 item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
-deliverable is its diff), so nothing is lost); the child's
+deliverable is its diff), so nothing is lost); 10 = an --isolate run that exited 0 having changed
+nothing AND printed no REPORT heading (INCOMPLETE: the worker stopped mid-task, so there is no report
+to disbelieve - relaunch it, never resume, skill R-orch-06; the track record carries failure class
+"capability", like the NO-OP; the heading counts only in the client's final message, and a line the
+spawner itself sent (the brief a worker echoes back) never counts - SPAWNFIX3c);
+11 = an --isolate run marked --read-only (or a card whose kind/role is
+research) that changed its sandbox anyway (READ-ONLY WRITE: changing nothing is that run's success, so an
+edit is the failure - the diff stat is printed, plus any commit the sandbox's own reflog still shows
+beyond its base (a commit the run reset away - SPAWNFIX3c), and the track record carries failure class
+"capability".
+The same marked run that only reported is NOT a failure: it exits 0 with "RESEARCH: report only"); the child's
 exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
 mode and the client's accepted list);
@@ -116,6 +129,17 @@ deferred), 5 input_required (no route survived the filters, or a removed
 override), 2 bad input (a bad card, a bad --now, an unknown
 --orchestrator-model, or any other measure()/plan() ValueError - fail closed,
 message on stderr).
+
+`inbox <name>|--file PATH` (RESTART spec §0/§2, lane R1) prints one inbox's
+records whole, oldest first, each headed by its `<timestamp>#<ordinal>` position
+so a reader can write that position into its card as `last-event`. The window is
+required: `--since-card <card>` (a successor's resume point, the form a relaunch
+prompt uses), `--since <position|UTC>`, or `--all`; `--max-records N` (default
+30) cuts the oldest and says how many. Records print on stdout, notices on stderr,
+so a pack can embed stdout verbatim. The RUN dir is `$AUTOOS_RUN_DIR` only - an
+unset variable with no `--file` is an error, never an empty read. Exit codes: 0
+read, 1 the file holds no timestamped record (an inbox of another shape is never
+"no events"), 2 no window named, a bad position, or an unreadable file.
 """
 from __future__ import annotations
 
@@ -141,6 +165,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
+import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
@@ -207,11 +232,26 @@ WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
 
 
-def isolate_task_prefix(sandbox_path: str, root: str) -> str:
-    """The one line prepended to the task text of an --isolate run."""
-    return ("Your working directory %s is your only writable checkout; "
-            "never cd, git -C or write into %s or any other path outside it."
-            % (sandbox_path, root))
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
+    """The lines prepended to the task text of an --isolate run.
+
+    SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
+    reaches for approval stops there and exits 0, so the containment line is
+    paired with the one fact the worker cannot probe: nobody is answering.
+
+    Item 4 adds the third line a research run needs: an edit is not the
+    deliverable, and a worker that is never told so will helpfully make one.
+    """
+    lines = ("Your working directory %s is your only writable checkout; "
+             "never cd, git -C or write into %s or any other path outside it.\n"
+             "The run is headless: nobody will answer questions or approve "
+             "anything - decide, commit, and report."
+             % (sandbox_path, root))
+    if read_only:
+        lines += ("\nThis run is read-only: its deliverable is its REPORT, and "
+                  "changing nothing is success - do not edit, commit or "
+                  "reorganise anything; read and report.")
+    return lines
 
 
 def load_jsonc(path: str) -> dict:
@@ -308,6 +348,18 @@ DEFAULT_FREE_CONCURRENCY = 1
 FREE_QUEUE_POLL_SECONDS = 15
 FREE_QUEUE_TIMEOUT_SECONDS = 20 * 60
 EXIT_FREE_QUEUE_TIMEOUT = 9
+# SPAWNFIX (S3) item 1: a worker that stops mid-thought exits rc 0 having printed
+# neither a REPORT nor a commit (work/L1-routing/MUSEREG.try1.out quit after "Let
+# me find the POST handler"). A NO-OP says "it reported, and the report is worth
+# nothing"; this says "it never reported at all", and the next action is a
+# relaunch (skill R-orch-06: never resume a no-change child).
+EXIT_INCOMPLETE = 10
+# SPAWNFIX (S3) item 4: a research run is graded on its report, because an edit
+# was never the deliverable (work/L1-routing/R6RES.out and FOLD4MAP.out both
+# ended "NO-OP exit 5" for a run whose job was to read and say something). A
+# run marked read-only that changed its sandbox anyway is its own failure: the
+# report exists, the instruction was not followed.
+EXIT_READ_ONLY_WRITE = 11
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -898,6 +950,22 @@ def _card_asks_review(card: dict) -> bool:
     return card.get("kind") == "review" or card.get("role") == "review"
 
 
+def read_only_run(args, card) -> bool:
+    """True when this run's success is an unchanged sandbox (SPAWNFIX3 item 4).
+
+    Two spellings, one fact: `run --read-only` says it out loud, and a research
+    card (v2 ``kind=research``, v1 ``role=research``) asks for it by name. The
+    verdict that reads this mark is what turned R6RES and FOLD4MAP into a NO-OP:
+    a run that reads code and reports is not a run that failed to edit.
+
+    ``args`` is read with a default because the route helpers are shared with
+    subcommands that carry no run flags at all (``route``, and the hand-built
+    namespaces the tests plan with) - the same convention `args.isolate` uses.
+    """
+    return bool(getattr(args, "read_only", False)) or (
+        (card or {}).get("kind") == "research" or (card or {}).get("role") == "research")
+
+
 def review_run_refusal(review: dict | None):
     """Why an authored review run must not start yet, or None when it may.
 
@@ -931,7 +999,11 @@ def review_run_refusal(review: dict | None):
 # paste-ready one, so the format is never something you have to go looking for.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
 REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
-READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm"))
+READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
+                            # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
+                            # final signs its lanes "SHIP"; "fix-first" is the same
+                            # vocabulary's OPEN finding and stays refused.
+                            "ship"))
 # The final check is the operator's unchanged decision (Q-003 2026-09-27): a
 # cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
 # registry route -- it is the orchestrator's own interactive model -- so this one
@@ -943,28 +1015,11 @@ FINAL_REVIEWER = "sonnet"
 # the client, so it counts too; anything else does not.
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
-                     "reviewer=<model> verdict=<ready|pass|lgtm|...>")
+                     "reviewer=<model> verdict=<ready|pass|ship|lgtm|...>")
 
 
-def reviewer_family(spelling, registry):
-    """The model FAMILY of a reviewer named in a lane record, or None.
-
-    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
-    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
-    keeps its ``family`` honest against ``models``. Then the registry's own model
-    ids, whole and after a client/provider prefix. The answer is in
-    ``resolver.family_key`` form, so a record's "Meta" and the registry's "meta"
-    are one family wherever it is compared (REVFIX S2).
-
-    Unknown returns None rather than a guess. An invented *reviewer* name would
-    differ from every author family and read as an independent review that never
-    happened -- which is also why ``author_family`` no longer guesses at an
-    unknown *author* (REVFIX S2: both halves must be known before they may
-    disagree).
-    """
-    if not isinstance(spelling, str) or not spelling.strip():
-        return None
-    name = spelling.strip()
+def _family_of_one_spelling(name, registry):
+    """The family the registry declares for exactly one reviewer spelling, or None."""
     key = resolver.family_key(name)
     for entry in ((registry.get("policy") or {}).get("reviewers") or []):
         if isinstance(entry, dict) and resolver.family_key(entry.get("model")) == key:
@@ -974,6 +1029,44 @@ def reviewer_family(spelling, registry):
         entry = resolver.ci_value(models, candidate)
         if isinstance(entry, dict):
             return resolver.family_key(entry.get("family"))
+    return None
+
+
+# A client reports its own models by full id, so the Claude pass that policy
+# .reviewers spells "haiku" signs "claude-haiku-4-5" (SPAWNFIX3 (S3) item 5,
+# work/L1-routing/LEAKFP2.record.md). The vendor's prefix and the version tail
+# are not a different reviewer; the name between them is what the registry may
+# know. Same tail shape as FINAL_REVIEWER_RE.
+_CLAUDE_MODEL_ID_RE = re.compile(r"^claude-([a-z]+)(?:-[0-9][0-9a-z.-]*)?$")
+
+
+def reviewer_family(spelling, registry):
+    """The model FAMILY of a reviewer named in a lane record, or None.
+
+    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
+    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
+    keeps its ``family`` honest against ``models``. Then the registry's own model
+    ids, whole and after a client/provider prefix; then that spelling again with a
+    client's own model-id prefix and version tail removed, which is how a finished
+    pass reports the reviewer the operator named ("claude-haiku-4-5" == "haiku").
+    The answer is in ``resolver.family_key`` form, so a record's "Meta" and the
+    registry's "meta" are one family wherever it is compared (REVFIX S2).
+
+    Unknown returns None rather than a guess. An invented *reviewer* name would
+    differ from every author family and read as an independent review that never
+    happened -- which is also why ``author_family`` no longer guesses at an
+    unknown *author* (REVFIX S2: both halves must be known before they may
+    disagree).
+    """
+    if not isinstance(spelling, str) or not spelling.strip():
+        return None
+    key = spelling.strip()
+    family = _family_of_one_spelling(key, registry)
+    if family is not None:
+        return family
+    bare = _CLAUDE_MODEL_ID_RE.match(resolver.family_key(key) or "")
+    if bare:
+        return _family_of_one_spelling(bare.group(1), registry)
     return None
 
 
@@ -1176,18 +1269,54 @@ def append_inbox_line(path, line):
         fh.write(line + "\n")
 
 
+def ci_run_status(run_id, runner=None):
+    """``(conclusion, head_sha, error)`` — what one CI run says about its own commit.
+
+    ``gh run view --json conclusion,headSha``, through an injectable runner:
+    SPAWNFIX3 item 6, because a test cannot ask GitHub about a commit that only
+    exists under ``/tmp``, and the real call has exactly one place to live.
+    Mirrors `remote_branch_tip`: a non-None ``error`` means the question was
+    never answered (gh missing, gh refusing, output that is not the JSON asked
+    for), which is a different next action and a different exit code from a run
+    that came back red. The timeout is not decoration — `ready` runs inside a
+    lane's session, and a gate that hangs takes that session with it.
+    """
+    runner = runner or subprocess.run
+    argv = ["gh", "run", "view", str(run_id), "--json", "conclusion,headSha"]
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "%s" % exc
+    if proc.returncode != 0:
+        return None, None, ((proc.stderr or proc.stdout or "").strip()
+                            or "gh run view exited %d" % proc.returncode)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, None, "gh run view printed output that is not JSON: %s" % exc
+    head_sha = data.get("headSha")
+    if not head_sha:
+        return None, None, ("gh run view answered with no headSha (conclusion %r)"
+                            % data.get("conclusion"))
+    return data.get("conclusion"), head_sha, None
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Three gates, in this order, each naming itself when it fails: the record
+    Four gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
-    for ``--branch``, and only then is the line appended to the inbox. The rule
-    moved into code because the hand-written claim was wrong once -- L1-main
-    refused a `ready` line whose record had no reviews (inbox 00:31:52Z).
+    for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
+    finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
+    certify a commit the gate never tested (SPAWNFIX3 item 6; the run id rides
+    on the line as ``ci=<id>``). Without ``--ci-run`` the lane is still allowed
+    and one note says the gate was skipped. The gates live in code because the
+    hand-written claim was wrong once -- L1-main refused a `ready` line whose
+    record had no reviews (inbox 00:31:52Z).
 
     Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
-    met, 2 a gate could not be read (unreadable record, git failure, unwritable
-    inbox)."""
+    met, 2 a gate could not be read (unreadable record, git or gh failure,
+    unwritable inbox)."""
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
@@ -1211,10 +1340,29 @@ def cmd_ready(args) -> int:
         print("ready: not pushed -- %s is at %s on origin, not %s"
               % (args.branch, tip, args.sha))
         return 1
-    line = "%s ready %s %s reviews: %s | %s" % (
+    ci_field = ""
+    if getattr(args, "ci_run", None):
+        conclusion, head_sha, ci_error = ci_run_status(args.ci_run)
+        if ci_error:
+            print("ready: cannot read CI run %s: %s" % (args.ci_run, ci_error),
+                  file=sys.stderr)
+            return 2
+        if conclusion != "success":
+            print("ready: not appended -- CI run %s is %s, not success"
+                  % (args.ci_run, conclusion or "still running"))
+            return 1
+        if head_sha != args.sha:
+            print("ready: not appended -- CI run %s tested %s, not %s"
+                  % (args.ci_run, head_sha, args.sha))
+            return 1
+        ci_field = " ci=%s" % args.ci_run
+    else:
+        print("note: no --ci-run given -- the lane is declared ready on the "
+              "reviews and the pushed sha alone")
+    line = "%s ready %s %s reviews: %s | %s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
-        report["cross_family"]["detail"], report["final"]["detail"])
+        report["cross_family"]["detail"], report["final"]["detail"], ci_field)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -1346,6 +1494,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     # resolver's bucket, reason and effort still describe the card's plan.
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
+            "read_only": read_only_run(args, card),
             "bucket": result["bucket"], "class": route_class, "resolver": True,
             "effort": result.get("effort"),
             # who reviews this card (REVROUTE item 2); plan() already walked
@@ -1415,7 +1564,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
-                "review": args.tier == 3, "review_plan": None}
+                "review": args.tier == 3, "read_only": read_only_run(args, None),
+                "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
@@ -1432,6 +1582,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["role"] == "review",
+            "read_only": read_only_run(args, card),
             # a v1 card asks for a review with role=review; author is the shared
             # field, so the same reviewer walk applies (REVROUTE item 2).
             "review_plan": review, "reviewer_note": reviewer_note}
@@ -1526,10 +1677,15 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # itself. Every client takes the task as its last argv
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
-        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT) + "\n" + cmd[-1]
+        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT,
+                                     read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            # The text this run sends the client (containment prefix + task),
+            # kept so the REPORT check can tell the worker's own words from its
+            # brief echoed back at it (SPAWNFIX3c).
+            "brief": cmd[-1],
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
             "session_tag": tag}
@@ -2031,16 +2187,31 @@ def _leg_provider_model(leg, registry):
         return None
 
 
+# The characters that make a model id longer, not a boundary: the gateway quotes
+# the id as one token, so "gemini-3.7-flash-high" is a different model from
+# "gemini-3.7-flash" and "openai/gpt-oss-120b" from "gpt-oss-120b" (R6STOP
+# review, SPAWNFIX3 item 7). Git's own `\b` treats '-' '/' '.' as breaks, which
+# matched the shorter id inside the longer one and benched the wrong provider.
+# A '.' is only part of an id when something id-like follows it: the gateway
+# ends its sentences with one ("... model gpt-oss-120b."), and treating that as
+# a continuation would attribute the stop to no provider at all.
+_MODEL_ID_TOKEN = r"[0-9A-Za-z._/-]"
+_MODEL_ID_NEXT = r"[0-9A-Za-z_/-]|\.[0-9A-Za-z]"
+
+
 def _line_names_model(line, model_id) -> bool:
     """True when the stop line quotes `model_id` as a word of its own.
 
     The gateway says "All credentials for model gemini-3.8-flash ...", so the
-    model it had already chosen is in the text. Whole-word so a model id that
+    model it had already chosen is in the text. Whole-token so a model id that
     is a fragment of another one's spelling cannot drag in the wrong provider.
     """
     if not model_id:
         return False
-    return re.search(r"\b%s\b" % re.escape(str(model_id).lower()), line) is not None
+    pattern = (r"(?<!%s)%s(?!%s)" % (_MODEL_ID_TOKEN,
+                                     re.escape(str(model_id).lower()),
+                                     _MODEL_ID_NEXT))
+    return re.search(pattern, line) is not None
 
 
 def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
@@ -2051,7 +2222,12 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
     one. Next a line that names the MODEL it tried (R6STOP: "All credentials
     for model gemini-3.8-flash are cooling down"): the gateway is telling us
     who served it, and the provider of the leg heading that model is benched
-    whatever else the route happens to hold. Only an unnamed line falls back
+    whatever else the route happens to hold -- unless more than one provider of
+    the route serves that model, when NOTHING is benched and the line says so
+    out loud (R6STOP review, SPAWNFIX3 item 7: t2-worker's route carries
+    gpt-oss-120b on both cerebras and sambanova, and a stop line names the
+    model, never who served it; benching one of them on a 50/50 guess starves a
+    provider that may be perfectly healthy). Only an unnamed line falls back
     to the gateway working down the route's legs in order, so the one that took
     the traffic is the first leg whose provider is up right now. Both read legs
     through `resolve_leg`, so a leg spelled with a gateway alias attributes to
@@ -2072,17 +2248,25 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
                 return pid
         return None
     low = line.lower()
-    served = None
+    served = {}
     for leg in legs or []:
         resolved = _leg_provider_model(leg, registry)
         if resolved is None:
             continue
         pid, model_id = resolved
-        if _line_names_model(low, model_id) and (
-                served is None or len(model_id) > len(served[1])):
-            served = (pid, model_id)
+        if _line_names_model(low, model_id):
+            pids = served.setdefault(model_id, [])
+            if pid not in pids:
+                pids.append(pid)
     if served:
-        return served[0]
+        # The most specific id the line quoted is the model it named.
+        model_id = max(served, key=len)
+        pids = served[model_id]
+        if len(pids) > 1:
+            print("ambiguous stop: %s served by %s - not benched"
+                  % (model_id, ", ".join(pids)))
+            return None
+        return pids[0]
     for leg in legs or []:
         pid, _model_id = _leg_provider_model(leg, registry) or (None, None)
         provider = providers.get(pid)
@@ -2504,9 +2688,14 @@ def parent_leak(snapshot, root=None, sandbox=None):
     rule: a worker that commits on a branch CREATED during the run and then
     moves HEAD back off it is missed, because new refs are never scanned (the
     orchestrator fetches lanes into them); and plumbing that writes a commit
-    without moving a pre-existing ref or dirtying the tree is missed. A stale
-    worktree left behind by an earlier run can also carry the one exemption,
-    which is another reason the parent is frozen (skill R-coord-01).
+    without moving a pre-existing ref or dirtying the tree is missed. The one
+    exemption (another lane's own worktree branch) can be carried by ANY
+    worktree the sandboxed worker can reach - a live one it did not make and a
+    stale one left by an earlier run, and a worker that runs `git worktree add`
+    itself makes one: every worktree of the parent's .git is inside the fence,
+    because a worktree is a directory the parent checkout points at, not a
+    separate repository. None of the three is a containment proof; each is
+    another reason the parent is frozen (skill R-coord-01).
 
     Git-ignored parent files (configuration/api-keys.yml, inventory.yml) are
     NOT covered: porcelain cannot see them. Nothing here is reverted.
@@ -2555,25 +2744,253 @@ def parent_leak(snapshot, root=None, sandbox=None):
     return leaks
 
 
-def _reflog_len(root: str, branch: str) -> int:
-    r = subprocess.run(["git", "-C", root, "reflog", "show", "refs/heads/" + branch],
+def sandbox_diffstat(path: str, base: str) -> str:
+    """One line saying how much the sandbox's worktree differs from `base`.
+
+    Covers committed and uncommitted change in one read (`git diff` against a
+    revision compares it with the worktree), which is what a read-only run's
+    failure message has to name. A git that cannot answer returns "": the
+    verdict does not depend on this string, only its detail does.
+    """
+    proc = subprocess.run(["git", "-C", path, "diff", "--shortstat", base],
+                          capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def _reflog_count(root: str, ref: str) -> int:
+    """How many entries `ref`'s own reflog has (0 when it has none at all)."""
+    r = subprocess.run(["git", "-C", root, "reflog", "show", ref],
                        capture_output=True, text=True)
     if r.returncode != 0:
         return 0
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
-def sandbox_verdict(route: dict, changed: str, ahead: str):
+def _reflog_len(root: str, branch: str) -> int:
+    return _reflog_count(root, "refs/heads/" + branch)
+
+
+# The refs a sandbox run can move. HEAD and its own branch carry a commit the
+# run made; refs/stash is the same commit hidden from the worktree by
+# `git stash` instead of a reset.
+SANDBOX_REFLOG_REFS = ("HEAD", "refs/stash")
+
+
+def sandbox_reflog_snapshot(path: str, branch: str) -> dict:
+    """{"counts": {ref: reflog length}, "known": {sha, ...}} for a sandbox.
+
+    Taken before the client starts, so the clone and its `switch -c` are already
+    in it. `counts` bounds the reflog read to what the run appended; `known` is
+    every commit that already existed anywhere in the clone (`git rev-list
+    --all`, and `--all` walks every fetched ref, so a full clone's whole history
+    costs ~15 ms for ~1.4 k commits here) — the shas a run may legitimately move
+    HEAD onto. A commit the run itself made is in neither.
+    """
+    refs = list(SANDBOX_REFLOG_REFS) + ["refs/heads/" + branch]
+    r = subprocess.run(["git", "-C", path, "rev-list", "--all"],
+                       capture_output=True, text=True)
+    known = set(r.stdout.split()) if r.returncode == 0 else set()
+    return {"counts": {ref: _reflog_count(path, ref) for ref in refs},
+            "known": known}
+
+
+def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
+    """Short shas of commits the sandbox's own reflogs still show beyond `base`.
+
+    A run that edits, commits and then `reset --hard`s back to its base leaves a
+    clean final `git status --short` and an empty `base..branch` - the only two
+    reads sandbox_verdict used to make, and the escape SPAWNFIX3c (S2) item 2
+    measured. A reflog entry whose new value carries commits past `base` IS that
+    commit. The run's own moves are not: a switch, a checkout or a reset onto a
+    commit that already existed (`snapshot["known"]`, taken before the client
+    started) is a research run reading history, and a reset back onto `base`
+    names `base` itself, which `base..sha` renders empty.
+
+    Same shape as parent_leak's commit-then-reset scan, with one difference:
+    there the worker identity is the signal (an orchestrator legitimately merges
+    into a parent); here the sandbox is private to the run, so ANY commit past
+    its base is the write. Returns [] when the snapshot is missing (a run that
+    never took one).
+    """
+    counts = (snapshot or {}).get("counts") or {}
+    known = (snapshot or {}).get("known") or set()
+    found = set()
+    for ref, before in counts.items():
+        new = _reflog_count(path, ref) - before
+        if new <= 0:
+            continue
+        r = subprocess.run(["git", "-C", path, "reflog", "show", "--format=%H",
+                            "-n", str(new), ref], capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+        for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
+            if sha == base or sha in known:
+                continue
+            probe = subprocess.run(["git", "-C", path, "rev-list", "--max-count=1",
+                                    base + ".." + sha],
+                                   capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout.strip():
+                found.add(sha[:10])
+    return sorted(found)
+
+
+# The return contract (docs/agent-protocol.md): a finished worker prints a
+# REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).
+# Prose that merely mentions a report is not one; neither is a word that only
+# starts with the same letters ("REPORTED") or a file named after it
+# ("REPORT.md" — measured in work/L1-routing/A7spike.out, whose run wrote its
+# report to a file and named it in its closing line).
+REPORT_HEADING_RE = re.compile(
+    r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])")
+
+# An inline-code span (backticks) or a string/regex literal (quotes): the shapes
+# a line carries when it QUOTES something instead of saying something.
+_QUOTED_SPAN_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")
+
+# The word rendered AS the heading convention: markup touching it (`**REPORT**`,
+# `# REPORT:`) or a regex escape next to it (\breport\b). A span that quotes an
+# ordinary message string ("RESEARCH: report only") names a message the worker
+# saw, and a real report does exactly that (SPAWNFIX3c.out).
+_SELFQUOTE_MARKUP_RE = re.compile(
+    r"[*#>?+|]{1,3}\s*\breport\b"        # `**REPORT**`, `# REPORT:`
+    r"|\breport\b\s*[*#>?+|]"            # the bold close, `REPORT*`
+    r"|\\[a-zA-Z][*+?\s]*report"         # \breport, \s*report
+    r"|report[*+?\s]*\\[a-zA-Z]",        # report\b, report\s*
+    re.IGNORECASE)
+
+
+def is_self_quoting(line: str) -> bool:
+    """True when a heading line displays the heading convention itself.
+
+    The old rule counted the word "report" in the line and rejected two or more
+    mentions; that also rejected the real headers of SPAWNFIX3c.out and
+    OR34spike.out, which say it twice because they are long lines of prose.
+    Only a QUOTED mention that carries the markup counts: the spawner's own
+    comment is out, a run's own sentence is in.
+    """
+    for span in _QUOTED_SPAN_RE.findall(line):
+        if _SELFQUOTE_MARKUP_RE.search(span):
+            return True
+    return False
+
+
+# The lines a client's harness prints for its own tool calls, as opposed to its
+# message text. Everything before the LAST of them is transcript: a REPORT
+# heading there belongs to an earlier turn (or to a run that died in that tool
+# call), not to the closing message the return contract asks for. Anchored at
+# the line start and deliberately tiny: a report body may quote any of these
+# shapes mid-sentence, and a false INCOMPLETE relaunches a finished research run.
+FINAL_SEGMENT_MARKER_RES = (
+    # agy prints one of these per tool event - the same prefix
+    # headless_refusal() trusts (HEADLESS_REFUSAL_PREFIX).
+    re.compile(r"^jetski[:>]", re.IGNORECASE),
+    # A tool call as the captured transcript renders it: `Read(path)`,
+    # `Bash(git status)`, `apply_patch(...)`.
+    re.compile(r"^(?:read|write|edit|glob|grep|bash|shell|exec|search|find|task|think"
+               r"|apply_patch|webfetch|web_fetch|web_search|fetch|question)\w*\s*\(",
+               re.IGNORECASE),
+)
+
+INCOMPLETE_MESSAGE = ("INCOMPLETE: the worker stopped without a REPORT - "
+                      "relaunch it (never resume)")
+
+
+def final_message_segment(output: str, brief: str = "") -> str:
+    """The part of a captured client tail that is its closing message.
+
+    run_client merges the child's stdout+stderr and keeps the last TAIL_LIMIT
+    bytes verbatim, so the tail is the whole raw transcript: the task text the
+    client echoed, its tool output, and only at the end the assistant's final
+    message. Two things come out of it here:
+
+    - everything up to the last tool-call line (FINAL_SEGMENT_MARKER_RES): the
+      client was still working there, and whatever it or its tools printed in
+      that part is the transcript, quotations included;
+    - the brief's own lines: a worker that cats or echoes its brief prints a
+      line starting "REPORT:" (every brief ends with the return contract's field
+      list) and that is the spawner's text, not the worker's report.
+
+    What is left is what the client's final message said. A tool RESULT printed
+    plainly after its own command echo is indistinguishable from message text in
+    a merged stream, which is why the brief rule above is the one that carries
+    the measured case - and why fences are not stripped: in the final message a
+    fenced REPORT heading is the message (SPAWNFIX3d).
+    """
+    quoted = {ln.strip() for ln in (brief or "").splitlines() if ln.strip()}
+    lines = [(_ANSI_RE.sub("", raw).strip()) for raw in (output or "").splitlines()]
+    start = 0
+    for i, line in enumerate(lines):
+        if line and any(m.match(line) for m in FINAL_SEGMENT_MARKER_RES):
+            start = i + 1
+    return "\n".join(ln for ln in lines[start:] if ln and ln not in quoted)
+
+
+def has_report(output: str, brief: str = "") -> bool:
+    """True when the client's FINAL MESSAGE carries a REPORT heading line.
+
+    `brief` is the text this run sent the client (plan["brief"]): its lines never
+    count, because echoing the brief back is not reporting on the task (that is
+    final_message_segment's filter). A heading line that renders the heading
+    markup itself quotes the contract instead of filing a report
+    (is_self_quoting).
+    """
+    for line in final_message_segment(output, brief).splitlines():
+        if REPORT_HEADING_RE.search(line) and not is_self_quoting(line):
+            return True
+    return False
+
+
+def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
+                    diffstat: str = "", reflog: str = "", brief: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
     commit hashes and changed nothing. A run whose job is to implement must
     leave a commit or a change; an agent's report is not evidence.
+
+    SPAWNFIX (S3) item 1: a run that changed nothing AND never printed its
+    REPORT did not finish the task at all (work/L1-routing/MUSEREG.try1.out),
+    which is a different next action from a reported no-change: relaunch it.
+
+    SPAWNFIX (S3) item 4: for a read-only run the empty sandbox IS the success,
+    so a REPORT and no change exits 0 (work/L1-routing/R6RES.out and
+    FOLD4MAP.out were graded NO-OP for doing exactly that) - and the change a
+    writer run is rewarded for is the failure this one is judged by. The diff
+    stat goes into the message because the run's work is now in the sandbox: the
+    operator has to see what to throw away without another git command.
+
+    SPAWNFIX3c (S2) item 2: a read-only run's two reads were the final
+    `git status --short` and `base..branch`, so a worker that committed and
+    `reset --hard` back to base escaped with an empty sandbox in both. `reflog`
+    is what sandbox_reflog_writes found in the sandbox's own reflogs (short shas,
+    comma-joined) and it counts as a change for the read-only verdict ONLY: a
+    writer run that reset its own work away is still the unfinished run its
+    porcelain says it is, never a pass.
+
+    `brief` (item 1) is the text this run sent the client: has_report() must not
+    read the worker's own instructions back to it as its report.
     """
-    if route.get("review") or changed or ahead:
+    if route.get("review"):
         return None, ""
-    return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
-               "unverified and the run as failed (exit 5)")
+    read_only = bool(route.get("read_only"))
+    if read_only and (changed or ahead or reflog):
+        detail = diffstat or "(no diff stat)"
+        if reflog:
+            detail += ("; commits its reflog still shows, beyond the base: %s "
+                       "(commit then reset; the sandbox reflog is the only witness)"
+                       % reflog)
+        return EXIT_READ_ONLY_WRITE, (
+            "READ-ONLY WRITE: a read-only run changed its sandbox "
+            "(exit %d) - its deliverable was the report, never the edit: %s"
+            % (EXIT_READ_ONLY_WRITE, detail))
+    if not changed and not ahead:
+        if not has_report(output, brief):
+            return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
+        if read_only:
+            return 0, "RESEARCH: report only"
+        return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
+                   "unverified and the run as failed (exit 5)")
+    return None, ""
 
 
 def wip_commit(sandbox: str, rc: int, stop: str | None, branch: str | None = None) -> str | None:
@@ -2657,8 +3074,11 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     recorded as unknown/0 until the resolver measures them. The effort is the
     rung RUNV2's route carries (``route["effort"]``) when there is one, else
     "unknown". rc is the same value the run exits with, the NO-OP (5), the
-    headless refusal (6, failure class "refusal") and the LEAK (7, failure
-    class "containment") overrides included.
+    headless refusal (6, failure class "refusal"), the LEAK (7, failure class
+    "containment") and the INCOMPLETE (10, failure class "capability" like the
+    NO-OP) and the READ-ONLY WRITE (11, "capability" too - a model that edits
+    when told not to failed the instruction, which is answer quality) overrides
+    included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -2694,7 +3114,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
-        "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
+        "failure_class": (None if rc == 0 else ("capability" if rc in (
+                              5, EXIT_INCOMPLETE, EXIT_READ_ONLY_WRITE) else
                           ("refusal" if rc == 6 else
                            ("containment" if rc == 7 else
                             ("provider" if rc == 8 else "logic"))))),
@@ -3428,6 +3849,9 @@ def cmd_run(args, cfg: dict) -> int:
     if route.get("reviewer_note"):
         print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
+    if route.get("read_only"):
+        print("read-only: this run's success is an unchanged sandbox and a REPORT "
+              "(an edit in it exits %d)" % EXIT_READ_ONLY_WRITE)
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
     if args.lean:
@@ -3523,6 +3947,14 @@ def cmd_run(args, cfg: dict) -> int:
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
+        # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
+        # later read sees only what the run appended. Kept in the dict, which a
+        # provider-stop fallthrough re-run inherits with the sandbox itself.
+        # SPAWNFIX3d (S2) item 3: only a read-only run is judged on an untouched
+        # sandbox, so only it pays for the snapshot - exactly like the diff stat
+        # at the summary below (sandbox_reflog_writes is never called otherwise).
+        if plan["route"].get("read_only"):
+            sb["reflog"] = sandbox_reflog_snapshot(sb["path"], sb["branch"])
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
@@ -3595,13 +4027,14 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: HEADLESS-REFUSAL: %s" % redact_output(refusal), file=sys.stderr)
         # A provider stop is a failure even though the client often exited 0: it
         # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
-        # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+        # LEAK (7) still wins below, and neither the NO-OP (5) nor the
+        # INCOMPLETE (10) verdict fires on an 8.
         # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
         # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
         # them - the provider_stop() tail check still gates the upgrade, and other
         # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
         # reach here with a provider-stop line.
-        # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
+        # Exit precedence 7 > 8 > 5/10 > 6: a HEADLESS-REFUSAL (6) run that is then
         # provider-stopped exits 8 with failure_class "provider" (agy measured:
         # jetski refusal + AGY_ERROR 429, R-gateway-12).
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
@@ -3720,7 +4153,20 @@ def cmd_run(args, cfg: dict) -> int:
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
-        override, message = sandbox_verdict(plan["route"], changed, ahead)
+        read_only = bool(plan["route"].get("read_only"))
+        # SPAWNFIX3c (S2): only a read-only run is judged on an untouched
+        # sandbox, so only it pays for the reflog read and the diff stat. A
+        # commit the run reset away leaves both of those empty (the worktree is
+        # back at base) — the reflog shas are the only witness.
+        reset_away = sandbox_reflog_writes(sb["path"], sb.get("reflog"),
+                                           sb["base"]) if read_only else []
+        override, message = sandbox_verdict(
+            plan["route"], changed, ahead, client_tail,
+            # Only the read-only verdict quotes the diff stat, so only the
+            # read-only run pays for the extra git call.
+            sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
+            reflog=", ".join(reset_away),
+            brief=plan.get("brief") or "")
         leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
@@ -3761,30 +4207,157 @@ def cmd_run(args, cfg: dict) -> int:
     return rc
 
 
-def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
-        return usage_mod.main(list(argv[1:]))
-    # ... and everything after `token-rate` belongs to autoos_tokenrate
-    # (RESTART spec §5: the metric verb, no gateway needed).
-    if argv[:1] == ["token-rate"]:
-        return tokenrate_mod.main(list(argv[1:]))
-    ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+def cmd_inbox(args) -> int:
+    """Print one inbox's records since a position (RESTART spec §2, lane R1).
+
+    The record shapes live in tools/autoos_inbox.py (§0, one home); this is the
+    window and the printing. Records go to stdout with their continuations and
+    a malformed line inside the window goes there too, tagged `(malformed line
+    N)` with the lines under it, so a context pack that embeds stdout keeps
+    every acknowledgement. The notice is made only for an entry this run
+    actually prints — it promises the text is on stdout, and a line behind
+    `--since` or dropped by the `--max-records` cut reaches nowhere. A malformed
+    entry cut with the record it rode on is counted in the cut line.
+    Every notice goes to stderr.
+
+    Exit 0 read, 1 the file holds no timestamped record (an inbox of another
+    shape is never read as "no events"), 2 no window named, a bad position, or
+    an unreadable file."""
+    if args.file and args.name:
+        print("inbox: name one source -- an <name> under the RUN dir or --file, "
+              "not both", file=sys.stderr)
+        return 2
+    try:
+        path = args.file or inbox.inbox_path(args.name)
+    except inbox.InboxError as exc:
+        print("inbox: %s" % exc, file=sys.stderr)
+        return 2
+    if args.all and (args.since or args.since_card):
+        print("inbox: --all reads the whole file; drop --since/--since-card",
+              file=sys.stderr)
+        return 2
+    if args.since and args.since_card:
+        print("inbox: name one window -- --since-card reads where the card "
+              "stopped, --since where you say", file=sys.stderr)
+        return 2
+    if not args.all and not args.since and not args.since_card:
+        print("inbox: name the window -- --since-card <card>, --since "
+              "<position|UTC> or --all", file=sys.stderr)
+        return 2
+    if args.max_records < 1:
+        print("inbox: --max-records must be at least 1", file=sys.stderr)
+        return 2
+    since = None
+    since_text = ""
+    if args.since_card:
+        try:
+            position = inbox.card_last_event(args.since_card)
+        except inbox.InboxError as exc:
+            print("inbox: %s" % exc, file=sys.stderr)
+            return 2
+        if position is None:
+            print("inbox: %s has no last-event -- reading from the start"
+                  % args.since_card, file=sys.stderr)
+        else:
+            since, since_text = position, position
+            source = args.since_card
+    elif args.since:
+        since, source = args.since, "--since"
+        since_text = args.since
+    if isinstance(since, str):
+        try:
+            since = inbox.parse_position(since)
+        except ValueError as exc:
+            print("inbox: %s: %s" % (source, exc), file=sys.stderr)
+            return 2
+    try:
+        records, malformed = inbox.parse_file(path)
+    except inbox.InboxError as exc:
+        print("inbox: %s" % exc, file=sys.stderr)
+        return 2
+    if not records:
+        print("inbox: no timestamped records in %s" % path, file=sys.stderr)
+        return 1
+    entries = inbox.window_entries(records, malformed, since)
+    selected = [entry for entry in entries if not
+                isinstance(entry, inbox.Malformed)]
+    if len(selected) > args.max_records:
+        cut = len(selected) - args.max_records
+        dropped = {id(entry) for entry in selected[:cut]}
+        kept = [entry for entry in entries
+                if id(entry) not in dropped
+                and not (isinstance(entry, inbox.Malformed)
+                         and id(entry.anchor) in dropped)]
+        # Names the malformed entries that rode on a cut record, so the budget
+        # that dropped them is stated whole rather than implied by the records.
+        lost = sum(1 for entry in entries
+                   if isinstance(entry, inbox.Malformed)
+                   and id(entry.anchor) in dropped)
+        print("inbox: cut %d earlier records%s"
+              % (cut, " and %d malformed entries" % lost if lost else ""),
+              file=sys.stderr)
+        entries = kept
+    for entry in entries:
+        if isinstance(entry, inbox.Malformed):
+            lines = 1 + len(entry.continuations)
+            print("inbox: malformed at line %d (%d %s): the line looks like a UTC "
+                  "timestamp but is not one, so it is neither a record nor a "
+                  "continuation; its text is on stdout tagged (malformed line %d)"
+                  % (entry.line, lines, "line" if lines == 1 else "lines",
+                     entry.line), file=sys.stderr)
+    if not selected:
+        # Names the window as the caller wrote it: a bare UTC cut reads that
+        # whole second internally (ordinal 0), and "#0" is not a position a card
+        # may hold, so echoing it would invite an unparseable last-event.
+        print("inbox: nothing since %s (%d records in %s)"
+              % (since_text or "the start", len(records), path), file=sys.stderr)
+    for entry in entries:
+        if isinstance(entry, inbox.Malformed):
+            # No position to head it with — the tag is its place in the file.
+            print("(malformed line %d) %s" % (entry.line, entry.text))
+        else:
+            print("%s%s %s" % (entry.position,
+                               " (late)" if entry.late else "", entry.text))
+        for extra in entry.continuations:
+            print(extra)
+    return 0
+
+
+# ── verbs: one table builds the parsers, one table dispatches ────────────────
+# What this replaces is the old last line of main(),
+# `cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)`: every verb that
+# was not `list` fell through into `run`, so a verb added to the parser but not
+# to the dispatch silently spawned an agent, and a mistyped verb spawned one too.
+# A verb now has to be in BOTH tables; one without a handler is refused (RESTART
+# spec R1, "it freezes the dispatch").
+
+def _parser_usage(sub):
     sub.add_parser("usage", help="usage report by provider/combo/lane from the OmniRoute "
                                  "gateway (OR4); its own flags follow `usage`, e.g. "
                                  "`usage --since 1h --by provider,lane`")
+
+
+def _parser_token_rate(sub):
     sub.add_parser("token-rate",
                    help="orchestrator tokens per merged change (RESTART spec §5); "
                         "its own flags follow `token-rate`, e.g. "
                         "`token-rate --since 48h --cwd-prefix <lane dir>`")
+
+
+def _parser_list(sub):
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
+
+
+def _parser_ps(sub):
     ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
                                    "worktrees and clones); deletes records that ended "
                                    "(or died) more than 7 days ago")
     ps.add_argument("--all", action="store_true",
                     help="also show exited workers from the last 24 h")
     ps.add_argument("--json", action="store_true", help="print the rows as JSON")
+
+
+def _parser_run(sub):
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
@@ -3810,13 +4383,23 @@ def main(argv=None) -> int:
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",
                      help="no heavy MCP servers (%s) - for research/review agents" % ", ".join(LEAN_DROP))
+    run.add_argument("--read-only", dest="read_only", action="store_true",
+                     help="a research run: an unchanged sandbox plus a REPORT is success (exit 0), an "
+                          "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
+                          "run without this flag")
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
+
+
+def _parser_context(sub):
     context = sub.add_parser("context", help="print this session's context fill")
     context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     context.add_argument("--model", help="override the model the cap is looked up for")
     context.add_argument("--json", action="store_true", help="print the fill as JSON")
+
+
+def _parser_heartbeat(sub):
     heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
                                  "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
     heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest PAUSE/RESUME line")
@@ -3825,6 +4408,9 @@ def main(argv=None) -> int:
                              help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
     heartbeat_p.add_argument("--cap", type=int, help="override the model's hand-off cap (tokens)")
     heartbeat_p.add_argument("--json", action="store_true", help="print the report as one JSON object")
+
+
+def _parser_route(sub):
     route = sub.add_parser("route", help="print the resolver v2 route_plan for a task card")
     route.add_argument("--card", required=True,
                        help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
@@ -3836,6 +4422,9 @@ def main(argv=None) -> int:
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+
+
+def _parser_review_status(sub):
     review_status_p = sub.add_parser(
         "review-status", help="read a lane record and report whether it carries both "
                               "reviews a ready lane needs: a cross-family review and the "
@@ -3844,6 +4433,9 @@ def main(argv=None) -> int:
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+
+
+def _parser_ready(sub):
     ready_p = sub.add_parser(
         "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
                       "hand: gate on review-status and on --sha being the tip of "
@@ -3855,30 +4447,96 @@ def main(argv=None) -> int:
     ready_p.add_argument("--sha", required=True,
                          help="the commit the lane is ready at; must equal origin's tip for --branch")
     ready_p.add_argument("--inbox", required=True,
-                         help="the controller's inbox file to append the ready line to "
+                         help="the controller's inbox to append the ready line to "
                               "(created if missing, never rewritten)")
     ready_p.add_argument("--registry",
                          help="registry to resolve model families against "
                               "(default: catalog/ai-registry.json)")
     ready_p.add_argument("--repo",
                          help="git checkout to ask origin about (default: the cwd)")
+    ready_p.add_argument("--ci-run", dest="ci_run", metavar="RUN_ID",
+                         help="a GitHub Actions run that tested --sha: it must have "
+                              "conclusion=success AND headSha=--sha, else the lane is not "
+                              "ready (exit 1) or the gate could not be read (exit 2). Its "
+                              "id is appended to the inbox line as ci=<RUN_ID>; without it "
+                              "the lane is still allowed and one note says so")
     ready_p.add_argument("--dry-run", action="store_true",
                          help="print the line, append nothing")
+
+
+def _parser_inbox(sub):
+    inbox_p = sub.add_parser(
+        "inbox", help="read an inbox window instead of the whole file (RESTART §2): "
+                      "records print whole with their positions, so a successor "
+                      "resumes at `last-event` and never opens a 50k-token inbox")
+    inbox_p.add_argument("name", nargs="?",
+                         help="the inbox name, read as <RUN>/inbox/<name>.md "
+                              "(RUN = $AUTOOS_RUN_DIR)")
+    inbox_p.add_argument("--file", help="read this inbox file instead (wins over <name>)")
+    inbox_p.add_argument("--since-card", metavar="CARD",
+                         help="resume at the `last-event <position>` in this card's header")
+    inbox_p.add_argument("--since", metavar="POSITION_OR_UTC",
+                         help="read after this `<timestamp>#<ordinal>` position, or after "
+                              "this UTC second (a bare stamp reads the whole second)")
+    inbox_p.add_argument("--all", action="store_true", help="read every record in the file")
+    inbox_p.add_argument("--max-records", type=int, default=30, metavar="N",
+                         help="print at most N records, cutting the oldest (default: %(default)s)")
+
+
+VERB_PARSERS = {
+    "usage": _parser_usage,
+    "token-rate": _parser_token_rate,
+    "list": _parser_list,
+    "ps": _parser_ps,
+    "run": _parser_run,
+    "context": _parser_context,
+    "heartbeat": _parser_heartbeat,
+    "route": _parser_route,
+    "review-status": _parser_review_status,
+    "ready": _parser_ready,
+    "inbox": _parser_inbox,
+}
+
+# Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
+# verbs read, loaded for those two and None for the rest. `usage` and
+# `token-rate` are the registered verbs with no entry here: main() hands them to
+# autoos_usage / autoos_tokenrate before argparse runs, because every flag after
+# them belongs to that module.
+VERB_HANDLERS = {
+    "context": lambda args, cfg: cmd_context(args),
+    "heartbeat": lambda args, cfg: cmd_heartbeat(args),
+    "inbox": lambda args, cfg: cmd_inbox(args),
+    "list": lambda args, cfg: cmd_list(cfg),
+    "ps": lambda args, cfg: cmd_ps(args),
+    "ready": lambda args, cfg: cmd_ready(args),
+    "review-status": lambda args, cfg: cmd_review_status(args),
+    "route": lambda args, cfg: cmd_route(args),
+    "run": lambda args, cfg: cmd_run(args, cfg),
+}
+
+CFG_VERBS = frozenset({"list", "run"})
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
+        return usage_mod.main(list(argv[1:]))
+    # ... and everything after `token-rate` belongs to autoos_tokenrate
+    # (RESTART spec §5: the metric verb, no gateway needed).
+    if argv[:1] == ["token-rate"]:
+        return tokenrate_mod.main(list(argv[1:]))
+    ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for build_parser in VERB_PARSERS.values():
+        build_parser(sub)
     args = ap.parse_args(argv)
-    if args.cmd == "context":
-        return cmd_context(args)
-    if args.cmd == "heartbeat":
-        return cmd_heartbeat(args)
-    if args.cmd == "route":
-        return cmd_route(args)
-    if args.cmd == "review-status":
-        return cmd_review_status(args)
-    if args.cmd == "ready":
-        return cmd_ready(args)
-    if args.cmd == "ps":
-        return cmd_ps(args)
-    cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
-    return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
+    handler = VERB_HANDLERS.get(args.cmd)
+    if handler is None:
+        print("autoos-agent: verb '%s' is registered but has no handler -- refusing "
+              "rather than falling through to `run`" % args.cmd, file=sys.stderr)
+        return 2
+    cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc")) if args.cmd in CFG_VERBS else None
+    return handler(args, cfg)
 
 
 if __name__ == "__main__":
