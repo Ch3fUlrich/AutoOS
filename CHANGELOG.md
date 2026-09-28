@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a spawned worker's environment is chosen, not inherited (FF1, D-106)
+
+- **`tools/autoos-agent.py` `worker_env()`** (new, used by both spawn sites —
+  the first launch and the provider-stop fallthrough re-run): the child's
+  environment is an **allowlist** of the caller's (`PATH`, `HOME`, `USER`,
+  `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SHELL`, `XDG_*`, `NVM_DIR` and
+  an explicitly named set of `AUTOOS_*`), plus the plan's own entries. A
+  denylist only covers the names somebody remembered, and the operator's shell
+  on this host holds GitHub, provider, cloud and ssh-agent credentials — all of
+  which a worker could read with `env`. `AUTOOS_OMNIROUTE_KEY` is never
+  inherited; the run's own minted key is added only when it uses the gateway,
+  and `register_secret_env` still sees the final dict.
+- **git in a worker can neither prompt nor fetch a stored credential**:
+  `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` to a binary that always fails, and
+  `GIT_CONFIG_COUNT/KEY_n/VALUE_n` cancelling `credential.helper` and
+  `core.askPass`.
+- **`fence_sandbox_push()`**: an `--isolate` clone had its `origin` push URL
+  disabled; every remote is now disabled and the clone gets a `pre-push` hook
+  that exits 1, because `pushurl` does not fence `git push </absolute/parent>`
+  — a path the containment brief itself names to the worker.
+- **`lib/agent_harness.py` `user_config_fence()`**: rendering a user-level
+  config (under `$HOME`/`$XDG_*_HOME`) from a lane sandbox checkout is refused
+  (exit 1). Measured on this branch: a lane render baked the sandbox's own path
+  into `.config/opencode/opencode.json` twice, so the user's next session read
+  instructions and fences pointing at a directory deleted with the sandbox. A
+  staged target outside any home is unaffected.
+- Tests: `tests/test_autoos_spawner.py` (`WorkerEnvAllowlistTests`,
+  `SpawnerChildEnvTests`, `SandboxPushFenceTests` — 15, red before the change)
+  and the new `tests/test_user_config_fence.py` (13, wired into
+  `tests/linux/07-mcp-pins.sh`).
+
 ### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
 
 - **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid

@@ -530,9 +530,64 @@ def _backup_and_write(path, text, stamp=None):
     return True
 
 
+# FF1 (D-106): a lane sandbox (`.../AutoOS-lanes/<lane>/logs/sandboxes/<run>`) is
+# a throwaway clone a spawned worker edits. Rendering a USER-level config from
+# one bakes paths that are deleted with it into ~/.config/opencode, ~/.openhands,
+# ~/.claude.json — the next session there reads instructions and fences pointing
+# at a directory that no longer exists. So: refuse, and say what to run instead.
+# A non-user target (the tests, a staged directory) is not the hazard and stays
+# allowed, so the fence cannot break a rendering that never reaches a home dir.
+LANE_PATH_MARKERS = ("/AutoOS-lanes/", "/logs/sandboxes/")
+
+
+def _norm(path):
+    """Absolute, with forward slashes: the two spellings are one shape."""
+    return os.path.abspath(path).replace(os.sep, "/")
+
+
+def is_lane_checkout(path):
+    # The text as given, not abspath()'d: on POSIX a Windows path resolves
+    # against the current directory, and a lane's cwd would mark every argument
+    # a lane. A genuinely relative path is still resolved — the installer passes
+    # one, and its own directory is what the rule is about.
+    given = str(path).replace(os.sep, "/").replace("\\", "/")
+    forms = [given]
+    if not os.path.isabs(given) and not (len(given) > 2 and given[1] == ":"):
+        forms.append(_norm(path))
+    return any(marker in form.rstrip("/") + "/"
+               for form in forms for marker in LANE_PATH_MARKERS)
+
+
+def is_user_level_target(path):
+    """True when `path` sits under a home directory the child agents read from."""
+    target = _norm(path)
+    homes = [os.path.expanduser("~"), os.environ.get("XDG_CONFIG_HOME"),
+             os.environ.get("XDG_DATA_HOME"), os.environ.get("XDG_STATE_HOME")]
+    for home in homes:
+        if not home:
+            continue
+        base = _norm(home)
+        if target == base or target.startswith(base + "/"):
+            return True
+    return False
+
+
+def user_config_fence(repo_root, target):
+    """(ok, reason): a user-level config must not be rendered from a lane."""
+    if is_lane_checkout(repo_root) and is_user_level_target(target):
+        return False, ("refusing to write %s into a home directory from the lane "
+                       "sandbox checkout %s — run the installer from the real "
+                       "checkout instead" % (_norm(target), _norm(repo_root)))
+    return True, ""
+
+
 def cmd_opencode(args):
     harness = load_harness(args.harness)
     config_path = args.config
+    ok, reason = user_config_fence(args.repo_root, config_path)
+    if not ok:
+        print("agent-harness opencode: refused, %s" % reason)
+        return 1
     existed = os.path.exists(config_path)
     if existed:
         # utf-8-sig: a BOM written by an editor must not make the file "invalid".
@@ -744,6 +799,10 @@ def _settings_status(settings_path, enable, dry_run):
 
 def cmd_openhands(args):
     harness = load_harness(args.harness)
+    ok, reason = user_config_fence(args.repo_root, args.openhands_dir)
+    if not ok:
+        print("agent-harness openhands: refused, %s" % reason)
+        return 1
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))

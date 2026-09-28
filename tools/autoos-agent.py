@@ -253,6 +253,113 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
 
+# FF1 (D-106): what a spawned worker inherits. The caller's environment on this
+# host carries GitHub, provider and cloud credentials plus an ssh-agent socket,
+# and a worker reads its own env (`env`, `git`, a script it was told to run).
+# So the set is chosen by an ALLOWLIST: a denylist only ever covers the names
+# somebody remembered to write down, and an unlisted name is a name that got
+# through.
+WORKER_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
+                    "SHELL", "NVM_DIR",
+                    # Windows: a process with no SYSTEMROOT cannot start a
+                    # thread, and a client with no USERPROFILE finds no home.
+                    # None of these carry a credential.
+                    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+                    "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
+                    "PROGRAMDATA")
+WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
+# AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
+# here: the child gets the minted key, never the path to the file it came from.
+WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
+                     "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
+                     "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
+                     "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
+                     "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN")
+# Cross-check on top of the allowlist, applied to what the *plan* injects too:
+# no secret-shaped name reaches the child from either side.
+WORKER_ENV_DENY = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                   "SSH_AUTH_SOCK", "SSH_ASKPASS", "AUTOOS_OMNIROUTE_KEY")
+WORKER_ENV_DENY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+                            "_ACCESS_KEY", "_CREDENTIALS")
+WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
+                            "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
+                            "GITHUB_", "GITLAB_", "SLACK_")
+
+# git in the worker must fail rather than ask: askpass helpers that always exit
+# non-zero, no terminal prompt, and a config that cancels any stored credential.
+_GIT_ASKPASS_FALSE = ("/bin/false" if os.path.exists("/bin/false")
+                      else "/usr/bin/false")
+WORKER_GIT_GUARDS = (
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", _GIT_ASKPASS_FALSE),
+    ("GIT_CONFIG_COUNT", "2"),
+    ("GIT_CONFIG_KEY_0", "credential.helper"),
+    ("GIT_CONFIG_VALUE_0", ""),
+    ("GIT_CONFIG_KEY_1", "core.askPass"),
+    ("GIT_CONFIG_VALUE_1", ""),
+)
+
+
+def _worker_env_denied(name: str) -> bool:
+    return (name in WORKER_ENV_DENY or
+            name.endswith(WORKER_ENV_DENY_SUFFIXES) or
+            name.startswith(WORKER_ENV_DENY_PREFIXES))
+
+
+def _worker_env_allowed(name: str) -> bool:
+    if _worker_env_denied(name):
+        return False
+    return (name in WORKER_ENV_ALLOW or name in WORKER_ENV_AUTOOS or
+            name.startswith(WORKER_ENV_ALLOW_PREFIXES))
+
+
+def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
+    """The environment of one spawned worker: an allowlist of the caller's
+    environment, the plan's own entries, the worker's single gateway ``key``,
+    and the guards that stop git from prompting or reading a stored credential.
+
+    The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
+    added only when this run genuinely goes through the gateway. ``base`` exists
+    so the scrub is testable without touching the real environment.
+    """
+    src = os.environ if base is None else base
+    env = {n: v for n, v in src.items() if _worker_env_allowed(n)}
+    for n, v in (plan.get("env") or {}).items():
+        if not _worker_env_denied(n):
+            env[n] = v
+    env["PWD"] = plan["cwd"]
+    for n, v in WORKER_GIT_GUARDS:
+        env[n] = v
+    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    if key:
+        env["AUTOOS_OMNIROUTE_KEY"] = key
+    return env
+
+
+def fence_sandbox_push(sandbox: str) -> None:
+    """Make every push out of an --isolate clone fail, however it is addressed.
+
+    `git remote set-url --push` fences the *named* remotes, but a brief that
+    names the parent's absolute path (which `isolate_task_prefix` does, so the
+    worker can be told what to avoid) lets `git push </parent>` through — the
+    sandbox's own pre-push hook is what covers every destination.
+    """
+    remotes = subprocess.run(["git", "-C", sandbox, "remote"],
+                             capture_output=True, text=True).stdout.split()
+    for remote in remotes:
+        subprocess.run(["git", "-C", sandbox, "remote", "set-url", "--push",
+                        remote, ISOLATE_PUSH_DISABLED], check=True)
+    hooks = os.path.join(sandbox, ".git", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    path = os.path.join(hooks, "pre-push")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\n"
+                 "# autoos --isolate: a worker's work leaves the sandbox by the\n"
+                 "# spawner's take-it step, never by push.\n"
+                 'echo "autoos: git push is disabled in an --isolate sandbox" >&2\n'
+                 "exit 1\n")
+    os.chmod(path, 0o755)
+
 
 def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
     """The lines prepended to the task text of an --isolate run.
@@ -4206,7 +4313,9 @@ def cmd_run(args, cfg: dict) -> int:
         if lean_refusal is not None:
             return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
-    env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
+    # FF1 (D-106): the dry run names what the child actually gets, so an
+    # operator can see the containment instead of trusting it.
+    env_names = sorted(worker_env(plan, "x" if uses_key else None))
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     if route.get("review_plan"):
@@ -4258,8 +4367,9 @@ def cmd_run(args, cfg: dict) -> int:
     # PWD too, not just cwd=: opencode takes the project directory from $PWD,
     # so an inherited PWD sent an isolated worker's writes to the caller's
     # checkout (live 2026-09-24).
-    env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    # FF1 (D-106): the rest of what the worker gets is chosen, not inherited —
+    # see worker_env. The key is minted first so the scrub can add it.
+    key = None
     if uses_key:
         key = client_key(ROOT)
         if not key:
@@ -4270,7 +4380,7 @@ def cmd_run(args, cfg: dict) -> int:
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
-        env["AUTOOS_OMNIROUTE_KEY"] = key
+    env = worker_env(plan, key)
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -4493,10 +4603,11 @@ def cmd_run(args, cfg: dict) -> int:
                 plan = next_plan
                 # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
                 # and session tag), not the stopped route's (qoder review 2026-09-27).
-                env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-                env.pop("AUTOOS_OMNIROUTE_KEY", None)
-                if uses_key:
-                    env["AUTOOS_OMNIROUTE_KEY"] = key
+                # Scrubbed the same way as the first launch (FF1, D-106): the
+                # fallthrough must not be the site that inherits the caller's
+                # tokens back in.
+                env = worker_env(plan, key if uses_key else None)
+                register_secret_env(env)
         if not fell_through:
             break
     # Nothing that runs after here occupies the free leg: whatever is left of the
