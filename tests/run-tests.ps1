@@ -815,6 +815,63 @@ Test-Case 'tombstone: the skip line without a note' {
     Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired'
 }
 
+Test-Case 'tombstone: the serve payload carries the retirement facts' {
+    # The browser page resolves dependencies itself, so it can only honour a
+    # retired id if the payload says which ids are retired and why.
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'retired-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-True ($t.Contains('tombstone') -and $t.tombstone -eq $true) `
+        "the tombstone row says nothing about being retired: $($t | ConvertTo-Json -Compress)"
+    Assert-Equal $t.note 'wired by keep-demo now'
+    Assert-True ($k.Contains('tombstone') -and -not $k.tombstone) 'an ordinary entry is marked retired'
+    Assert-True $k.Contains('note') 'an ordinary entry has no note key at all'
+}
+
+Test-Case 'tombstone: the serve payload survives JSON round-tripping the retirement facts' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $back = ($state | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+    $t = @($back.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+    Assert-True ($t.tombstone -and $t.note -eq 'wired by keep-demo now') `
+        "after the JSON trip: $($t | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is refused at resolve' {
+    # Test-AutoOSCatalogSchema rejects this, but a normal run never validates:
+    # resolving had to refuse the dependent out loud rather than drop its
+    # requirement and install it green.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'prompted-demo' 'requires' @('retired-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('prompted-demo'))
+    $node = @($plan | Where-Object { $_.Id -eq 'prompted-demo' })[0]
+    Assert-True ($node.BlockedReason -match 'requires retired retired-demo') `
+        "no refusal recorded: [$($node.BlockedReason)]"
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).Count -eq 1) `
+        'the refused row must stay in the plan; what execution refuses is never silently absent'
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).AutoAdded) 'the tombstone is not marked a dependency'
+}
+
+Test-Case 'tombstone: a dependent of a refused component is refused too' {
+    $cat = New-TombstoneCatalog
+    $null = Set-TombstoneField $cat 'prompted-demo' 'requires' @('retired-demo')
+    $null = Set-TombstoneField $cat 'pulled-demo' 'requires' @('prompted-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('pulled-demo'))
+    $byId = @{}
+    foreach ($n in $plan) { $byId[$n.Id] = $n }
+    Assert-True ($byId['prompted-demo'].BlockedReason -match 'requires retired retired-demo') `
+        "the direct dependent was not refused: [$($byId['prompted-demo'].BlockedReason)]"
+    Assert-True ($byId['pulled-demo'].BlockedReason -match 'requires prompted-demo') `
+        "the dependent of the refused id was not refused: [$($byId['pulled-demo'].BlockedReason)]"
+}
+
+Test-Case 'tombstone: an ordinary resolve records no refusal' {
+    # The guard must not fire on the normal path.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('keep-demo', 'retired-demo'))
+    $blocked = @($plan | Where-Object { Get-AutoOSComponentProperty $_ 'BlockedReason' '' })
+    Assert-Equal $blocked.Count 0 "refusals on a clean plan: $(@($blocked | ForEach-Object { $_.BlockedReason }) -join '; ')"
+}
+
 
 # ─── the same gates through the real setup.ps1 ─────────────────────────────
 function Invoke-TombstoneSetup {
@@ -898,6 +955,35 @@ Test-Case 'tombstone: setup.ps1 asks a retired id nothing and runs no post-insta
     Assert-True ($r.Out -notmatch 'A few questions' -and $r.Out -notmatch 'DEMO PROMPT' `
                  -and $r.Out -notmatch 'Invoke-TombstoneMustNotRun' -and $r.Out -match 'skipped: retired') `
         "a tombstone asked or ran something: $($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 refuses an entry that requires a retired id' {
+    # The validator is not in a normal run's path, so -Only of such a component
+    # used to install it green with its requirement quietly dropped.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 1 -and $r.Out -match 'requires retired retired-demo' `
+                 -and $r.Out -match 'Failed +1' -and $r.Out -notmatch 'Asks A Question done') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 plan row that is both dependency and retired shows both tags' {
+    # setup.sh prints both; the Windows twin had an elseif that hid "(retired)"
+    # the moment the tombstone arrived as a dependency rather than by hand.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $row = @(($r.Out -split "`n") | Where-Object { $_ -match 'Retired Component' })[0]
+    Assert-True ($row -match '\(dependency\).*\(retired\)') "the plan row reads: [$row]"
 }
 
 Test-Case 'tombstone: setup.ps1 -FromState replays a retired id without a warning' {

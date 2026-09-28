@@ -333,6 +333,152 @@ if it "end-to-end: a profile dry run never plans a retired id"; then
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+if it "catalog tombstone: a live entry that requires a retired id is refused at resolve"; then
+    # The validator is the only thing that used to catch this, and a normal run
+    # never validates: the dependent would lose its requirement in the walk and
+    # install green. Resolve has to refuse it out loud instead.
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "prompted-demo": c["requires"] = ["retired-demo"]
+json.dump(d, open(p, "w"))
+')"
+    catalog_load "$f" x64 0
+    catalog_resolve prompted-demo >/dev/null 2>&1
+    rm -f "$f"
+    problems=""
+    [[ "$(catalog_resolve_blocked prompted-demo)" == *"requires retired retired-demo"* ]] \
+        || problems+="[no refusal recorded for the dependent: [$(catalog_resolve_blocked prompted-demo)]] "
+    # The refused row stays in the plan so the plan and the report name the same
+    # component; what execution refuses is never silently absent.
+    [[ " $PLAN_IDS " == *" prompted-demo "* ]] || problems+="[the refused id vanished from the plan: [$PLAN_IDS]] "
+    [[ " $PLAN_IDS " == *" retired-demo "* ]] || problems+="[the tombstone row was dropped: [$PLAN_IDS]] "
+    [[ " $PLAN_AUTO " == *" retired-demo "* ]] || problems+="[the tombstone is not marked a dependency: [$PLAN_AUTO]] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+fi
+
+if it "catalog tombstone: an ordinary resolve records no refusal"; then
+    # The guard must not fire on the normal path — that would turn every run into
+    # a false failure report.
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+    catalog_resolve keep-demo retired-demo >/dev/null 2>&1
+    problems=""
+    [[ -z "$(catalog_resolve_blocked keep-demo)$(catalog_resolve_blocked retired-demo)" ]] \
+        || problems+="[refusals recorded for a clean plan: [$(catalog_resolve_blocked keep-demo)|$(catalog_resolve_blocked retired-demo)]] "
+    [[ "$PLAN_IDS" == "keep-demo retired-demo" || "$PLAN_IDS" == "retired-demo keep-demo" ]] \
+        || problems+="[plan was [$PLAN_IDS]] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "catalog tombstone: a dependent of a refused component is refused too"; then
+    # A's requirement cannot be installed, so installing B on top of A repeats
+    # the same defect one level up: the cascade has to be refused as well.
+    f="$(fixture_variant '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "prompted-demo": c["requires"] = ["retired-demo"]
+        if c["id"] == "pulled-demo":  c["requires"] = ["prompted-demo"]
+json.dump(d, open(p, "w"))
+')"
+    catalog_load "$f" x64 0
+    catalog_resolve pulled-demo >/dev/null 2>&1
+    rm -f "$f"
+    problems=""
+    [[ "$(catalog_resolve_blocked prompted-demo)" == *"requires retired retired-demo"* ]] \
+        || problems+="[the direct dependent was not refused: [$(catalog_resolve_blocked prompted-demo)]] "
+    [[ "$(catalog_resolve_blocked pulled-demo)" == *"requires prompted-demo"* ]] \
+        || problems+="[the dependent of the refused id was not refused: [$(catalog_resolve_blocked pulled-demo)]] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+    catalog_load "$TOMBSTONE_FIXTURE" x64 0
+fi
+
+if it "catalog tombstone: the serve payload carries the retirement facts"; then
+    # The page resolves dependencies in the browser, so it can only honour a
+    # retired id if the payload says which ids are retired. state_components is
+    # build_state's own projection — the same function the server calls.
+    failures="$(python3 - "$TOMBSTONE_FIXTURE" <<'PY'
+import json, sys
+sys.path.insert(0, "lib/linux")
+from serve import state_components
+
+catalog = json.load(open(sys.argv[1], encoding="utf-8"))
+comps = {c["id"]: c for c in state_components(catalog, "linux", {}, "x64", False, {})}
+bad = []
+tomb = comps.get("retired-demo") or {}
+keep = comps.get("keep-demo") or {}
+if tomb.get("tombstone") is not True:
+    bad.append("the tombstone row does not say tombstone: true (%r)" % tomb.get("tombstone"))
+if tomb.get("note") != "wired by keep-demo now":
+    bad.append("the retire note is %r" % tomb.get("note"))
+if keep.get("tombstone"):
+    bad.append("an ordinary entry was marked retired")
+if "note" not in keep:
+    bad.append("an ordinary entry has no note key at all")
+print("; ".join(bad))
+PY
+)"
+    assert_eq "$failures" ""
+fi
+
+if it "catalog tombstone: the web page reads the retirement fields"; then
+    # The cheap guard for a host without node: the page must ask the payload at
+    # all. tests/test-web-progress.js runs the shipped functions and is the real
+    # proof that a retired id cannot be ticked, asked or pulled in.
+    ok=1
+    for marker in 'c.tombstone' 'chip-retired' 'function retiredChip'; do
+        grep -q "$marker" web/index.html || { ok=0; echo "missing: $marker" >&2; }
+    done
+    if (( ok )); then pass; else fail "the page ignores the retirement fields"; fi
+fi
+
+if it "end-to-end: --only an entry that requires a retired id fails loudly, not green"; then
+    tree="$(tombstone_tree '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "prompted-demo": c["requires"] = ["retired-demo"]
+json.dump(d, open(p, "w"))
+')"
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only prompted-demo --yes --no-color --dry-run \
+        --save-state "$tree/state.json" 2>&1)"; rc=$?
+    saved="$(tombstone_state_results "$tree/state.json")"
+    rm -rf "$tree"
+    problems=""
+    (( rc != 0 )) || problems+="[the run exited 0 over a requirement that cannot be satisfied] "
+    [[ "$out" == *"requires retired retired-demo"* ]] \
+        || problems+="[nothing named the refusal: $(printf '%s\n' "$out" | tail -5)] "
+    [[ "$out" != *"Asks A Question done"* ]] || problems+="[the refused component reported itself done] "
+    [[ "$saved" == *"failed=[prompted-demo]"* ]] || problems+="[the state file says: $saved] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "end-to-end: a tombstone pulled in as a dependency is tagged both ways"; then
+    # setup.sh and setup.ps1 print the same row for the same plan; the Windows
+    # twin hid "(retired)" behind an elseif the moment a tombstone was a
+    # dependency rather than hand-picked.
+    tree="$(tombstone_tree '
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+for g in d["categories"]:
+    for c in g["components"]:
+        if c["id"] == "prompted-demo": c["requires"] = ["retired-demo"]
+json.dump(d, open(p, "w"))
+')"
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only prompted-demo --yes --no-color --dry-run 2>&1)"
+    rm -rf "$tree"
+    row="$(printf '%s\n' "$out" | grep -E '^[[:space:]]+[0-9]+\. Retired Component' | head -1)"
+    problems=""
+    [[ "$row" == *"(dependency)"* ]] || problems+="[the row does not say (dependency): [$row]] "
+    [[ "$row" == *"(retired)"* ]] || problems+="[the row does not say (retired): [$row]] "
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 if it "end-to-end: a retired id chosen by hand still plans one marked row"; then
     tree="$(tombstone_tree)"
     out="$(HOME="$tree/home" bash "$tree/setup.sh" --only retired-demo --dry-run --yes --no-color 2>&1)"; rc=$?
