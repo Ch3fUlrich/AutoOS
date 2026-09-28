@@ -4693,14 +4693,13 @@ install_omnigraph_client() {
     # Antigravity has no project scope — its config is the user's own
     # ~/.gemini/config/mcp_config.json — so its omnigraph entry has to be written
     # here, and it is the one artifact that carries the resolved URL and token.
-    local omni_pkg omni_spec
-    omni_pkg="$(mcp_package omnigraph)"
+    local omni_spec
     # The base URL is the user's omnigraph_url answer: it reaches python through
     # the environment (as in the Zed writer), never spliced into the source. The
     # token is deliberately today's rule — only an OMNIGRAPH_TOKEN the user
     # exported themselves: this file is world-readable by default, so a keys-file
     # secret must not be copied into it.
-    omni_spec="$(OMNI_BASE="$(omnigraph_base_url)" OMNI_PKG="$omni_pkg" python3 -c "
+    omni_spec="$(OMNI_BASE="$(omnigraph_base_url)" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
@@ -4709,8 +4708,8 @@ env_vars = {'OMNIGRAPH_BASE_URL': os.environ['OMNI_BASE'],
 if os.environ.get('OMNIGRAPH_TOKEN'):
     env_vars['OMNIGRAPH_TOKEN'] = os.environ['OMNIGRAPH_TOKEN']
 print(json.dumps({
-    'command': 'npx',
-    'args': ['-y', os.environ['OMNI_PKG']],
+    'command': 'bash',
+    'args': ['-c', 'export PATH=\"\$HOME/.local/bin:\$PATH\"; omnigraph-mcp-autoos'],
     'env': env_vars
 }))
 ")"
@@ -5524,7 +5523,7 @@ mcps['context7'] = {
 }
 mcps['omnigraph'] = {
     'type': 'local',
-    'command': ['npx', '-y', MCP_PACKAGES['omnigraph']],
+    'command': ['bash', '-c', 'export PATH=\"\$HOME/.local/bin:\$PATH\"; omnigraph-mcp-autoos'],
     'enabled': True,
     'environment': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
 }
@@ -6013,8 +6012,8 @@ if omni_token:
     omni_env["OMNIGRAPH_TOKEN"] = omni_token
 mcp_cfg["omnigraph"] = {
     "transport": "stdio",
-    "command": "npx",
-    "args": ["-y", MCP_PACKAGES["omnigraph"]],
+    "command": "bash",
+    "args": ["-c", "export PATH=\"$HOME/.local/bin:$PATH\"; omnigraph-mcp-autoos"],
     "env": omni_env,
     "description": "Project memory graph for this repository (repo-scoped, not global)",
 }

@@ -72,8 +72,8 @@ def omnigraph_entry(worktree) -> dict:
     wiped and started rebuilding it.
     """
     return {
-        "command": "npx",
-        "args": ["-y", "@modernrelay/omnigraph-mcp"],
+        "command": "bash",
+        "args": ["-c", 'export PATH="$HOME/.local/bin:$PATH"; omnigraph-mcp-autoos'],
         "env": {
             "OMNIGRAPH_BASE_URL": os.environ.get(
                 "OMNIGRAPH_BASE_URL", "http://localhost:8080"

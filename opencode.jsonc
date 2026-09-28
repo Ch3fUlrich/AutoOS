@@ -470,9 +470,9 @@
       "omnigraph": {
         "type": "local",
         "command": [
-          "npx",
-          "-y",
-          "@modernrelay/omnigraph-mcp@0.8.0"
+          "bash",
+          "-c",
+          "export PATH=\"$HOME/.local/bin:$PATH\"; omnigraph-mcp-autoos"
         ],
         "environment": {
           "OMNIGRAPH_BASE_URL": "http://localhost:8080",

@@ -52,8 +52,10 @@ skill in this repo's `.agents/skills/` directory. What follows is the minimum co
 
 ## Client wiring (this repo)
 
-Every client runs the same stdio bridge, `npx -y @modernrelay/omnigraph-mcp`
-at the pin in `catalog/agent-harness.json`. The bridge needs three values;
+Every client runs the same bridge, at the pin in `catalog/agent-harness.json`
+— launched through `omnigraph-mcp-autoos` (see "The `omnigraph-client`
+component" below), never `npx` directly (SPEC-OMNI A3b, D9). The bridge needs
+three values;
 the first two missing make it **exit at start-up**, the third makes every
 read fail while the client still shows it connected:
 
@@ -189,8 +191,14 @@ nothing. It cannot report "already current": a dry run compares nothing, so the
 last line is `dry run: nothing was written` rather than a claim about the
 machine.
 
-This repository's own `.mcp.json` still runs the bridge through `npx` at project
-scope: that entry is the repo's, not a machine default, and is unchanged here.
+This repository's own `.mcp.json` and `opencode.jsonc` now call the wrapper too
+(SPEC-OMNI A3b, D-081): `"command": "bash", "args": ["-c", "export PATH=\"$HOME/.local/bin:$PATH\"; omnigraph-mcp-autoos"]`,
+the same form `install_omnigraph_client`'s Antigravity entry, the OpenCode and
+OpenHands config writers, and `cao-setup/setup_cao.py`'s per-terminal entry
+all use. A machine that has never run `omnigraph-client` gets a clear
+`omnigraph-mcp-autoos: the pinned bridge is missing ... re-run ./setup.sh
+--only omnigraph-client` (exit 127) instead of a connection, rather than a
+slow per-launch npx fetch.
 
 ### On Windows
 

@@ -41,10 +41,10 @@
       "disabled": false
     },
     "omnigraph": {
-      "command": "npx",
+      "command": "bash",
       "args": [
-        "-y",
-        "@modernrelay/omnigraph-mcp"
+        "-c",
+        "export PATH=\"$HOME/.local/bin:$PATH\"; omnigraph-mcp-autoos"
       ],
       "env": {
         "OMNIGRAPH_BASE_URL": "http://localhost:8080",

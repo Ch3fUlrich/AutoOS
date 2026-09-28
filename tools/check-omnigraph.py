@@ -81,10 +81,23 @@ def catalog_pin(root: Path) -> str:
         raise Unusable("catalog/agent-harness.json has no mcp_servers.omnigraph.package")
 
 
+def _runs_wrapper(command, args) -> bool:
+    """True if the launch command execs the omnigraph-mcp-autoos wrapper.
+
+    The wrapper (tools/omnigraph-mcp-autoos.sh, installed to
+    ~/.local/bin/omnigraph-mcp-autoos by install_omnigraph_client) carries no
+    version of its own — it execs whatever the catalog pin last installed
+    into the private npm prefix, so the catalog pin is enforced there, not in
+    this command string (D9: npx per-launch start-up is too slow to keep).
+    """
+    parts = [str(command)] + [str(a) for a in args]
+    return any("omnigraph-mcp-autoos" in p for p in parts)
+
+
 def check_config(root: Path) -> tuple[list[str], str]:
     """Return (problems, graph id declared by .mcp.json)."""
     problems: list[str] = []
-    pin = catalog_pin(root)
+    catalog_pin(root)  # sanity: catalog/agent-harness.json must name a pin at all
 
     mcp = load_json(root / ".mcp.json")
     entry = (mcp.get("mcpServers") or {}).get("omnigraph")
@@ -92,8 +105,8 @@ def check_config(root: Path) -> tuple[list[str], str]:
     if not isinstance(entry, dict):
         problems.append(".mcp.json: no mcpServers.omnigraph entry")
     else:
-        if pin not in (entry.get("args") or []):
-            problems.append(f".mcp.json: omnigraph does not run the catalog pin {pin}")
+        if not _runs_wrapper(entry.get("command") or "", entry.get("args") or []):
+            problems.append(".mcp.json: omnigraph does not run the omnigraph-mcp-autoos wrapper")
         env = entry.get("env") or {}
         graph = env.get("OMNIGRAPH_GRAPH_ID") or ""
         if not graph:
@@ -110,8 +123,8 @@ def check_config(root: Path) -> tuple[list[str], str]:
     if not isinstance(ocg, dict):
         problems.append("opencode.jsonc: no mcp.servers.omnigraph entry")
     else:
-        if pin not in (ocg.get("command") or []):
-            problems.append(f"opencode.jsonc: omnigraph does not run the catalog pin {pin}")
+        if not _runs_wrapper("", ocg.get("command") or []):
+            problems.append("opencode.jsonc: omnigraph does not run the omnigraph-mcp-autoos wrapper")
         env = ocg.get("environment") or {}
         if "OMNIGRAPH_TOKEN" in env:
             problems.append("opencode.jsonc: OMNIGRAPH_TOKEN must come from the process env, not the file")

@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "omnigraph": {
-      "command": "npx",
+      "command": "bash",
       "args": [
-        "-y",
-        "@modernrelay/omnigraph-mcp@0.8.0"
+        "-c",
+        "export PATH=\"$HOME/.local/bin:$PATH\"; omnigraph-mcp-autoos"
       ],
       "env": {
         "OMNIGRAPH_BASE_URL": "${OMNIGRAPH_BASE_URL:-http://localhost:8080}",
