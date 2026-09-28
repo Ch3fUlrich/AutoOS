@@ -511,6 +511,21 @@ class OpencodeMergeTests(unittest.TestCase):
         for kept in user["instructions"][1:]:
             self.assertIn(kept, doc["instructions"])
 
+    def test_stale_entry_matching_ignores_case_and_accepts_relative_paths(self):
+        # Windows paths are case-insensitive, and hand-written configs vary the
+        # drive letter, the clone's spelling and SKILL.md's case (review, WS-HARNESS).
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "C:/Users/x/Code/agent-skills-work/.agents/skills"
+        self.assertTrue(stale("C:\\Users\\x\\Code\\Agent-Skills\\skills\\coding-principles\\skill.md", skills, source))
+        self.assertTrue(stale("agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # The current entry, spelled with another drive-letter case, is never stale,
+        # even when the source itself sits under a directory named agent-skills.
+        nested = "C:/Users/x/Code/agent-skills/.agents/skills"
+        self.assertFalse(stale("c:/Users/x/Code/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, nested))
+        self.assertFalse(stale("my-agent-skills/skills/coding-principles/SKILL.md", skills, source))
+
     def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
         # No source means no replacement: dropping the old entry would leave
         # OpenCode with no copy of the skill at all.

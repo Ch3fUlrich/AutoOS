@@ -281,11 +281,14 @@ def _stale_skill_entry(entry, skills, skills_source):
     """True for a managed skill's SKILL.md under an agent-skills clone, not `skills_source`."""
     if not isinstance(entry, str):
         return False
-    norm = entry.replace("\\", "/")
-    if norm.startswith(str(skills_source).replace("\\", "/").rstrip("/") + "/"):
+    # Case-folded: Windows paths are case-insensitive, and hand-written entries
+    # vary the drive letter, the clone's spelling and SKILL.md's case.
+    norm = "/" + entry.replace("\\", "/").casefold().lstrip("/")
+    source = "/" + str(skills_source).replace("\\", "/").casefold().strip("/") + "/"
+    if norm.startswith(source):
         return False
     return "/agent-skills/" in norm and any(
-        norm.endswith("/%s/SKILL.md" % skill) for skill in skills
+        norm.endswith("/%s/skill.md" % skill.casefold()) for skill in skills
     )
 
 
