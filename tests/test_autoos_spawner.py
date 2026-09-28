@@ -13794,8 +13794,11 @@ class CommittedRefSetTests(unittest.TestCase):
             fh.write(text)
 
     def _git(self, *args):
-        subprocess.run(["git", "-C", self.repo, *args], check=True,
-                       capture_output=True, text=True)
+        # A throwaway repo: CI runners have no git identity, so name one here.
+        subprocess.run(["git", "-C", self.repo,
+                        "-c", "user.name=autoos-test",
+                        "-c", "user.email=autoos-test@example.invalid", *args],
+                       check=True, capture_output=True, text=True)
 
     def _out(self, *args):
         return subprocess.run(["git", "-C", self.repo, *args], check=True,
