@@ -369,6 +369,17 @@ class InboxCliTests(_Files):
         self.assertEqual(rc, 2)
         self.assertIn("yesterday", err)
 
+    def test_an_empty_window_names_the_position_the_caller_wrote(self):
+        # A bare UTC cut reads its whole second internally (ordinal 0); "#0" is
+        # not a position a card may hold, so the notice must not invent one.
+        path = self.write("2026-09-25T19:21:08Z old record\n")
+        rc, out, err = self.invoke("inbox", "--file", path,
+                                   "--since", "2026-09-28T06:00:00Z")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        self.assertIn("nothing since 2026-09-28T06:00:00Z", err)
+        self.assertNotIn("#0", err)
+
     def test_inbox_is_a_real_verb_of_the_cli(self):
         path = self.write(COLLIDING)
         rc = subprocess.run([sys.executable, str(AGENT), "inbox", "--file", path, "--all"],

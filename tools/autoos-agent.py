@@ -3689,6 +3689,7 @@ def cmd_inbox(args) -> int:
         print("inbox: --max-records must be at least 1", file=sys.stderr)
         return 2
     since = None
+    since_text = ""
     if args.since_card:
         try:
             position = inbox.card_last_event(args.since_card)
@@ -3699,10 +3700,11 @@ def cmd_inbox(args) -> int:
             print("inbox: %s has no last-event -- reading from the start"
                   % args.since_card, file=sys.stderr)
         else:
-            since = position
+            since, since_text = position, position
             source = args.since_card
     elif args.since:
         since, source = args.since, "--since"
+        since_text = args.since
     if isinstance(since, str):
         try:
             since = inbox.parse_position(since)
@@ -3727,8 +3729,11 @@ def cmd_inbox(args) -> int:
         selected = selected[cut:]
         print("inbox: cut %d earlier records" % cut, file=sys.stderr)
     if not selected:
+        # Names the window as the caller wrote it: a bare UTC cut reads that
+        # whole second internally (ordinal 0), and "#0" is not a position a card
+        # may hold, so echoing it would invite an unparseable last-event.
         print("inbox: nothing since %s (%d records in %s)"
-              % (since or "the start", len(records), path), file=sys.stderr)
+              % (since_text or "the start", len(records), path), file=sys.stderr)
     for record in selected:
         print("%s%s %s" % (record.position, " (late)" if record.late else "",
                            record.text))
