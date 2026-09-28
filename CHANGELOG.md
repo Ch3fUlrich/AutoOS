@@ -162,6 +162,115 @@ did not close. Tests first, in `tests/test_autoos_spawner.py`
   `SpawnerChildEnvTests`, `SandboxPushFenceTests` — 15, red before the change)
   and the new `tests/test_user_config_fence.py` (13, wired into
   `tests/linux/07-mcp-pins.sh`).
+### Fixed — the budget gate judges the model the runner launches (CLAUDEBUDGET-f, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-d, from `rev-claudebudget3.out` (FIX-FIRST). One design rule for all
+  of it: **the gate must read the same value the argv carries**, computed once in the runner's own
+  precedence order — explicit `--model` > the tier agent's model (for a client that goes through
+  the gateway) > the client's own default > the card's combo.
+  - **An unknown combo was priced as free.** `spawn_spends_claude` returned `False` whenever the
+    caller named the string itself (`--model`, a registry `clients` row), so an attacker naming an
+    all-Claude combo the registry does not carry was told the run costs nothing. A combo the
+    registry cannot price is now "cannot tell" — refused under the budget, unchanged with the
+    budget off, with the value named in the message. The name still decides for the two values that
+    are not route ids at all: a client default compiled into the adapter
+    (`clients.QODER_DEFAULT_MODEL`) and a caller's `--model` on an own-account client, which goes
+    to that CLI verbatim. A typo in a registry `clients` row is registry data and refuses (item 5).
+  - **The client default shadowed the tier.** `effective_spawn_model` consulted the registry row /
+    `AGY` / `QODER` default *before* the tier, so a tier agent whose `opencode.jsonc` model IS
+    Claude was priced as a free client default. The tier branch now calls the launcher's own
+    `resolve_model`, so a `--clean` tier and a declared variant come back spelled exactly as the
+    run receives them.
+  - **`model or free_model` short-circuited the resolution.** Both spawn paths pre-OR'd the promo
+    model into `model`, so `--free`/`--tier` never reached the tier branch. The flags are passed as
+    flags now (`free`, `free_model`, `clean`), and the tests assert gate input == launch model
+    across 12 client/tier/card/free/`--model` combinations.
+  - **`AUTOOS_CLAUDE_FINAL` leaked to the closer.** `_select_reviewers` gated the `risk=high`
+    closer on the env declaration alone, so any high-risk non-final card with the variable in the
+    profile got client `claude` / model `sonnet`. The closer now needs the card to be a final
+    (`kind`/`role`) *and* the declaration; a non-budget run keeps the behaviour it always had.
+  - Two tests asserted the wrong door (item 6): `agy_default_model_is_a_claude_spend` fell back to
+    a unit call because its `role=implement` card hit the capability check first — it is a CLI run
+    with a read-only card now; `qoder` non-Claude never-gated asserts the run is *allowed*
+    (`would run:`), not only that the budget said nothing.
+
+### Fixed — a Claude final is declared, never claimed; the spawn gate reads the model (CLAUDEBUDGET-d, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-b, from `rev-claudebudget2.out` (FIX-FIRST). Three holes, all of them
+  "the gate trusted the wrong side of the table":
+  - **`kind=final` was self-grantable, exactly like `critical` was.** `claude_allowed("final")`
+    returned True with no env, so any worker that wrote `kind=final` (or `role=final`) into its own
+    card got a Claude leg, client `claude`, a Claude reviewer *and* the `risk=high` closer
+    (`_CLOSER`, client claude / model sonnet), which HEAD emitted with no gate at all. A final is
+    now what the orchestrator declares: `AUTOOS_CLAUDE_FINAL="<lane>@<sha>"` in the caller's env, or
+    `AUTOOS_CLAUDE_CRITICAL` (which declares the bigger thing and so opens the final too). A blank
+    declaration is not one. `strip_claude_env()` already removed the whole `AUTOOS_CLAUDE*`
+    namespace from every child, so a worker still cannot hold or pass down a declaration — and the
+    plan line now cites `final declared (<lane>@<sha>)`, not only a critical-path override.
+  - **The spawn gate read the client *name*.** `qoder`/`agy`/`opencode`/`codex`/`qwen`/`gemini` with
+    `--model claude-*|opus|sonnet|haiku|fable`, an `openrouter/anthropic/*` leg, or a client whose
+    own default model IS Claude (`clients.AGY_DEFAULT_MODEL` = `claude-opus-4-6-thinking`) walked
+    straight past `claude_spawn_refusal` and `client_held`. Both spawn paths — `autoos-agent.py run`
+    and the MCP `spawn` tool — now gate the **effective model**: `--model` / `--free-model`, a
+    registry `clients.<id>.default_model` row, the adapter's own default, the `--tier` agent's model
+    in `opencode.jsonc`, then the card's combo route (all-Claude legs = a spend, one non-Claude leg
+    falls through to it). When none of those can say what will answer, budget mode **refuses**
+    instead of assuming free, and names `--model=<provider/leg>` as the way to ask.
+  - **The MCP `spawn` tool takes `claude_reason`** — a per-spawn declaration threaded to
+    `claude_allowed(kind="spawn")`, so an orchestrator does not have to export
+    `AUTOOS_CLAUDE_CRITICAL` server-wide where every later caller inherits it. It reaches the CLI
+    preflight and the runner as that one spawn's env, and the spawner strips it before the worker's
+    own env. `filter_routes`' client hold asks `kind="spawn"` now instead of its default `"leg"`, so
+    the plan and the spawn path are one decision.
+  - Tests: `tests/test_autoos_resolver.py` `ClaudeBudgetGateTests` (a forged final gets no leg, no
+    client, no reviewer, no closer; `AUTOOS_CLAUDE_FINAL` opens each; a final declaration does not
+    open the ordinary kinds) and `tests/test_autoos_spawner.py` `ClaudeBudgetSpawnTests` /
+    `ClaudeBudgetMcpSpawnTests` (`--model sonnet`, `openrouter/anthropic/claude-*`, agy's default,
+    the unknown-model refusal, `claude_reason` unlocking exactly one spawn, budget-off unchanged).
+    Non-Claude-shape tests that spawn `agy` declare the run the way `claude_env()` already did for
+    `--client claude`, because agy *is* a Claude spend now.
+
+### Fixed — the Claude budget has one gate, and only the orchestrator holds the key (CLAUDEBUDGET-b, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET (`claude_budget`, same day). Four holes in a policy that was written
+  once per caller instead of once:
+  - **`critical=true` was self-grantable.** A card is written by the worker that wants the model, so
+    any worker could unlock Claude. The override now needs `AUTOOS_CLAUDE_CRITICAL="<why>"` in the
+    **spawning process's** env; `tools/autoos-agent.py` `strip_claude_env()` removes every
+    `AUTOOS_CLAUDE*` key from each child env, so a declaration cannot travel down the tree. A held
+    card that claimed `critical` is refused with `claude_budget: critical needs the orchestrator's
+    AUTOOS_CLAUDE_CRITICAL`, and an allowed plan cites the declared *reason* so the DONE line says
+    why Claude was spent.
+  - **`wait_until` could name a Claude window** — `cc`'s 21:00 hour, i.e. "wait until Claude gets
+    cheap", the opposite of holding it. `budget_wait_until` now skips every Claude provider
+    (`is_claude_provider`: a provider whose every leg is Claude); with no non-Claude window on file
+    the answer is `free capacity`. `tests/test_autoos_resolver.py` `test_a_claude_offpeak_window_is_never_a_wait`
+    replaces the test that pinned the old behaviour.
+  - **One gate: `claude_allowed(kind, env, registry, now)`**, called by the leg filter, the
+    client-bound hold, **cross-family reviewer selection** (a Claude reviewer only for the final —
+    this caller had no budget check at all at HEAD), **the escalation ladders** (same), `route_plan_for`
+    (which now passes `client`/`env`, and `route` grew a `--client` so a plan can be asked for the
+    client that would run), `autoos-agent.py run --client claude` (refused at rc 2, the existing
+    "card or route refused" code, before any sandbox is cloned), and `tools/autoos_agent_mcp.py`
+    `spawn`.
+  - **The Claude predicate is the model's family and name, not the provider id**: family `anthropic`
+    or a model id containing claude/opus/sonnet/haiku/fable, case-insensitive, under *any* provider
+    (a proxy, `openrouter/anthropic/*`), plus client `claude` always. An unknown provider now fails
+    toward "Claude" — guessing the other way is the side that spends the allowance.
+- Deferred plans carry the same key set a ready plan does (`leg`/`p`/`theta`/`expected_cost` null,
+  `reviewers`/`escalation` empty): a caller that read `plan["reviewers"]` on every plan raised only
+  on a deferred one, which is the state that arrives most when the fleet is busy.
+
+### Changed — memoised identical dry runs and split part 13 across two shards (WS-PART13)
+
+- **`tests/linux/13-end-to-end-dry-run-only.sh`**: identical `setup.sh` runs are
+  served from a memo (`memo_dry_run`, keyed on argv + every `AUTOOS_*` variable
+  + `PATH` + the e2e/real home mode), so the repeated `--profile ai-coding` and
+  `--check-catalog` runs happen once. Filesystem-asserting tests and the
+  determinism pair keep real runs; a guard test pins the keying.
+- **`tests/linux/41-end-to-end-retirement.sh`** (new): the four retirement tests
+  moved out of part 13 onto their own shard (`g 41` in `tests/ci-shards.txt`),
+  so the two halves run in parallel.
 
 ### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
 
@@ -187,6 +296,7 @@ did not close. Tests first, in `tests/test_autoos_spawner.py`
   and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
   Re-created from the operator's local work (2026-09-25) and reworked for the
   DSBACK policy (2026-09-28).
+- **WS-DSCALL-LOW:** `main()` refuses `--max-tokens` below the 4096 floor (exit 2, before any key or network access); a truncated call-log walk is tested to refuse the cap.
 
 ### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
 

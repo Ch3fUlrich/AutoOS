@@ -1,5 +1,6 @@
 # TEMPLATE. Copy to `cluster.yaml` before the first apply:
 #     cp cluster.yaml.example cluster.yaml
+# Shape: cluster.schema.json (JSON Schema, tracked). The live `cluster.yaml` is not.
 #
 # `cluster.yaml` itself is GITIGNORED, and deliberately so: a graph is named after
 # the repository it serves, so the live file becomes a list of every project you

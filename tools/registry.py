@@ -2254,6 +2254,123 @@ def leg_rule_for(leg: str, registry: dict):
     return None
 
 
+# ---------------------------------------------------------------------------
+# policy.claude_budget (D-102 CLAUDEBUDGET, S2 item 1, 2026-09-28)
+# ---------------------------------------------------------------------------
+
+CLAUDE_BUDGET_MODES = ("normal", "budget")
+CLAUDE_BUDGET_DEFAULT_BELOW = 0.25
+_CLAUDE_BUDGET_KEYS = ("mode", "weekly_share_left", "budget_below", "source")
+
+
+def claude_budget(registry) -> dict:
+    """The shipped Claude-budget state, as one resolved dict.
+
+    `policy.claude_budget` is the single home for "how much of this week's
+    Claude allowance is left" (operator D-102: Claude only orchestrates and
+    gives finals; writers, researchers and first reviewers use free/cheap legs).
+    The resolver and every CLI reader call this instead of reading the JSON, so
+    the ON/OFF rule exists exactly once:
+
+        on = mode == "budget" OR weekly_share_left < budget_below
+
+    `weekly_share_left` may be null (nobody has measured it yet), which is only
+    decisive through `mode`. A registry with no `claude_budget` key at all is
+    OFF -- an older catalog keeps routing exactly as it did before the field,
+    and a missing measurement never silently restricts the routes.
+    """
+    entry = _section(registry, "policy").get("claude_budget")
+    entry = entry if isinstance(entry, dict) else {}
+    mode = entry.get("mode") if entry.get("mode") in CLAUDE_BUDGET_MODES \
+        else "normal"
+    share = entry.get("weekly_share_left")
+    share = share if isinstance(share, (int, float)) and \
+        not isinstance(share, bool) else None
+    below = entry.get("budget_below")
+    below = float(below) if isinstance(below, (int, float)) and \
+        not isinstance(below, bool) else CLAUDE_BUDGET_DEFAULT_BELOW
+    return {
+        "on": mode == "budget" or (share is not None and share < below),
+        "mode": mode,
+        "weekly_share_left": share,
+        "budget_below": below,
+        "source": entry.get("source"),
+    }
+
+
+def _check_claude_budget(registry) -> list:
+    """rule 12 - policy.claude_budget is shaped like the resolver reads it.
+
+    Every field is checked rather than defaulted, because each one fails in the
+    direction the operator is trying to avoid: an unknown key (a typo'd
+    `budget_bellow`) silently means "no threshold", a share of 1.5 means
+    "nothing is left to ration" -- and both keep planning Claude work after the
+    weekly allowance is gone. `source` must be a string for the same reason the
+    dated-value rule exists: a number or a list is not an attribution.
+    """
+    entry = _section(registry, "policy").get("claude_budget")
+    if entry is None:
+        return []
+    if not isinstance(entry, dict):
+        return ["claude_budget: policy.claude_budget must be an object"]
+    problems = []
+    for field in sorted(entry):
+        if field not in _CLAUDE_BUDGET_KEYS and field != "$comment":
+            problems.append(
+                "claude_budget: policy.claude_budget.%s unknown key "
+                "(allowed: %s)" % (field, ", ".join(_CLAUDE_BUDGET_KEYS)))
+    if "mode" not in entry:
+        problems.append("claude_budget: policy.claude_budget.mode is missing")
+    elif entry["mode"] not in CLAUDE_BUDGET_MODES:
+        problems.append(
+            "claude_budget: policy.claude_budget.mode %r is not one of %s"
+            % (entry["mode"], ", ".join(CLAUDE_BUDGET_MODES)))
+
+    def _number(value):
+        # A bool is an int in Python, and `True < 0.25` would read as a share of
+        # 1 -- the one shape that turns budget mode off by accident.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    if "weekly_share_left" in entry and entry["weekly_share_left"] is not None:
+        share = _number(entry["weekly_share_left"])
+        if share is None:
+            problems.append(
+                "claude_budget: policy.claude_budget.weekly_share_left must be "
+                "a number 0..1 or null (got %r)"
+                % (entry["weekly_share_left"],))
+        elif not 0.0 <= share <= 1.0:
+            problems.append(
+                "claude_budget: policy.claude_budget.weekly_share_left %s is "
+                "outside 0..1 - a share above 1 would read as \"nothing left to "
+                "ration\"" % (entry["weekly_share_left"],))
+    if "budget_below" not in entry:
+        problems.append("claude_budget: policy.claude_budget.budget_below is "
+                        "missing")
+    else:
+        below = _number(entry["budget_below"])
+        if below is None:
+            problems.append(
+                "claude_budget: policy.claude_budget.budget_below must be a "
+                "number 0..1 (got %r) - claude_budget() only falls back to %s "
+                "when the key is absent, so a string here is a threshold that "
+                "never applies"
+                % (entry["budget_below"], CLAUDE_BUDGET_DEFAULT_BELOW))
+        elif not 0.0 <= below <= 1.0:
+            problems.append(
+                "claude_budget: policy.claude_budget.budget_below %s is outside "
+                "0..1" % (entry["budget_below"],))
+    if "source" not in entry:
+        problems.append("claude_budget: policy.claude_budget.source is missing "
+                        "- name the decision this value came from")
+    elif not isinstance(entry["source"], str) or not entry["source"].strip():
+        problems.append(
+            "claude_budget: policy.claude_budget.source must be a non-empty "
+            "string (got %r)" % (entry["source"],))
+    return problems
+
+
 def leg_denied(leg: str, registry: dict) -> bool:
     """Whether policy.leg_rules denies `leg` (first matching rule has allow false)."""
     rule = leg_rule_for(leg, registry)
@@ -2722,6 +2839,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_reviewers(registry))
+    problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
     problems.extend(_check_handoff_caps(registry))
     return problems

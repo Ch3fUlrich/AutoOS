@@ -403,7 +403,7 @@
                 },
                 "kind": {
                   "type": "object",
-                  "required": ["implement", "bulk", "review", "research", "debug", "plan"],
+                  "required": ["implement", "bulk", "review", "research", "debug", "plan", "final"],
                   "additionalProperties": false,
                   "properties": {
                     "implement": { "type": "integer" },
@@ -411,7 +411,8 @@
                     "review": { "type": "integer" },
                     "research": { "type": "integer" },
                     "debug": { "type": "integer" },
-                    "plan": { "type": "integer" }
+                    "plan": { "type": "integer" },
+                    "final": { "type": "integer" }
                   }
                 },
                 "buckets": {
@@ -601,6 +602,19 @@
               "first_pass_only": { "type": "boolean" },
               "source": { "$ref": "#/$defs/source_tag" }
             }
+          }
+        },
+        "claude_budget": {
+          "type": "object",
+          "description": "D-102 CLAUDEBUDGET (S2) item 1, operator 2026-09-28: how much of this week's Claude allowance is left, and what to do about it. Budget mode is ON when `mode` == 'budget' OR `weekly_share_left` < `budget_below`; while it is on, every Claude leg (provider cc, the anthropic family, and the client 'claude') is held for finals by tools/autoos_resolver.py, and deferrable work waits for free/off-peak capacity instead of falling back to Claude. `weekly_share_left` may be null when nobody has measured it -- `mode` is then the only signal. `budget_below` is the share that flips a normal-mode registry into budget mode (0.25 = a quarter of the week left). The rule lives in registry.claude_budget(); nothing else may re-derive it. Field names, the 0..1 range and the mode spelling are enforced by registry.check_registry rule 12, because a typo'd key reads as 'no threshold' and a share of 1.5 reads as 'nothing left to ration'.",
+          "required": ["mode", "budget_below", "source"],
+          "additionalProperties": false,
+          "properties": {
+            "$comment": { "$ref": "#/$defs/comment" },
+            "mode": { "enum": ["normal", "budget"] },
+            "weekly_share_left": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "budget_below": { "type": "number", "minimum": 0, "maximum": 1 },
+            "source": { "type": "string", "minLength": 1 }
           }
         }
       }
