@@ -6,7 +6,7 @@ this file never quotes it verbatim and invents nothing beyond it.
 
 Citation discipline: every claim about this checkout ends in a `path:line` citation
 that resolves in this branch. Anything not verifiable in the checkout is marked
-`(inference)`. Placeholders (`<management host>`, `<tailnet>`, `example.internal`)
+`(inference)`. Placeholders (`<management host>`, `<tailnet>`, `example.com`)
 are never real values — this repository is public.
 
 Related work (not this spec): fleetd (the fleet API/event-bus service, gap-spec 2
