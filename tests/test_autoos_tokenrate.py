@@ -28,6 +28,7 @@ machine. Run it directly, never through unittest discover:
 
     python3 tests/test_autoos_tokenrate.py
 """
+import itertools
 import json
 import os
 import subprocess
@@ -49,10 +50,14 @@ import autoos_tokenrate as tr  # noqa: E402
 PREFIX = "/home/user/code/AutoOS-lanes/L1-routing"
 OTHER = "/home/user/code/AutoOS-lanes/L1-backlog"
 
+# A real transcript gives every record its own uuid; fixtures get one per call.
+_RECORD_IDS = itertools.count(1)
+
 
 def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
                ts="2026-09-27T12:00:00.000Z", cwd=PREFIX, session="sess-1",
-               with_iterations=True, sidechain=False):
+               with_iterations=True, sidechain=False, uuid=None, mid=None,
+               no_uuid=False, rid=None, model="claude-opus-4-6[1m]"):
     """One assistant record, key-for-key as the real transcript writes it.
 
     `sidechain=True` is the in-session subagent turn (router D-045): the same
@@ -61,6 +66,24 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
     false` and no `agentId`; the 8,888 records under
     `<projects>/<session>/subagents/*.jsonl` have `isSidechain: true`,
     `agentId`, `sessionKind: "bg"`, and the parent's `cwd`).
+
+    `uuid` identifies the *record* and is unique per call by default, as it is
+    in a real transcript — one API turn writes one record per content block, all
+    sharing `message.id` but each with its own uuid (measured: 1,901 of 3,553
+    message ids in the L1-routing parent files appear on more than one record,
+    always with the same usage). Pass an explicit `uuid` to build the duplicate
+    the dedup has to collapse, `no_uuid=True` to leave it out so `mid` is the
+    only identity, and `session=""` for a file whose records carry no
+    `sessionId` at all.
+
+    `requestId` is the top-level key naming the API *response* a record belongs
+    to (measured 2026-09-28: present on all 9,745 in-window records of the
+    L1-routing row and on all but one of L1-main's 7,089, and never varying
+    within one `message.id`). A fixture with a `mid` therefore gets a requestId
+    derived from it — two records that share a message id share a response id,
+    which is what the real transcript does. Pass `rid=` to write the requestId,
+    `rid=""` to leave the key out, and `rid=` together with `mid=None` for a
+    record that has a response id but no message id.
     """
     usage = {
         "input_tokens": input_tokens,
@@ -93,13 +116,21 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
         "session_id": session,
         "isSidechain": sidechain,
         "gitBranch": "L1-routing/R5ARATE",
-        "uuid": "uuid-%s" % input_tokens,
         "message": {
-            "model": "claude-opus-4-6[1m]",
+            "model": model,
             "role": "assistant",
             "usage": usage,
         },
     }
+    if not no_uuid:
+        record["uuid"] = (uuid if uuid is not None
+                          else "rec-%d" % next(_RECORD_IDS))
+    if mid is not None:
+        record["message"]["id"] = mid
+        if rid is None:
+            rid = "req-%s" % mid
+    if rid:
+        record["requestId"] = rid
     if sidechain:
         record["agentId"] = "agent-%s" % session
     return json.dumps(record)
@@ -116,6 +147,14 @@ def write_transcript(projects_dir, cwd, name, lines, session_paths=False):
     return d / name
 
 
+def write_subagents(projects_dir, cwd, session, name, lines):
+    """`<project>/<session>/subagents/<name>.jsonl` — how this host writes them."""
+    d = projects_dir / slug(cwd) / session / "subagents"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ("%s.jsonl" % name)).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return d / ("%s.jsonl" % name)
+
+
 def git(repo, *args, env_extra=None):
     env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
@@ -125,6 +164,18 @@ def git(repo, *args, env_extra=None):
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
+
+
+def init_repo(path):
+    """A throwaway checkout with a `main` and one plain commit, so `count_merges`
+    has a branch to read and 0 merges to report."""
+    repo = Path(path)
+    repo.mkdir(parents=True, exist_ok=True)
+    git(repo, "init", "-b", "main")
+    (repo / "f").write_text("1\n", encoding="utf-8")
+    git(repo, "add", "f")
+    git(repo, "commit", "-m", "chore: base")
+    return repo
 
 
 class WeightTests(unittest.TestCase):
@@ -260,6 +311,392 @@ class SidechainTests(unittest.TestCase):
         self.assertEqual(res["subagent_weighted"], 100.0)
         self.assertEqual(res["subagent_naive"], 460)
         self.assertEqual(res["subagent_share_pct"], 20.0)  # 100 of 500 weighted
+
+
+class SubagentFileDiscoveryTests(unittest.TestCase):
+    """Router answer R5A3: discovery reaches `<session>/subagents/*.jsonl`.
+
+    D-045 kept an `isSidechain` turn in the numerator and reported its share;
+    what made all three measured rows print `0.0%` was that this host's client
+    writes those turns one level below what `discover_transcripts` scanned. The
+    fix is a discovery scope, not a filter: the subagent records join the
+    weighted and naive numerator *and* stay in the subagent columns, and a
+    record seen in both a session file and a subagent file counts once.
+    """
+
+    PARENT = dict(input_tokens=100, output_tokens=100, cache_creation=100,
+                  cache_read=1000)          # weighted 400, naive 1300
+    CHILD = dict(input_tokens=10, output_tokens=20, cache_creation=30,
+                 cache_read=400)            # weighted 100, naive 460
+
+    def tree(self, projects, parent_lines=None, child_lines=None, session="sess-1"):
+        """One session file plus its `subagents/` dir, both in the window."""
+        if parent_lines is None:
+            parent_lines = [usage_line(**self.PARENT, session=session)]
+        if child_lines is None:
+            child_lines = [usage_line(**self.CHILD, session=session, sidechain=True)]
+        if parent_lines:
+            write_transcript(projects, PREFIX, "%s.jsonl" % session, parent_lines)
+        if child_lines:
+            write_subagents(projects, PREFIX, session, "agent-a", child_lines)
+
+    def measure(self, projects):
+        return tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                          "2026-09-29T00:00:00Z")
+
+    def test_discover_transcripts_returns_both_the_session_and_the_subagent_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            found = tr.discover_transcripts(projects, [PREFIX])
+        self.assertEqual(sorted(p.name for p in found),
+                         ["agent-a.jsonl", "sess-1.jsonl"])
+
+    def test_subagent_file_counts_in_the_numerator_and_in_the_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertAlmostEqual(res.weighted, 500.0)      # 400 + 100, both counted
+        self.assertEqual(res.naive, 1760)                # 1300 + 460
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 100.0)
+        self.assertEqual(res.subagent_naive, 460)
+        self.assertAlmostEqual(res.subagent_share_pct(), 20.0)
+
+    def test_a_record_from_a_subagents_file_counts_as_subagent_without_the_flag(self):
+        """Provenance decides too: `isSidechain` false inside a `subagents/` file
+        is still a subagent turn — the flag is the transcript's own claim, the
+        directory is the client's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[usage_line(**self.CHILD,
+                                                         sidechain=False)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertAlmostEqual(res.weighted, 500.0)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 100.0)
+
+    def test_a_parent_record_outside_a_subagents_file_is_never_the_subagent_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.subagent_records, 0)
+
+    def test_the_same_record_in_a_parent_and_a_subagent_file_counts_once(self):
+        dup = "shared-uuid-1"
+        parent = usage_line(**self.PARENT, uuid=dup, sidechain=False)
+        child = usage_line(**self.PARENT, uuid=dup, sidechain=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, parent_lines=[parent], child_lines=[child])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)                 # not 2
+        self.assertAlmostEqual(res.weighted, 400.0)      # not 800
+        self.assertEqual(res.naive, 1300)
+        # and the one copy that counts is the copy that belongs to a subagent.
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)
+        self.assertAlmostEqual(res.subagent_share_pct(), 100.0)
+
+    def test_dedup_uses_the_message_id_when_the_record_has_no_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects,
+                      parent_lines=[usage_line(**self.PARENT, no_uuid=True,
+                                               mid="msg-shared")],
+                      child_lines=[usage_line(**self.PARENT, no_uuid=True,
+                                              mid="msg-shared", sidechain=True)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.subagent_records, 1)
+
+    def test_the_blocks_of_one_turn_count_once_because_they_are_one_response(self):
+        """R5A4 reverses the identity: the numerator counts the API *response*,
+        and one response is written as one record per content block, all sharing
+        `message.id` and each carrying the same turn usage. Deduped by uuid (as
+        R5A3 did) those blocks were `turns x blocks`; keyed on the message id
+        they are one turn."""
+        one_turn = [usage_line(**self.PARENT, mid="msg-one-turn"),
+                    usage_line(**self.PARENT, mid="msg-one-turn")]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, parent_lines=one_turn, child_lines=[])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.naive, 1300)
+
+    def test_a_subagent_file_adds_no_session_of_its_own(self):
+        """Its records carry the parent's `sessionId`; when they carry none, the
+        session dir — not `agent-a` — is the fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[usage_line(**self.CHILD, session="",
+                                                        sidechain=True)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertEqual(res.sessions, 1)
+
+    def test_the_window_and_the_cwd_filter_apply_to_subagent_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[
+                usage_line(**self.CHILD, ts="2026-09-25T23:59:59.000Z"),
+                usage_line(**self.CHILD, cwd=OTHER)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)                 # the parent turn only
+        self.assertEqual(res.subagent_records, 0)
+
+    def test_the_report_carries_the_subagent_files_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["records"], 2)
+        self.assertEqual(res["weighted"], 500.0)
+        self.assertEqual(res["subagent_weighted"], 100.0)
+        self.assertEqual(res["subagent_share_pct"], 20.0)
+
+
+class ResponseDedupTests(unittest.TestCase):
+    """The R5A4 decision: one API response in the numerator, never one per block.
+
+    R5A3 measured the shape this closes — Claude Code writes one transcript
+    record per content block, each repeating the same `message.id`, the same
+    `requestId` and the same usage (1,901 of 3,553 message ids in the L1-routing
+    parent files appear on more than one record) — so with a uuid as the only
+    identity the numerator counted *turns x blocks*. Identity is now the
+    response: `message.id` plus `requestId` when the record carries one, and the
+    uuid is the fallback for a record with no message id at all. The first
+    record of a message wins; a later duplicate may only move it into the
+    subagent view.
+    """
+
+    BLOCK = dict(input_tokens=100, output_tokens=100, cache_creation=100,
+                 cache_read=1000)             # weighted 400, naive 1300
+
+    def sum(self, lines):
+        return tr.sum_records(tr.iter_usage_records(lines))
+
+    def test_parse_record_keys_the_identity_on_the_response_not_the_record(self):
+        a = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-1"))
+        b = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-2"))
+        self.assertEqual(a.identity, b.identity)
+        self.assertIn("msg-1", a.identity)
+        self.assertIn("req-msg-1", a.identity)
+        self.assertNotIn("u-1", a.identity)
+
+    def test_three_records_sharing_a_message_id_and_usage_count_once(self):
+        lines = [usage_line(**self.BLOCK, mid="msg-blocks") for _ in range(3)]
+        total = self.sum(lines)
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)
+        self.assertEqual(total.naive, 1300)
+
+    def test_different_message_ids_count_separately(self):
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-a"),
+                          usage_line(**self.BLOCK, mid="msg-b")])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_same_message_id_under_another_request_id_is_two_responses(self):
+        """A retried response repeats the message id but is billed again, so the
+        request id is part of the identity."""
+        total = self.sum([
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-2"),
+        ])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_a_record_without_a_message_id_falls_back_to_its_uuid(self):
+        same = [usage_line(**self.BLOCK, uuid="uuid-only"),
+                usage_line(**self.BLOCK, uuid="uuid-only")]
+        self.assertEqual(self.sum(same).records, 1)
+        both = [usage_line(**self.BLOCK, uuid="uuid-one"),
+                usage_line(**self.BLOCK, uuid="uuid-two")]
+        self.assertEqual(self.sum(both).records, 2)
+
+    def test_a_record_with_neither_a_message_id_nor_a_uuid_is_its_own_response(self):
+        total = self.sum([usage_line(**self.BLOCK, no_uuid=True),
+                          usage_line(**self.BLOCK, no_uuid=True)])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_first_record_of_a_message_wins_and_a_duplicate_adds_no_usage(self):
+        """Measured on this host: 242 of the 4,964 in-window L1-routing message
+        ids do *not* repeat the usage — the client writes the growing partial
+        usage as the blocks land, so the last record of a message carries the
+        most. The rule is still first-wins, so a duplicate never adds usage."""
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-grow"),
+                          usage_line(input_tokens=100, output_tokens=300,
+                                     cache_creation=100, cache_read=1000,
+                                     mid="msg-grow")])
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)   # not 500, not 900
+        self.assertEqual(total.naive, 1300)
+
+    def test_a_subagent_copy_of_a_parent_message_counts_once_in_the_subagent_view(self):
+        """Across files: the same response written at both depths is one turn's
+        cost, reported as a subagent turn because a subagent file claims it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            parent = [usage_line(**self.BLOCK, mid="msg-mirror"),
+                      usage_line(**self.BLOCK, mid="msg-mirror")]
+            child = [usage_line(**self.BLOCK, mid="msg-mirror", sidechain=True)]
+            write_transcript(projects, PREFIX, "sess-1.jsonl", parent)
+            write_subagents(projects, PREFIX, "sess-1", "agent-a", child)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)
+        self.assertAlmostEqual(res.subagent_share_pct(), 100.0)
+
+    def test_a_deduped_subagent_duplicate_never_moves_a_record_out_of_the_view(self):
+        """The subagent file's own blocks of one response collapse too, and the
+        first copy to arrive (the parent's) decides the usage — the move is
+        one-way into the subagent view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-both")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True),
+                             usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)   # not 800
+
+    def test_a_promoting_duplicate_adds_the_counted_usage_not_its_own(self):
+        """R5A5 finding 1 (HIGH): the streaming case makes the two copies of one
+        response *differ*. The parent file holds the first, partial record (50
+        weighted); the `subagents/` copy carries the finished usage (400). The
+        totals kept the first, so the promotion must reuse the first — otherwise
+        the view reports 400 of a 50 weighted numerator."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(input_tokens=50, mid="msg-grow-mirror")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-grow-mirror",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 50.0)          # the first record's
+        self.assertEqual(res.naive, 50)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 50.0)  # not the duplicate's 400
+        self.assertEqual(res.subagent_naive, 50)
+        self.assertLessEqual(res.subagent_weighted, res.weighted)
+
+    def test_the_promoted_view_is_always_a_subset_of_the_numerator(self):
+        """Property over the fixture set: `subagent_weighted` is a *view onto*
+        the records the plain field already sums (D-045), so it can never exceed
+        it — whatever order copies of one response arrive in, and whatever usage
+        each copy claims. Sweeps the fixture usages at both depths, deliberately
+        mismatching the parent's and the duplicate's numbers (the streaming
+        partial usage is what made the bug visible)."""
+        usages = [dict(self.BLOCK), dict(input_tokens=50),
+                  dict(input_tokens=10, output_tokens=20, cache_creation=30,
+                       cache_read=400),
+                  dict(input_tokens=0)]
+        for parent_usage, dup_usage in itertools.product(usages, usages):
+            for parent_sidechain in (False, True):
+                parent = [usage_line(**parent_usage, mid="msg-sweep",
+                                     sidechain=parent_sidechain)]
+                dups = [usage_line(**dup_usage, mid="msg-sweep",
+                                   sidechain=parent_sidechain),
+                        usage_line(**dup_usage, mid="msg-sweep", sidechain=True)]
+                first = tr.parse_record(parent[0])
+                total = tr.sum_records(tr.iter_usage_records(parent + dups))
+                with self.subTest(parent=parent_usage, dup=dup_usage,
+                                  parent_sidechain=parent_sidechain):
+                    self.assertEqual(total.records, 1)
+                    self.assertAlmostEqual(total.weighted, first.weighted())
+                    self.assertEqual(total.naive, first.naive())
+                    # the view re-uses the response that was counted, never the
+                    # duplicate's own numbers, and so stays inside the numerator
+                    self.assertEqual(total.subagent_records, 1)
+                    self.assertAlmostEqual(total.subagent_weighted,
+                                           first.weighted())
+                    self.assertEqual(total.subagent_naive, first.naive())
+                    self.assertLessEqual(total.subagent_weighted, total.weighted)
+                    self.assertLessEqual(total.subagent_naive, total.naive)
+                    self.assertLessEqual(total.summary().subagent_share_pct() or 0,
+                                         100.0)
+
+    def test_the_report_and_the_cli_count_each_response_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli")])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["records"], 1)
+        self.assertEqual(res["weighted"], 400.0)
+        self.assertEqual(res["naive"], 1300)
+
+
+class ProjectsDirEchoTests(unittest.TestCase):
+    """`--json` must not print the default transcript root — it carries the
+    operator's username — unless the user named it. The repo path is the same
+    secret by the same route: its default is the current working directory."""
+
+    def test_an_explicit_projects_dir_is_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["projects_dir"], str(projects))
+
+    def test_a_defaulted_repo_is_not_echoed(self):
+        """The default repo is the resolved cwd, and a cwd under the operator's
+        home is not part of the answer: say `default`, echo the path only when
+        the user named it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, repo_defaulted=True,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], "default")
+        self.assertNotIn(str(repo), json.dumps(res))
+
+    def test_a_named_repo_is_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], str(repo))
 
 
 class WindowTests(unittest.TestCase):
@@ -530,10 +967,10 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_tool(self, *args):
+    def run_tool(self, *args, cwd=None):
         return subprocess.run([sys.executable, str(TOKENRATE)] + list(args),
                               capture_output=True, text=True, env=self.env,
-                              cwd=str(ROOT), stdin=subprocess.DEVNULL)
+                              cwd=str(cwd or ROOT), stdin=subprocess.DEVNULL)
 
     def test_cli_prints_all_fields(self):
         proc = self.run_tool("--projects-dir", str(self.projects),
@@ -581,6 +1018,74 @@ class CliTests(unittest.TestCase):
         self.assertEqual(data["weighted"], 10.0)
         self.assertEqual(data["merges"], 0)
         self.assertIsNone(data["weighted_per_merge"])
+
+    def test_cli_json_reaches_the_subagent_files(self):
+        """The measured shape: the parent turn carries no flag and the subagent
+        file lives one level down, under the session's own directory."""
+        session = json.loads(usage_line(input_tokens=1, output_tokens=2,
+                                        cache_creation=3, cache_read=40))["sessionId"]
+        write_subagents(self.projects, PREFIX, session, "agent-a",
+                        [usage_line(input_tokens=100, output_tokens=0,
+                                    cache_creation=0, cache_read=0)])
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["records"], 2)
+        self.assertEqual(data["weighted"], 110.0)
+        self.assertEqual(data["subagent_records"], 1)
+        self.assertEqual(data["subagent_weighted"], 100.0)
+        self.assertEqual(data["subagent_share_pct"], 90.9)
+
+    def test_cli_json_without_projects_dir_prints_default_not_a_path(self):
+        """The default root is `$HOME/.claude/projects` — on this host a real
+        operator's home — so `--json` names it as `default` and echoes nothing
+        about the path."""
+        proc = self.run_tool("--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["projects_dir"], "default")
+        self.assertNotIn(str(Path(self.env["HOME"])), proc.stdout)
+
+    def test_cli_json_echoes_an_explicit_projects_dir(self):
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["projects_dir"], str(self.projects))
+
+    def test_cli_json_without_repo_prints_default_not_the_cwd(self):
+        """The denominator's default is the current directory — on the
+        orchestrator's machine a path holding its username — so an unnamed
+        `--repo` is reported as `default`, exactly as `--projects-dir` is."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX,
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json",
+                                 cwd=str(repo))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], "default")
+        self.assertEqual(data["merges"], 0)
+        self.assertNotIn(str(repo), proc.stdout)
+
+    def test_cli_json_echoes_an_explicit_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX, "--repo", str(repo),
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], str(repo))
 
     def test_repeatable_branch_prefix(self):
         proc = self.run_tool("--projects-dir", str(self.projects), "--no-git",
