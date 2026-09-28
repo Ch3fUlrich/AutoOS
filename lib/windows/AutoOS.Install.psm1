@@ -2517,6 +2517,9 @@ function Sync-AutoOSSkillDirs {
         before .agents/skills became the only skills home (2026-09-25). Such a link
         is moved to -Source; each old target is first appended to
         <Destination>.autoos-backup-<stamp>, and the target itself is never touched.
+        The shape is a path suffix, not a known clone location: a link a user made
+        on purpose to their own ...\agent-skills\skills\<same name> checkout would
+        be moved too. That is why it is opt-in, and why every move is recorded.
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
