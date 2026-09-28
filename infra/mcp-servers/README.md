@@ -10,8 +10,8 @@ quoted here had no measurement behind it and its supporting doc was retired.
 Runs on your own hardware with Docker + uv + Node.js. The memory layer is
 **Omnigraph** (typed graph + vector + full-text) backed by MinIO — no OpenAI key
 required. There is **no fallback memory**: the stack requires Omnigraph (Mem0 was removed —
-ADR 0003 (retired agent-skills repo, history); ADR 0001 (retired agent-skills repo, history)
-are why Omnigraph in the first place; archived in retired agent-skills repo).
+ADR 0003 and ADR 0001 explain why Omnigraph is the memory store; both are history in the
+retired agent-skills repo).
 For the authoritative overview
 see [`../../docs/architecture.md`](../../docs/architecture.md); for the memory
 protocol see [structured-memory skill](../../.agents/skills/structured-memory/SKILL.md).
