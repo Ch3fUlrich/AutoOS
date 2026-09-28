@@ -248,6 +248,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   skipped, a moved pin reinstalled, the user's own wrapper kept and AutoOS's
   replaced with a backup, the retired rc line removed and its neighbours kept,
   the wrapper's env precedence and its 127, and a dry run that writes nothing.
+### Fixed — flock's post-lockfile shell stop is still a stop behind a leading `--` (hx3 review LOWs, S1, 2026-09-28)
+
+Fast-follow on the hx3 Sonnet FINAL review: one LOW in the policy, one in a test message. Failing tests written first (8 red assertions).
+
+- **`tools/hostexec/policy.py`** (`_walk_wrapper_options`): the post-`--` catch-up loop filled the wrapper's positional slots and then handed the next token to the caller as the head without consulting `spec.post_positional_stops`, so `flock -- /tmp/l -c id` and `flock -- /tmp/l --command id` — nested one wrapper deep, `nice flock -- /tmp/l -c id`, likewise — denied as `path-hijack` on a literal `-c` that no program will ever exec, instead of as the shell form flock really runs there. Measured on util-linux 2.39.3: `flock -- ./l -c '/bin/echo FIVE'` prints `FIVE` via `sh -c`, while `flock -- ./l --comm x` and `flock -- ./l -cX` report `failed to execute` (rc 69) and `flock -- ./l ls` runs `ls`. `--` now ends option parsing without leaving the loop: a `scanning` flag replaces the separate catch-up, so the positional slots still take the following tokens verbatim (the `flock -- -c rm -rf /` reading, where `-c` is a file name, is unchanged) and what lands past them is judged by the one rule that already knows about `post_positional_stops`. The decision stays deny in both spellings — only the reason was wrong, and it is the reason an audit record is made of.
+- **`tests/test_check_omnigraph_bridge.py`**: `test_a_bridge_leads_its_own_process_group` asserted `getpgid(pid) == pid` behind the message *"the bridge shares the benchmark's process group"* — that is the safe state, not the failure, so a red run printed a sentence describing the opposite of what it detected. The message now names the failure it means: the bridge sits in somebody else's group, so `close()`'s `killpg` would signal that group, the benchmark's own processes included.
+- **`tests/test_hostexec_policy.py`**: the two `--`-before-the-lockfile shell forms joined `_FLOCK_COMMAND_FORMS` (flat and nested under `nice`) and `_NON_PERMUTING_HEADS` (no head, plus the unhonoured `--comm` as the verbatim head), and `NonPermutingGetoptTests.test_flock_shell_stop_survives_a_leading_dashdash` pins the walker's option list, the denial reason and the nested head. `flock -- /tmp/l ls` stays allowed and still yields `["ls"]`.
+
+Measured here: `python3 -m pytest -q tests/test_hostexec_policy.py tests/test_hostexec_runner.py tests/test_hostexec_server.py tests/test_check_omnigraph_bridge.py` 99 passed / 3 skipped / 4402 subtests; `python3 -m pytest -q tests/` 1847 passed / 4 skipped / 4571 subtests.
+
 ### Fixed — affected-tests re-reads a file plainly when its scan ends unbalanced (AFFFIX3, 2026-09-28)
 
 Fast-follow on `review-afffix.md` (Sonnet round 3: one CRITICAL, one HIGH; the recorded decision is *stop chasing bash grammar*), failing tests written first.
