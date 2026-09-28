@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
+
+- **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
+  was red before its fix** (72 red of 108 in `tests/test_autoos_risk.py`). The one
+  failure mode this module may not have is a diff that reads `normal` because the
+  reader never saw it; five of the six were exactly that.
+- **A rename kept only the name it moved to.** `git mv AGENTS.md docs/AGENTS.md`
+  reports one changed path, so a rule on `AGENTS.md` watched a policy file walk out
+  of the class that guards it. `changed_files` now carries `old_path`, every
+  `path_glob` is tested against both names, and the reason line says which moved:
+  `policy: AGENTS.md -> docs/AGENTS.md`.
+- **Secrets were path-only.** `**/*.key` and `**/*secret*` catch a file named for
+  what it holds and nothing else, so a key added to `notes.txt` was `normal`. Five
+  `added_regex` content rules now read the ADDED lines for the high-confidence
+  shapes (`-----BEGIN … PRIVATE KEY-----`, `AKIA…{16}`, `ghp_…{36}`, `sk-…{20,}`,
+  `xox[baprs]-`), and `**/*.pem`, `**/.env`, `**/.env.*` join the path rules. A new
+  `exclude` field on `path_glob` keeps the tracked `.env.example` templates out of
+  it — AGENTS.md rule 1 says commit those, and a rule that punished honest
+  templates is a rule that gets switched off. `tools/registry.py` rule 12 knows
+  both new fields. (Test fixtures assemble these shapes at runtime, so no tracked
+  file ever holds a literal key; the public scrub scan stays green.)
+- **`high` risk was cheaper to review than `normal`.** The RISKTIER-a registry
+  declared `review_counts.high` as 1 cross-family + the final, while operator Q-013
+  (common.md, D-060) says two diverse cheap cross-family reviews and, for high, the
+  same two *plus* the Sonnet final. `high` is now `cross_family: 2, final: true`,
+  which also agrees with the resolver's own D2 fallback constants it had been
+  overriding.
+- **`--sha HEAD` exited 2, and one commit had two audit answers.** `HEAD`, a branch
+  or a tag is not hex, so the draw raised while the diff classified perfectly; and
+  `audit()` buckets 12 hex digits, so `28ada0a` and the 40 digits of the same commit
+  could land in different buckets — a caller who learns the friendlier spelling.
+  `assess` now resolves the rev with `git rev-parse --verify <rev>^{commit}` (a tree
+  or blob is refused) and uses that hex everywhere, reporting it as `sha` /
+  `commit:` so a lane records which commit the answer is about.
+- **The diff was parsed line-and-tab, which git quotes.** `--name-status` C-quotes a
+  path containing a tab or a newline — and escapes the tab with the very character
+  the parser splits on, so the path arrived wrapped in quotes and matched no glob.
+  `changed_files` and the new `deleted_lines` read `-z` and split on NUL (a rename's
+  two paths by the arity its status declares, so a file named `A100` is never
+  mistaken for a status). The same quoting hits the `+++` header of `git diff -U0`:
+  an awkward filename left `current` unset for the file's whole body and dropped
+  every added line in it, `sudo` included. Added lines are now unquoted too.
+- **The rule table's gaps, and how much a change deletes.** `**/*.sql`,
+  `**/setup*`, `**/bootstrap*`, `**/Install*` (case-sensitive, so it is not the
+  existing `**/install*`) and `docs/**/*spec*.md` joined the globs; the generic
+  `diff_deletion` rule gained `min_deleted_lines: 200`, because a change that
+  deletes 240 lines from a file that *survives* is a large deletion and only a whole
+  file disappearing used to read as one. Corpus: `f5744611` (679 lines removed, no
+  file lost) flips `normal` → `high`; `967021cb8`, which edits
+  `stack.env.example`, stays `normal`.
+- Tests: 108 in `tests/test_autoos_risk.py` (was 82), wired into both harnesses
+  already. No CLI surface changed but the `risk` verb's output, which now leads with
+  the resolved commit.
+
 ### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
 
 - **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the

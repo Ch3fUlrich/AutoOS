@@ -1243,16 +1243,20 @@ def cmd_risk(args) -> int:
     """Classify a commit's diff by risk (RISKTIER-a, operator Q-013/D-060).
 
     The writer does not grade its own work: the class comes from the diff, read
-    against `policy.risk_rules` by tools/autoos_risk.py. Prints
+    against `policy.risk_rules` by tools/autoos_risk.py. The rev is resolved to one
+    commit hex first, so `--sha HEAD`, a branch and the full sha all classify the
+    same commit the same way. Prints
 
+        commit: 59aa3a9794f4d81a1a67241a202eb4fb7de3e527
         risk: high
           reason: secrets handling: configuration/api-keys.yml
         audit: no (20%)
 
-    on stdout; `--json` prints the whole assessment (reasons, the audit draw and
-    the changed files) instead. Exit 0 classified, 2 the diff or the registry
-    could not be read — an unclassified diff is never reported as `normal`,
-    because a secrets change that reads as low risk gets one cheap review.
+    on stdout; `--json` prints the whole assessment (reasons, the resolved commit,
+    the audit draw and the changed files) instead. Exit 0 classified, 2 the diff or
+    the registry could not be read — an unclassified diff is never reported as
+    `normal`, because a secrets change that reads as low risk gets one cheap
+    review.
     """
     try:
         registry = load_registry(args.registry or REGISTRY_PATH)
@@ -1268,6 +1272,7 @@ def cmd_risk(args) -> int:
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
+    print("commit: %s" % out["sha"])
     print("risk: %s" % out["risk"])
     for reason in out["reasons"]:
         print("  reason: %s" % reason)
@@ -4512,7 +4517,9 @@ def _parser_risk(sub):
                      "policy.risk_rules (RISKTIER-a): the writer does not grade "
                      "its own work, the diff does")
     risk_p.add_argument("--sha", required=True,
-                        help="the commit to classify (any rev git accepts)")
+                        help="the commit to classify: any rev git resolves to a "
+                             "commit (HEAD, a branch, a short sha); resolved with "
+                             "rev-parse --verify before the audit draw")
     risk_p.add_argument("--base", default="origin/main",
                         help="the diff's other end, compared at its merge base "
                              "with --sha (default: %(default)s)")

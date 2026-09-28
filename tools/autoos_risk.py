@@ -15,10 +15,19 @@ Nothing in here is a decision the registry could make itself: `classify` walks
 a rule that silently does nothing is impossible. `tools/registry.py validate` is
 the gate that keeps the registry's rules inside the implemented set.
 
-The four rule types:
+The rule types:
 
-  path_glob        a changed path matching `pattern` (`glob_match` below)
-  diff_deletion    any deleted file in the diff
+  path_glob        a changed path matching `pattern`. A rename or copy is tested
+                   against BOTH names — the one the change moved away from and the
+                   one it moved to — because `git mv AGENTS.md docs/AGENTS.md`
+                   otherwise walks a policy file out of the class that guards it.
+                   An optional `exclude` glob cancels a match, which is what keeps
+                   a tracked `.env.example` template out of a `.env` rule.
+  diff_deletion    any deleted file in the diff, and — when the rule declares
+                   `min_deleted_lines` — a diff that removes more than that many
+                   lines. A change that deletes 240 lines from a file that
+                   survives is a large deletion; only a whole file disappearing
+                   used to read as one.
   added_regex      an ADDED line matching `pattern`, optionally restricted to
                    files matching `paths`. Case-sensitive and textual: a test
                    that only mentions `sudo` inside a string raises the class.
@@ -32,6 +41,11 @@ Every git read goes through one injectable runner, `runner(args, cwd) ->
 git failure raises `RiskError` — never a silent `normal`, because an
 unclassified diff that reads as low risk is how a secrets change gets one cheap
 review. Callers map `RiskError` to exit 2.
+
+`assess` resolves the rev it was handed (`HEAD`, a branch, a short sha) to one
+full commit hex with `git rev-parse --verify <rev>^{commit}` and uses that
+everywhere — including the audit draw, so one commit has one answer however the
+caller spelled it.
 
 `audit` is the sampling side of the same decision: `normal` work gets two cheap
 cross-family reviews deterministically, and 20% of them (by the sha, so the same
@@ -61,6 +75,20 @@ REGISTRY_REL_PATH = "catalog/ai-registry.json"
 # How many leading hex digits of a sha decide the audit bucket.
 _AUDIT_DIGITS = 12
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+# One resolved commit, as `git rev-parse` writes it.
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# A `--name-status -z` status field: the letter, plus the similarity score git
+# appends to R and C. Anything else at a status position is a desync of the
+# field walk, not a path.
+_STATUS_RE = re.compile(r"^[A-Za-z]\d*$")
+# The numeric head of a `--numstat -z` record: `added<TAB>deleted<TAB>`, with
+# `-` where a binary file has no counts.
+_NUMSTAT_RE = re.compile(r"^(\d+|-)\t(\d+|-)\t")
+
+# The escapes git writes inside a C-quoted path (`"tab\\tname.md"`), and the two
+# punctuation ones that quote a quote and a backslash.
+_C_ESCAPES = {"a": 0x07, "b": 0x08, "t": 0x09, "n": 0x0A, "v": 0x0B, "f": 0x0C,
+              "r": 0x0D, '"': 0x22, "\\": 0x5C}
 
 
 class RiskError(Exception):
@@ -129,6 +157,32 @@ def glob_match(pattern: str, path: str) -> bool:
 # reading the diff
 # ---------------------------------------------------------------------------
 
+def resolve_sha(repo: str, rev: str, runner) -> str:
+    """The full commit hex that `rev` names — `HEAD`, a branch, a tag, a short sha.
+
+    Two reasons, both about the audit draw. `audit()` buckets the first 12 hex
+    digits, so `28ada0a` and the 40 digits of the same commit can land in
+    different buckets: one commit, two answers, and a caller who learns the
+    friendlier spelling. And `HEAD` — what a lane actually has when it asks about
+    the commit it just made — is not hex at all, so a perfectly classifiable diff
+    used to exit 2 on the shape of the argument.
+
+    `^{commit}` is what makes this a commit and not any object: a tree or a blob
+    has no diff to classify, and answering with a resolved sha nobody can diff is
+    the silent failure this module is built not to have.
+    """
+    code, out = runner(["rev-parse", "--verify", "%s^{commit}" % rev], repo)
+    text = out.strip()
+    if code or not text:
+        raise RiskError("git rev-parse --verify %s^{commit} failed: %s"
+                        % (rev, text.splitlines()[0] if text else "no such rev"))
+    first = text.splitlines()[0].strip()
+    if not _FULL_SHA_RE.match(first):
+        raise RiskError("git rev-parse answered %r for %s, not a commit sha"
+                        % (first, rev))
+    return first
+
+
 def merge_base(repo: str, base: str, sha: str, runner) -> str:
     """The merge base of `base` and `sha` — the diff's other end.
 
@@ -146,29 +200,117 @@ def merge_base(repo: str, base: str, sha: str, runner) -> str:
 
 
 def changed_files(repo: str, base: str, sha: str, runner) -> list:
-    """`[{"path", "deleted"}]` for everything the diff touches.
+    """`[{"path", "old_path", "deleted"}]` for everything the diff touches.
 
-    Renames are read as the NEW path and are not a deletion — moving a file does
-    not delete content. `deleted` is the flag `diff_deletion` reads.
+    `-z`, with the fields split on NUL. The default `--name-status` C-quotes a
+    path containing a tab, a newline or a quote — and the tab it escapes with is
+    the very character the line is split on, so `M\\t"docs/tab\\tname.md"` arrives
+    as three fields and the path keeps its quotes. A name like that matches no
+    glob in the registry, which is a `normal` bought with a filename.
+
+    A rename or copy keeps BOTH names: `old_path` is the name the change moved
+    away from, `path` the one it moved to. `git mv AGENTS.md docs/AGENTS.md`
+    reports only the new one, and a rule on `AGENTS.md` that reads only the new
+    one watches a policy file walk out of the class that guards it.
+    A rename is not a deletion — moving a file deletes no content — so
+    `deleted` stays the flag `diff_deletion` reads.
     """
     mb = merge_base(repo, base, sha, runner)
-    code, out = runner(["diff", "--name-status", mb, sha], repo)
+    code, out = runner(["diff", "--name-status", "-z", mb, sha], repo)
     if code:
-        raise RiskError("git diff --name-status %s %s failed: %s"
+        raise RiskError("git diff --name-status -z %s %s failed: %s"
                         % (mb, sha, out.strip()))
+    fields = [f for f in out.split("\0") if f != ""]
     files = []
-    for line in out.splitlines():
-        fields = line.split("\t")
-        if len(fields) < 2:
-            continue
-        status, paths = fields[0], fields[1:]
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not _STATUS_RE.match(status):
+            # The walk is by the arity each status declares, so this is only
+            # reachable when git wrote something this reader does not know.
+            # Guessing one field forward would drop a file off the diff.
+            raise RiskError("git diff --name-status -z: unexpected status %r "
+                            "at field %d of the %s..%s diff"
+                            % (status, index, mb, sha))
         letter = status[0]
-        if letter in ("R", "C"):        # rename / copy: <old>\t<new>
-            path, deleted = paths[-1], False
+        arity = 3 if letter in ("R", "C") else 2
+        if len(fields) < index + arity:
+            raise RiskError("git diff --name-status -z: status %s is missing a "
+                            "path in the %s..%s diff" % (status, mb, sha))
+        if letter == "R" or letter == "C":
+            files.append({"path": fields[index + 2], "old_path": fields[index + 1],
+                          "deleted": False})
         else:
-            path, deleted = paths[0], letter == "D"
-        files.append({"path": path, "deleted": deleted})
+            files.append({"path": fields[index + 1], "old_path": None,
+                          "deleted": letter == "D"})
+        index += arity
     return files
+
+
+def deleted_lines(repo: str, base: str, sha: str, runner) -> int:
+    """How many lines the diff removes, summed over every file it touches.
+
+    `diff_deletion` used to see only a whole file disappearing; how much a change
+    takes *out* of the files that survive was invisible, and a 240-line deletion
+    from a file that stays is a large deletion by any reading of the rule.
+
+    `-z` for the same reason as `--name-status`: the counts and the name are
+    separated by tabs, so only an unquoted path keeps a filename from being read
+    as numbers. Each record's own numeric head is what is summed, which also means
+    the reader never walks a rename's pair of paths and never double-counts. A
+    binary file writes `-` — not a line count, so not a contribution.
+    """
+    mb = merge_base(repo, base, sha, runner)
+    code, out = runner(["diff", "--numstat", "-z", mb, sha], repo)
+    if code:
+        raise RiskError("git diff --numstat -z %s %s failed: %s"
+                        % (mb, sha, out.strip()))
+    total = 0
+    for token in out.split("\0"):
+        head = _NUMSTAT_RE.match(token)
+        if head and head.group(2) != "-":
+            total += int(head.group(2))
+    return total
+
+
+def _unquote_path(text: str) -> str:
+    """A C-quoted git path (`"tab\\tname.md"`) back to the path itself.
+
+    `core.quotepath=false` only stops git quoting *non-ASCII*; a name with a tab,
+    a newline or a quote is still written escaped and inside double quotes, in the
+    `+++` header as in `--name-status`. Read as a raw string the header matches
+    neither `b/` nor `/dev/null`, `current` stays None, and every added line of
+    that file — `sudo` included — is dropped before a rule ever sees it.
+
+    The escapes are the C ones plus octal for a byte git has no letter for, so the
+    body is reassembled as bytes and decoded: a `\303\251` pair is one é, not two
+    characters.
+    """
+    if not (len(text) >= 2 and text.startswith('"') and text.endswith('"')):
+        return text
+    body = text[1:-1]
+    raw = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\" and index + 1 < len(body):
+            nxt = body[index + 1]
+            if nxt in _C_ESCAPES:
+                raw.append(_C_ESCAPES[nxt])
+                index += 2
+                continue
+            if nxt.isdigit() and nxt < "8":
+                digits = ""
+                while len(digits) < 3 and index + 1 + len(digits) < len(body) \
+                        and body[index + 1 + len(digits)].isdigit() \
+                        and body[index + 1 + len(digits)] < "8":
+                    digits += body[index + 1 + len(digits)]
+                raw.append(int(digits, 8))
+                index += 2 + len(digits)
+                continue
+        raw += char.encode("utf-8")
+        index += 1
+    return bytes(raw).decode("utf-8", "replace")
 
 
 def added_lines(repo: str, base: str, sha: str, runner) -> dict:
@@ -183,6 +325,10 @@ def added_lines(repo: str, base: str, sha: str, runner) -> dict:
     added line that begins with a plus (`++++ x` in a test that embeds a diff)
     looks exactly like a header — and a header seen as content, or content seen
     as a header, is a `sudo` line nobody ever classified.
+
+    The `+++` target goes through `_unquote_path`: a file whose name git quotes
+    would otherwise leave `current` as None for its whole body, dropping every
+    added line it contains.
     """
     mb = merge_base(repo, base, sha, runner)
     code, out = runner(["diff", "-U0", mb, sha], repo)
@@ -197,7 +343,7 @@ def added_lines(repo: str, base: str, sha: str, runner) -> dict:
         elif not in_hunk and raw.startswith("@@"):
             in_hunk = True
         elif not in_hunk and raw.startswith("+++ "):
-            target = raw[4:].strip()
+            target = _unquote_path(raw[4:].strip())
             if target.startswith("b/"):
                 current = target[2:]
                 added.setdefault(current, [])
@@ -252,14 +398,38 @@ def _policy(text, rev):
 # classify / audit / assess
 # ---------------------------------------------------------------------------
 
+def _path_hit(pattern, exclude, entry):
+    """The path a `path_glob` rule matched, or None.
+
+    A rename or copy is tested against both of its names, and the reported one is
+    whichever matched — the old name with an arrow to where it went, so a reviewer
+    reading `policy: AGENTS.md -> docs/AGENTS.md` can see the move rather than
+    hunt for a file that is no longer there.
+    """
+    new = entry.get("path")
+    old = entry.get("old_path")
+    if (new is not None and glob_match(pattern, new)
+            and not (exclude and glob_match(exclude, new))):
+        return new
+    if (old and glob_match(pattern, old)
+            and not (exclude and glob_match(exclude, old))):
+        return "%s -> %s" % (old, new)
+    return None
+
+
 def classify(files: list, added_lines: dict, registry: dict,
-             registry_policy_changed: bool = False) -> dict:
+             registry_policy_changed: bool = False,
+             deleted_lines: int = 0) -> dict:
     """`{"risk": "normal"|"high", "reasons": ["<reason>: <path or detail>", ...]}`.
 
     Every rule in `policy.risk_rules` is applied, in registry order; a reason
     line is one per matching path (per rule), so a reviewer sees which file
     raised the class and why. An unknown rule type raises — a rule no code
     reads is a rule that does not exist.
+
+    `deleted_lines` is the diff's own count from `deleted_lines()` above; a
+    `diff_deletion` rule that declares `min_deleted_lines` reads it, and a rule
+    that does not is unaffected by a caller who never measured it.
     """
     rules = ((registry or {}).get("policy") or {}).get("risk_rules") or []
     reasons = []
@@ -279,13 +449,22 @@ def classify(files: list, added_lines: dict, registry: dict,
             pattern = rule.get("pattern")
             if not pattern:
                 continue
+            exclude = rule.get("exclude")
             for entry in files:
-                if glob_match(pattern, entry["path"]):
-                    add(reason, entry["path"])
+                hit = _path_hit(pattern, exclude, entry)
+                if hit:
+                    add(reason, hit)
         elif type_ == "diff_deletion":
             for entry in files:
                 if entry["deleted"]:
                     add(reason, entry["path"])
+            threshold = rule.get("min_deleted_lines")
+            if threshold is not None:
+                if isinstance(threshold, bool) or not isinstance(threshold, int):
+                    raise RiskError("min_deleted_lines must be an int, got %r"
+                                    % (threshold,))
+                if deleted_lines > threshold:
+                    add(reason, "%d lines deleted" % deleted_lines)
         elif type_ == "added_regex":
             pattern = rule.get("pattern")
             if not pattern:
@@ -318,9 +497,12 @@ def audit(sha: str, percent: int) -> bool:
     `int(sha[:12], 16) % 100 < percent`, which is deterministic in the commit
     itself: the same sha is always in or always out, no process state and no
     clock can re-roll it, and re-running the classifier after an unlucky draw is
-    not possible (the answer is the commit). 12 hex digits is well past the
-    point where the low two decimal digits are uniform, and git's own short
-    shas are at least 7, so a short sha is still a real bucket.
+    not possible (the answer is the commit). 12 hex digits is well past the point
+    where the low two decimal digits are uniform.
+
+    Pass the resolved commit — `assess()` does, through `resolve_sha()` — because
+    a rev spelled shorter buckets shorter, and two answers for one commit is
+    exactly the shopping this function exists to remove.
     """
     if isinstance(percent, bool) or not isinstance(percent, int):
         raise RiskError("audit percent must be an int, got %r" % (percent,))
@@ -353,19 +535,27 @@ def audit_percent(registry: dict) -> int:
 def assess(repo: str, base: str, sha: str, registry: dict, runner=None) -> dict:
     """Classify `repo`'s diff (merge base of `base` and `sha`, up to `sha`).
 
-    `{"risk", "reasons", "audit", "audit_percent", "files"}`. `runner` is the
-    git seam (`runner(args, cwd) -> (code, stdout)`); the default shells out to
-    git. Any git failure raises `RiskError` — the caller exits 2, it does not
-    get to treat an unreadable diff as low risk.
+    `{"risk", "reasons", "sha", "audit", "audit_percent", "files"}`, where `sha`
+    is the resolved commit — what the answer is actually about, so a caller that
+    asked about `HEAD` can record which commit it turned out to be. Every git read
+    after the resolution uses that hex, so the diff, the reasons and the audit draw
+    are all decisions about one commit.
+
+    `runner` is the git seam (`runner(args, cwd) -> (code, stdout)`); the default
+    shells out to git. Any git failure raises `RiskError` — the caller exits 2, it
+    does not get to treat an unreadable diff as low risk.
     """
     runner = runner or _git
-    changed = changed_files(repo, base, sha, runner)
-    added = added_lines(repo, base, sha, runner)
+    commit = resolve_sha(repo, sha, runner)
+    changed = changed_files(repo, base, commit, runner)
+    added = added_lines(repo, base, commit, runner)
     out = classify(changed, added, registry,
                    registry_policy_changed=registry_policy_changed(
-                       repo, base, sha, runner))
+                       repo, base, commit, runner),
+                   deleted_lines=deleted_lines(repo, base, commit, runner))
     percent = audit_percent(registry)
-    out["audit"] = audit(sha, percent)
+    out["audit"] = audit(commit, percent)
     out["audit_percent"] = percent
+    out["sha"] = commit
     out["files"] = changed
     return out

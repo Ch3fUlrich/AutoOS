@@ -65,9 +65,11 @@ Three subcommands:
         is resolved with the same rule 1 predicate everything else uses.
     12. policy.risk_rules, policy.risk_audit_percent and policy.review_counts
         are shapes tools/autoos_risk.py and the resolver can actually apply
-        (RISKTIER-a, operator Q-013 2026-09-28): every rule's ``type`` is one
-        classify() implements, it carries the fields that type reads and no
-        others, a glob/regex rule has a non-empty ``pattern`` (an added_regex
+        (RISKTIER-a, operator Q-013 2026-09-28; fields widened by RISKTIER-a2):
+        every rule's ``type`` is one classify() implements, it carries the fields
+        that type reads and no others — ``exclude`` (a path_glob's second glob)
+        and ``min_deleted_lines`` (a diff_deletion's numstat threshold) among them
+        — a glob/regex rule has a non-empty ``pattern`` (an added_regex
         one compiles), the audit percent is an int 0-100, and each review count
         is a non-negative int with a boolean ``final``. classify() raises on an
         unknown type rather than ignoring it, so this is what keeps such a rule
@@ -2377,9 +2379,12 @@ _RISK_PATTERN_TYPES = ("path_glob", "added_regex")
 # Every field `classify()` reads for a given type, beyond the shared three. A
 # field outside its type's set is inert: `paths` on a path_glob looks like a
 # scope and is not one, and a stray key says nothing at all.
+# (RISKTIER-a2: `exclude` is the second glob a path_glob reads — the tracked
+# `.env.example` template a `**/.env.*` rule must not catch — and
+# `min_deleted_lines` is the numstat threshold a diff_deletion reads.)
 _RISK_RULE_FIELDS = {
-    "path_glob": {"pattern"},
-    "diff_deletion": set(),
+    "path_glob": {"pattern", "exclude"},
+    "diff_deletion": {"min_deleted_lines"},
     "added_regex": {"pattern", "paths"},
     "registry_policy": set(),
 }
@@ -2455,6 +2460,20 @@ def _check_risk_policy(registry) -> list:
                                     or not rule["paths"]):
                 problems.append("risk_rules: %s.paths must be a non-empty string "
                                 "(added_regex only)" % label)
+            if "exclude" in rule and (not isinstance(rule["exclude"], str)
+                                      or not rule["exclude"]):
+                problems.append("risk_rules: %s.exclude must be a non-empty glob "
+                                "(path_glob only) - an empty one excludes nothing, "
+                                "which is the opposite of why the field is there"
+                                % label)
+            threshold = rule.get("min_deleted_lines")
+            if "min_deleted_lines" in rule and (
+                    isinstance(threshold, bool)
+                    or not isinstance(threshold, int)
+                    or threshold < 0):
+                problems.append("risk_rules: %s.min_deleted_lines must be an int "
+                                ">= 0, got %r - classify() compares it against the "
+                                "diff's own deleted-line count" % (label, threshold))
 
     percent = policy.get("risk_audit_percent")
     if percent is None:
