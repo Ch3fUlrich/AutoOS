@@ -571,6 +571,167 @@ if it "omnigraph-client: an rc file that is not valid UTF-8 is still repaired an
     (( ok )) && pass || fail "the retire step is not byte-safe"
 fi
 
+# ─── the rc-line writer (replace_or_append_marked_line) ─────────────────────
+# The two heredocs this step runs used to read and write the rc file as strict
+# UTF-8 text, unguarded: an undecodable dotfile aborted the run with a traceback,
+# a refused write was announced as a completed one, and every CRLF neighbour was
+# converted to LF. Same containment and same bytes as the retire step above.
+
+if it "omnigraph-client: the marked-line step repairs a non-UTF-8 rc file in bytes and keeps its CRLF neighbours"; then
+    tmp="$(oh_client_sandbox)"
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    printf '# Mein sch\xc3h\xc4en\r\n%s\r\nalias ll="ls -alF"\r\n\xff\xfe junk\r\n' "$v1" >"$tmp/.bashrc"
+    line="$(omnigraph_rc_line)"
+    printf '# Mein sch\xc3h\xc4en\r\n%s\r\nalias ll="ls -alF"\r\n\xff\xfe junk\r\n' "$line" >"$tmp/expected"
+    out="$(oh_run_client "$tmp")"
+    stale="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+    ours="$(grep -c 'AutoOS:omnigraph-env' "$tmp/.bashrc" || true)"
+    cmp -s "$tmp/.bashrc" "$tmp/expected" && bytes=same || bytes=different
+    crs="$(grep -c $'\r' "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log" >&2; }
+    [[ "$stale" == 0 && "$ours" == 1 ]] \
+        || { ok=0; echo "stale=$stale ours=$ours (the line was not replaced in place)" >&2; }
+    [[ "$bytes" == same ]] || { ok=0; echo "the file is not the byte sequence the edit should leave" >&2; }
+    [[ "$crs" == 4 ]] || { ok=0; echo "the edited file holds $crs CR-terminated lines, expected 4" >&2; }
+    [[ "$out" == *"replaced the"* ]] || { ok=0; echo "the replacement was not announced" >&2; }
+    (( ok )) && pass || fail "the marked-line step is not byte-safe"
+fi
+
+if it "omnigraph-client: the marked-line purge of a stale line leaves every other line's bytes alone"; then
+    tmp="$(oh_client_sandbox)"
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    line="$(omnigraph_rc_line)"
+    printf 'junk \xff\xfe here\r\n%s\r\n%s\r\n' "$v1" "$line" >"$tmp/.bashrc"
+    printf 'junk \xff\xfe here\r\n%s\r\n' "$line" >"$tmp/expected"
+    out="$(oh_run_client "$tmp")"
+    cmp -s "$tmp/.bashrc" "$tmp/expected" && bytes=same || bytes=different
+    ours="$(grep -c 'AutoOS:omnigraph-env' "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log" >&2; }
+    [[ "$ours" == 1 ]] || { ok=0; echo "the current line appears $ours times" >&2; }
+    [[ "$bytes" == same ]] || { ok=0; echo "the lines around the purged one were rewritten" >&2; }
+    (( ok )) && pass || fail "the marked-line purge is not byte-safe"
+fi
+
+if it "omnigraph-client: a marked-line step that cannot write the rc file warns, records, and the run continues"; then
+    tmp="$(oh_client_sandbox)"
+    oh_run_client "$tmp" >/dev/null
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    printf '%s\n' "$v1" >>"$tmp/.bashrc"
+    if [[ "$(id -u)" == 0 ]]; then
+        rm -rf "$tmp"
+        skip "root writes a read-only file, so the refusal cannot be seeded"
+    else
+        chmod 444 "$tmp/.bashrc"
+        before="$(md5sum <"$tmp/.bashrc")"
+        # setup.sh's own shell options: the step must not take the run down with
+        # it, and must not claim an edit it could not make.
+        out="$( (
+            set -euo pipefail
+            SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_EXTRA_FAILURES=()
+            OMNIGRAPH_TOKEN="dummy-token-1234" AUTOOS_KEYS_FILE="$tmp/keys.yml"
+            # shellcheck disable=SC2016
+            AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
+            npm() { :; }
+            run_post_install install_omnigraph_client omnigraph-client
+            printf 'RUN CONTINUED\nFAILURES %s\n' "${AUTOOS_EXTRA_FAILURES[*]-}"
+        ) 2>&1)"; rc=$?
+        after="$(md5sum <"$tmp/.bashrc")"
+        chmod 644 "$tmp/.bashrc"
+        still_there="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+        rm -rf "$tmp"
+        ok=1
+        (( rc == 0 )) || { ok=0; echo "the run aborted with $rc: [${out:0:300}]" >&2; }
+        [[ "$out" == *"RUN CONTINUED"* ]] || { ok=0; echo "the step took the run down: [${out:0:300}]" >&2; }
+        [[ "$out" == *"FAILURES"*"omnigraph-client"* ]] \
+            || { ok=0; echo "the refused edit was not recorded for the summary: [${out:0:400}]" >&2; }
+        [[ "$out" != *"replaced the"* && "$out" != *"removed the stale"* ]] \
+            || { ok=0; echo "the step claimed an edit it could not write: [${out:0:400}]" >&2; }
+        [[ "$out" == *"left unchanged"* ]] || { ok=0; echo "the refusal was not announced: [${out:0:400}]" >&2; }
+        [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log: [${out:0:400}]" >&2; }
+        [[ "$before" == "$after" && "$still_there" == 1 ]] \
+            || { ok=0; echo "the unwritable file was modified anyway" >&2; }
+        (( ok )) && pass || fail "an unwritable rc file is not contained by the marked-line step"
+    fi
+fi
+
+if it "omnigraph-client: an older versioned rc line is replaced in place and the gate then reads current"; then
+    tmp="$(oh_client_sandbox)"
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    v2='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
+    printf '# mine\n%s\n%s\n' "$v1" "$v2" >"$tmp/.bashrc"
+    cp "$tmp/.bashrc" "$tmp/.zshrc"
+    out="$(oh_run_client "$tmp")"
+    line="$(omnigraph_rc_line)"
+    marker="$(omnigraph_rc_marker)"
+    ours="$(grep -cF -- "$line" "$tmp/.bashrc" || true)"
+    olds="$(grep -c 'AutoOS:omnigraph-env' "$tmp/.bashrc" || true)"
+    gate="$(oh_gate "$tmp")"
+    second="$(oh_run_client "$tmp")"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$out" != *"Traceback"* ]] || { ok=0; echo "a python traceback reached the log" >&2; }
+    [[ "$ours" == 1 ]] || { ok=0; echo "the current rc line appears $ours times" >&2; }
+    [[ "$olds" == 1 ]] || { ok=0; echo "$olds AutoOS lines survived (marker $marker)" >&2; }
+    [[ "$gate" == current ]] || { ok=0; echo "after the upgrade the gate still says: $gate" >&2; }
+    [[ "$second" == *"CHANGED 0"* && "$second" == *"STATE skipped"* ]] \
+        || { ok=0; echo "the upgraded machine is not stable: [${second:0:300}]" >&2; }
+    (( ok )) && pass || fail "the rc-line version upgrade does not land"
+fi
+
+if it "omnigraph-client: one env file yields the same values for the rc line, the shell wrapper and PowerShell"; then
+    tmp="$(mktemp -d)"
+    # The rule is: whitespace round a value is not part of it, then one layer of
+    # matching quotes goes. Three readers share it — the rc line install.sh
+    # writes, the shell wrapper and its PowerShell twin. The env file is written
+    # by hand here, which is exactly when the rule is visible: install.sh's own
+    # writer emits the canonical KEY=value form.
+    printf 'OMNIGRAPH_BASE_URL=  https://spaced.example  \n' >"$tmp/.autoos-omnigraph.env"
+    printf 'OMNIGRAPH_TOKEN=" spaced-token "\n' >>"$tmp/.autoos-omnigraph.env"
+    printf "OMNIGRAPH_GRAPH_ID='\tgraph-tabs\t'\n" >>"$tmp/.autoos-omnigraph.env"
+    printf 'OTHER=nope\n' >>"$tmp/.autoos-omnigraph.env"
+    want='B=[https://spaced.example] T=[ spaced-token ] G=[graph-tabs] O=[UNSET]'
+    # The rc line, read the way a login shell reads it.
+    mkdir -p "$tmp/.config"
+    printf '# added by AutoOS\n%s\n' "$(omnigraph_rc_line)" >"$tmp/.bashrc"
+    cp "$tmp/.bashrc" "$tmp/.zshrc"
+    got_b="$(env -i HOME="$tmp" PATH=/usr/bin:/bin bash -c \
+        '. "$HOME/.bashrc"; printf "B=[%s] T=[%s] G=[%s] O=[%s]" "${OMNIGRAPH_BASE_URL-UNSET}" "${OMNIGRAPH_TOKEN-UNSET}" "${OMNIGRAPH_GRAPH_ID-UNSET}" "${OTHER-UNSET}"' 2>&1)"
+    got_z="$(env -i HOME="$tmp" PATH=/usr/bin:/bin zsh -f -c \
+        '. "$HOME/.zshrc"; printf "B=[%s] T=[%s] G=[%s] O=[%s]" "${OMNIGRAPH_BASE_URL-UNSET}" "${OMNIGRAPH_TOKEN-UNSET}" "${OMNIGRAPH_GRAPH_ID-UNSET}" "${OTHER-UNSET}"' 2>&1)"
+    # The shell wrapper, started the way an MCP client starts it.
+    cp tools/omnigraph-mcp-autoos.sh "$tmp/wrapper.sh"; chmod 755 "$tmp/wrapper.sh"
+    cat >"$tmp/wrapper_report.sh" <<'EOF'
+#!/bin/sh
+printf 'B=[%s] T=[%s] G=[%s] O=[%s]' "${OMNIGRAPH_BASE_URL-UNSET}" "${OMNIGRAPH_TOKEN-UNSET}" \
+    "${OMNIGRAPH_GRAPH_ID-UNSET}" "${OTHER-UNSET}"
+EOF
+    mkdir -p "$tmp/.local/share/autoos/omnigraph-mcp/bin"
+    cp "$tmp/wrapper_report.sh" "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp"
+    chmod 755 "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp"
+    got_s="$(env -i HOME="$tmp" PATH=/usr/bin:/bin bash "$tmp/wrapper.sh" 2>&1)"
+    got_p=""
+    if command -v pwsh >/dev/null; then
+        cp "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp" \
+            "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp.cmd"
+        cp tools/omnigraph-mcp-autoos.ps1 "$tmp/wrapper.ps1"
+        got_p="$(env -i USERPROFILE="$tmp" HOME="$tmp" PATH="$PATH" \
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$tmp/wrapper.ps1" 2>&1)"
+    fi
+    rm -rf "$tmp"
+    ok=1
+    [[ "$got_b" == "$want" ]] || { ok=0; echo "bash rc line:  [$got_b]" >&2; }
+    if command -v zsh >/dev/null; then
+        [[ "$got_z" == "$want" ]] || { ok=0; echo "zsh rc line:   [$got_z]" >&2; }
+    fi
+    [[ "$got_s" == "$want" ]] || { ok=0; echo "shell wrapper: [$got_s]" >&2; }
+    [[ -z "$got_p" || "$got_p" == "$want" ]] || { ok=0; echo "powershell:    [$got_p]" >&2; }
+    (( ok )) && pass || fail "the three readers of one env file disagree"
+fi
+
 if it "omnigraph-client: a hand-edited export/quoted token line is normalised instead of shadowing the resolved value"; then
     tmp="$(oh_client_sandbox)"
     oh_run_client "$tmp" >/dev/null
