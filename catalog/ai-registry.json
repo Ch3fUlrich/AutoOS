@@ -1340,38 +1340,38 @@
     },
     "handoff_caps": {
       "claude-opus-1m": {
-        "cap_fraction": 0.6,
-        "cap_tokens": 600000,
+        "cap_fraction": 0.5,
+        "cap_tokens": 500000,
         "match": ["opus", "fable"],
-        "source": "operator 2026-09-27T10:4xZ (common.md 'Operator direction 10:4xZ': Opus orchestrators hand off at 600k, 60% of 1M; was 400k 2026-09-25)",
+        "source": "operator D-088 2026-09-28 (typed in the L1-routing session): orchestration sessions hand off at 500k (was 600k, operator 2026-09-27T10:4xZ)",
         "window": 1000000
       },
       "muse-spark-1m": {
-        "cap_fraction": 0.3,
-        "cap_tokens": 300000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 400000,
         "match": ["spark"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 400k (was 300k)",
         "window": 1000000
       },
       "gemini-1m": {
-        "cap_fraction": 0.2,
-        "cap_tokens": 200000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 400000,
         "match": ["gemini"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 400k (was 200k)",
         "window": 1000000
       },
       "claude-sonnet-1m": {
-        "cap_fraction": 0.25,
-        "cap_tokens": 250000,
+        "cap_fraction": 0.5,
+        "cap_tokens": 500000,
         "match": ["sonnet"],
-        "source": "routing-00 D-085 2026-09-28 (L2 sonnet orchestrators handed off every ~15 min at 150k; fresh L2 baseline 55.5k measured); lower again after RESTART packs if a relaunch costs < ~20k",
+        "source": "operator D-088 2026-09-28 (typed in the L1-routing session): orchestration sessions (sonnet L2s, 1M window) hand off at 500k (was 250k D-085, 150k before)",
         "window": 1000000
       },
       "200k-class": {
-        "cap_fraction": 0.75,
-        "cap_tokens": 150000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 80000,
         "match": ["*"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 80k of a 200k window (was 150k)",
         "window": 200000
       }
     },
