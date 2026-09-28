@@ -5,6 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
+
+A7b retired the component's *work* and left a live row holding a pointer: the
+catalog entry still named a `postInstall`, still sat in two profiles, and still
+answered "installed" from a hand-written detection branch. A7a shipped the
+mechanism that says all three from data, so the last step is to stop saying them
+in code. Windows (`catalog/windows.json`, `lib/windows`) is untouched — its entry
+still clones, and its retirement is a later lane.
+
+- **`catalog/linux.json`, `catalog/macos.json`**: `agent-skills` is
+  `"tombstone": true` with the note *its work moved to agent-skill-links,
+  omnigraph-client and the mcp-\* components* and `replaced_by` naming the six ids
+  that took it (`agent-skill-links`, `omnigraph-client`, `mcp-graphify`,
+  `mcp-serena`, `mcp-playwright`, `mcp-context7` — all present in both catalogs).
+  It is dropped from `workstation` and `ai-coding`: a profile pre-selects what
+  should get *installed*. `postInstall` goes with the installer, and the long
+  `notes` line goes because `note` now carries the same fact — one home per fact.
+  The `uv` entry's note named `agent-skills` as its consumer; it names the
+  `mcp-*` components, which is what actually runs `uv`.
+- **`lib/linux/install.sh`**: `install_agent_skills` deleted (setup.sh reports a
+  retired row before it ever asks the provider, so nothing could call it), and the
+  `agent-skills` branch of `custom_is_installed` deleted with it
+  (`catalog_probe_installed` answers *not installed* for a tombstone before it
+  probes, so the branch was unreachable too). Leaving either would have kept a
+  second owner for a fact the catalog holds.
+- **Behaviour**, on the paths A7's verify row names: a `--profile workstation` /
+  `ai-coding` dry run plans no `agent-skills` row at all and still plans the
+  successors (they are profile members in their own right); `--only
+  agent-skills` announces `agent-skills is retired: replaced by …`, plans the six
+  beside the retired row, and the row reports `skipped: retired (its work moved
+  to …)`. A state file saved before the retirement replays the same way. The
+  retired row is no longer in the "Installed apps" line, no longer prints
+  "✓ Already installed", and no longer hunted for a launcher in the landing
+  report.
+- **Tests** (all five red before the catalogs flipped, for exactly those
+  reasons): `tests/linux/13-end-to-end-dry-run-only.sh` drives the real entry
+  point over the shipped catalogs — `--only` expands, a profile plans no retired
+  id, `--from-state` replays a hand-authored pre-retirement file to its
+  successors — and its three scratch-home cases now share one `e2e_setup` helper
+  instead of restating the trick. `tests/linux/18-mcp-wiring.sh` asserts the
+  catalog shape (the boolean flag, the note, the exact successor set, no profile,
+  no `postInstall`/`prompt`/`requires`/`verify`), that the retirement leaves no
+  installer or detection branch behind, and — with detection stubbed to "everything
+  is here" — that the retired id is never reported installed while its
+  successors are. The two A7b cases that drove `install_agent_skills` and
+  `custom_is_installed agent-skills` directly are gone: the function they tested
+  no longer exists, and what replaces them is reached the way a run reaches it.
+- **`docs/catalog.md`**: the field table and the retirement section say what a
+  tombstone now *is* in this repo — no profile, no installer, the note and the
+  successors as the only prose — with the shipped `agent-skills` entry as the
+  `replaced_by` example. `docs/plans/2026-09-27-omnigraph-mcp-catalog-plan.md`
+  marks A7 done on Linux and macOS.
+
+Verified: `bash tests/run-tests.sh --filter='agent-skills,tombstone,skill,catalog,end-to-end,from-state'`
+121 passed / 0 failed; `bash setup.sh --check-catalog` exits 0; shellcheck clean
+on the touched `.sh`; `python3 -m pytest -q tests/` green.
+
 ### Fixed — a retired row is locked in both terminal menus, and every selection path expands it (A7a review 2, 2026-09-28)
 
 Muse's re-check found the `replaced_by` expansion sitting behind the wrong

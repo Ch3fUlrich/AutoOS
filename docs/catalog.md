@@ -104,9 +104,12 @@ What that changes, on both platforms:
 - Selecting it does nothing: the run reports `skipped: retired (<note>)`, asks no
   prompt, runs no post-install step, and never counts it as installed or as
   failed. An old state file replays clean instead of failing.
-- Profiles never pre-tick it, and no menu can tick it: a retired row is drawn
-  **locked** in the terminal menu — `[-]` / `[=]`, muted, ignored by space, `a`,
-  `g`, `i` and the non-interactive fallback alike — and labelled
+- It names no profile, and no menu can tick it: a profile pre-selects what should
+  get *installed*, and a retired id installs nothing, so `profiles` is dropped
+  along with the installer. The loader refuses a retired id from a profile list
+  anyway, so a hand-edited catalog cannot pre-tick one either. A retired row is
+  drawn **locked** in the terminal menu — `[-]` / `[=]`, muted, ignored by space,
+  `a`, `g`, `i` and the non-interactive fallback alike — and labelled
   `(retired: replaced by <ids>)`, so the row itself answers why choosing it does
   nothing. `--list` / `-ListComponents` still marks the row `(retired)`. A
   selection that does name a retired id is expanded before the plan (below), so
@@ -155,10 +158,16 @@ used to book the retirement and install nothing: the machine the user is
 provisioning simply never gets that work done, and the run reports `skipped`,
 which reads like success.
 
-`replaced_by` is the catalog's answer — the ids that took the work on:
+`replaced_by` is the catalog's answer — the ids that took the work on. The
+shipped retirement, `agent-skills` on Linux and macOS:
 
 ```jsonc
-{ "id": "agent-skills", "tombstone": true, "replaced_by": ["agent-skill-links", "omnigraph-client"] }
+{
+  "id": "agent-skills", "tombstone": true,
+  "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
+  "replaced_by": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+                  "mcp-serena", "mcp-playwright", "mcp-context7"]
+}
 ```
 
 Every selection the entry point produces is expanded before the plan, whichever
@@ -167,7 +176,8 @@ path made it — `--from-state` / `-FromState`, `--only` / `-Only`, a browser ru
 profile a `-Yes` run takes:
 
 - One muted line announces it: `agent-skills is retired: replaced by
-  agent-skill-links, omnigraph-client`. Nothing is substituted silently.
+  agent-skill-links, omnigraph-client, mcp-graphify, mcp-serena, mcp-playwright,
+  mcp-context7`. Nothing is substituted silently.
 - The retired row **stays** in the plan and still reports `skipped: retired`, so
   what the reader replayed is what the report names, and the successors do the
   installing beside it.
@@ -305,9 +315,11 @@ Available standalone MCP components in the catalog:
   client reads, and `link_skill_dirs` is the one link rule they all go through.
 
 The retired `agent-skills` component is a **tombstone**: the id stays known so an
-old selection or state file still resolves, its step installs nothing and only
-names the components that took its work — `agent-skill-links`, `omnigraph-client`
-and the four `mcp-*` components, which each register their own server.
+old selection or state file still resolves, and it runs nothing at all — no
+installer, no prompt, no profile — while its row reports `skipped: retired` and
+the catalog names what took the work: `agent-skill-links`, `omnigraph-client` and
+the four `mcp-*` components, which each register their own server. Selecting the
+retired id, by hand or from an old state file, plans exactly those.
 
 | Server | Scope | Configuration & Precedence |
 |---|---|---|
