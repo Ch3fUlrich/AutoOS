@@ -5,7 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — `token-rate`: orchestrator tokens per merged change (RESTART R5a, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (new, stdlib, read-only): the §5 metric the
+  before/after cap comparison needs. Its numerator iterates **every** usage
+  record of the orchestrator's Claude Code transcripts and weights them
+  `input + output + cache_creation + 0.1 * cache_read` (`CACHE_READ_WEIGHT`);
+  the naive unweighted sum is printed beside it as a labelled diagnostic.
+  `tools/autoos_context.py` `fill_from_transcript` is deliberately not reused —
+  it keeps only the last usage record, which is a *snapshot*, and a rate needs
+  the sum over all of them. The denominator is first-parent merges into `main`
+  in the same window (by committer date) whose subject names the orchestrator's
+  branch prefix, so numerator and denominator are the same actor; sessions are
+  selected by the record's `cwd` on whole path segments, which keeps
+  `/home/s/code/AutoOS` and `/home/s/code/AutoOS-lanes/...` apart. The output
+  states the known bias: it rewards shorter sessions and prices the
+  orchestrator only.
+- **`tools/autoos-agent.py`**: a `token-rate` verb forwards to it, the way
+  `usage` forwards to `autoos_usage` — the metric needs no gateway.
+- **`tests/test_autoos_tokenrate.py`** (new, 27 cases, wired into
+  `tests/linux/33-documentation.sh`): fixtures reproduce the real transcript
+  record key-for-key (including `usage.iterations`, which must *not* be summed
+  twice) against a throwaway projects dir and a temp git repo. Covers the four
+  summed fields, the all-records-vs-last-record regression guard, the
+  half-open window, cwd scoping, merge attribution by prefix, and the
+  zero-merge window printing `n/a` instead of dividing. 27 red before the tool
+  existed, green after.
+
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
+
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
 - **`tests/test_autoos_spawner.py`**: **`LeakStrictnessTests`** (new, 8 cases) drives the real `parent_snapshot`/`parent_leak` against real temp repositories across the exemption boundary — a sibling worktree's own branch moving is exempt; a worktree added mid-run is not; a worktree inside the sandbox is not; a commit on a branch created during the run is a leak either way HEAD then goes. `IsolateContainmentTests` gains four fake-worker modes for the evasions (decoy branch, backdated committer date, `switch -c` + ff back, commit on a new branch) and the three flipped expectations above. 13 red before the fix, 417 green after on the file; `python3 -m pytest -q tests/` 1831 passed, 4 skipped.

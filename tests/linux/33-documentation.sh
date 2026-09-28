@@ -579,6 +579,13 @@ if it "autoos-agent context: fill from the session transcript (unit tests)"; the
     out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/autoos_tokenrate.py (RESTART spec §5 metric): tokens per merged change,
+# summed over EVERY transcript usage record — the fixture projects dir and the
+# throwaway git repo mean this never reads the live transcripts.
+if it "autoos-agent token-rate: orchestrator tokens per merge (unit tests)"; then
+    out="$(python3 tests/test_autoos_tokenrate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07 migrated into code): pause,
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then

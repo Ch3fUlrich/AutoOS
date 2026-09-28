@@ -144,6 +144,7 @@ import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
@@ -3645,11 +3646,19 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
         return usage_mod.main(list(argv[1:]))
+    # ... and everything after `token-rate` belongs to autoos_tokenrate
+    # (RESTART spec §5: the metric verb, no gateway needed).
+    if argv[:1] == ["token-rate"]:
+        return tokenrate_mod.main(list(argv[1:]))
     ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("usage", help="usage report by provider/combo/lane from the OmniRoute "
                                  "gateway (OR4); its own flags follow `usage`, e.g. "
                                  "`usage --since 1h --by provider,lane`")
+    sub.add_parser("token-rate",
+                   help="orchestrator tokens per merged change (RESTART spec §5); "
+                        "its own flags follow `token-rate`, e.g. "
+                        "`token-rate --since 48h --cwd-prefix <lane dir>`")
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
     ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
                                    "worktrees and clones); deletes records that ended "

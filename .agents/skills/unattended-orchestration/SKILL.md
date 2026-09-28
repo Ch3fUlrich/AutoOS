@@ -75,6 +75,9 @@ agent", operator 2026-09-26T13:45Z).
 
 Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
 context cap), `python3 tools/autoos-agent.py ready` (review gate + pushed sha + inbox line),
+`python3 tools/autoos-agent.py route` (route_plan for a task card),
+`python3 tools/autoos-agent.py token-rate --since 48h --cwd-prefix <dir> --branch-prefix <prefix>`
+(RESTART spec §5 metric: orchestrator tokens per merged change),
 `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
 full list of code-enforced rules.
