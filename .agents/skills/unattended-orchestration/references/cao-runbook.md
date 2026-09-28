@@ -294,14 +294,18 @@ review from Git Bash or any POSIX shell with Python 3.9+, through
 is one user message, the answer goes to stdout, one `served: <model> via <leg>`
 line to stderr.
 
-- **Route:** the OmniRoute combo `deepseek-v4.1-flash` first (skipped when
-  `/api/health` does not answer), then OpenRouter `deepseek/deepseek-v4.1-flash`.
+- **Route:** OmniRoute first, asked for the route's allowed leg itself
+  (`deepseek/deepseek-flash`; the route id is not an API id and answers 400),
+  skipped when `/api/health` does not answer; then OpenRouter
+  `deepseek/deepseek-v4.1-flash`. Every request carries `max_tokens` 4096
+  (reasoning rungs answer an empty 502 below it).
   Never local Ollama; both legs failing exits 1 and says so.
 - **Model policy is the registry's:** a served model passes only when it is one
-  of route `deepseek-v4.1-flash`'s legs that `policy.leg_rules` allows (today
-  `deepseek/deepseek-flash`), and the OpenRouter leg runs only while the rules
-  allow `openrouter/deepseek/deepseek-v4.1-flash`. V4 Pro never passes, in any
-  spelling. A combo that re-routed in silence is a failure, not a review.
+  of route `deepseek-v4.1-flash`'s legs that `policy.leg_rules` allows, exactly
+  (no dated snapshot, no other provider), with the deny rules run on the served
+  id itself; the OpenRouter leg runs only while the rules allow
+  `openrouter/deepseek/deepseek-v4.1-flash`. V4 Pro never passes, in any
+  spelling. A gateway that re-routed in silence is a failure, not a review.
 - **Keys** are read in-process from AutoOS `configuration/api-keys.yml`
   (`omniroute:` / `openrouter:`; `$AUTOOS_API_KEYS`, `$AUTOOS_ROOT`, then the
   main checkout), never passed in argv or printed; an error body that echoes a

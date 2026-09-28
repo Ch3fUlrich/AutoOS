@@ -193,7 +193,10 @@ def test_omniroute_first_with_its_key_and_the_pinned_combo(legs):
     call = omni.calls[0]
     assert call["path"] == "/v1/chat/completions"
     assert call["auth"] == "Bearer " + OMNI_KEY
-    assert call["body"]["model"] == "deepseek-v4.1-flash"
+    # The allowed registry leg, never the combo's display id (deepseek-v4.1-flash answers
+    # 400; L1-routing review 2026-09-28), and a max_tokens reasoning rungs can answer in.
+    assert call["body"]["model"] == "deepseek/deepseek-flash"
+    assert call["body"]["max_tokens"] >= 4096
     assert call["body"]["messages"] == [{"role": "user", "content": "hello"}]
     assert call["body"]["temperature"] == 0.1
 
@@ -222,9 +225,27 @@ def test_a_served_model_the_policy_denies_is_rejected(legs, served):
     assert served in str(e.value)
 
 
-def test_a_dated_snapshot_of_an_allowed_leg_passes(legs):
-    legs(omni=Fake(model="DeepSeek-Flash-20260927"))
+@pytest.mark.parametrize("served", ["deepseek-flash-20260927", "deepseek/deepseek-flash-20260927",
+                                    "deepseek-v4-pro", "cheaperinference/deepseek-flash",
+                                    "openrouter/deepseek/deepseek-v4-pro"])
+def test_the_served_model_is_denied_unless_it_is_exactly_an_allowed_leg(legs, served):
+    # Muse xhigh (L1-routing): never normalise before the deny check. A dated snapshot, a
+    # bare pro id or the same model from a foreign provider is not the allowed leg.
+    legs(omni=Fake(model=served), openrouter=Fake(model=served))
+    with pytest.raises(dc.RouteError):
+        dc.complete("hello", timeout=10)
+
+
+def test_a_bare_served_id_of_the_one_allowed_leg_passes(legs):
+    legs(omni=Fake(model="DeepSeek-Flash"))
     assert dc.complete("hello", timeout=10)[2] == "omniroute"
+
+
+def test_openrouter_is_asked_for_its_allowed_model_with_max_tokens(legs):
+    omni, orr = legs(omni=Fake(status=502))
+    assert dc.complete("hello", timeout=10)[2] == "openrouter"
+    assert orr.calls[0]["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert orr.calls[0]["body"]["max_tokens"] >= 4096
 
 
 def test_the_openrouter_leg_is_skipped_when_the_policy_denies_it(legs, tmp_path, monkeypatch):
@@ -247,7 +268,7 @@ def test_an_unreadable_registry_is_a_usage_error(legs, tmp_path, monkeypatch):
 
 
 def test_the_real_registry_allows_a_flash_leg_and_never_pro():
-    allowed, openrouter = dc.load_policy()
+    allowed, openrouter, _registry, _denied = dc.load_policy()
     assert allowed, "route deepseek-v4.1-flash has no leg policy.leg_rules allows"
     assert not any("pro" in leg.casefold() for leg in allowed)
     assert isinstance(openrouter, bool)

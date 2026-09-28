@@ -36,7 +36,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-MODEL = "deepseek-v4.1-flash"                      # the OmniRoute combo = registry route id
+MODEL = "deepseek-v4.1-flash"                      # registry route id (the policy's source)
+MAX_TOKENS = 4096                                  # reasoning rungs answer an empty 502 below it
 OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 OPENROUTER_LEG = "openrouter/" + OPENROUTER_MODEL  # its spelling in policy.leg_rules
 ALLOWED = ("", MODEL, OPENROUTER_MODEL)
@@ -113,8 +114,8 @@ def load_keys() -> dict:
 
 # ── policy (catalog/ai-registry.json) ──────────────────────────────────────────
 
-def load_policy() -> tuple[list[str], bool]:
-    """(the OmniRoute route's allowed legs, whether the OpenRouter leg is allowed).
+def load_policy() -> tuple[list[str], bool, dict, object]:
+    """(the route's allowed legs, whether the OpenRouter leg is allowed, the registry, leg_denied).
 
     ``$DSR_REGISTRY`` names another registry (tests). The rules are the repo's own
     ``tools/registry.leg_denied`` - first match wins, case-insensitive - so this file never
@@ -129,14 +130,16 @@ def load_policy() -> tuple[list[str], bool]:
     route = (registry.get("routes") or {}).get(MODEL) or {}
     allowed = [leg for leg in route.get("legs") or []
                if isinstance(leg, str) and not leg_denied(leg, registry)]
-    return allowed, not leg_denied(OPENROUTER_LEG, registry)
+    return allowed, not leg_denied(OPENROUTER_LEG, registry), registry, leg_denied
 
 
-def legs() -> list[tuple[str, str, str, str | None]]:
-    """(name, chat url, model, health url) in route order."""
+def legs(omni_model: str) -> list[tuple[str, str, str, str | None]]:
+    """(name, chat url, requested model, health url) in route order. OmniRoute is asked for
+    the allowed registry leg itself (``provider/model``): the route id is not an API id and
+    answers 400 (L1-routing review, 2026-09-28)."""
     omni = os.environ.get("DSR_OMNIROUTE_URL", "http://127.0.0.1:20128").rstrip("/")
     orr = os.environ.get("DSR_OPENROUTER_URL", "https://openrouter.ai/api").rstrip("/")
-    return [("omniroute", omni + "/v1/chat/completions", MODEL, omni + "/api/health"),
+    return [("omniroute", omni + "/v1/chat/completions", omni_model, omni + "/api/health"),
             ("openrouter", orr + "/v1/chat/completions", OPENROUTER_MODEL, None)]
 
 
@@ -155,8 +158,9 @@ def healthy(url: str) -> bool:
         return False
 
 
-def post(url: str, key: str, model: str, prompt: str, timeout: float) -> dict:
-    body = json.dumps({"model": model, "temperature": 0.1,
+def post(url: str, key: str, model: str, prompt: str, timeout: float,
+         max_tokens: int = MAX_TOKENS) -> dict:
+    body = json.dumps({"model": model, "temperature": 0.1, "max_tokens": max_tokens,
                        "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": "Bearer " + key, "Content-Type": "application/json"})
@@ -164,24 +168,31 @@ def post(url: str, key: str, model: str, prompt: str, timeout: float) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-def served_ok(served: str, accepted: list[str]) -> bool:
-    """`served` names one of `accepted` (``provider/model`` legs): the whole leg or its model
-    part, any case, optionally a dated snapshot of it ("...-20260901")."""
-    norm = re.sub(r"-\d{4,8}$", "", served.strip().casefold())
-    for leg in accepted:
-        leg = leg.casefold()
-        if norm in (leg, leg.split("/", 1)[-1]):
-            return True
-    return False
+def served_ok(served: str, accepted: list[str], registry: dict, leg_denied,
+              rules_prefix: str = "") -> bool:
+    """`served` is exactly one of `accepted` (``provider/model`` legs, any case) and
+    policy.leg_rules allows it as served. Nothing is normalised before the deny check: a dated
+    snapshot, another provider or a bare id matching no single leg is not the allowed leg. A
+    bare id is qualified only when exactly one accepted leg has that model part."""
+    full = served.strip()
+    if "/" not in full:
+        same = [leg for leg in accepted if leg.split("/", 1)[-1].casefold() == full.casefold()]
+        if len(same) != 1:
+            return False
+        full = same[0]
+    if leg_denied(rules_prefix + full, registry):
+        return False
+    return any(full.casefold() == leg.casefold() for leg in accepted)
 
 
-def complete(prompt: str, timeout: float = 900) -> tuple[str, str, str]:
+def complete(prompt: str, timeout: float = 900, max_tokens: int = MAX_TOKENS) -> tuple[str, str, str]:
     """Return (answer, served model, leg). Raise RouteError when no leg answers."""
     keys = load_keys()
-    omni_legs, openrouter_allowed = load_policy()
+    omni_legs, openrouter_allowed, registry, leg_denied = load_policy()
     accepted = {"omniroute": omni_legs, "openrouter": [OPENROUTER_MODEL] if openrouter_allowed else []}
+    prefix = {"omniroute": "", "openrouter": "openrouter/"}
     failures = []
-    for name, url, model, health in legs():
+    for name, url, model, health in legs(omni_legs[0] if omni_legs else MODEL):
         if not accepted[name]:
             failures.append("%s: no DeepSeek leg allowed by policy.leg_rules" % name)
             continue
@@ -193,7 +204,7 @@ def complete(prompt: str, timeout: float = 900) -> tuple[str, str, str]:
             failures.append("%s: gateway not reachable" % name)
             continue
         try:
-            data = post(url, key, model, prompt, timeout)
+            data = post(url, key, model, prompt, timeout, max_tokens)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
             failures.append("%s: HTTP %s %s" % (name, e.code, detail))
@@ -202,7 +213,7 @@ def complete(prompt: str, timeout: float = 900) -> tuple[str, str, str]:
             failures.append("%s: %s" % (name, e))
             continue
         served = str(data.get("model") or "")
-        if not served_ok(served, accepted[name]):
+        if not served_ok(served, accepted[name], registry, leg_denied, prefix[name]):
             failures.append("%s: served %r, not one of %s" % (name, served, ", ".join(accepted[name])))
             continue
         try:
@@ -222,6 +233,7 @@ def main(argv=None) -> int:
     ap.add_argument("prompt_file")
     ap.add_argument("--model", default="")
     ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     a = ap.parse_args(argv)
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding="utf-8")
@@ -235,7 +247,7 @@ def main(argv=None) -> int:
         print("prompt file missing or empty: %s" % p, file=sys.stderr)
         return 2
     try:
-        text, served, leg = complete(p.read_text(encoding="utf-8"), a.timeout)
+        text, served, leg = complete(p.read_text(encoding="utf-8"), a.timeout, a.max_tokens)
     except (KeyError_, PolicyError) as e:
         print(e, file=sys.stderr)
         return 2
