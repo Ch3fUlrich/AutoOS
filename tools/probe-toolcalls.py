@@ -10,8 +10,8 @@ every model at tool_calls "unproven". This script sends each distinct leg
 (a "<provider>/<model>" string exactly as written in a route's ``legs``) two
 tool-calling trials through the OmniRoute gateway (OpenAI chat/completions
 format: the "model" field is the leg string and OmniRoute routes it straight
-to that leg) and records a verdict in the git-ignored overlay
-logs/routing/measured.json. tools/autoos_resolver.py's filter_routes() reads
+to that leg) and records a verdict in the machine-wide overlay
+(tools/autoos_overlay.py). tools/autoos_resolver.py's filter_routes() reads
 that overlay (overlay wins over the registry) when it enforces "tool_calls =
 proven" for implement/debug/bulk kinds.
 
@@ -28,7 +28,7 @@ Usage:
     python3 tools/probe-toolcalls.py --leg deepseek/deepseek-flash --trials 5
     python3 tools/probe-toolcalls.py --route t2-worker
     python3 tools/probe-toolcalls.py --registry catalog/ai-registry.json \\
-        --overlay logs/routing/measured.json --gateway http://127.0.0.1:20128/v1/chat/completions
+        --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 
 Exit codes: 0 the probe ran (verdicts, including "broken"/"unproven", are
 data, not failure); 2 bad arguments or an unreadable registry; 3 no OmniRoute

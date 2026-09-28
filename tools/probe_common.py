@@ -2,7 +2,7 @@
 """Shared plumbing for the routing probes (spec section 10, D18).
 
 tools/probe-recall.py and tools/probe-effort.py both measure free legs and
-write the git-ignored overlay logs/routing/measured.json (spec section 3.1:
+write the machine-wide overlay, tools/autoos_overlay.py (spec section 3.1:
 measured values never write the registry). Everything the two probes share
 lives here, once, so a routing rule cannot drift between them:
 
@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import autoos_overlay  # noqa: E402 - tools/ is on sys.path above
 from registry import (  # noqa: E402 - tools/ is on sys.path above
     leg_denied,
     leg_rule_for,
@@ -39,7 +40,10 @@ from registry import (  # noqa: E402 - tools/ is on sys.path above
 )
 
 DEFAULT_REGISTRY = os.path.join(ROOT, "catalog", "ai-registry.json")
-DEFAULT_OVERLAY = os.path.join(ROOT, "logs", "routing", "measured.json")
+# OVERLAYHOME: the machine-wide overlay (tools/autoos_overlay.py); every probe
+# writes it there. The per-checkout file is only read, and only for the default.
+DEFAULT_OVERLAY = autoos_overlay.default_path()
+LEGACY_OVERLAY = autoos_overlay.legacy_path(ROOT)
 DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1/chat/completions"
 
 # 429/503 are transient (rate limit / load shedding); retried before a call
@@ -165,28 +169,16 @@ def post_with_retry(post, body, sleep):
 # ---------------------------------------------------------------------------
 
 def load_overlay(path):
-    if not os.path.isfile(path):
-        return {}
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    """Read-modify-write start. The default path falls back to the legacy
+    per-checkout overlay, so the first probe after OVERLAYHOME carries the old
+    verdicts over instead of starting empty; an explicit --overlay never does."""
+    legacy = LEGACY_OVERLAY if path == DEFAULT_OVERLAY else None
+    return autoos_overlay.load(path, legacy)
 
 
 def save_overlay(path, overlay):
-    """Atomic write: a temp file in the same directory, then os.replace."""
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".measured-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(overlay, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+    """Atomic write, mode 600 (autoos_overlay.save)."""
+    autoos_overlay.save(path, overlay)
 
 
 # ---------------------------------------------------------------------------

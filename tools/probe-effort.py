@@ -28,7 +28,7 @@ null when no trial reported it), the completion_tokens mean and the
 latency mean (per attempt - a 429's backoff sleep is not the model's
 latency).
 
-The result lands in the git-ignored overlay logs/routing/measured.json as
+The result lands in the machine-wide overlay (tools/autoos_overlay.py) as
 overlay["models"][<model_id>]["effort"] (read-modify-write: every other
 key - including context_usable written by tools/probe-recall.py - is
 kept). A rung whose every trial hit a no-verdict status (401/402/403/429/
@@ -41,7 +41,7 @@ Usage:
     python3 tools/probe-effort.py --leg antigravity/claude-opus-4-6-thinking
     python3 tools/probe-effort.py --route t2-worker
     python3 tools/probe-effort.py --registry catalog/ai-registry.json \\
-        --overlay logs/routing/measured.json --gateway http://127.0.0.1:20128/v1/chat/completions
+        --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 
 Exit codes: 0 the probe ran; 2 bad arguments or an unreadable registry; 3
 no OmniRoute client key or the gateway is unreachable; 4 a --leg named a

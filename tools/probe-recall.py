@@ -23,7 +23,7 @@ already fails, nothing is written for tokens (the registry default stays in
 force) and only a detail is recorded. Every non-200 status (or a transport
 error) means no verdict: whatever the overlay already said is kept.
 
-The verdict lands in the git-ignored overlay logs/routing/measured.json as
+The verdict lands in the machine-wide overlay (tools/autoos_overlay.py) as
 overlay["models"][<model_id>]["context_usable"] (read-modify-write: every
 other key is kept), the shape tools/autoos_resolver.py's usable_context()
 already reads. Every request logs leg, size, prompt_tokens and
@@ -40,7 +40,7 @@ Usage:
     python3 tools/probe-recall.py --route t2-worker
     python3 tools/probe-recall.py --sizes 32000,128000
     python3 tools/probe-recall.py --registry catalog/ai-registry.json \\
-        --overlay logs/routing/measured.json --gateway http://127.0.0.1:20128/v1/chat/completions
+        --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 
 Exit codes: 0 the probe ran (a "no usable context" verdict is data, not
 failure); 2 bad arguments or an unreadable registry; 3 no OmniRoute client

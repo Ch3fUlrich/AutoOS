@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — one machine-wide tool_calls overlay, and a loud reason when it is missing (OVERLAYHOME, 2026-09-28)
+
+The overlay lived at `<checkout>/logs/routing/measured.json`. At 12:5xZ the main
+checkout had none, so `route` skipped every agentic leg as `tool_calls: ...
+unproven` and returned `input_required` — it looked like a fleet-wide outage.
+
+- **`tools/autoos_overlay.py`** (new): the one path — `$AUTOOS_MEASURED_OVERLAY`,
+  else `${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+  `%LOCALAPPDATA%\autoos\measured.json`) — plus load with a read-only legacy
+  fallback (one stderr note; the old file is never deleted), an atomic mode-600
+  save, `status` and the missing-overlay reason.
+- **Readers**: `tools/autoos-agent.py` (`route`, `run`/`spawn` routing,
+  `propose_reprobe`) and `tools/autoos_agent_mcp.py` read through it. With no
+  overlay anywhere, an agentic card that fails on tool_calls says `no tool_calls
+  overlay found at <path> (run tools/probe-toolcalls.py or set
+  AUTOOS_MEASURED_OVERLAY)`. `heartbeat --json` gains `overlay: {path, present,
+  age_hours}`.
+- **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
+  `probe-effort`) default to the new path; the first run reads the legacy file so
+  its verdicts carry over.
+
 ### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
 
 - **`tools/autoos_tokenrate.py`** (HIGH): R5A4's `Totals.add` lets a second copy
