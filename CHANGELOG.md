@@ -21,7 +21,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   profile so the `L2-*` allow glob cannot span a refspec colon, a `refs/`
   path or a delete flag — only `git push [-u] origin L2-<name>`
   (same-name push, destination = source) is allowed there, and branch
-  deletion is an explicit deny; the L1 grants are unchanged.
+  deletion is an explicit deny; round 5 constrains the grant by shape,
+  not tokens (enumerating tokens missed `L2-x L1-foo` and `L2-x --prune`):
+  anything after the branch token denies (a second argument of any kind)
+  and any option before the ref denies but `-u` (long options via one
+  shape, short force/delete flags enumerated — a lone `-*` shape would
+  shadow the `-u` allow since deny beats allow), so exactly one `L2-*`
+  ref, same-name, no options except `-u` is allowed there. The L1 grants
+  are unchanged.
   `l0-router` and the leaves carry no pre-grant.
   Every profile denies push-to-`main` (fence set, not one string: ref
   spellings plus `--all`/`--mirror`/`HEAD`/bare, `-C`/`--git-dir`/`-c`

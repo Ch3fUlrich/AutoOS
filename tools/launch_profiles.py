@@ -70,10 +70,21 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    (``*.vault.yml``, ``*.pem`` - spec 3.3 names them).
 6. ``~/.claude.json`` writes (``Edit``, ``Write`` and the shell
    ``tee``/redirect/``sed -i`` forms - spec 3.3).
-7. the l2-orchestrator-only same-name-push fences (round 4, F1/F2):
-   ``*git push * *:*`` (any refspec colon), ``*git push *refs/*`` (any
-   refs/ path), ``*git push *--delete*`` / ``* -d`` (delete flags) - so
-   only ``git push [-u] origin L2-<name>`` (destination = source) allows.
+7. the l2-orchestrator-only single-ref push fences (round 4, F1/F2;
+   tightened round 5, by shape not tokens): ``*git push * *:*`` (any
+   refspec colon), ``*git push *refs/*`` (any refs/ path),
+   ``*git push *--delete*`` / ``* -d`` (delete flags),
+   ``git push origin L2-* *`` / ``git push -u origin L2-* *`` (a space
+   after the L2 token means a second argument of any kind - a second
+   refspec or a trailing option), ``git push --* origin L2-*`` (any long
+   option before the ref) plus ``git push -f/-d origin L2-*`` (the known
+   short force/delete flags; ``--prune`` and friends are long-only) - so
+   only exactly ``git push origin L2-<name>`` / ``git push -u origin
+   L2-<name>`` (one ref, nothing after it, destination = source) allows.
+   A lone ``git push -* origin L2-*`` shape would also match the ``-u``
+   spelling, and deny beats allow regardless of order, so no ordering
+   keeps ``-u`` allowed - hence the ``--*`` + short-flag split, stated
+   here so a reviewer knows why the short flags stay enumerated.
    Rendered ONLY into the l2-orchestrator profile; the L1 roles keep
    their existing grants unchanged, so these fences cannot shadow
    anything the L1 roles need.
@@ -102,20 +113,22 @@ carries the launch identity, the MCP document rides as ``mcpConfig``):
   - the model may run the script but stays denied reading its key, which
   the script reads in its own process).
 - ``l2-orchestrator`` carries a NARROWER push grant (review round 3,
-  D-138, tightened round 4): push only to any ``L2-*`` lane branch -
-  ``Bash(git push origin L2-*)`` plus the ``-u`` spelling - and
-  ``gh workflow run`` only with ``--ref`` on that same prefix - never a
-  bare run. The grant is per ROLE, not per session: any l2-orchestrator
-  session may push/dispatch on any ``L2-*`` lane branch, not only the one
-  it created - per-session scoping is not expressible in a per-role
-  profile. No stated L2 branch-naming convention exists in the skill or
-  docs text; the live branches are ``L2-<name>/...``
+  D-138, tightened round 4, shaped round 5): exactly one ``L2-*`` ref,
+  same-name, no options except ``-u`` - ``Bash(git push origin L2-*)``
+  plus the ``-u`` spelling - and ``gh workflow run`` only with ``--ref``
+  on that same prefix - never a bare run; per role, not per session: any
+  l2-orchestrator session may push/dispatch on any ``L2-*`` lane branch,
+  not only the one it created - per-session scoping is not expressible
+  in a per-role profile. No stated L2 branch-naming convention exists in
+  the skill or docs text; the live branches are ``L2-<name>/...``
   (``L2-general/*``), so the grant keys on the ``L2-`` prefix. The
   always-deny fence set renders into the L2 profile unchanged, and deny
   still beats the new allows (an ``L2-x:main`` refspec matches the allow
   glob and still denies); round 4 adds L2-only fences so the allow glob
-  cannot span a refspec colon, a ``refs/`` path or a delete flag - only
-  the same-name push (destination = source) allows.
+  cannot span a refspec colon, a ``refs/`` path or a delete flag, and
+  round 5 denies by shape anything after the branch token (a second
+  argument of any kind) and any option before the ref but ``-u`` - only
+  the same-name single-ref push (destination = source) allows.
 - ``l0-router`` maps to the orchestrator harness role but carries no
   pre-grant: unlisted stays fail-closed under the launch flags.
 - ``l3-worker``/``l3-reviewer`` map to the leaf harness roles with an
@@ -161,18 +174,20 @@ COORDINATOR_ALLOW = (
     "Bash(gh workflow run:*)",
 )
 APPLY_ALLOW = "Bash(bash configuration/omniroute/apply.sh:*)"
-# L2 lane-branch prefix (round 3, D-138; tightened round 4): narrower
-# than the L1 grant. Push only to any `L2-*` lane branch on origin - the
-# plain and -u spellings, the exact Claude Code rule syntax the L1 grant
-# already uses - and workflow dispatch only with --ref on that prefix
-# (both --ref spellings, mirroring the GH_REF_MAIN fence below), never a
-# bare `gh workflow run`. The grant is per ROLE, not per session: any
-# l2-orchestrator session may push/dispatch on any `L2-*` lane branch -
-# per-session scoping is not expressible in a per-role profile.
+# L2 lane-branch prefix (round 3, D-138; tightened round 4, shaped round
+# 5): narrower than the L1 grant. Exactly one `L2-*` ref, same-name, no
+# options except `-u` - the plain and -u spellings, the exact Claude Code
+# rule syntax the L1 grant already uses - and workflow dispatch only with
+# --ref on that prefix (both --ref spellings, mirroring the GH_REF_MAIN
+# fence below), never a bare `gh workflow run`. The grant is per role,
+# not per session: any l2-orchestrator session may push/dispatch on any
+# `L2-*` lane branch - per-session scoping is not expressible in a
+# per-role profile.
 # Non-origin remotes, other prefixes and wrapper push shapes stay
 # unlisted; main in every spelling stays denied by the unchanged fence
-# set (deny wins); refspec/refs/delete shapes stay denied by the L2-only
-# L2_PUSH_DENY fences (deny wins).
+# set (deny wins); refspec/refs/delete shapes (round 4) and any trailing
+# arg or leading option but `-u` (round 5, by shape) stay denied by the
+# L2-only L2_PUSH_DENY fences (deny wins).
 L2_PUSH_ALLOW = (
     "Bash(git push origin L2-*)",
     "Bash(git push -u origin L2-*)",
@@ -183,24 +198,42 @@ L2_WORKFLOW_ALLOW = (
 )
 L2_ALLOW = L2_PUSH_ALLOW + L2_WORKFLOW_ALLOW
 
-# L2 same-name-push fences (round 4, F1/F2): the L2 allow entries above
-# are whole-line globs, so `*` spans a refspec `:` and the destination -
-# without these, `git push origin L2-x:<anything>` allowed an overwrite of
-# any non-main branch, and `--delete`/`-d` allowed branch deletion. Every
-# push carrying a refspec colon or a refs/ path denies, as does every
-# delete-flag spelling (the `:L2-x` empty-source delete is caught by the
-# colon fence); only `git push [-u] origin L2-<name>` (destination =
-# source) allows. Rendered ONLY into the l2-orchestrator profile - only
-# that profile carries the L2 allow glob, and l1-coordinator/l1-routing
-# keep the full lane-push grant, so these fences cannot shadow anything
-# the L1 roles need. The ` -d` forms carry a leading space so a branch
-# merely ending in `-d` (`L2-x-d`) stays outside the fence.
+# L2 same-name-push fences (round 4, F1/F2) plus the single-ref shape
+# fences (round 5): the L2 allow entries above are whole-line globs, so
+# `*` spans a refspec `:` and the destination - without the round-4
+# entries, `git push origin L2-x:<anything>` allowed an overwrite of any
+# non-main branch, and `--delete`/`-d` allowed branch deletion. Round 5
+# closes the same hole by shape: the allow glob's trailing `*` also spans
+# the space after the ref, so `git push origin L2-x L1-foo` (a second
+# refspec - git pushes local L1-foo onto origin L1-foo) and `git push
+# origin L2-x --prune` (deletes remote branches) allowed too. Anything
+# following the branch token now denies (`git push origin L2-* *` /
+# `git push -u origin L2-* *` - a space after the L2 token means a second
+# argument of any kind), and any option before the ref denies but `-u`.
+# A lone `git push -* origin L2-*` would also match the `-u` spelling,
+# and deny beats allow regardless of order, so no ordering keeps `-u`
+# allowed: long options deny via one `git push --* origin L2-*` shape
+# while the known short force/delete flags stay enumerated (`-f`, `-d`;
+# prune has no short spelling - `--prune` is covered by `--*`). Only
+# `git push [-u] origin L2-<name>` (one ref, nothing after it,
+# destination = source) allows. The round-4 colon/refs/delete entries
+# stay as defence in depth. Rendered ONLY into the l2-orchestrator
+# profile - only that profile carries the L2 allow glob, and
+# l1-coordinator/l1-routing keep the full lane-push grant, so these
+# fences cannot shadow anything the L1 roles need. The ` -d` forms carry
+# a leading space so a branch merely ending in `-d` (`L2-x-d`) stays
+# outside the fence.
 L2_PUSH_DENY = (
     "*git push * *:*",
     "*git push *refs/*",
     "*git push *--delete*",
     "*git push * -d *",
     "*git push * -d",
+    "git push origin L2-* *",
+    "git push -u origin L2-* *",
+    "git push --* origin L2-*",
+    "git push -f origin L2-*",
+    "git push -d origin L2-*",
 )
 
 GRANT_SETS = {
@@ -310,9 +343,10 @@ def render_role(role, harness):
     deny = list(MAIN_FENCE)
     deny.extend(GH_REF_MAIN)
     if role == "l2-orchestrator":
-        # Round 4 (F1/F2): the L2-only same-name-push fences - only this
-        # profile carries the L2 allow glob, so only it needs the fence;
-        # every other profile's deny list is byte-identical to before.
+        # Round 4 (F1/F2) plus round 5 (single-ref shape): the L2-only
+        # fences - only this profile carries the L2 allow glob, so only
+        # it needs the fence; every other profile's deny list is
+        # byte-identical to before.
         deny.extend("Bash(%s)" % pattern for pattern in L2_PUSH_DENY)
     deny.extend("Bash(%s)" % p for p in bash_secret_patterns(
         fences["bash_deny_all"], fences["read_deny_all"]))

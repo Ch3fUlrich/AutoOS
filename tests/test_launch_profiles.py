@@ -432,6 +432,64 @@ BRANCH_L2_PLAIN_ALLOW_COMMANDS = (
     "git push -u origin L2-x",
 )
 
+# L2 single-ref shape (round 5): the L2 allow entries are whole-line globs
+# whose trailing `*` spans the space after the ref, so `git push origin
+# L2-x <anything>` - a second refspec (`L2-x L1-foo`, `L2-x L2-y`) or a
+# trailing option (`L2-x --prune`, `-o x`) - matches the allow glob and
+# pushes more than the one named ref. Enumerating dangerous tokens always
+# misses one (round 4 caught `:`, `refs/`, `--delete`, `-d`; `L2-x L1-foo`
+# and `L2-x --prune` still allowed). A space after the L2 token means a
+# second argument of any kind and must deny. Every command below matches an
+# L2 allow entry (checked in the test - deny beats allow) and must deny on
+# l2; the pinned table after it fixes the other roles' decisions.
+BRANCH_L2_TRAILING_DENY_COMMANDS = (
+    "git push origin L2-x L1-foo",
+    "git push origin L2-x L2-y",
+    "git push origin L2-x --prune",
+    "git push origin L2-x --force",
+    "git push origin L2-x --force-with-lease",
+    "git push origin L2-x -f",
+    "git push origin L2-x --no-verify",
+    "git push origin L2-x --tags",
+    "git push origin L2-x -o x",
+    "git push -u origin L2-x L1-foo",
+    "git push -u origin L2-x --prune",
+)
+
+# L2 leading options (round 5): any option placed before the ref. Long
+# options all deny via one shape; the known short force/delete flags deny
+# explicitly (`-f`, `-d` - `--prune` and friends are long-only). None of
+# these matches an L2 allow entry; `--force`/`-f` already deny via the
+# shared fence, `--prune`/`-d` must deny via the new L2-only shape fences
+# (explicit deny, not merely unlisted).
+BRANCH_L2_LEADING_OPTION_DENY_COMMANDS = (
+    "git push --force origin L2-x",
+    "git push -f origin L2-x",
+    "git push --prune origin L2-x",
+)
+
+# Round-5 commands with the other roles' decisions pinned (unchanged by this
+# round - the new shape denies render ONLY into l2-orchestrator):
+# (command, l1-decision, l0-decision). Leaf is deny for every row (the leaf
+# push fence catches every `git push`); l2 is deny for every row (asserted
+# in the l2 tests above, not here).
+BRANCH_L2_ROUND5_OTHER_ROLES = (
+    ("git push origin L2-x L1-foo", "allow", "none"),
+    ("git push origin L2-x L2-y", "allow", "none"),
+    ("git push origin L2-x --prune", "allow", "none"),
+    ("git push origin L2-x --force", "deny", "deny"),
+    ("git push origin L2-x --force-with-lease", "deny", "deny"),
+    ("git push origin L2-x -f", "deny", "deny"),
+    ("git push origin L2-x --no-verify", "allow", "none"),
+    ("git push origin L2-x --tags", "deny", "deny"),
+    ("git push origin L2-x -o x", "allow", "none"),
+    ("git push -u origin L2-x L1-foo", "allow", "none"),
+    ("git push -u origin L2-x --prune", "allow", "none"),
+    ("git push --force origin L2-x", "deny", "deny"),
+    ("git push -f origin L2-x", "deny", "deny"),
+    ("git push --prune origin L2-x", "allow", "none"),
+)
+
 # L2 workflow dispatch (round 3, D-138): only --ref on the own prefix is
 # pre-granted, in both --ref spellings. A bare run and any non-own ref stay
 # unlisted; --ref main denies via the same fence as L1.
@@ -687,6 +745,97 @@ class L2ScopeTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(decide_deny(profile, "Bash", command))
                 self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l2_trailing_args_are_denied(self):
+        # Round 5 (shape, not tokens): a space after the L2 ref means a
+        # second argument of any kind - a second refspec or a trailing
+        # option - and denies. Every command here matches an L2 allow glob
+        # (checked - deny beats allow), so these prove the shape fence:
+        # token enumeration (`:`, `refs/`, `--delete`, `-d` in round 4)
+        # missed `L2-x L1-foo` and `L2-x --prune`, both allow before this
+        # round.
+        profile = load_profile("l2-orchestrator")
+        allow = perms_of(profile)["allow"]
+        for command in BRANCH_L2_TRAILING_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    any(
+                        split_rule(rule)[0] == "Bash"
+                        and bash_matches(split_rule(rule)[1], command)
+                        for rule in allow
+                    ),
+                    "%s matches no L2 allow entry" % command,
+                )
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_leading_options_are_denied(self):
+        # Round 5: any option placed before the ref denies on l2. None of
+        # these matches an L2 allow entry; `--force`/`-f` already deny via
+        # the shared fence, `--prune` denies via the new L2-only long-option
+        # shape (explicit deny, not merely unlisted).
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_LEADING_OPTION_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_single_ref_shape_still_allows_plain_and_u(self):
+        # Round 5 restatement: the grant is exactly one `L2-*` ref,
+        # same-name, no options except `-u` - the two plain shapes still
+        # allow with nothing after the ref.
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_PLAIN_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l1_l0_leaf_results_unchanged_for_l2_shape_commands(self):
+        # Round 5: the new shape denies render ONLY into the
+        # l2-orchestrator profile, so every other role decides these
+        # commands exactly as before this round - pinned per command,
+        # because unlike round 4 the L1/l0 decisions are mixed here (L1
+        # allows the unlisted-option shapes via its full lane-push grant
+        # and denies the fenced ones; l0 mirrors that as none/deny).
+        # Leaves deny every row via the leaf push fence.
+        pinned = dict(
+            (command, (l1, l0)) for command, l1, l0 in BRANCH_L2_ROUND5_OTHER_ROLES
+        )
+        commands = (
+            BRANCH_L2_TRAILING_DENY_COMMANDS
+            + BRANCH_L2_LEADING_OPTION_DENY_COMMANDS
+        )
+        self.assertEqual(set(pinned), set(commands))
+        for command in commands:
+            l1_expected, l0_expected = pinned[command]
+            for role in L1_ROLES:
+                profile = load_profile(role)
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        l1_expected,
+                        "%s is not %s on %s" % (command, l1_expected, role),
+                    )
+            for role in UNGRANTED_ROLES:
+                profile = load_profile(role)
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        l0_expected,
+                        "%s is not %s on %s" % (command, l0_expected, role),
+                    )
+            for role in LEAF_ROLES:
+                profile = load_profile(role)
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "deny",
+                        "%s is not denied by %s" % (command, role),
+                    )
 
     def test_l1_l0_leaf_results_unchanged_for_l2_fence_commands(self):
         # Round 4: the new colon/refs/delete denies render ONLY into the
@@ -1060,6 +1209,17 @@ CONTRADICTION_TARGETS = {
     "Bash(*git push *--delete*)": "git push origin L2-x --delete",
     "Bash(*git push * -d *)": "git push origin -d L2-x",
     "Bash(*git push * -d)": "git push origin L2-x -d",
+    # L2-only single-ref shape fences (round 5): each target matches its
+    # deny entry. The trailing-space targets match the L2 allow glob too,
+    # so the contradiction test proves the shape fence beats the allow;
+    # the `--prune`/`-d` leading-option targets match no allow entry and
+    # prove the explicit deny (fail-closed unlisted is not enough where a
+    # whole option class was unlisted before).
+    "Bash(git push origin L2-* *)": "git push origin L2-x L1-foo",
+    "Bash(git push -u origin L2-* *)": "git push -u origin L2-x L1-foo",
+    "Bash(git push --* origin L2-*)": "git push --prune origin L2-x",
+    "Bash(git push -f origin L2-*)": "git push -f origin L2-x",
+    "Bash(git push -d origin L2-*)": "git push -d origin L2-x",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that
