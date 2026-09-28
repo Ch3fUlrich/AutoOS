@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a Claude final is declared, never claimed; the spawn gate reads the model (CLAUDEBUDGET-d, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-b, from `rev-claudebudget2.out` (FIX-FIRST). Three holes, all of them
+  "the gate trusted the wrong side of the table":
+  - **`kind=final` was self-grantable, exactly like `critical` was.** `claude_allowed("final")`
+    returned True with no env, so any worker that wrote `kind=final` (or `role=final`) into its own
+    card got a Claude leg, client `claude`, a Claude reviewer *and* the `risk=high` closer
+    (`_CLOSER`, client claude / model sonnet), which HEAD emitted with no gate at all. A final is
+    now what the orchestrator declares: `AUTOOS_CLAUDE_FINAL="<lane>@<sha>"` in the caller's env, or
+    `AUTOOS_CLAUDE_CRITICAL` (which declares the bigger thing and so opens the final too). A blank
+    declaration is not one. `strip_claude_env()` already removed the whole `AUTOOS_CLAUDE*`
+    namespace from every child, so a worker still cannot hold or pass down a declaration — and the
+    plan line now cites `final declared (<lane>@<sha>)`, not only a critical-path override.
+  - **The spawn gate read the client *name*.** `qoder`/`agy`/`opencode`/`codex`/`qwen`/`gemini` with
+    `--model claude-*|opus|sonnet|haiku|fable`, an `openrouter/anthropic/*` leg, or a client whose
+    own default model IS Claude (`clients.AGY_DEFAULT_MODEL` = `claude-opus-4-6-thinking`) walked
+    straight past `claude_spawn_refusal` and `client_held`. Both spawn paths — `autoos-agent.py run`
+    and the MCP `spawn` tool — now gate the **effective model**: `--model` / `--free-model`, a
+    registry `clients.<id>.default_model` row, the adapter's own default, the `--tier` agent's model
+    in `opencode.jsonc`, then the card's combo route (all-Claude legs = a spend, one non-Claude leg
+    falls through to it). When none of those can say what will answer, budget mode **refuses**
+    instead of assuming free, and names `--model=<provider/leg>` as the way to ask.
+  - **The MCP `spawn` tool takes `claude_reason`** — a per-spawn declaration threaded to
+    `claude_allowed(kind="spawn")`, so an orchestrator does not have to export
+    `AUTOOS_CLAUDE_CRITICAL` server-wide where every later caller inherits it. It reaches the CLI
+    preflight and the runner as that one spawn's env, and the spawner strips it before the worker's
+    own env. `filter_routes`' client hold asks `kind="spawn"` now instead of its default `"leg"`, so
+    the plan and the spawn path are one decision.
+  - Tests: `tests/test_autoos_resolver.py` `ClaudeBudgetGateTests` (a forged final gets no leg, no
+    client, no reviewer, no closer; `AUTOOS_CLAUDE_FINAL` opens each; a final declaration does not
+    open the ordinary kinds) and `tests/test_autoos_spawner.py` `ClaudeBudgetSpawnTests` /
+    `ClaudeBudgetMcpSpawnTests` (`--model sonnet`, `openrouter/anthropic/claude-*`, agy's default,
+    the unknown-model refusal, `claude_reason` unlocking exactly one spawn, budget-off unchanged).
+    Non-Claude-shape tests that spawn `agy` declare the run the way `claude_env()` already did for
+    `--client claude`, because agy *is* a Claude spend now.
+
 ### Fixed — the Claude budget has one gate, and only the orchestrator holds the key (CLAUDEBUDGET-b, D-102, 2026-09-28)
 
 - Follow-up on CLAUDEBUDGET (`claude_budget`, same day). Four holes in a policy that was written

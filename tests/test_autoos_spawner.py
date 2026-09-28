@@ -89,6 +89,11 @@ def claude_env(**extra):
     the way an orchestrator would. The budget's own tests
     (ClaudeBudgetSpawnTests/ClaudeBudgetMcpSpawnTests) deliberately leave it unset:
     that refusal is what they measure.
+
+    CLAUDEBUDGET-d item 2: the same declaration covers `--client agy`. What spends
+    the allowance is the model that answers, and agy answers with
+    `clients.AGY_DEFAULT_MODEL` = a Claude model when the caller names no --model,
+    so naming that client was never a claim that the run is free.
     """
     return clean_env(AUTOOS_CLAUDE_CRITICAL="test: the claude client's own argv",
                      **extra)
@@ -428,7 +433,7 @@ class ClientCommandTests(unittest.TestCase):
         # go BEFORE -p. Item 2: with no caller model it gets the measured
         # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
         # own default Gemini whose quota is out until ~2026-10-01.
-        r = plan_of("--client", "agy", "t")
+        r = plan_of("--client", "agy", "t", env=claude_env())
         self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
 
@@ -698,7 +703,7 @@ class DepthTests(unittest.TestCase):
         self.assertIn("depth: 1/%d" % clients.DEFAULT_MAX_DEPTH, r.stdout)
 
     def test_spawn_past_the_max_is_refused(self):
-        r = plan_of("--client", "agy", "t", env=clean_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
+        r = plan_of("--client", "agy", "t", env=claude_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
         self.assertEqual(r.returncode, 4)
         self.assertIn("depth", r.stderr)
 
@@ -892,7 +897,8 @@ class SignInProbeTests(unittest.TestCase):
     def test_run_refuses_a_signed_out_agy_fast_and_never_starts_the_task(self):
         d, env = self.stub(self.SIGNED_OUT)
         start = time.time()
-        r = run_agent("run", "--client", "agy", "Reply with exactly: ack", env=env)
+        r = run_agent("run", "--client", "agy", "Reply with exactly: ack",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("agy is installed but not signed in", r.stderr)
         self.assertIn("Please sign in", r.stderr)
@@ -901,7 +907,8 @@ class SignInProbeTests(unittest.TestCase):
 
     def test_run_goes_ahead_when_agy_is_signed_in(self):
         d, env = self.stub(self.SIGNED_IN)
-        r = run_agent("run", "--client", "agy", "t", env=env)
+        r = run_agent("run", "--client", "agy", "t",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # AGYFIX item 1+2 (measured 2026-09-27): the working form is
         # `agy --model <m> -p <task>`, and with no caller model the spawner
@@ -3096,8 +3103,8 @@ class HeadlessRefusalTests(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(stub)
         os.chmod(path, 0o755)
-        env = clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
-                        AUTOOS_STATE_DIR=d)
+        env = claude_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                         AUTOOS_STATE_DIR=d)
         r = run_agent("run", "--client", "agy", "t", env=env)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("autoos-agent: HEADLESS-REFUSAL:", r.stderr)
@@ -5090,6 +5097,13 @@ class IsolateContainmentTests(unittest.TestCase):
             env["AUTOOS_STATE_DIR"] = statedir
             env["AUTOOS_FAKE_ROOT"] = root
             env["AUTOOS_FAKE_MODE"] = mode
+            # CLAUDEBUDGET-d item 2: agy's own default model IS Claude, so these
+            # spawns are Claude spends and the budget gate holds them -- the same
+            # `claude_env` convention as the claude-client tests above. These
+            # tests measure containment, not the budget, so the harness declares
+            # the run the way an orchestrator would; ClaudeBudgetSpawnTests
+            # measures the refusal itself and leaves this out.
+            env["AUTOOS_CLAUDE_CRITICAL"] = "test: agy containment harness"
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
                 # SPAWNCAP (S2): the real registry declares headless agy with
@@ -9234,6 +9248,91 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
                                    "PATH": "/bin"})
         self.assertEqual(out, {"AUTOOS_AGENT_DEPTH": "1", "PATH": "/bin"})
 
+    # CLAUDEBUDGET-d item 2: the gate reads the model that will actually answer,
+    # not only the client's name. Naming a non-Claude client was never a claim
+    # that the run is free -- `--client opencode --model sonnet` and `agy`'s own
+    # default model are both Claude spends, and they used to walk straight past
+    # `claude_spawn_refusal`.
+
+    def test_run_named_client_with_a_claude_model_is_refused(self):
+        for model in ("sonnet", "openrouter/anthropic/claude-opus-4-6",
+                      "claude-sonnet-5", "opus"):
+            r = run_agent("run", "--client", "opencode", "--model", model,
+                          "--dry-run", "--card", self.CARD, "t",
+                          env=clean_env())
+            self.assertNotEqual(r.returncode, 0, "%s: %s%s" % (model, r.stdout, r.stderr))
+            self.assertIn("claude_budget", r.stderr, model)
+
+    def test_agy_default_model_is_a_claude_spend(self):
+        # agy answers with clients.AGY_DEFAULT_MODEL when the caller names none,
+        # and that model IS Claude -- the client-name-only gate saw "agy" and
+        # waved it through. Unit level, not CLI level: cmd_run's capability check
+        # refuses agy (it declares shell=false, write=false) before the budget
+        # gate is reached, so a CLI-level run of this case tests the wrong door.
+        cli = load_agent()
+        registry = self.shipped_budget()
+        refusal, note = cli.claude_spawn_refusal("agy", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-opus", refusal)
+        self.assertIn("claude_budget", refusal)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_defaulted_client(self):
+        cli = load_agent()
+        refusal, note = cli.claude_spawn_refusal(
+            "agy", {cli.resolver.CLAUDE_CRITICAL_ENV: self.CRITICAL},
+            self.shipped_budget())
+        self.assertIsNone(refusal, refusal)
+        self.assertIn(self.CRITICAL, note)
+
+    def shipped_budget(self):
+        # The operator's shipped registry, budget and all: this is the gate as the
+        # host runs it, not a fixture that flatters the code under test.
+        import json
+        import pathlib
+        path = pathlib.Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_named_client_on_a_non_claude_model_is_never_gated(self):
+        # qoder's own default is Qwen3.8-Flash: the name check must not become a
+        # blanket refusal of every client that CAN take a Claude model.
+        r = run_agent("run", "--client", "qoder", "--dry-run", "--card",
+                      self.CARD, "t", env=clean_env())
+        self.assertNotIn("claude_budget", r.stderr, r.stdout + r.stderr)
+
+    def test_an_unknown_effective_model_fails_closed(self):
+        # When the gate cannot tell what the client will answer with, and the
+        # budget is on, the answer is "no" -- a clear "no" that says how to ask.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "budget",
+                                                 "weekly_share_left": 0.1,
+                                                 "budget_below": 0.25}},
+                    "clients": {"codex": {"id": "codex"}}, "routes": {}, "models": {}}
+        refusal, note = cli.claude_spawn_refusal("codex", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("--model", refusal)
+
+    def test_the_model_gate_is_inert_when_the_budget_is_off(self):
+        # Non-budget mode unchanged: the same Claude models route as they did.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "normal",
+                                                 "weekly_share_left": 0.9,
+                                                 "budget_below": 0.25}},
+                    "clients": {}, "routes": {}, "models": {}}
+        for client, model in (("opencode", "sonnet"), ("agy", None),
+                              ("codex", None)):
+            refusal, note = cli.claude_spawn_refusal(client, {}, registry,
+                                                     model=model)
+            self.assertIsNone(refusal, "%s/%s: %s" % (client, model, refusal))
+
+    def test_effective_model_prefers_the_callers_model(self):
+        cli = load_agent()
+        self.assertEqual(cli.effective_spawn_model("agy", model="deepseek-v3"),
+                         ("deepseek-v3", "--model"))
+        # ...and the client's configured default when it names none.
+        model, source = cli.effective_spawn_model("agy")
+        self.assertEqual(model, cli.clients.AGY_DEFAULT_MODEL)
+        self.assertIn("AGY_DEFAULT_MODEL", source)
+
     def test_the_plan_sees_the_client_that_would_run(self):
         # Item 3(d): route_plan_for must pass the client. Under the shipped
         # budget, a card planned for client `claude` is held by the *client*
@@ -9280,3 +9379,36 @@ class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
         finally:
             del os.environ["AUTOOS_CLAUDE_CRITICAL"]
         self.assertNotIn("claude_budget", out.get("error", ""), out)
+
+    # CLAUDEBUDGET-d item 2/3: the tool call names the model, so the tool call is
+    # where the orchestrator declares it -- `claude_reason` per spawn, instead of
+    # an AUTOOS_CLAUDE_CRITICAL the whole server inherits for every later caller.
+
+    def test_spawn_refuses_a_claude_model_on_a_non_claude_client(self):
+        for model in ("opus", "sonnet", "openrouter/anthropic/claude-opus-4-6"):
+            out = mcp_server.spawn({"client": "opencode", "model": model,
+                                    "task": "t", "card": {"role": "implement"},
+                                    "dry_run": True})
+            self.assertEqual(out.get("state"), "rejected", "%s: %s" % (model, out))
+            self.assertIn("claude_budget", out.get("error", ""), model)
+
+    def test_spawn_per_call_reason_unlocks_that_one_spawn(self):
+        reason = "final review of L1-routing@deadbeef"
+        out = mcp_server.spawn({"client": "claude", "model": "sonnet",
+                                "task": "t", "claude_reason": reason,
+                                "dry_run": True})
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
+        # The reason is part of the record, not only of the decision: the plan
+        # the caller reads back has to cite what let the spend happen.
+        self.assertIn(reason, str(out.get("route", {})), out)
+
+    def test_a_card_cannot_supply_the_spawn_reason(self):
+        # `claude_reason` is a request field the orchestrator sends; a card is
+        # the worker's own text, so the same spelling inside a card buys nothing:
+        # the spawn is still refused (a card field the router does not accept is
+        # refused outright, which is the same outcome for the worker).
+        out = mcp_server.spawn({"client": "opencode", "model": "opus", "task": "t",
+                                "card": {"role": "implement",
+                                         "claude_reason": "trust me"},
+                                "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)

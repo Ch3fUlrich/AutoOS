@@ -465,9 +465,10 @@ CLAUDE_PROVIDERS = ("cc", "anthropic")
 # whether or not a route leg names it.
 CLAUDE_CLIENTS = ("claude",)
 
-# The card kinds that may still spend Claude while the budget is on. `final` is
-# the reserved final review (the same spelling the report line already uses:
-# "AutoOS-Review: kind=final reviewer=sonnet verdict=READY").
+# The card kinds that name the reserved final review (the same spelling the
+# report line already uses: "AutoOS-Review: kind=final reviewer=sonnet
+# verdict=READY"). Naming it is not permission to spend Claude on it: only the
+# orchestrator's declaration in `env` is (CLAUDEBUDGET-d item 1).
 CLAUDE_BUDGET_ALLOWED_KINDS = ("final",)
 
 # CLAUDEBUDGET-b item 1: the critical-path exception is the ORCHESTRATOR's
@@ -477,6 +478,15 @@ CLAUDE_BUDGET_ALLOWED_KINDS = ("final",)
 # the spawner strips from every child, see `autoos-agent.py` CLAUDE_ENV_PREFIX)
 # is the difference between a declaration and an excuse.
 CLAUDE_CRITICAL_ENV = "AUTOOS_CLAUDE_CRITICAL"
+
+# CLAUDEBUDGET-d item 1: the same rule for the `final` exemption. D-102 reserved
+# Claude for the finals, and CLAUDEBUDGET-b read that as "kind=final is exempt on
+# its own" -- but `kind` is a card field and the card is what the worker that
+# wants the model writes. A worker could fork `kind=final` and get a Claude leg,
+# the claude client, a Claude reviewer and the high-risk closer, all without
+# asking. The final is therefore what the ORCHESTRATOR declares, in the shape the
+# declaration is only worth having: which final, on which lane at which sha.
+CLAUDE_FINAL_ENV = "AUTOOS_CLAUDE_FINAL"
 
 # CLAUDEBUDGET-b item 5: Claude's own model names. A leg whose model id carries
 # one of these is Claude whatever provider it is spelled under -- a proxy, an
@@ -493,6 +503,9 @@ CLAUDE_BUDGET_HELD_CLIENT = "claude_budget: client %s held for finals"
 CLAUDE_BUDGET_OVERRIDE = "claude_budget: critical-path override"
 CLAUDE_BUDGET_CRITICAL_NEEDED = ("claude_budget: critical needs the "
                                  "orchestrator's %s" % CLAUDE_CRITICAL_ENV)
+CLAUDE_BUDGET_FINAL_NEEDED = ("claude_budget: a final needs the orchestrator's "
+                              "%s=<lane>@<sha>" % CLAUDE_FINAL_ENV)
+CLAUDE_BUDGET_FINAL_DECLARED = "claude_budget: final declared"
 
 
 def claude_model_name(model_id) -> bool:
@@ -599,64 +612,97 @@ def critical_declaration(env) -> str | None:
     not a declaration about a specific run, and an empty reason would make the
     DONE line cite nothing.
     """
-    value = (env or {}).get(CLAUDE_CRITICAL_ENV)
+    return _declaration(env, CLAUDE_CRITICAL_ENV)
+
+
+def final_declaration(env) -> str | None:
+    """The orchestrator's declared final ("<lane>@<sha>"), or None.
+
+    The same whitespace rule as `critical_declaration`: a blank `AUTOOS_CLAUDE_FINAL`
+    exported once in a profile would otherwise exempt every run the shell ever
+    spawns, which is the self-grant item 1 removed, bought back with an env var.
+    """
+    return _declaration(env, CLAUDE_FINAL_ENV)
+
+
+def _declaration(env, name) -> str | None:
+    value = (env or {}).get(name)
     value = value if isinstance(value, str) else ""
     return value.strip() or None
 
 
-def claude_allowed(kind, env, registry, now=None):
-    """``(allowed, reason)`` -- the one Claude gate (CLAUDEBUDGET-b item 3).
+def claude_allowed(kind, env, registry, now=None, reason=None):
+    """``(allowed, reason)`` -- the one Claude gate (CLAUDEBUDGET-b item 3,
+    amended by CLAUDEBUDGET-d item 1 and 3).
 
     Every Claude decision routes through here: the resolver's leg filter, the
     client-bound hold in `filter_routes`, cross-family reviewer selection, the
-    escalation ladders, and both spawn paths (`autoos-agent.py run
-    --client claude` and the MCP `spawn` tool). HEAD had the same policy written
+    escalation ladders, the high-risk closer, and both spawn paths (`autoos-agent.py
+    run --client claude` and the MCP `spawn` tool). HEAD had the same policy written
     three times in three shapes, and the shape a caller forgot to copy is the
     hole: reviewer selection was one of them.
 
-    `kind` is what the Claude spend is FOR -- one of `CLAUDE_USE_KINDS`. Only a
-    `final` is exempt on its own (D-102: Claude is for finals); anything else
-    needs the orchestrator's `AUTOOS_CLAUDE_CRITICAL`. A card's own `critical`
-    field is not input here, because the card is what a worker writes.
+    `kind` is what the Claude spend is FOR -- one of `CLAUDE_USE_KINDS`. Nothing is
+    exempt on its own any more: a `final` needs the orchestrator's
+    `AUTOOS_CLAUDE_FINAL=<lane>@<sha>`, everything else needs
+    `AUTOOS_CLAUDE_CRITICAL=<why>`, and a critical declaration opens the final too
+    (it declared the bigger thing). A card's own `kind`/`critical` fields are not
+    input here, because the card is what a worker writes.
 
-    `reason` is the text that goes into the plan and the DONE line, so a Claude
-    run always cites what let it happen. `now` is the caller's clock, unused by
-    the rule itself and kept in the signature because every caller already
-    threads one -- a time-window rule added later must not need the callers
-    changed again.
+    `reason` is the same authority as an env declaration, one call wide: the MCP
+    `spawn` request's `claude_reason` (item 3), so an orchestrator declares the
+    single spawn instead of exporting an exception every later caller inherits.
+    It comes from the request, never from the card.
+
+    `reason`'s text and the declaration's text both travel in the returned reason,
+    which is what goes into the plan and the DONE line, so a Claude run always
+    cites what let it happen. `now` is the caller's clock, unused by the rule
+    itself and kept in the signature because every caller already threads one -- a
+    time-window rule added later must not need the callers changed again.
     """
     if kind not in CLAUDE_USE_KINDS:
         raise ValueError("unknown Claude use %r (one of %s)"
                          % (kind, ", ".join(CLAUDE_USE_KINDS)))
     if not claude_budget_of(registry)["on"]:
         return True, "claude_budget: off - %s may use Claude" % kind
+    declared = (str(reason).strip() if reason else "") or critical_declaration(env)
     if kind == "final":
-        return True, "claude_budget: final reviews may use Claude"
-    declared = critical_declaration(env)
+        declared_final = final_declaration(env)
+        if declared_final:
+            return True, "%s (%s)" % (CLAUDE_BUDGET_FINAL_DECLARED, declared_final)
+        if declared:
+            return True, "%s (%s)" % (CLAUDE_BUDGET_OVERRIDE, declared)
+        return False, CLAUDE_BUDGET_FINAL_NEEDED
     if declared:
         return True, "%s (%s)" % (CLAUDE_BUDGET_OVERRIDE, declared)
     return False, CLAUDE_BUDGET_CRITICAL_NEEDED
 
 
 def is_final_card(card) -> bool:
-    """Whether `card` is the reserved final review (by v2 `kind` or v1 `role`)."""
+    """Whether `card` is the reserved final review (by v2 `kind` or v1 `role`).
+
+    A description of the card, nothing more: it selects which gate question gets
+    asked ("is this the spend the budget reserves?"), it never answers it. The
+    answer comes from the orchestrator's `AUTOOS_CLAUDE_FINAL` (item 1).
+    """
     return (card or {}).get("kind") in CLAUDE_BUDGET_ALLOWED_KINDS or \
         (card or {}).get("role") in CLAUDE_BUDGET_ALLOWED_KINDS
 
 
-def budget_holds_claude(card, registry, env=None, kind="leg") -> bool:
-    """Whether the Claude budget is on *and* this card is not exempt.
+def budget_holds_claude(card, registry, env=None, kind="leg", reason=None) -> bool:
+    """Whether the Claude budget is on *and* nothing permits this spend.
 
-    `kind` is what the caller wants Claude for -- "leg", "review" or
-    "escalation" -- so the answer names the true spend, and a final card is
-    exempt whatever the caller asked (`is_final_card`), because the final is the
-    one thing the budget reserves the model for. Exempt in exactly two cases,
-    both D-102's wording as amended by CLAUDEBUDGET-b: the card is a final, or
-    the orchestrator declared this run critical path in `env`. A card's own
-    `critical` field alone is not an exemption -- it was self-grantable.
+    `kind` is what the caller wants Claude for -- "leg", "review", "escalation" or
+    "spawn" -- so the answer names the true spend, and a card that says it is a
+    final is asked the final question (`is_final_card`), because D-102 reserves the
+    model for exactly that. Exempt in exactly two cases, both D-102's wording as
+    amended by CLAUDEBUDGET-b and CLAUDEBUDGET-d: the orchestrator declared this
+    run's final in `env`, or it declared the run critical path. Neither a card's
+    `kind=final` nor its `critical` field alone is an exemption -- both are
+    self-grantable.
     """
     allowed, _ = claude_allowed("final" if is_final_card(card) else kind,
-                                env, registry)
+                                env, registry, reason=reason)
     return not allowed
 
 
@@ -679,10 +725,12 @@ def claude_budget_explain(registry) -> list:
     # so before it did.
     reason = ("mode" if state["mode"] == "budget"
               else "share below %s" % _share_text(state["budget_below"]))
-    return ["claude_budget: ON (%s, %s, by %s) - Claude legs held for finals; "
-            "only kind=final or the orchestrator's %s may use them (source: %s)"
-            % (state["mode"], numbers, reason, CLAUDE_CRITICAL_ENV,
-               state["source"])]
+    return ["claude_budget: ON (%s, %s, by %s) - Claude legs held; only the "
+            "orchestrator's %s=<lane>@<sha> (a final) or %s=<why> (critical "
+            "path) may use them -- a card's own kind/critical grants nothing "
+            "(source: %s)"
+            % (state["mode"], numbers, reason, CLAUDE_FINAL_ENV,
+               CLAUDE_CRITICAL_ENV, state["source"])]
 
 
 def _share_text(value) -> str:
@@ -952,8 +1000,12 @@ def filter_routes(card, features, client_state, registry, overlay,
     # and no leg filter would catch it -- a client-native run never reads
     # route["legs"]. Route-level, because for a bound client the whole route is
     # that client.
+    # CLAUDEBUDGET-d item 3: this is a *spawn*, and it asks with the spawn kind --
+    # HEAD asked with the default "leg", so the plan's client hold and the spawn
+    # gate answered to two different kinds, and a caller's per-spawn declaration
+    # had no kind to arrive under.
     client_held = (is_claude_client(client)
-                   and budget_holds_claude(card, registry, env))
+                   and budget_holds_claude(card, registry, env, kind="spawn"))
 
     survivors = []
     removed = {}
@@ -1574,7 +1626,15 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     else:
         reason = "cross-family reviewer(s): %s" % ", ".join(picked)
 
-    closer = dict(_CLOSER) if risk == "high" else None
+    # CLAUDEBUDGET-d item 1: the closer is a Claude client run, so it is a Claude
+    # spend and it asks the final question -- it closes the final review. HEAD
+    # emitted it for every risk=high card with no gate at all, which handed a
+    # worker that could write `kind=final` a fourth Claude door (client claude,
+    # model sonnet) beside the leg, the reviewer and the escalation ladder.
+    closer = None
+    if risk == "high":
+        allowed, _gate = claude_allowed("final", env, registry)
+        closer = dict(_CLOSER) if allowed else None
     return {"routes": list(picked), "closer": closer, "reason": reason}
 
 
@@ -2075,16 +2135,18 @@ def plan(card, features, client_state, registry, overlay, track_record,
     chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
 
-    # D-102 CLAUDEBUDGET: the one non-final that may still spend Claude is a run
-    # the ORCHESTRATOR declared critical path, and the plan has to say so -- a
-    # DONE line citing a Claude leg with no override named looks like a violated
-    # policy, and the operator cannot tell the two apart without reading the
-    # card. The gate's own text (which carries the declared reason) is what goes
-    # on the plan, so the record cites why, not just that.
+    # D-102 CLAUDEBUDGET: the Claude spend a plan may still carry is one the
+    # ORCHESTRATOR declared -- a critical path, or this run's final -- and the plan
+    # has to say so, because a DONE line citing a Claude leg with no authority
+    # named looks like a violated policy and the operator cannot tell the two
+    # apart without reading the card. The gate's own text (which carries what was
+    # declared) is what goes on the plan, so the record cites why, not just that.
+    # CLAUDEBUDGET-d item 1: "final declared (<lane>@<sha>)" is an authority line
+    # too, not only the critical-path override.
     allowed, gate_reason = claude_allowed("final" if is_final_card(card)
                                           else "leg", env, registry, now)
-    if allowed and gate_reason.startswith(CLAUDE_BUDGET_OVERRIDE) \
-            and is_claude_leg(chosen["leg"], registry):
+    if allowed and is_claude_leg(chosen["leg"], registry) and gate_reason.startswith(
+            (CLAUDE_BUDGET_OVERRIDE, CLAUDE_BUDGET_FINAL_DECLARED)):
         reason_parts.append(gate_reason)
 
     theta = _policy_value(registry, "modes", card["mode"], "theta", "value")

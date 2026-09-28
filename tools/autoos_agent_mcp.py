@@ -327,10 +327,28 @@ def build_argv(req: dict) -> tuple:
     return argv, route
 
 
-def preflight(argv: list, cwd: str):
+def spawn_budget_env(req: dict) -> dict:
+    """The env for the CLI processes THIS spawn starts (its preflight and its runner).
+
+    `claude_reason` (CLAUDEBUDGET-d item 3) is the orchestrator's declaration for
+    one spawn, so it has to reach the gate the CLI re-reads on the way in -- and
+    it is materialized for these two processes only, rather than exported to the
+    server where every later caller inherits it. It does not go further: the
+    spawner strips every `AUTOOS_CLAUDE*` key out of the worker's own env
+    (`strip_claude_env`), so a worker never holds a declaration to pass down.
+    """
+    env = dict(os.environ)
+    reason = str(req.get("claude_reason") or "").strip()
+    if reason:
+        env[agent.resolver.CLAUDE_CRITICAL_ENV] = reason
+    return env
+
+
+def preflight(argv: list, cwd: str, env: dict | None = None):
     """The CLI's own dry run: every refusal (promo, flag clashes, route) comes back now."""
     dry = argv if "--dry-run" in argv else argv[:-1] + ["--dry-run", argv[-1]]
     r = subprocess.run([sys.executable, AGENT] + dry, cwd=cwd, stdin=subprocess.DEVNULL,
+                       env=env if env is not None else os.environ,
                        capture_output=True, text=True)
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
@@ -379,19 +397,27 @@ def spawn(req: dict) -> dict:
     # a refusal arrive as a mysterious "route refused" string instead of the
     # budget's own reason, and a future launch path that skipped preflight would
     # have skipped the policy entirely. Checked here, before any run dir exists.
+    # CLAUDEBUDGET-d item 2/3: the gate reads the model the request names (or the
+    # client's default, or the tier/card combo), and `claude_reason` is this
+    # spawn's own declaration -- so the exception is one call wide instead of an
+    # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
     try:
         budget_refusal, budget_note = agent.claude_spawn_refusal(
-            req.get("client") or "opencode", os.environ)
+            req.get("client") or "opencode", os.environ,
+            model=req.get("model") or (agent.DEFAULT_FREE_MODEL if req.get("free") else None),
+            card=req.get("card"), tier=req.get("tier"),
+            reason=req.get("claude_reason"))
     except (OSError, ValueError) as exc:
         return _refused("cannot read the Claude budget: %s" % exc)
     if budget_refusal is not None:
         return _refused(budget_refusal)
     if budget_note is not None:
         route["claude_budget"] = budget_note
+    budget_env = spawn_budget_env(req)
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
-    refused = preflight(argv, cwd)
+    refused = preflight(argv, cwd, budget_env)
     if refused:
         return _refused(refused)
     max_attempts = 5
@@ -418,7 +444,8 @@ def spawn(req: dict) -> dict:
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
-                            cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            cwd=cwd, env=budget_env,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True)
     job["pid"] = proc.pid
     _CHILDREN[proc.pid] = proc
@@ -691,7 +718,8 @@ def serve() -> None:
                tier: int | None = None, model: str | None = None, isolate: bool = False,
                lean: bool | None = None, free: bool = False, allow_training: bool = False,
                joinable: bool = False, max_depth: int | None = None, title: str | None = None,
-               cwd: str | None = None, dry_run: bool = False) -> dict:
+               cwd: str | None = None, dry_run: bool = False,
+               claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
@@ -701,11 +729,18 @@ def serve() -> None:
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
-        inert there; it only waives the privacy check on an explicit --model)."""
+        inert there; it only waives the privacy check on an explicit --model).
+
+        claude_reason: this spawn's own Claude-budget declaration, for a `model`
+        that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that
+        needs it rather than exporting AUTOOS_CLAUDE_CRITICAL server-wide, where
+        every later caller would inherit it; it is what the returned route cites.
+        A card field of the same name is not one — the card is the worker's text."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
-                      "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run})
+                      "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
+                      "claude_reason": claude_reason})
 
     @app.tool(name="status")
     def _status(run_id: str | None = None) -> dict:

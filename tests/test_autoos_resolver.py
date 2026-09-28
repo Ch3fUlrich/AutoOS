@@ -3434,11 +3434,23 @@ class ClaudeBudgetLegTests(unittest.TestCase):
                 ["claude_budget: antigravity/claude-opus-4-6 held for finals"],
                 kind)
 
-    def test_a_final_card_keeps_the_claude_leg(self):
-        # The finals are what the operator reserved Claude for.
-        kept, skipped = self.legs(self.card(kind="final"))
+    def test_a_final_card_keeps_the_claude_leg_when_the_orchestrator_declares_it(self):
+        # The finals are what the operator reserved Claude for -- and the final
+        # is the ORCHESTRATOR's declaration (CLAUDEBUDGET-d item 1), not a word
+        # the card can say for itself.
+        kept, skipped = self.legs(self.card(kind="final"),
+                                  env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"})
         self.assertIn(("antigravity", "claude-opus-4-6"), kept)
         self.assertNotIn("antigravity/claude-opus-4-6", skipped)
+
+    def test_a_card_forging_kind_final_does_not_keep_the_claude_leg(self):
+        # CLAUDEBUDGET-d item 1 (HIGH, rev-claudebudget2): `kind=final` is a card
+        # field, and a worker writes its own card, so a forged final must get the
+        # same verdict as any other card while the budget is on and nobody
+        # declared: no Claude leg.
+        kept, skipped = self.legs(self.card(kind="final"), env={})
+        self.assertNotIn(("antigravity", "claude-opus-4-6"), kept)
+        self.assertIn("antigravity/claude-opus-4-6", skipped)
 
     def test_a_v1_role_review_card_is_still_held(self):
         # normalize_v2 maps role=review onto kind=review before plan() sees it,
@@ -3504,12 +3516,24 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         for route_id, reasons in removed.items():
             self.assertIn("claude_budget", " ".join(reasons), route_id)
 
-    def test_the_claude_client_still_serves_a_final_card(self):
+    def test_the_claude_client_still_serves_a_declared_final(self):
         registry = self.registry()
         survivors, _ = r.filter_routes(
             self.card(kind="final"), self.features(), self.state(),
-            registry, {}, "claude")
+            registry, {}, "claude",
+            env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"})
         self.assertEqual(survivors, ["r-claude-only", "r-mixed", "r-clean"])
+
+    def test_a_forged_final_does_not_unlock_the_claude_client(self):
+        # The client half of the same rule: the card names the final, the
+        # orchestrator's env permits it.
+        registry = self.registry()
+        survivors, removed = r.filter_routes(
+            self.card(kind="final"), self.features(), self.state(),
+            registry, {}, "claude")
+        self.assertEqual(survivors, [])
+        for route_id, reasons in removed.items():
+            self.assertIn("claude_budget", " ".join(reasons), route_id)
 
     def test_the_claude_client_is_untouched_when_budget_is_off(self):
         registry = self.registry(mode="normal", weekly_share_left=1.0)
@@ -3709,10 +3733,17 @@ class ClaudeBudgetPlanTests(unittest.TestCase):
             self.assertIn(key, plan, key)
             self.assertEqual(plan[key], expected, key)
 
-    def test_a_final_card_routes_to_claude_without_the_override_line(self):
-        plan = self.plan(self.claude_only(), kind="final")
+    def test_a_declared_final_routes_to_claude_without_the_override_line(self):
+        plan = self.plan(self.claude_only(), kind="final",
+                         env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"})
         self.assertEqual(plan["route"], "r-claude")
         self.assertNotIn("critical-path", plan["reason"])
+
+    def test_a_forged_final_does_not_route_to_claude(self):
+        # No declaration in the caller's env, so the reserved Claude route is
+        # not reachable from the card alone.
+        plan = self.plan(self.claude_only(), kind="final")
+        self.assertNotEqual(plan["route"], "r-claude")
 
     def test_budget_off_plan_carries_no_budget_override(self):
         registry = self.registry(mode="normal", weekly_share_left=0.9)
@@ -3766,7 +3797,7 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         return r.plan(card, features, state, registry, {}, [],
                       "claude-opus-4-6", self.NOW)
 
-    def legs(self, card_kind, route_id):
+    def legs(self, card_kind, route_id, env=None):
         """usable_legs() for one shipped route. The cards here are non-agentic
         kinds, so no tool_calls overlay is consulted, and need_tokens stays
         under every leg's context -- the budget hold is the only reason a leg
@@ -3776,7 +3807,7 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         return r.usable_legs(self.registry["routes"][route_id],
                              {"kind": card_kind, "privacy": "public"},
                              {"need_tokens": 1000}, state, self.registry, {},
-                             "opencode", self.NOW)
+                             "opencode", self.NOW, env)
 
     # card kind -> (route, leg) with the budget off, read off the shipped
     # catalog on 2026-09-28 and approved as the before/after pin.
@@ -3821,9 +3852,11 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                     ["claude_budget: %s held for finals" % leg],
                     "%s of %s" % (leg, route_id))
 
-    def test_a_final_card_keeps_the_same_claude_legs(self):
+    def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
         for route_id in ("opus-4-6", "t2-orchestrator"):
-            _kept, skipped, _ = self.legs("final", route_id)
+            _kept, skipped, _ = self.legs(
+                "final", route_id,
+                env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"})
             self.assertEqual([leg for leg, reasons in skipped.items()
                               if any(x.startswith("claude_budget:")
                                      for x in reasons)], [], route_id)
@@ -3880,6 +3913,7 @@ class ClaudeBudgetGateTests(unittest.TestCase):
 
     NOW = datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc)
     DECLARED = {r.CLAUDE_CRITICAL_ENV: "CI is red on main, nothing else closes it"}
+    FINAL = {r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef1234"}
 
     def registry(self, on=True):
         entry = {"mode": "budget" if on else "normal",
@@ -3930,14 +3964,56 @@ class ClaudeBudgetGateTests(unittest.TestCase):
             self.assertTrue(allowed, kind)
             self.assertIn("off", reason, kind)
 
-    def test_only_a_final_passes_the_gate_without_a_declaration(self):
+    def test_no_kind_passes_the_gate_without_a_declaration(self):
+        # CLAUDEBUDGET-d item 1: even `final`. HEAD returned True for it with no
+        # env at all, so a card that forged kind=final bought Claude legs, the
+        # claude client, a Claude reviewer and the high-risk closer -- a
+        # permission the worker handed itself, because the worker writes the card.
         registry = self.registry()
-        allowed, _ = r.claude_allowed("final", {}, registry, self.NOW)
-        self.assertTrue(allowed)
-        for kind in ("leg", "review", "escalation", "spawn"):
+        for kind in r.CLAUDE_USE_KINDS:
             allowed, reason = r.claude_allowed(kind, {}, registry, self.NOW)
             self.assertFalse(allowed, kind)
-            self.assertIn(r.CLAUDE_CRITICAL_ENV, reason, kind)
+        allowed, reason = r.claude_allowed("final", {}, registry, self.NOW)
+        self.assertIn(r.CLAUDE_FINAL_ENV, reason)
+
+    def test_the_orchestrators_final_declaration_opens_the_final_gate(self):
+        allowed, reason = r.claude_allowed("final", self.FINAL,
+                                           self.registry(), self.NOW)
+        self.assertTrue(allowed)
+        # The record has to cite WHICH final was declared, lane and sha, or a
+        # DONE line claiming "declared" proves nothing.
+        self.assertIn("L1-routing@deadbeef1234", reason)
+
+    def test_a_blank_final_declaration_is_not_a_declaration(self):
+        registry = self.registry()
+        for value in ("", "  ", "\n"):
+            allowed, _ = r.claude_allowed("final", {r.CLAUDE_FINAL_ENV: value},
+                                          registry, self.NOW)
+            self.assertFalse(allowed, repr(value))
+
+    def test_the_critical_declaration_opens_the_final_too(self):
+        # An orchestrator that declared the run critical path declared a bigger
+        # thing than a final; the final gate must not be stricter than the
+        # one it contains.
+        self.assertTrue(r.claude_allowed("final", self.DECLARED, self.registry(),
+                                         self.NOW)[0])
+
+    def test_a_final_declaration_does_not_open_the_ordinary_kinds(self):
+        # The narrower declaration buys only what it names.
+        registry = self.registry()
+        for kind in ("leg", "review", "escalation", "spawn"):
+            self.assertFalse(r.claude_allowed(kind, self.FINAL, registry,
+                                              self.NOW)[0], kind)
+
+    def test_a_per_call_reason_opens_the_gate_it_is_passed_to(self):
+        # CLAUDEBUDGET-d item 3: the MCP spawn request carries `claude_reason`,
+        # so an orchestrator declares ONE spawn instead of exporting the
+        # exception server-wide. It is the caller's own text, never the card's.
+        registry = self.registry()
+        allowed, reason = r.claude_allowed("spawn", {}, registry, self.NOW,
+                                           reason="closing the final on L1-routing")
+        self.assertTrue(allowed)
+        self.assertIn("closing the final on L1-routing", reason)
 
     def test_the_declaration_opens_every_kind_and_travels_with_the_verdict(self):
         registry = self.registry()
@@ -3968,13 +4044,16 @@ class ClaudeBudgetGateTests(unittest.TestCase):
 
     # --- (b) cross-family reviewer selection --------------------------------
 
-    def reviewers(self, card, registry, env=None, chosen="r-mixed"):
+    def review(self, card, registry, env=None, chosen="r-mixed"):
         return r._select_reviewers(
             self.candidates(registry, ["r-claude", "r-clean", "r-mixed"]),
             ["r-claude", "r-clean", "r-mixed"],
             self.score(chosen, registry), card, "S2",
             {"need_tokens": 1000}, {}, registry, {}, [], "orch", "balanced",
-            "opencode", self.NOW, env)["routes"]
+            "opencode", self.NOW, env)
+
+    def reviewers(self, card, registry, env=None, chosen="r-mixed"):
+        return self.review(card, registry, env, chosen)["routes"]
 
     def test_a_claude_reviewer_is_not_selected_for_a_non_final_card(self):
         routes = self.reviewers({"kind": "implement", "risk": "high"},
@@ -3984,9 +4063,41 @@ class ClaudeBudgetGateTests(unittest.TestCase):
                                  for leg in self.registry()["routes"][route_id]["legs"]),
                              "%s reviewed by Claude" % route_id)
 
-    def test_a_claude_reviewer_is_selected_for_a_final_card(self):
+    def test_a_claude_reviewer_is_selected_for_a_declared_final(self):
         self.assertIn("r-claude", self.reviewers({"kind": "final", "risk": "high"},
-                                                 self.registry()))
+                                                 self.registry(), env=self.FINAL))
+
+    def test_a_forged_final_selects_no_claude_reviewer(self):
+        # The reviewer walk asked the gate, and the gate now answers from the
+        # caller's env, so `kind=final` in a card buys no Claude reviewer.
+        self.assertNotIn("r-claude", self.reviewers({"kind": "final",
+                                                     "risk": "high"},
+                                                    self.registry()))
+
+    # --- (f) the high-risk closer is a Claude client run, so it is gated ------
+
+    def test_the_high_risk_closer_is_held_without_a_final_declaration(self):
+        # CLAUDEBUDGET-d item 1: `_CLOSER` is client claude / model sonnet, and
+        # HEAD emitted it for every risk=high card with no gate at all -- the
+        # same forged card, the same free Claude spend through a fourth door.
+        closer = self.review({"kind": "implement", "risk": "high"},
+                             self.registry())["closer"]
+        self.assertIsNone(closer)
+
+    def test_the_high_risk_closer_applies_for_a_declared_final(self):
+        out = self.review({"kind": "final", "risk": "high"}, self.registry(),
+                          env=self.FINAL)
+        self.assertEqual(out["closer"], {"client": "claude", "model": "sonnet"})
+
+    def test_the_high_risk_closer_applies_when_the_run_is_declared_critical(self):
+        out = self.review({"kind": "implement", "risk": "high"}, self.registry(),
+                          env=self.DECLARED)
+        self.assertEqual(out["closer"], {"client": "claude", "model": "sonnet"})
+
+    def test_budget_off_still_emits_the_high_risk_closer(self):
+        out = self.review({"kind": "implement", "risk": "high"},
+                          self.registry(on=False))
+        self.assertEqual(out["closer"], {"client": "claude", "model": "sonnet"})
 
     def test_the_declaration_selects_the_claude_reviewer_for_a_non_final(self):
         routes = self.reviewers({"kind": "implement", "risk": "high"},
@@ -4032,8 +4143,13 @@ class ClaudeBudgetGateTests(unittest.TestCase):
                                env=self.DECLARED)
         self.assertEqual(steps["capability"]["route"], "r-claude")
 
-    def test_a_final_escalates_onto_claude_without_a_declaration(self):
-        steps = self.escalator({"kind": "final"}, self.registry())
+    def test_a_final_escalates_onto_claude_only_when_the_orchestrator_declares(self):
+        # The escalation ladder reads the same gate as the legs and the
+        # reviewers: `kind=final` in the card is a description, not a permission.
+        self.assertNotEqual(
+            self.escalator({"kind": "final"}, self.registry())["capability"]
+            .get("route"), "r-claude")
+        steps = self.escalator({"kind": "final"}, self.registry(), env=self.FINAL)
         self.assertEqual(steps["capability"]["route"], "r-claude")
 
     # --- (a) the leg filter and the plan line it feeds -----------------------
