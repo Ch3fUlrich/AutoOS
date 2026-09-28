@@ -29,6 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
   Re-created from the operator's local work (2026-09-25) and reworked for the
   DSBACK policy (2026-09-28).
+- **WS-DSCALL-LOW:** `main()` refuses `--max-tokens` below the 4096 floor (exit 2, before any key or network access); a truncated call-log walk is tested to refuse the cap.
 
 ### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
 
