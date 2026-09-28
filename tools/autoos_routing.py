@@ -49,8 +49,15 @@ ALL_COMBOS = ("t1-orchestrator", "t2-worker", "t3-driver",
 # role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy
 # is shared by both versions. normalize_v2 is additive - normalize/select_combo
 # and their results do not change.
+#
+# D-102 CLAUDEBUDGET (2026-09-28) adds two v2 fields for the Claude budget:
+# kind=final names the reserved final review, and critical=true names blocking
+# work. Both are the *only* non-deferrable reasons a Claude leg survives the
+# hold in tools/autoos_resolver.py; a v1 card cannot say either, so a final
+# review is spelled kind=final.
 CARD_V2_VALUES = {
-    "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+    "kind": ("implement", "debug", "review", "plan", "bulk", "research",
+             "final"),
     "risk": ("normal", "high"),
     "spec": ("exact", "partial", "vague"),
     "privacy": ("public", "sensitive"),
@@ -59,10 +66,10 @@ CARD_V2_VALUES = {
 CARD_V2_DEFAULTS = {"kind": "implement", "risk": "normal", "spec": "partial",
                     "privacy": "public", "mode": "balanced", "deferrable": False,
                     "deadline": None, "paths": [], "override": {},
-                    "author": None}
+                    "author": None, "critical": False}
 CARD_V1_ONLY = frozenset({"role", "complexity", "ctx", "spend"})
 CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
-                          "deadline", "paths", "override"})
+                          "deadline", "paths", "override", "critical"})
 # privacy and author belong to both dialects: REVROUTE (S2) item 2 put the
 # author on the card so a review can be resolved to a different-family
 # reviewer, and role=review is how most lanes already spell a review.
@@ -165,12 +172,16 @@ def _check_choice(field: str, value, allowed: tuple) -> str:
     return value
 
 
-def _check_deferrable(value) -> bool:
+def _check_bool(field: str, value) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str) and value.strip().lower() in ("true", "false"):
         return value.strip().lower() == "true"
-    raise CardError("card deferrable=%r: expected true or false" % (value,))
+    raise CardError("card %s=%r: expected true or false" % (field, value))
+
+
+def _check_deferrable(value) -> bool:
+    return _check_bool("deferrable", value)
 
 
 def _check_deadline(value: str) -> str:
@@ -286,6 +297,8 @@ def normalize_v2(card: dict) -> dict:
         out["author"] = _check_author(flat["author"])
     if "deferrable" in flat:
         out["deferrable"] = _check_deferrable(flat["deferrable"])
+    if "critical" in flat:
+        out["critical"] = _check_bool("critical", flat["critical"])
     if "deadline" in flat and flat["deadline"] is not None:
         if not out["deferrable"]:
             raise CardError("card deadline=%r: only allowed with deferrable=true"

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
                       _parse_until, leg_denied, leg_rule_for,
-                      plan_dead_reasons)
+                      plan_dead_reasons, claude_budget as claude_budget_of)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -62,7 +62,7 @@ DEFAULT_BUCKET_TABLE = {
     "spec": {"exact": 0, "partial": 1, "vague": 2},
     "tests": {True: 0, False: 1},
     "kind": {"implement": 0, "bulk": 0, "review": 0, "research": 0,
-             "debug": 2, "plan": 3},
+             "debug": 2, "plan": 3, "final": 0},
     "buckets": (
         {"name": "S0", "max": 1},
         {"name": "S1", "max": 3},
@@ -452,6 +452,123 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
     return None, notes
 
 
+# ---------------------------------------------------------------------------
+# Claude budget (D-102 CLAUDEBUDGET, S2 item 2, operator 2026-09-28)
+# ---------------------------------------------------------------------------
+
+# The provider ids that are Claude, whatever a model's family row says. `cc` is
+# the Claude Code subscription and `anthropic` the direct API; both spellings
+# have to hold, or a route renamed onto one of them escapes the budget.
+CLAUDE_PROVIDERS = ("cc", "anthropic")
+
+# The clients that ARE Claude: a run inside Claude Code spends the allowance
+# whether or not a route leg names it.
+CLAUDE_CLIENTS = ("claude",)
+
+# The card kinds that may still spend Claude while the budget is on. `final` is
+# the reserved final review (the same spelling the report line already uses:
+# "AutoOS-Review: kind=final reviewer=sonnet verdict=READY").
+CLAUDE_BUDGET_ALLOWED_KINDS = ("final",)
+
+CLAUDE_BUDGET_HELD = "claude_budget: %s held for finals"
+CLAUDE_BUDGET_HELD_CLIENT = "claude_budget: client %s held for finals"
+CLAUDE_BUDGET_OVERRIDE = "claude_budget: critical-path override"
+
+
+def is_claude_leg(leg, registry) -> bool:
+    """Whether `leg` is a Claude leg: anthropic family, cc/anthropic provider,
+    or a model whose own id says claude.
+
+    Three tests because the registry spells Claude three ways -- `cc/*` and
+    `antigravity/claude-*` carry the `anthropic` family, and a provider added
+    later may name the model without the family row. A leg that resolves to no
+    known provider raises through resolve_leg, exactly as everywhere else in the
+    resolver: a broken registry fails closed rather than reading as non-Claude.
+    """
+    provider_id, model_id = resolve_leg(leg, registry)
+    if provider_id in CLAUDE_PROVIDERS:
+        return True
+    model = (registry.get("models") or {}).get(model_id) or {}
+    if str(model.get("family") or "").lower() == "anthropic":
+        return True
+    return "claude" in model_id.lower()
+
+
+def budget_holds_claude(card, registry) -> bool:
+    """Whether the Claude budget is on *and* this card is not exempt.
+
+    Exempt in exactly two cases, both from D-102's own wording: the card is a
+    final (`kind`/`role` == "final"), or it is marked `critical` -- blocking
+    work may still use Claude, and the plan says so out loud.
+    """
+    if not claude_budget_of(registry)["on"]:
+        return False
+    if card.get("critical"):
+        return False
+    return card.get("kind") not in CLAUDE_BUDGET_ALLOWED_KINDS and \
+        card.get("role") not in CLAUDE_BUDGET_ALLOWED_KINDS
+
+
+def claude_budget_explain(registry) -> list:
+    """One line saying what the budget is doing, for `route --explain`.
+
+    The state has to be visible when it is OFF too: an orchestrator reading a
+    plan cannot tell "no Claude leg appeared because the budget held it" from
+    "this registry has no Claude legs" without the line.
+    """
+    state = claude_budget_of(registry)
+    numbers = ("weekly_share_left=%s, budget_below=%s"
+               % (_share_text(state["weekly_share_left"]),
+                  _share_text(state["budget_below"])))
+    if not state["on"]:
+        return ["claude_budget: off (mode=%s, %s) - Claude legs route normally"
+                % (state["mode"], numbers)]
+    # Which half of the rule flipped it matters to the reader: a share under the
+    # threshold says the allowance ran down, mode=budget says the operator said
+    # so before it did.
+    reason = ("mode" if state["mode"] == "budget"
+              else "share below %s" % _share_text(state["budget_below"]))
+    return ["claude_budget: ON (%s, %s, by %s) - Claude legs held for finals; "
+            "only kind=final or critical=true may use them (source: %s)"
+            % (state["mode"], numbers, reason, state["source"])]
+
+
+def _share_text(value) -> str:
+    return "null" if value is None else ("%g" % value)
+
+
+def budget_wait_until(registry, now):
+    """When deferrable work may run again: the earliest cheap/off-peak window.
+
+    Reuses the same window data `defer_until` reads (`providers.<id>.windows`,
+    price_factor < 1.0), scanned over every provider rather than one chosen leg
+    -- with every Claude leg held there is no chosen leg to ask about. When the
+    registry records no window at all, the honest answer is "free capacity":
+    the work waits for a free leg, and the operator sees why.
+    """
+    best = None
+    for provider_id in sorted(registry.get("providers") or {}):
+        start = next_cheap_start(provider_id, registry, now)
+        if start is not None and (best is None or start < best):
+            best = start
+    if best is None:
+        return "free capacity", "claude_budget"
+    return (_format_iso_z(best),
+            "claude_budget: Claude held for finals, cheapest window from %s"
+            % _format_iso_z(best))
+
+
+def _claude_budget_removed(removed) -> bool:
+    """Whether a no-survivors result was caused by the Claude hold.
+
+    Required before deferring, so a card that failed for an unrelated reason
+    (privacy, a client nobody installed) is not reported as "waiting for free
+    capacity" when nothing is waiting for it.
+    """
+    return any("claude_budget" in reason
+               for reasons in removed.values() for reason in reasons)
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
                client="opencode", now=None):
     """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
@@ -470,6 +587,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     Per-leg filters (replacing the old route-level context/tool_calls/
     client_bound checks, which blocked the whole route on one bad leg):
 
+    - claude_budget (D-102, 2026-09-28): while budget mode is on, a Claude leg
+      is held for finals -- reason ``claude_budget: <leg> held for finals`` --
+      unless the card is ``kind=final`` or ``critical=true``. One predicate,
+      `budget_holds_claude`, and `is_claude_leg` is the leg half of it.
     - plan limits (MISTRALFIX, 2026-09-28): a leg the recorded plan cannot
       answer at all is skipped -- ``providers.<id>.limits.<model>.rpm`` of 0
       (reason ``plan: 0 rpm``) or ``plan_available: false`` (reason
@@ -527,6 +648,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         raise ValueError("missing feature 'need_tokens' in features")
     need = features["need_tokens"]
     agentic = card.get("kind") in AGENTIC_KINDS
+    holds = budget_holds_claude(card, registry)
     unavailable = route.get("unavailable_legs") or {}
 
     legs = []
@@ -545,6 +667,14 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             continue
 
         reasons = []
+
+        # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
+        # reserved for finals. Held per leg, not per route, so a mixed route
+        # keeps its cheap legs instead of being dropped along with the Claude
+        # one -- dropping the route would send work to no model that free
+        # capacity can serve.
+        if holds and is_claude_leg(leg, registry):
+            reasons.append(CLAUDE_BUDGET_HELD % leg)
 
         # MISTRALFIX (2026-09-28): the plan itself can veto a leg. Measured on
         # api.mistral.ai with the operator's key, four of its models answer 429
@@ -647,6 +777,13 @@ def filter_routes(card, features, client_state, registry, overlay,
     now = _now_or_default(now)
     privacy_sensitive = card.get("privacy") == "sensitive"
     client_reason = _client_reason(client_state, client, registry, now)
+    # D-102 CLAUDEBUDGET: the client half of the same rule. Running the work
+    # *inside* Claude Code spends the allowance exactly as a Claude leg does,
+    # and no leg filter would catch it -- a client-native run never reads
+    # route["legs"]. Route-level, because for a bound client the whole route is
+    # that client.
+    client_held = (budget_holds_claude(card, registry)
+                   and client in CLAUDE_CLIENTS)
 
     survivors = []
     removed = {}
@@ -668,6 +805,9 @@ def filter_routes(card, features, client_state, registry, overlay,
 
         if client_reason:
             reasons.append(client_reason)
+
+        if client_held:
+            reasons.append(CLAUDE_BUDGET_HELD_CLIENT % client)
 
         usable, skipped, _ = usable_legs(route, card, features, client_state,
                                         registry, overlay, client, now)
@@ -1696,6 +1836,20 @@ def plan(card, features, client_state, registry, overlay, track_record,
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
+        # D-102 CLAUDEBUDGET: deferrable work that lost its last leg to the
+        # Claude hold waits for free/off-peak capacity -- it never falls back to
+        # Claude, because "the cheap legs are busy" and "there are no cheap
+        # legs" are the same sentence to an operator reading a `ready` plan.
+        if card.get("deferrable") and _claude_budget_removed(removed):
+            wait_until, wait_reason = budget_wait_until(registry, now)
+            return {
+                "route": None,
+                "state": "deferred",
+                "bucket": bucket_name,
+                "wait_until": wait_until,
+                "reason": wait_reason,
+                "explain": claude_budget_explain(registry),
+            }
         result = no_route(removed)
         result["bucket"] = bucket_name
         return result
@@ -1716,6 +1870,14 @@ def plan(card, features, client_state, registry, overlay, track_record,
 
     chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
+
+    # D-102 CLAUDEBUDGET: blocking work is the one non-final that may still
+    # spend Claude, and the plan has to say so -- a DONE line citing a Claude
+    # leg with no override named looks like a violated policy, and the operator
+    # cannot tell the two apart without reading the card.
+    if claude_budget_of(registry)["on"] and card.get("critical") \
+            and is_claude_leg(chosen["leg"], registry):
+        reason_parts.append(CLAUDE_BUDGET_OVERRIDE)
 
     theta = _policy_value(registry, "modes", card["mode"], "theta", "value")
     eligible = [s for s in scores if s["p"] >= theta]

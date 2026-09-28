@@ -2363,5 +2363,113 @@ class MistralReplaceTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class ClaudeBudgetPolicyTests(unittest.TestCase):
+    """D-102 CLAUDEBUDGET (S2) item 1: policy.claude_budget is the one home for
+    "how much Claude is left this week".
+
+    The resolver, the CLI and the orchestrator all read the same number, so the
+    field is checked like every other piece of shipped data: an unknown key (a
+    typo'd `budget_bellow`) must not silently mean "no threshold", and a share
+    of 1.5 must not silently mean "plenty left" -- both would keep routing
+    Claude work after the weekly allowance was gone. `claude_budget()` owns the
+    ON/OFF rule: mode == "budget" OR a share below `budget_below`.
+    """
+
+    def budget_reg(self, **over):
+        reg = mutated()
+        entry = {"mode": "normal", "weekly_share_left": None,
+                 "budget_below": 0.25, "source": "test"}
+        entry.update(over)
+        reg["policy"]["claude_budget"] = entry
+        return reg
+
+    def problems(self, reg):
+        return [p for p in registry.check_registry(reg) if "claude_budget" in p]
+
+    def on(self, reg):
+        return registry.claude_budget(reg)["on"]
+
+    # --- the shipped value -------------------------------------------------
+
+    def test_the_shipped_value_is_the_operators_decision(self):
+        entry = load_registry()["policy"]["claude_budget"]
+        self.assertEqual(entry["mode"], "budget")
+        self.assertEqual(entry["weekly_share_left"], 0.10)
+        self.assertEqual(entry["budget_below"], 0.25)
+        self.assertIn("D-102", entry["source"])
+        self.assertIn("2026-09-28", entry["source"])
+
+    def test_the_shipped_registry_stays_clean(self):
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+    def test_the_shipped_registry_is_budget_mode_on(self):
+        self.assertTrue(self.on(load_registry()))
+
+    # --- the ON/OFF rule --------------------------------------------------
+
+    def test_on_when_mode_is_budget(self):
+        self.assertTrue(self.on(self.budget_reg(mode="budget",
+                                               weekly_share_left=None)))
+
+    def test_on_when_share_is_below_the_threshold_even_in_normal_mode(self):
+        # 0.2 < 0.25: the share alone turns it on, whatever `mode` says.
+        self.assertTrue(self.on(self.budget_reg(mode="normal",
+                                                weekly_share_left=0.2)))
+
+    def test_off_when_share_is_at_or_above_the_threshold_in_normal_mode(self):
+        for share in (0.25, 0.3, 1.0):
+            self.assertFalse(self.on(self.budget_reg(mode="normal",
+                                                     weekly_share_left=share)),
+                             "share %s must not turn budget mode on" % share)
+
+    def test_off_when_mode_is_normal_and_no_share_is_recorded(self):
+        self.assertFalse(self.on(self.budget_reg(mode="normal",
+                                                 weekly_share_left=None)))
+
+    def test_absent_field_is_off_so_an_old_registry_routes_unchanged(self):
+        reg = mutated()
+        reg["policy"].pop("claude_budget", None)
+        self.assertFalse(self.on(reg))
+        self.assertEqual(self.problems(reg), [])
+
+    # --- validation -------------------------------------------------------
+
+    def test_validate_rejects_a_share_above_one(self):
+        problems = self.problems(self.budget_reg(weekly_share_left=1.5))
+        self.assertTrue(problems, "share 1.5 must fail validation")
+        self.assertIn("1.5", problems[0])
+
+    def test_validate_rejects_a_share_below_zero(self):
+        self.assertTrue(self.problems(self.budget_reg(weekly_share_left=-0.1)))
+
+    def test_validate_rejects_an_unknown_field(self):
+        problems = self.problems(self.budget_reg(budget_bellow=0.25))
+        self.assertTrue(problems)
+        self.assertIn("budget_bellow", problems[0])
+
+    def test_validate_rejects_a_mode_that_is_not_normal_or_budget(self):
+        self.assertTrue(self.problems(self.budget_reg(mode="tight")))
+
+    def test_validate_rejects_a_non_numeric_threshold(self):
+        problems = self.problems(self.budget_reg(budget_below="0.25"))
+        self.assertTrue(problems)
+        self.assertIn("budget_below", problems[0])
+
+    def test_validate_rejects_a_non_string_source(self):
+        self.assertTrue(self.problems(self.budget_reg(source=42)))
+
+    def test_validate_accepts_a_null_share_with_a_source(self):
+        self.assertEqual(self.problems(self.budget_reg(
+            mode="budget", weekly_share_left=None)), [])
+
+    def test_the_schema_declares_the_field(self):
+        schema = registry.load(registry.SCHEMA_PATH)
+        props = schema["$defs"]["policy"]["properties"]["claude_budget"]
+        self.assertFalse(props["additionalProperties"])
+        self.assertEqual(set(props["properties"]),
+                         {"$comment", "mode", "weekly_share_left",
+                          "budget_below", "source"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3631,7 +3631,8 @@ class CardV2Tests(unittest.TestCase):
 
     def test_the_v2_tables_are_the_documented_ones(self):
         self.assertEqual(routing.CARD_V2_VALUES, {
-            "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+            "kind": ("implement", "debug", "review", "plan", "bulk", "research",
+                     "final"),
             "risk": ("normal", "high"),
             "spec": ("exact", "partial", "vague"),
             "privacy": ("public", "sensitive"),
@@ -3641,12 +3642,33 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
-            "author": None,
+            "author": None, "critical": False,
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
         self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
         self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+
+    def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
+        """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
+        `critical=true` names blocking work -- the two card states that may
+        still spend Claude in budget mode. `critical` is a boolean like
+        `deferrable`, and both are v2-only fields."""
+        self.assertIs(self.norm({"kind": "final"})["kind"], "final")
+        self.assertIs(self.norm({"critical": True})["critical"], True)
+        self.assertIs(self.norm({"critical": "true"})["critical"], True)
+        self.assertIs(self.norm({})["critical"], False)
+        for bad in ("yes", "1", "maybe"):
+            with self.assertRaises(routing.CardError, msg=bad):
+                routing.normalize_v2({"critical": bad})
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2({"kind": "final-review"})
+
+    def test_a_dotted_card_string_carries_final_and_critical(self):
+        out = routing.normalize_v2(routing.parse_card(
+            "kind=final,critical=true,paths=README.md"))
+        self.assertEqual(out["kind"], "final")
+        self.assertTrue(out["critical"])
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})

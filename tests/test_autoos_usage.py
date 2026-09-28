@@ -762,5 +762,59 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class ProviderLinesTests(CostTests):
+    """D-102 CLAUDEBUDGET (S2) item 3: `usage --by provider --lines`.
+
+    The table render is for a human reading a terminal; the daily routing-00
+    line is for an orchestrator pasting one row per provider into a report. So
+    this prints exactly one flat line per group -- calls, tokens in/out and the
+    estimated cost -- and prices it whether or not --cost was passed, because a
+    budget report with the cost column missing looks the same as one where the
+    providers were free.
+    """
+
+    def lines(self, rows, argv_extra=()):
+        fetch = FakeFetch({0: (200, rows)})
+        argv = ["--since", "24h", "--by", "provider",
+                "--registry", str(self.registry), "--lines"] + list(argv_extra)
+        rc, out, err = self.run_cli(argv, fetch)
+        self.assertEqual(rc, 0, err)
+        return [l for l in out.splitlines() if l.strip()]
+
+    def test_one_flat_line_per_provider(self):
+        rows = (self.rows(self.PRICED, n=3, age_min=2)
+                + self.rows("openai/gpt-oss-120b", provider="groq", n=1,
+                            age_min=5))
+        lines = self.lines(rows)
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(all(l.startswith("provider=") for l in lines), lines)
+        self.assertTrue(lines[0].startswith("provider=meta-api"), lines)
+
+    def test_the_line_carries_calls_tokens_and_cost(self):
+        lines = self.lines(self.rows(self.PRICED, tin=1000, tout=500, n=2))
+        self.assertEqual(len(lines), 1, lines)
+        fields = dict(kv.split("=", 1) for kv in lines[0].split()[1:])
+        self.assertEqual(fields["calls"], "2")
+        self.assertEqual(fields["tokens_in"], "2000")
+        self.assertEqual(fields["tokens_out"], "1000")
+        # 2000 * 1e-07 + 1000 * 2e-07 = 0.0004, per token, not per 1M.
+        self.assertEqual(fields["cost_usd"], "0.0004")
+
+    def test_lines_prices_without_an_explicit_cost_flag(self):
+        priced = self.lines(self.rows(self.PRICED))
+        self.assertNotIn("cost_usd=0.0000", priced[0])
+
+    def test_no_rows_is_no_lines(self):
+        self.assertEqual(self.lines([]), [])
+
+    def test_the_default_by_still_leads_with_provider(self):
+        fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
+        rc, out, _err = self.run_cli(
+            ["--since", "24h", "--registry", str(self.registry), "--lines"],
+            fetch)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.splitlines()[0].startswith("provider="), out)
+
+
 if __name__ == "__main__":
     unittest.main()

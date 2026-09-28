@@ -555,6 +555,27 @@ def render_text(report, dims):
     return "\n".join(lines)
 
 
+def render_lines(report, dims):
+    """One flat line per group of the FIRST --by dimension.
+
+    D-102 CLAUDEBUDGET (S2) item 3, operator 2026-09-28: the daily report to
+    routing-00 is one line per provider, so an orchestrator can paste it without
+    cutting a table out of terminal formatting. `key=value` pairs, never a column
+    layout -- the widths move with the longest provider name and nothing
+    downstream can grep a padded column.
+    """
+    dim = dims[0]
+    lines = []
+    for group in report["by"].get(dim, []):
+        cost = group.get("cost_in", 0.0) + group.get("cost_out", 0.0)
+        lines.append("%s=%s calls=%d ok=%d errors=%d tokens_in=%d "
+                     "tokens_out=%d cost_usd=%.4f"
+                     % (dim, group["key"], group["calls"], group["ok"],
+                        group["errors"], group["tokens_in"],
+                        group["tokens_out"], cost))
+    return "\n".join(lines)
+
+
 def main(argv=None, *, fetch=None, env=None, now=None):
     ap = argparse.ArgumentParser(
         prog="autoos-agent.py usage",
@@ -570,6 +591,12 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     ap.add_argument("--cost", action="store_true",
                     help="add estimated cost_in/cost_out (USD) per group, priced from "
                          "the registry's price_in/price_out")
+    ap.add_argument("--lines", action="store_true",
+                    help="one flat key=value line per group of the first --by "
+                         "dimension instead of tables (D-102: the daily "
+                         "per-provider report). Implies --cost, because a budget "
+                         "line with the cost missing reads the same as a free "
+                         "provider.")
     ap.add_argument("--registry", default=None,
                     help="price source for --cost and the paid-spend section "
                          "(default: catalog/ai-registry.json)")
@@ -641,18 +668,21 @@ def main(argv=None, *, fetch=None, env=None, now=None):
         print("autoos-usage: %s" % e, file=sys.stderr)
         return 3
 
-    priced = args.cost or spend_on
+    priced = args.cost or args.lines or spend_on
     registry = read_registry(args.registry) if priced else {}
     prices = prices_from_registry(registry)
     price_source = price_source_name(args.registry) if priced else None
     spend = paid_spend(rows, prices, registry, spend_cutoff, balance=balance,
                        price_source=price_source, complete=not truncated) if spend_on else None
+    show_cost = args.cost or args.lines
     report = build_report(rows, dims, cutoff, pages, truncated,
-                          prices=prices if args.cost else None,
-                          price_source=price_source if args.cost else None,
+                          prices=prices if show_cost else None,
+                          price_source=price_source if show_cost else None,
                           spend=spend)
     if args.json:
         print(json.dumps(report, indent=2))
+    elif args.lines:
+        print(render_lines(report, dims))
     else:
         print(render_text(report, dims))
     return 0

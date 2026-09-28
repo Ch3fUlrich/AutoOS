@@ -1968,8 +1968,18 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
-    return resolver.plan(normalized, features, client_state, registry, overlay,
-                         track_record, orchestrator_model, now)
+    result = resolver.plan(normalized, features, client_state, registry,
+                           overlay, track_record, orchestrator_model, now)
+    # D-102 CLAUDEBUDGET: the budget state leads every explain block, ON or off.
+    # A plan that dropped a Claude leg looks identical to one that never had a
+    # Claude candidate, and `route --explain` is what an operator reads to tell
+    # them apart. A budget-deferred plan already carries the line (plan() has no
+    # routes to explain), so it is not added twice.
+    budget_line = resolver.claude_budget_explain(registry)[0]
+    explain = result.get("explain") or []
+    if explain and explain[0].startswith("claude_budget:"):
+        return result
+    return dict(result, explain=[budget_line] + list(explain))
 
 
 def cmd_route(args) -> int:
@@ -2006,7 +2016,12 @@ def cmd_route(args) -> int:
             print(line, file=sys.stderr)
         print(result.get("reason", ""), file=sys.stderr)
     print(json.dumps(result, sort_keys=True, indent=2))
-    return 0 if result.get("route") is not None else 5
+    # A budget-deferred plan carries no route (there is nothing to run yet), but
+    # it is an answer, not a refusal: exit 5 means "input_required", and a
+    # caller that retries on 5 would spin against a policy that is working.
+    if result.get("route") is not None or result.get("state") == "deferred":
+        return 0
+    return 5
 
 
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:

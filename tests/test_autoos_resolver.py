@@ -58,8 +58,10 @@ class TableTests(unittest.TestCase):
             [row["points"] for row in t["features"]["lines"]], [0, 1, 2, 3])
         self.assertEqual(t["spec"], {"exact": 0, "partial": 1, "vague": 2})
         self.assertEqual(t["tests"], {True: 0, False: 1})
+        # "final" is the D-102 CLAUDEBUDGET kind: the reserved Claude review.
         self.assertEqual(t["kind"], {"implement": 0, "bulk": 0, "review": 0,
-                                     "research": 0, "debug": 2, "plan": 3})
+                                     "research": 0, "debug": 2, "plan": 3,
+                                     "final": 0})
         self.assertEqual(
             [(b["name"], b["max"]) for b in t["buckets"]],
             [("S0", 1), ("S1", 3), ("S2", 6), ("S3", 9), ("S4", None)])
@@ -3269,6 +3271,428 @@ class PlanLimitsGateTests(unittest.TestCase):
         legs, skipped, _ = self.legs("r-mixed")
         self.assertIn(("mistral", "mistral-small-latest"), legs)
         self.assertNotIn("mistral/mistral-small-latest", skipped)
+
+
+class ClaudeBudgetLegTests(unittest.TestCase):
+    """D-102 CLAUDEBUDGET (S2) item 2, per-leg: in budget mode a Claude leg is
+    held for finals, and nothing else about the route changes.
+
+    The operator's rule is "Claude only orchestrates and gives finals": writers,
+    researchers and first reviewers use free/cheap legs. The hold is a *per-leg*
+    filter (same shape as policy.leg_rules), so a mixed route keeps its cheap
+    legs and only loses the Claude one -- removing the whole route would drop
+    work that free capacity can do.
+    """
+
+    def registry(self, **budget):
+        entry = {"mode": "budget", "weekly_share_left": 0.10,
+                 "budget_below": 0.25, "source": "test D-102"}
+        entry.update(budget)
+        return {
+            "providers": {"cc": {"id": "cc"},
+                          "antigravity": {"id": "antigravity"},
+                          "groq": {"id": "groq"}},
+            "models": {
+                "claude-opus-4-6": {"id": "claude-opus-4-6",
+                                    "family": "anthropic",
+                                    "tool_calls": "proven",
+                                    "context_usable": {"tokens": 200000,
+                                                       "source": "default"}},
+                "gemini-3-flash": {"id": "gemini-3-flash", "family": "google",
+                                   "tool_calls": "proven",
+                                   "context_usable": {"tokens": 200000,
+                                                      "source": "default"}},
+                "openai/gpt-oss-120b": {"id": "openai/gpt-oss-120b",
+                                        "family": "openai-oss",
+                                        "tool_calls": "proven",
+                                        "context_usable": {"tokens": 200000,
+                                                           "source": "default"}},
+            },
+            "routes": {
+                "r-claude-only": {"id": "r-claude-only", "class": "frontier",
+                                  "legs": ["cc/claude-opus-4-6"]},
+                "r-mixed": {"id": "r-mixed", "class": "frontier",
+                            "legs": ["antigravity/claude-opus-4-6",
+                                     "groq/openai/gpt-oss-120b"]},
+                "r-clean": {"id": "r-clean", "class": "free",
+                            "legs": ["groq/openai/gpt-oss-120b",
+                                     "antigravity/gemini-3-flash"]},
+            },
+            "clients": {"claude": {"id": "claude"},
+                        "opencode": {"id": "opencode"}},
+            "policy": {"claude_budget": entry},
+        }
+
+    def features(self):
+        return {"need_tokens": 1000}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""},
+                "claude": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def legs(self, card, route_id="r-mixed", registry=None, client="opencode"):
+        registry = registry or self.registry()
+        kept, skipped, _ = r.usable_legs(registry["routes"][route_id], card,
+                                        self.features(), self.state(),
+                                        registry, {}, client)
+        return kept, skipped
+
+    def card(self, **over):
+        base = {"kind": "implement", "privacy": "public"}
+        base.update(over)
+        return base
+
+    # --- what counts as a Claude leg --------------------------------------
+
+    def test_a_claude_leg_is_recognised_by_family_provider_and_name(self):
+        registry = self.registry()
+        self.assertTrue(r.is_claude_leg("cc/claude-opus-4-6", registry))
+        self.assertTrue(r.is_claude_leg("antigravity/claude-opus-4-6", registry))
+        self.assertFalse(r.is_claude_leg("groq/openai/gpt-oss-120b", registry))
+        self.assertFalse(r.is_claude_leg("antigravity/gemini-3-flash", registry))
+
+    def test_the_real_registry_has_exactly_the_known_claude_legs(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        claude = set()
+        for route in registry["routes"].values():
+            for leg in route.get("legs") or []:
+                if r.is_claude_leg(leg, registry):
+                    claude.add(leg)
+        self.assertEqual(claude, {"cc/claude-opus-4-6",
+                                  "antigravity/claude-opus-4-6-thinking"})
+
+    # --- the hold ----------------------------------------------------------
+
+    def test_budget_mode_holds_the_claude_leg_of_a_mixed_route(self):
+        for kind in ("implement", "review", "research", "debug", "bulk", "plan"):
+            kept, skipped = self.legs(self.card(kind=kind))
+            self.assertEqual(kept, [("groq", "openai/gpt-oss-120b")], kind)
+            self.assertEqual(
+                skipped["antigravity/claude-opus-4-6"],
+                ["claude_budget: antigravity/claude-opus-4-6 held for finals"],
+                kind)
+
+    def test_a_final_card_keeps_the_claude_leg(self):
+        # The finals are what the operator reserved Claude for.
+        kept, skipped = self.legs(self.card(kind="final"))
+        self.assertIn(("antigravity", "claude-opus-4-6"), kept)
+        self.assertNotIn("antigravity/claude-opus-4-6", skipped)
+
+    def test_a_v1_role_review_card_is_still_held(self):
+        # normalize_v2 maps role=review onto kind=review before plan() sees it,
+        # so the hold reads the v2 kind -- pin that the mapped card is held.
+        kept, skipped = self.legs(self.card(kind="review"))
+        self.assertIn("antigravity/claude-opus-4-6", skipped)
+
+    def test_a_critical_card_keeps_the_claude_leg(self):
+        kept, skipped = self.legs(self.card(critical=True))
+        self.assertIn(("antigravity", "claude-opus-4-6"), kept)
+        self.assertNotIn("antigravity/claude-opus-4-6", skipped)
+
+    def test_budget_off_changes_nothing(self):
+        registry = self.registry(mode="normal", weekly_share_left=0.3)
+        kept, skipped = self.legs(self.card(), registry=registry)
+        self.assertEqual(kept, [("antigravity", "claude-opus-4-6"),
+                               ("groq", "openai/gpt-oss-120b")])
+        self.assertEqual(skipped, {})
+
+    def test_no_claude_budget_key_at_all_changes_nothing(self):
+        registry = self.registry()
+        del registry["policy"]["claude_budget"]
+        kept, skipped = self.legs(self.card(), registry=registry)
+        self.assertEqual(skipped, {})
+        self.assertIn(("antigravity", "claude-opus-4-6"), kept)
+
+    def test_a_non_claude_route_is_untouched_by_budget_mode(self):
+        kept, skipped = self.legs(self.card(), route_id="r-clean")
+        self.assertEqual(skipped, {})
+        self.assertEqual(len(kept), 2)
+
+    # --- the client half ---------------------------------------------------
+
+    def test_the_claude_client_is_held_for_every_route_except_finals(self):
+        registry = self.registry()
+        survivors, removed = r.filter_routes(
+            self.card(kind="implement"), self.features(), self.state(),
+            registry, {}, "claude")
+        self.assertEqual(survivors, [])
+        for route_id, reasons in removed.items():
+            self.assertIn("claude_budget", " ".join(reasons), route_id)
+
+    def test_the_claude_client_still_serves_a_final_card(self):
+        registry = self.registry()
+        survivors, _ = r.filter_routes(
+            self.card(kind="final"), self.features(), self.state(),
+            registry, {}, "claude")
+        self.assertEqual(survivors, ["r-claude-only", "r-mixed", "r-clean"])
+
+    def test_the_claude_client_is_untouched_when_budget_is_off(self):
+        registry = self.registry(mode="normal", weekly_share_left=1.0)
+        survivors, _ = r.filter_routes(
+            self.card(kind="implement"), self.features(), self.state(),
+            registry, {}, "claude")
+        self.assertEqual(len(survivors), 3)
+
+    # --- explain -----------------------------------------------------------
+
+    def test_explain_names_the_budget_state_in_one_line(self):
+        lines = r.claude_budget_explain(self.registry())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("claude_budget: ON"), lines[0])
+        self.assertIn("0.1", lines[0])
+
+    def test_explain_says_off_when_budget_is_off(self):
+        lines = r.claude_budget_explain(self.registry(mode="normal",
+                                                     weekly_share_left=0.9))
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("claude_budget: off"), lines[0])
+
+    def test_explain_says_off_when_the_key_is_absent(self):
+        registry = self.registry()
+        del registry["policy"]["claude_budget"]
+        self.assertTrue(r.claude_budget_explain(registry)[0]
+                        .startswith("claude_budget: off"))
+
+
+class ClaudeBudgetPlanTests(unittest.TestCase):
+    """plan(): the deferred path and the critical-path override line.
+
+    A deferrable card that loses its last leg to the budget hold does not get a
+    Claude fallback -- it waits. `wait_until` is the next cheap/off-peak start
+    the registry knows about, and when no window is recorded it says the only
+    honest thing: "free capacity".
+    """
+
+    def registry(self, **budget):
+        # PlanTests' inline registry plus a Claude-only frontier route, so one
+        # knob (policy.claude_budget) changes the answer and nothing else does.
+        registry = PlanTests.registry(None)
+        registry["providers"]["cc"] = {"id": "cc"}
+        registry["models"]["claude-opus-4-6"] = {
+            "id": "claude-opus-4-6", "family": "anthropic", "reasoning": True,
+            "effort_ladder": ["none", "low", "medium", "high", "max"],
+            "tool_calls": "proven", "price_in": 1.5e-5, "price_out": 7.5e-5,
+            "output_max": 32000,
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["routes"]["r-claude"] = {"id": "r-claude",
+                                          "class": "frontier",
+                                          "legs": ["cc/claude-opus-4-6"]}
+        registry["clients"] = {"opencode": {"id": "opencode"},
+                               "claude": {"id": "claude"}}
+        registry["policy"]["claude_budget"] = {
+            "mode": "budget", "weekly_share_left": 0.10,
+            "budget_below": 0.25, "source": "test D-102"}
+        registry["policy"]["claude_budget"].update(budget)
+        return registry
+
+    def plan(self, registry=None, client="opencode", now=None,
+             **card_overrides):
+        registry = registry or self.registry()
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public"}
+        card.update(card_overrides)
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                    "tests": True, "need_tokens": 1000}
+        state = {"opencode": {"installed": True, "signed_in": True, "reason": ""},
+                 "claude": {"installed": True, "signed_in": True, "reason": ""}}
+        return r.plan(card, features, state, registry, {}, [], "orch",
+                      now or datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc),
+                      client)
+
+    # --- the deferred path (Claude-only card) ------------------------------
+
+    def claude_only(self, **budget):
+        """A registry in which the only routes left are Claude ones."""
+        registry = self.registry(**budget)
+        for route_id in ("r-free", "r-cheap", "r-mid", "r-frontier"):
+            del registry["routes"][route_id]
+        return registry
+
+    def test_a_deferrable_claude_only_card_is_deferred_not_falled_back(self):
+        plan = self.plan(self.claude_only(), deferrable=True)
+        self.assertIsNone(plan["route"])
+        self.assertEqual(plan["state"], "deferred")
+        self.assertIn("claude_budget", plan["reason"])
+        self.assertIn("wait_until", plan)
+        self.assertIsNotNone(plan["wait_until"])
+
+    def test_wait_until_is_the_next_cheap_window_the_registry_knows(self):
+        # cheap-p turns cheap at 10:00 UTC on weekdays and the clock is 09:00
+        # Tuesday, so that is the window this card waits for -- the same
+        # providers.<id>.windows data defer_until() already reads.
+        registry = self.claude_only()
+        plan = self.plan(registry, kind="review", deferrable=True)
+        self.assertEqual(plan["state"], "deferred")
+        self.assertEqual(plan["wait_until"], "2026-09-29T10:00Z")
+
+    def test_wait_until_says_free_capacity_when_no_window_is_known(self):
+        registry = self.claude_only()
+        del registry["providers"]["cheap-p"]["windows"]
+        plan = self.plan(registry, deferrable=True)
+        self.assertEqual(plan["wait_until"], "free capacity")
+        self.assertEqual(plan["reason"], "claude_budget")
+
+    def test_a_claude_offpeak_window_is_a_wait_until_too(self):
+        # cc's own quiet window (the shipped registry records one) is an
+        # off-peak signal like any other: with no cheap-p window on file, the
+        # 21:00 load window is what the card waits for.
+        registry = self.claude_only()
+        del registry["providers"]["cheap-p"]["windows"]
+        registry["providers"]["cc"]["windows"] = [
+            {"days": ["mon", "tue", "wed", "thu", "fri"], "utc_from": "21:00",
+             "utc_to": "23:59", "price_factor": 0.5, "kind": "load",
+             "source": "test"}]
+        plan = self.plan(registry, deferrable=True,
+                         now=datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc))
+        self.assertEqual(plan["state"], "deferred")
+        self.assertEqual(plan["wait_until"], "2026-09-29T21:00Z")
+
+    def test_a_non_deferrable_claude_only_card_never_gets_claude(self):
+        plan = self.plan(self.claude_only())
+        self.assertIsNone(plan["route"])
+        self.assertNotEqual(plan["state"], "ready")
+        self.assertIn("claude_budget", plan["reason"])
+
+    # --- the critical-path override ---------------------------------------
+
+    def test_a_critical_card_still_routes_to_claude_and_says_why(self):
+        plan = self.plan(self.claude_only(), critical=True)
+        self.assertEqual(plan["route"], "r-claude")
+        self.assertIn("claude_budget: critical-path override", plan["reason"])
+
+    def test_a_final_card_routes_to_claude_without_the_override_line(self):
+        plan = self.plan(self.claude_only(), kind="final")
+        self.assertEqual(plan["route"], "r-claude")
+        self.assertNotIn("critical-path", plan["reason"])
+
+    def test_budget_off_plan_carries_no_budget_override(self):
+        registry = self.registry(mode="normal", weekly_share_left=0.9)
+        plan = self.plan(registry, critical=True)
+        self.assertNotIn("claude_budget: critical-path", plan["reason"])
+
+    def test_a_deferred_plan_explains_the_budget(self):
+        # The deferred plan has no scored route to explain, so its whole explain
+        # block is the budget state -- otherwise "deferred" looks like a bug in
+        # the resolver rather than a policy.
+        plan = self.plan(self.claude_only(), deferrable=True)
+        self.assertTrue(plan["explain"][0].startswith("claude_budget: ON"),
+                        plan["explain"])
+
+
+class ClaudeBudgetRealRegistryTests(unittest.TestCase):
+    """The before/after table on the shipped catalog (D-102, 3 cards).
+
+    Budget OFF is the status quo: these three cards must route exactly as they
+    did before the field existed, or the change moves work nobody asked to move.
+    Budget ON must never land a non-final card on a Claude leg, and must leave a
+    final card's Claude legs alone.
+
+    The three cards are the non-agentic kinds: an implement/debug/bulk card
+    needs a tool_calls-proven leg from the measured overlay, which is host state
+    this file never reads -- the CLI's own `route --card kind=implement` check
+    covers that path against the real overlay instead.
+    """
+
+    NOW = datetime(2026, 9, 28, 13, 0, tzinfo=timezone.utc)
+    OFF = {"mode": "normal", "weekly_share_left": None}
+    ON = {"mode": "budget", "weekly_share_left": 0.10}
+
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        cls.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def plan(self, kind, budget):
+        import copy
+        registry = copy.deepcopy(self.registry)
+        if budget is not None:
+            registry["policy"]["claude_budget"].update(budget)
+        card = {"kind": kind, "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public"}
+        features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                    "tests": True, "need_tokens": 1000}
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in registry["clients"]}
+        return r.plan(card, features, state, registry, {}, [],
+                      "claude-opus-4-6", self.NOW)
+
+    def legs(self, card_kind, route_id):
+        """usable_legs() for one shipped route. The cards here are non-agentic
+        kinds, so no tool_calls overlay is consulted, and need_tokens stays
+        under every leg's context -- the budget hold is the only reason a leg
+        can be skipped in these tests."""
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in self.registry["clients"]}
+        return r.usable_legs(self.registry["routes"][route_id],
+                             {"kind": card_kind, "privacy": "public"},
+                             {"need_tokens": 1000}, state, self.registry, {},
+                             "opencode", self.NOW)
+
+    # card kind -> (route, leg) with the budget off, read off the shipped
+    # catalog on 2026-09-28 and approved as the before/after pin.
+    BEFORE_AFTER = {
+        "review": ("t1-orchestrator-free-only",
+                   "google_ai_studio/gemini-3.8-flash"),
+        "research": ("t1-orchestrator-free-only",
+                     "google_ai_studio/gemini-3.8-flash"),
+        "plan": ("t1-orchestrator-free-only",
+                 "google_ai_studio/gemini-3.8-flash"),
+    }
+
+    def test_budget_off_routes_are_the_pinned_table(self):
+        for kind, (route, leg) in self.BEFORE_AFTER.items():
+            plan = self.plan(kind, self.OFF)
+            self.assertEqual((plan["route"], plan["leg"]), (route, leg), kind)
+
+    def test_budget_on_changes_nothing_for_the_3_cards(self):
+        for kind in self.BEFORE_AFTER:
+            off = self.plan(kind, self.OFF)
+            on = self.plan(kind, self.ON)
+            self.assertEqual((on["route"], on["leg"]),
+                             (off["route"], off["leg"]), kind)
+            self.assertFalse([leg for leg in [on["leg"]]
+                              if r.is_claude_leg(leg, self.registry)], kind)
+
+    def test_the_shipped_value_turns_budget_mode_on(self):
+        # The hold an operator sees in `route --explain` comes from the shipped
+        # number, not from a test that set one.
+        self.assertTrue(r.claude_budget_explain(self.registry)[0]
+                        .startswith("claude_budget: ON"))
+
+    def test_a_non_final_card_holds_every_claude_leg_it_offers(self):
+        for route_id in ("opus-4-6", "t2-orchestrator"):
+            _kept, skipped, _ = self.legs("implement", route_id)
+            held = [leg for leg, reasons in skipped.items()
+                    if any(x.startswith("claude_budget:") for x in reasons)]
+            self.assertTrue(held, route_id)
+            for leg in held:
+                self.assertEqual(
+                    [x for x in skipped[leg] if x.startswith("claude_budget:")],
+                    ["claude_budget: %s held for finals" % leg],
+                    "%s of %s" % (leg, route_id))
+
+    def test_a_final_card_keeps_the_same_claude_legs(self):
+        for route_id in ("opus-4-6", "t2-orchestrator"):
+            _kept, skipped, _ = self.legs("final", route_id)
+            self.assertEqual([leg for leg, reasons in skipped.items()
+                              if any(x.startswith("claude_budget:")
+                                     for x in reasons)], [], route_id)
+
+    def test_a_critical_card_is_held_by_nothing(self):
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in self.registry["clients"]}
+        kept, skipped, _ = r.usable_legs(
+            self.registry["routes"]["t2-orchestrator"],
+            {"kind": "review", "privacy": "public", "critical": True},
+            {"need_tokens": 1000}, state, self.registry, {}, "opencode",
+            self.NOW)
+        self.assertEqual([leg for leg, reasons in skipped.items()
+                          if any(x.startswith("claude_budget:")
+                                 for x in reasons)], [])
+        self.assertIn(("antigravity", "claude-opus-4-6-thinking"), kept)
 
 
 if __name__ == "__main__":
