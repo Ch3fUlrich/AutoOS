@@ -649,12 +649,20 @@ class _WrapperSpec:
     that make the wrapped command statically unknowable; a stop yields no head.
     ``lone_dash_is_flag`` marks env, whose bare ``-`` means -i. A wrapper that
     takes positional arguments *before* its command (flock's lockfile, chrt's
-    priority, taskset's mask) sets ``positionals_before_command`` so the walker
-    keeps scanning for options that GNU getopt permutes after it -- and keeps
+    priority, taskset's mask) sets ``positionals_before_command`` and keeps
     consuming that many positionals after ``--``, which ends option parsing but
-    not the positional region. ``trailing`` names the only argument shapes the
-    walker has to recognize *after* the option region: env's NAME=VALUE
-    assignments and timeout's bare duration."""
+    not the positional region.
+
+    ``permute`` is how the real program's getopt was called. GNU getopt (the
+    default: flock, and every launcher here that leaves it unset) permutes
+    options that follow a positional back into the option region, so the walker
+    keeps scanning. POSIX ``+`` mode does not: util-linux calls it for chrt and
+    taskset, whose scanning stops at their positional -- after that, the very
+    next token is the command handed to execvp verbatim, ``--`` (measured:
+    ``chrt -i 0 -- /bin/echo x`` fails with "failed to execute --") or ``-p``
+    included. ``trailing`` names the only argument shapes the walker has to
+    recognize *after* the option region: env's NAME=VALUE assignments and
+    timeout's bare duration."""
 
     label: str
     longs: Mapping[str, str]
@@ -664,6 +672,7 @@ class _WrapperSpec:
     trailing: str = "none"  # none | assignments | duration
     lone_dash_is_flag: bool = False
     positionals_before_command: int = 0
+    permute: bool = True
 
 
 _ENV_SPEC = _WrapperSpec("env", _ENV_LONGS,
@@ -681,15 +690,22 @@ _XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
                            short_optional=frozenset("il"))
 _FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
                            stops=frozenset(("c", "command")),
-                           positionals_before_command=1)
+                           positionals_before_command=1,
+                           # The program the permuting walker was modelled on:
+                           # `flock /tmp/l -c cmd` really does read -c as an
+                           # option, so the flag is explicit, not defaulted.
+                           permute=True)
 _SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
 _NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
+# chrt and taskset call getopt with a `+`-prefixed optstring (util-linux 2.39.3,
+# measured): their option parsing stops at the priority / the mask, so what
+# follows that positional is the command verbatim and never an option.
 _CHRT_SPEC = _WrapperSpec("chrt", _CHRT_LONGS, short_value=frozenset("TPD"),
                           stops=frozenset(("p", "pid")),
-                          positionals_before_command=1)
+                          positionals_before_command=1, permute=False)
 _TASKSET_SPEC = _WrapperSpec("taskset", _TASKSET_LONGS,
                              stops=frozenset(("p", "pid")),
-                             positionals_before_command=1)
+                             positionals_before_command=1, permute=False)
 _WATCH_SPEC = _WrapperSpec("watch", _WATCH_LONGS, short_value=frozenset("nq"),
                            short_optional=frozenset("d"))
 
@@ -746,12 +762,24 @@ def _walk_wrapper_options(
     values, unique-prefix long options with ``=value`` or a next-token
     value, ``--``, env's bare ``-`` and NAME=VALUE assignments, and the
     positional a wrapper takes before its command (flock's lockfile, chrt's
-    priority, taskset's mask). ``--`` ends option parsing but not that
-    positional region, so the token after it is read as the wrapper's own
-    argument even when it starts with ``-`` (``flock -- -c rm -rf /`` puts
-    ``-c`` in the lockfile slot and ``rm`` in the command slot) -- the
-    reading that keeps a command region in view whichever token ``--`` landed
-    before."""
+    priority, taskset's mask).
+
+    Two getopt dialects are modelled, and ``spec.permute`` says which a
+    launcher uses. GNU getopt -- flock, env, nice, timeout, stdbuf, ionice,
+    xargs, setsid, nohup and watch -- permutes an option that follows the
+    positional back into the option region, so the walk continues past it
+    (``flock /tmp/l -c cmd`` is ``flock -c cmd /tmp/l`` to the real program).
+    chrt and taskset pass util-linux a ``+``-prefixed optstring, whose scan
+    stops at the first non-option: past their positional nothing is an option
+    and the next token is the execed command, so the walk breaks there and
+    reports that token as the head however it is spelled.
+
+    ``--`` ends option parsing in both dialects but only while options are
+    still being scanned, and it does not end the positional region, so the
+    token after it is read as the wrapper's own argument even when it starts
+    with ``-`` (``flock -- -c rm -rf /`` puts ``-c`` in the lockfile slot and
+    ``rm`` in the command slot) -- the reading that keeps a command region in
+    view whichever token ``--`` landed before."""
     i, n = 1, len(cur)
     problem: str | None = None
     options: list[str] = []
@@ -762,6 +790,12 @@ def _walk_wrapper_options(
         if not isinstance(tok, str):
             i += 1
             continue
+        if not spec.permute and positionals >= spec.positionals_before_command:
+            # A `+`-mode getopt stopped scanning at the first non-option, so
+            # with the positional region satisfied there are no more options:
+            # this token is the command the program execs, `--` and `-p`
+            # included -- and it is the head verbatim, unresolvable or not.
+            break
         if tok == "--":
             saw_dashdash = True
             i += 1
@@ -809,10 +843,12 @@ def _walk_wrapper_options(
             i += 2 if consumed_next else 1
             continue
         # A positional. flock's lockfile, chrt's priority and taskset's mask
-        # are the ones a wrapper takes before its command; consume them and
-        # keep walking, because getopt permutes options that follow them
-        # (flock /tmp/l -c cmd) into the option region. Any later positional
-        # is the wrapped command.
+        # are the ones a wrapper takes before its command; consume it and, for
+        # a permuting launcher, keep walking, because GNU getopt permutes
+        # options that follow it (flock /tmp/l -c cmd) into the option region.
+        # A non-permuting one (chrt, taskset) is caught by the scan-stop at the
+        # top of the loop on the next token: that token is its command. Any
+        # later positional is the wrapped command.
         if positionals < spec.positionals_before_command:
             positionals += 1
             i += 1
@@ -850,6 +886,26 @@ def _wrapper_option_problem(head: Sequence[str]) -> str | None:
 
 def _idx_after_env(s: Sequence[str]) -> int | None:
     return _walk_wrapper_options(s, _ENV_SPEC)[0]
+
+
+def _wrapper_child_heads(cur: Sequence[str],
+                         spec: _WrapperSpec) -> list[list[str]]:
+    """The command a `+`-mode (non-permuting) launcher hands to execvp.
+
+    chrt and taskset stop option scanning at their positional, so the next
+    token is the command *verbatim* -- ``--`` and ``-p`` included, which is why
+    this does not apply the ``-`` filter the permuting launchers' branches in
+    _direct_child_heads() do: for them a leading ``-`` means getopt permuted the
+    option into the option region, for these two it means the program is about
+    to fail to exec a file with that name. Surfacing it anyway is what keeps
+    decide() from auditing some later token as though it had run, and an
+    unresolvable head denies as path-hijack. Any wrapper that later sets
+    ``permute=False`` belongs on this path too.
+    """
+    idx = _walk_wrapper_options(cur, spec)[0]
+    if idx is None or idx >= len(cur):
+        return []
+    return [list(cur[idx:])]
 
 
 def _env_split_string_problem(argv: Sequence[str]) -> str | None:
@@ -903,10 +959,6 @@ def _idx_after_stdbuf(s: Sequence[str]) -> int | None:
     return _walk_wrapper_options(s, _STDBUF_SPEC)[0]
 
 
-def _idx_after_chrt(s: Sequence[str]) -> int | None:
-    return _walk_wrapper_options(s, _CHRT_SPEC)[0]
-
-
 def _idx_after_flock(s: Sequence[str]) -> int | None:
     return _walk_wrapper_options(s, _FLOCK_SPEC)[0]
 
@@ -924,16 +976,14 @@ def _flock_runs_shell(head: Sequence[str]) -> bool:
     return "c" in options or "command" in options
 
 
-def _idx_after_taskset(s: Sequence[str]) -> int | None:
-    return _walk_wrapper_options(s, _TASKSET_SPEC)[0]
-
-
 def _pid_mode_problem(head: Sequence[str]) -> str | None:
     """chrt/taskset -p/--pid (or any unambiguous abbreviation of it) operate
     on an existing pid instead of a command, so there is nothing to audit and
     decide() refuses -- the same posture as env -S and flock -c. Reads the
     walker's option list, so a cluster (-pc, -vp) and an abbreviation both
-    surface."""
+    surface. Only an option that precedes the priority/mask is in that list:
+    these two stop scanning at their positional, so `chrt 5 -p 123` execs the
+    literal `-p` and is not pid mode (hx3)."""
     if not head:
         return None
     base = _basename(head[0])
@@ -1058,14 +1108,12 @@ def _direct_child_heads(cur: Sequence[str]) -> list[list[str]]:
     if base == "stdbuf":
         idx = _idx_after_stdbuf(cur)
         return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
-    if base == "chrt":
-        idx = _idx_after_chrt(cur)
-        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
+    if base in ("chrt", "taskset"):
+        # The `+`-mode pair: their command is the token right after the
+        # priority/mask, verbatim, so it is not dash-filtered here.
+        return _wrapper_child_heads(cur, _WRAPPER_SPECS[base])
     if base == "flock":
         idx = _idx_after_flock(cur)
-        return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
-    if base == "taskset":
-        idx = _idx_after_taskset(cur)
         return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
     if base == "watch":
         idx = _idx_after_watch(cur)
