@@ -1,4 +1,4 @@
-# RESTART — cheap relaunches: state card + context pack (spec v3)
+# RESTART — cheap relaunches: state card + context pack (spec v3.1)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
@@ -105,11 +105,13 @@ printed. The order is:
    - An **open ready** is a `ready <branch> <sha>` record this session wrote into its parent's inbox
      for which no later record in its own inbox from the parent contains the first 7 hex of `<sha>`
      together with `main=`.
-   - An **open question** is a record in `<RUN>/inbox/L0.md` or this session's inbox matching
-     `Q[-:]\s?\d*` or `question:` that was written by this session and is not answered. Answered
-     means a later record matches `\banswer\s+(?P<id>Q-\d+)\b` or `\b(?P<id>Q-\d+)\s+ANSWERED\b`
-     (the id-first form in use) with the same id. A `question:` without an id is open until a later
-     `→ done` record of this session quotes its first 40 characters.
+   - **Open questions** are NOT inferred from inbox text. Measured: real answers are free text
+     ("Q-008 (a) -> REDACTMERGE queued", "answers Q-001/Q-003"), and mentions of an id are not
+     questions, so no pattern classifies them (Sonnet v3 review). The source of truth is the card:
+     every open question is a `threads` line whose id starts with `Q` (`Q-008 | routing-00 | asked
+     22:33Z | default a`). The session closes it by deleting the line when the answer arrives. The
+     pack prints those lines under the snapshot's `open questions` heading, and `card check` rejects a
+     `Q` thread without an `asked <time>` field.
 3. **Memory:** stub `memory: not wired (MEMSPEC)`.
 4. **Role brief:** `<RUN>/briefs/<name>.md`, verbatim.
 5. **State card:** verbatim.
@@ -161,7 +163,8 @@ started from, diff two packs, and answer "why this decision" by replaying the ex
 (operator retention D-042): exact replay works for 90 days. After that the manifest still names every
 part by sha, which proves lineage but can no longer rebuild the bytes.
 
-- **Redaction:** every blob is written through the repo's one secret-pattern module
+- **Redaction:** the pack FILE and every blob are written through the repo's one secret-pattern module
+  (the session reads the redacted pack, so `--replay` rebuilds exactly what it read);
   (`tools/autoos_redact.py`, landing with REDACTMERGE). Packs quote inbox text, briefs and operator
   lines verbatim, so a blob holds the redacted text and its sha is the sha of the redacted bytes.
   R7 starts after REDACTMERGE is on main.
@@ -225,7 +228,8 @@ items per worker run.
 | R2/R5 over 3 items | R2a/R2b, R5a/R5b |
 | canonical JSON undefined | §6 pinned serialization + id test |
 | 90-day prune vs replay | §6 trade-off stated in the goal |
-| "answered" left to prose | §3 exact patterns |
+| "answered" left to prose | v3.1: open questions live in the card's `threads` (Q-lines), not inferred from inbox text (v3 re-check: patterns unattested) |
+| pack vs blob redaction | v3.1: the pack file itself is redacted; replay is exact |
 
 ## §R. v1 review findings → v2 resolution
 
