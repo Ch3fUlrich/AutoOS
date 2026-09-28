@@ -12,6 +12,101 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Measured: L1-backlog handed off every ~15 min at 150k with a 55.5k fresh-session baseline. Temporary
   until the RESTART packs land; lowered again if a measured relaunch costs < ~20k. Haiku and unknown
   models keep 150k.
+### Fixed — `codestral-latest` counts as training until a source says otherwise (MISTRALFIX3, Muse review of MISTRALFIX2, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `models.codestral-latest.trains_on_prompts: true` (operator 12:0xZ
+  "Mistral trains -> never in -clean tiers"), so `private_safe()` keeps it out of every `-clean`
+  route; its limits row names both sources (10:5xZ direct headers for rpm/tpm, 11:5xZ gateway
+  answers); the Mistral provider note counts three limits rows. Guard tests in `MistralReplaceTests`.
+
+### Fixed — the codestral pair replaces `mistral-small`; the `-clean` twins stay non-training (MISTRALFIX2, 2026-09-28)
+
+- **Operator brief (via L1-main 11:5xZ)**: `mistral-small` does not work — replace it
+  with Mistral Codestral wherever it was a leg, and where both codestral siblings
+  answer, take `mistral-code-latest`. Measured through the gateway (3 calls each,
+  `max_tokens 4096`, `work/L1-routing/MISTRALREPL.probe.jsonl`):
+  `mistral/mistral-code-latest` 3/3 200 p50 0.3 s, `mistral/codestral-latest` 3/3 200
+  p50 0.3 s, `mistral/mistral-small-latest` 0/3 (429) — the gateway agrees with the
+  10:5xZ direct probe (MISTRALFIX).
+- **`catalog/ai-registry.json:models.codestral-latest` +
+  `providers.mistral.limits.codestral-latest`**: registered with the measured 125 rpm /
+  625k tpm row and the gateway-probe source, and **not** made a leg of any route — it is
+  the tested alternative, which is what the brief's tie-break left it. `context_advertised`
+  / `output_max` / `reasoning` are inherited from the provider's other records, not
+  measured here, and the `$comment` says so; `trains_on_prompts` stays unset (inherits
+  `providers.mistral`, the shape `mistral-small-latest` carried) because nobody has
+  measured whether codestral trains. `mistral-code-latest` already had its measured row.
+- **The requested `-clean` swap was measured and refused, not skipped**: putting
+  `mistral/mistral-code-latest` in `t2-worker-clean` / `t3-driver-clean` (the position
+  `mistral-small` held, which would have given each twin two live legs) makes
+  `tools/registry.py validate` exit 1 twice — `privacy: <route> leg
+  mistral/mistral-code-latest model trains on prompts` (spec 3.1 rule 3, `private_safe()`).
+  Those are the routes a `privacy=sensitive` card lands on
+  (`tests/test_autoos_spawner.py`), and `tests/linux/33-documentation.sh` independently
+  bans `mistral/mistral-code` in any `-clean` combo, so the leg would have routed private
+  prompts into a training pool. The twins keep MISTRALFIX's legs and their one live leg,
+  the native `deepseek/deepseek-flash` head, which satisfies the route-liveness invariant.
+- **`t3-driver`** needed no change and no new leg: `mistral/mistral-code-latest` was
+  already its head, so the dead model's slot is covered without duplicating the leg
+  (`MistralReplaceTests` pins the count at 1).
+- **Tests, `tests/test_registry.py:MistralReplaceTests` (written first, red, then made
+  green)**: codestral's measured row and source, codestral in no route, the probe recorded
+  in the registry, `mistral-small` in no route, `t3-driver`'s single mistral-code leg — and
+  the guard that the `-clean` twins carry no training leg and exactly one live leg, so a
+  later lane cannot "finish" this swap by adding it. The route-liveness invariant now reads
+  through the new `live_legs()` helper, shared with the count tests instead of restating the
+  filter.
+- **Docs**: `docs/models.md` records the gateway probe and the refused swap next to the
+  MISTRALFIX plan-limits table; `docs/models-proposed.md`'s three rows for the affected
+  combos stop listing `mistral-small` as a leg and name the reason. All five `render
+  --check` surfaces pass unchanged — no route's legs moved and a route-less model renders
+  nowhere, so `combos.json`, the litellm block, `ide-models.json` and the OpenHands
+  profiles had nothing to re-derive.
+
+### Fixed — Mistral plan limits are measured and gate the route; no route routes into a dead leg (MISTRALFIX, 2026-09-28)
+
+- **`catalog/ai-registry.json:providers.mistral.limits`**: the plan itself, not the
+  provider's uptime, is what killed `mistral-small-latest` — a direct probe
+  (2026-09-28T10:5xZ, `x-ratelimit` headers on `api.mistral.ai`) returns 429 at
+  **0 req/min** for it while `mistral-code-latest` serves 125 rpm / 625k tpm on the
+  same key. The measured rows now live in the registry's one home for plan caps
+  (`rpm`/`tpm`/`source`), and the bare-spelling models that were never registered
+  (`devstral-latest`, `mistral-medium-latest`, `magistral-medium-latest`,
+  `codestral-latest`, `open-mistral-nemo`, `ministral-8b-latest`, and
+  `mistral-large-latest` at 403) are recorded in the provider `$comment` only —
+  rule 10 rejects a limits key that does not resolve to a model of that provider.
+  The gateway agrees: `mistral-small-latest` failed 51/51 calls over 7 days.
+- **`tools/registry.py:plan_dead_reasons()`** (new, alongside
+  `provider_plan_limits()`): a leg is plan-dead when its row says `rpm: 0` or
+  `plan_available: false`; no row is never a deny. `plan_available` joined
+  `$defs.provider_limits` in the schema and `_LIMITS_ENTRY_KEYS`, so rule 10 now
+  rejects a non-boolean (a string would read as available).
+- **`tools/autoos_resolver.py:usable_legs()`** had no plan gate at all — only a
+  request-size `tpm` check — so a 0-rpm leg survived every filter and got served.
+  `plan_dead_reasons` now runs immediately after the availability hard check,
+  naming the reason `"plan: 0 rpm"`. The stale "rpm/rpd/tpd are data only" claims
+  in that module are corrected: `rpm` gates, but only for its zero.
+- **`routes.t3-driver` / `t2-worker-clean` / `t3-driver-clean`**: `mistral/
+  mistral-small-latest` is out of all three (13→12, 4→3, 3→2 legs). The `-clean`
+  twins do not need marking unavailable — after DSBACK they head on native
+  `deepseek/deepseek-flash`, which is live and plan-ungated, so each keeps a
+  serving leg. `t3-driver` keeps its paid `mistral/mistral-code-latest` leg.
+- **Invariant, `tests/test_registry.py:MistralPlanLimitsTests`**: every route that
+  serves traffic (`servable_route_ids`) keeps at least one leg that is
+  gateway-servable *and* plan-alive, over the real registry — the check that would
+  have caught this on the day the leg was added. A route with zero servable legs
+  renders no combo and so serves nothing, which is why `t1-orchestrator-clean` is
+  correctly outside the rule rather than exempt from it.
+- **Renders** re-derived from the registry: `sync-router-tiers.py` rewrote the
+  litellm managed block, `docs/models.md`'s managed block plus its mermaid chains
+  and provider table, `configuration/omniroute/combos.json` by minimal hand-edit
+  of the three leg arrays (its hand-written `$comment` is an intentional equality
+  exception and stays); `validate` and all five `render --check` surfaces pass.
+- **Stale pins re-derived, not loosened (R-worker-01)**: `RuleThreePrivacyTests`
+  read the live head leg from the registry instead of hard-coding mistral-small,
+  and three resolver tests that called it "the proven leg" now use
+  `test_autoos_resolver.py:clean_head_leg()`; `PlanLimitsGateTests` seeds the dead
+  plan inline so the gate is tested without `measured.json`.
 
 ### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
 

@@ -54,7 +54,19 @@ def mutated() -> dict:
 
 # The allowed keys of a providers.<id>.limits.<model> entry, matching
 # catalog/ai-registry.schema.json $defs.provider_limits.
-ALLOWED_LIMIT_KEYS = {"rpm", "rpd", "tpm", "tpd", "source"}
+ALLOWED_LIMIT_KEYS = {"rpm", "rpd", "tpm", "tpd", "plan_available", "source"}
+
+
+def live_legs(reg: dict, route_id: str) -> list:
+    """The legs of `route_id` the gateway could actually answer: not flagged
+    unavailable, not client-bound, not denied by policy.leg_rules (those are all
+    `gateway_legs`'s job) and not dead on the plan (0 rpm / plan_available
+    false). One helper for the route-liveness invariant and for every test that
+    wants to say "this route has N live legs", so the two can never drift."""
+    route = reg["routes"][route_id]
+    return [leg for leg in registry.gateway_legs(route, reg)
+            if not registry.plan_dead_reasons(*registry.resolve_leg(leg, reg),
+                                              registry=reg)]
 
 
 class RealRegistryTests(unittest.TestCase):
@@ -190,20 +202,32 @@ class RuleTwoIdUniquenessTests(unittest.TestCase):
 
 
 class RuleThreePrivacyTests(unittest.TestCase):
-    """Rule 3: -clean routes only use available legs whose provider does not train."""
+    """Rule 3: -clean routes only use available legs whose provider does not train.
+
+    MISTRALFIX (2026-09-28) re-derived the leg these tests dirty: the route's
+    mistral leg is gone (0 rpm on the plan), so they now flip the provider of
+    the leg that actually heads `t2-worker-clean` on this base —
+    deepseek/deepseek-flash — which is the head the privacy rule exists to keep
+    clean.
+    """
+
+    def setUp(self):
+        reg = load_registry()
+        self.leg = reg["routes"]["t2-worker-clean"]["legs"][0]
+        self.provider, _, self.model = self.leg.partition("/")
 
     def test_clean_route_with_a_training_leg_is_flagged(self):
         reg = mutated()
-        reg["providers"]["mistral"]["trains_on_prompts"] = True
+        reg["providers"][self.provider]["trains_on_prompts"] = True
         problems = registry.check_registry(reg)
-        self.assertIn("privacy: t2-worker-clean leg mistral/mistral-small-latest trains on prompts",
-                      problems)
+        self.assertIn("privacy: t2-worker-clean leg %s trains on prompts"
+                      % self.leg, problems)
 
     def test_allow_training_does_not_exempt_the_route(self):
         # review-a3: spec 3.1 has no allow_training escape; a clean route that
         # carries one is still checked (fail closed).
         reg = mutated()
-        reg["providers"]["mistral"]["trains_on_prompts"] = True
+        reg["providers"][self.provider]["trains_on_prompts"] = True
         reg["routes"]["t2-worker-clean"]["allow_training"] = True
         problems = registry.check_registry(reg)
         self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
@@ -228,7 +252,7 @@ class RuleThreePrivacyTests(unittest.TestCase):
     def test_unknown_trains_on_prompts_is_flagged(self):
         # review-a3: a null/missing trains_on_prompts is unverified, not clean.
         reg = mutated()
-        reg["providers"]["mistral"]["trains_on_prompts"] = None
+        reg["providers"][self.provider]["trains_on_prompts"] = None
         problems = registry.check_registry(reg)
         self.assertTrue(any("privacy: t2-worker-clean" in p for p in problems), problems)
 
@@ -238,21 +262,21 @@ class RuleThreePrivacyTests(unittest.TestCase):
         # free pool was treated as "clean" because only trains_on_prompts
         # was checked, never tier).
         reg = mutated()
-        reg["providers"]["mistral"]["tier"] = "free"
+        reg["providers"][self.provider]["tier"] = "free"
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("privacy: t2-worker-clean" in p and "mistral/mistral-small-latest" in p
-               for p in problems), problems)
+            any("privacy: t2-worker-clean" in p and self.leg in p
+                for p in problems), problems)
 
     def test_clean_route_with_a_training_model_override_is_flagged(self):
         # A model-level trains_on_prompts: true overrides an otherwise-clean
         # paid provider (mistral-code-latest's real-world case).
         reg = mutated()
-        reg["models"]["mistral-small-latest"]["trains_on_prompts"] = True
+        reg["models"][self.model]["trains_on_prompts"] = True
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("privacy: t2-worker-clean" in p and "mistral/mistral-small-latest" in p
-               for p in problems), problems)
+            any("privacy: t2-worker-clean" in p and self.leg in p
+                for p in problems), problems)
 
 
 class PrivateSafeTests(unittest.TestCase):
@@ -2083,6 +2107,260 @@ class DeepSeekNativeEffortLadderTests(unittest.TestCase):
         note = self.model.get("$comment", "")
         self.assertIn("reasoning_effort", note)
         self.assertIn("reasoning is ON by default".lower(), note.lower())
+
+
+class MistralPlanLimitsTests(unittest.TestCase):
+    """BRIEF MISTRALFIX (S1-S2, L1-routing 2026-09-28T10:5xZ): a direct probe of
+    api.mistral.ai with the operator's key read the x-ratelimit headers per
+    model. Four models 429 at **0 requests/minute** on this plan
+    (mistral-small-latest, devstral-latest, mistral-medium-latest,
+    magistral-medium-latest), mistral-large-latest answers 403 (not on the
+    plan at all), and only the codestral pair (125 rpm) and the nemo/ministral
+    pair (188 rpm) serve. The gateway's own 7-day log agrees:
+    mistral/mistral-small-latest failed 51 of 51 calls.
+
+    Two defects this closes, both asserted over the live registry the renders
+    read from:
+      1. a measured plan limit that says "cannot serve" was data only — nothing
+         read rpm, so the resolver planned a 0-rpm leg as if it worked;
+      2. mistral/mistral-small-latest was still a leg of three routes, so a
+         real request fell through to a leg that cannot answer.
+    """
+
+    #: The probe source string every measured row must carry (D20: a limit is
+    #: worthless without naming how it was measured).
+    SOURCE = ("L1-routing direct probe 2026-09-28T10:5xZ "
+              "x-ratelimit headers")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    # -- the measured data -------------------------------------------------
+
+    def test_mistral_small_is_recorded_at_zero_rpm(self):
+        entry = self.reg["providers"]["mistral"]["limits"]["mistral-small-latest"]
+        self.assertEqual(entry["rpm"], 0)
+        self.assertEqual(entry["source"], self.SOURCE)
+
+    def test_mistral_code_is_recorded_at_its_measured_capacity(self):
+        # The model that DOES serve stays plannable: a 125 rpm / 625k tpm row
+        # must not be written as a deny just because its sibling is dead.
+        entry = self.reg["providers"]["mistral"]["limits"]["mistral-code-latest"]
+        self.assertEqual(entry["rpm"], 125)
+        self.assertEqual(entry["tpm"], 625000)
+        self.assertEqual(entry["source"], self.SOURCE)
+        self.assertNotIn("plan_available", entry)
+
+    def test_plan_available_false_is_flagged_when_not_a_bool(self):
+        # `plan_available: "false"` (a string) would read as truthy at the gate,
+        # so the type is a validation problem, not a rendering detail.
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"] = {
+            "plan_available": "false", "source": self.SOURCE}
+        problems = [p for p in registry.check_registry(reg)
+                    if "plan_available" in p]
+        self.assertTrue(problems, registry.check_registry(reg))
+
+    def test_a_true_plan_available_flag_is_a_valid_entry(self):
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"][
+            "plan_available"] = True
+        self.assertEqual(registry.check_registry(reg), [])
+
+    # -- the gate reads the table ------------------------------------------
+
+    def test_plan_dead_reasons_names_the_zero_rpm_leg(self):
+        pid, mid = registry.resolve_leg("mistral/mistral-small-latest", self.reg)
+        self.assertEqual(registry.plan_dead_reasons(pid, mid, self.reg),
+                         ["plan: 0 rpm"])
+
+    def test_plan_dead_reasons_is_empty_for_a_serving_leg(self):
+        pid, mid = registry.resolve_leg("mistral/mistral-code-latest", self.reg)
+        self.assertEqual(registry.plan_dead_reasons(pid, mid, self.reg), [])
+
+    def test_plan_dead_reasons_is_empty_without_a_limits_row(self):
+        # No measurement is not a deny: a provider with no limits table, and a
+        # model with no row in one, are both simply ungated.
+        reg = self.reg
+        self.assertEqual(
+            registry.plan_dead_reasons("deepseek", "deepseek-flash", reg), [])
+        self.assertIsNone(
+            registry.provider_plan_limits("deepseek", "deepseek-flash", reg))
+        self.assertIsNone(registry.provider_plan_limits("ghost", "ghost", reg))
+
+    def test_provider_plan_limits_returns_the_measured_row(self):
+        entry = registry.provider_plan_limits("mistral", "mistral-small-latest",
+                                              self.reg)
+        self.assertEqual(entry["rpm"], 0)
+
+    def test_plan_available_false_is_a_dead_reason(self):
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"] = {
+            "plan_available": False, "source": self.SOURCE}
+        self.assertEqual(
+            registry.plan_dead_reasons("mistral", "mistral-small-latest", reg),
+            ["plan: plan_available false"])
+
+    # -- the routes no longer point at it ----------------------------------
+
+    def test_no_route_carries_a_mistral_small_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/mistral-small-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_the_clean_twins_head_on_native_deepseek(self):
+        # DSBACK (2026-09-28) put the native DeepSeek leg back at the head of
+        # both -clean twins; with the Mistral leg gone it is the only head.
+        # Checked here because the invariant below is only interesting while
+        # this head is live.
+        for route_id in ("t2-worker-clean", "t3-driver-clean"):
+            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+                             "deepseek/deepseek-flash", route_id)
+            self.assertEqual(
+                registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
+                [], route_id)
+
+    def test_t3_driver_keeps_the_codestral_mistral_leg(self):
+        # Only the dead model left the route: codestral measures 200/125 rpm on
+        # this plan and is still t3-driver's head.
+        self.assertEqual(self.reg["routes"]["t3-driver"]["legs"][0],
+                         "mistral/mistral-code-latest")
+
+    # -- the invariant ------------------------------------------------------
+
+    def test_every_route_that_serves_traffic_has_at_least_one_live_leg(self):
+        """A combo the gateway offers must be able to answer at least one of its
+        legs: not denied by policy.leg_rules, not flagged unavailable, not
+        client-bound, and not dead on the plan (0 rpm / plan_available false).
+
+        A route with no gateway-servable leg at all is out of scope — it gets no
+        combo, so it serves no traffic (t1-orchestrator-clean and the other
+        fully-flagged routes). That is the difference between "marked
+        unavailable" and "routed into a dead leg", and only the latter is a
+        defect.
+        """
+        reg = self.reg
+        dead = []
+        for route_id in sorted(registry.servable_route_ids(reg)):
+            if not live_legs(reg, route_id):
+                dead.append("%s: %s" % (route_id,
+                                        registry.gateway_legs(
+                                            reg["routes"][route_id], reg)))
+        self.assertEqual(dead, [])
+
+
+class MistralReplaceTests(unittest.TestCase):
+    """BRIEF MISTRALFIX2 (S1, operator via L1-main 2026-09-28 11:5xZ):
+    mistral-small does not work — replace it with Mistral Codestral wherever it
+    was a leg; if both mistral-code-latest and codestral-latest answer, use
+    mistral-code-latest. Measured through the gateway (max_tokens 4096, 3 calls
+    each, evidence work/L1-routing/MISTRALREPL.probe.jsonl):
+      mistral/mistral-code-latest  3/3 200, p50 0.3 s
+      mistral/codestral-latest     3/3 200, p50 0.3 s
+      mistral/mistral-small-latest 0/3 (429)
+    """
+
+    GATEWAY_SOURCE = ("L1-routing gateway probe 2026-09-28T11:5xZ "
+                      "(MISTRALREPL.probe.jsonl)")
+    CLEAN_TWINS = ("t2-worker-clean", "t3-driver-clean")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    # -- the replacement leg in the twins the brief names --------------------
+
+    def test_the_clean_twins_do_not_carry_mistral_code(self):
+        """BRIEF MISTRALFIX2 step 1 asks for mistral/mistral-code-latest at the
+        position mistral-small held in t2-worker-clean / t3-driver-clean, and for
+        each twin to have two live legs. Measured 2026-09-28 in this sandbox:
+        that leg cannot be added — `python3 tools/registry.py validate` exits 1
+        with 'privacy: <route> leg mistral/mistral-code-latest model trains on
+        prompts' for both twins (spec 3.1 rule 3 / `private_safe`: the model
+        record carries `trains_on_prompts: true`, its free pool trains). These
+        are the routes a `privacy=sensitive` card lands on (tests/test_autoos_
+        spawner.py), so the swap would send private prompts to a training pool —
+        and `tests/linux/33-documentation.sh` independently bans `mistral/
+        mistral-code` in any `-clean` combo. So the twins keep MISTRALFIX's legs
+        and one live leg each, and the operator's replacement lands as the
+        registered tested alternative (codestral) plus the probe record. This
+        test is the guard: a later lane that adds the leg fails here rather than
+        silently shipping a training leg into a no-training route.
+        """
+        reg = self.reg
+        for route_id, route in reg["routes"].items():
+            if route_id.endswith("-clean") and \
+                    route_id not in registry.CLEAN_ROUTE_EXEMPTIONS:
+                self.assertNotIn("mistral/mistral-code-latest",
+                                 route.get("legs") or [], route_id)
+        for route_id in self.CLEAN_TWINS:
+            safe, reason = registry.private_safe("mistral", "mistral-code-latest",
+                                                 reg)
+            self.assertFalse(safe, route_id)
+            self.assertEqual(reason, "model trains on prompts", route_id)
+
+    def test_the_clean_twins_keep_their_head_live_leg(self):
+        # One live leg, and it is the native DeepSeek head: the twins still
+        # serve, which is what the route-liveness invariant needs.
+        reg = self.reg
+        for route_id in self.CLEAN_TWINS:
+            self.assertEqual(live_legs(reg, route_id),
+                             ["deepseek/deepseek-flash"], route_id)
+            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+                             "deepseek/deepseek-flash", route_id)
+
+    # -- the registered tested alternative ----------------------------------
+
+    def test_codestral_is_registered_with_its_measured_limits(self):
+        entry = self.reg["providers"]["mistral"]["limits"]["codestral-latest"]
+        self.assertEqual(entry["rpm"], 125)
+        self.assertEqual(entry["tpm"], 625000)
+        self.assertIn("10:5xZ direct", entry["source"])
+        self.assertIn(self.GATEWAY_SOURCE, entry["source"])
+        self.assertIn("codestral-latest", self.reg["models"])
+
+    def test_codestral_counts_as_training_until_sourced(self):
+        # Operator 2026-09-28T12:0xZ: "Mistral trains -> never in -clean tiers".
+        # Nobody sourced that codestral does NOT train, so the record says it
+        # does and private_safe() keeps it out of every -clean route.
+        self.assertIs(self.reg["models"]["codestral-latest"].get("trains_on_prompts"), True)
+        safe, reason = registry.private_safe("mistral", "codestral-latest", self.reg)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "model trains on prompts")
+
+    def test_mistral_comment_counts_three_limits_rows(self):
+        note = self.reg["providers"]["mistral"]["$comment"]
+        self.assertNotIn("Only the two models", note)
+        self.assertNotIn("mistral-large/codestral/", note)
+        self.assertIn("Only the three models", note)
+
+    def test_codestral_is_not_a_leg_of_any_route(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/codestral-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_the_gateway_probe_is_recorded_in_the_registry(self):
+        # A measurement that lives only in a probe file is data, not a record:
+        # the provider comment is where a later lane reads what was measured.
+        note = self.reg["providers"]["mistral"]["$comment"]
+        self.assertIn("MISTRALREPL.probe.jsonl", note)
+
+    # -- the rest of the registry agrees ------------------------------------
+
+    def test_no_route_carries_a_mistral_small_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/mistral-small-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_t3_driver_has_exactly_one_mistral_code_leg(self):
+        # mistral-code-latest is t3-driver's head already; the swap must not
+        # duplicate it into the body of the same route.
+        legs = self.reg["routes"]["t3-driver"]["legs"]
+        self.assertEqual(legs.count("mistral/mistral-code-latest"), 1)
+
+    def test_real_registry_passes_check_after_the_swap(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
 
 
 if __name__ == "__main__":
