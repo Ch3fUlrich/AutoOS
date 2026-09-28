@@ -8232,7 +8232,7 @@ Test-Case 'apply registers meta_api from the shared meta key and stays idempoten
 # connection bound to it - createProviderNodeSchema, omniroute
 # src/shared/validation/schemas/provider.ts:307-385, needs name, prefix,
 # baseUrl and (for type openai-compatible) an apiType; the CLI's own POST sends
-# no body at all (bin/cli/api-commands/provider-nodes.mjs:20-28), so the node is
+# no body at all (bin/cli/api-commands/provider-nodes.mjs:18-25), so the node is
 # a REST call with the manage key in a header, and only the connection goes back
 # through the CLI, with the vendor key in its environment. Twin of the bash
 # suite's provider-node tests; the last case pins the same contract in text on

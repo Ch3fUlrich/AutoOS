@@ -514,11 +514,11 @@ for n in rows or []:
 # provider_connection_exists <node-id> <name> - is a key already bound to this
 # node? `omniroute providers list` cannot answer it: its second column is the
 # provider, and a node-bound connection's provider is the node's
-# "<type>-<uuid>" id, which apply's hex-id scan never matches (nodes.ts:64-74
-# names that concrete id as what a new connection carries). GET /api/providers
-# answers {"connections":[…],"total":N} (measured live 2026-09-28) and also
-# carries every stored apiKey, so only these two fields are read and the body
-# is never printed.
+# "<type>-<uuid>" id, which apply's hex-id scan never matches (omniroute
+# src/lib/db/providers/nodes.ts:61-71 says a new connection carries exactly
+# that concrete id). GET /api/providers answers {"connections":[…],"total":N}
+# (measured live 2026-09-28) and also carries every stored apiKey, so only these
+# two fields are read and the body is never printed.
 provider_connection_exists() {
     local doc
     doc="$(omni_rest GET '/api/providers?limit=5000' 2>/dev/null || true)"
@@ -553,7 +553,7 @@ ensure_provider_node() {
     # src/shared/validation/schemas/provider.ts:307-385: name, prefix, baseUrl,
     # and - for type "openai-compatible" - an apiType, or the write is refused.
     # The CLI's own POST sends no body at all (bin/cli/api-commands/
-    # provider-nodes.mjs:20-28), so this is the REST call, not `omniroute api`.
+    # provider-nodes.mjs:18-25), so this is the REST call, not `omniroute api`.
     body="$(python3 -c 'import json,sys
 print(json.dumps({"name": sys.argv[1], "prefix": sys.argv[1],
                   "type": "openai-compatible", "apiType": "chat",

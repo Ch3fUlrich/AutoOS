@@ -339,8 +339,10 @@ function Invoke-AutoOSRest {
         }
         return Invoke-RestMethod -Uri "$Gateway$Path" -Method $Method -Headers $headers -TimeoutSec 20
     } catch {
-        $code = ''
-        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        # A transport failure carries no Response at all, so the status is
+        # read conditionally and the exception text stays the reason.
+        $resp = $_.Exception.Response
+        $code = if ($resp -and $resp.StatusCode) { [string][int]$resp.StatusCode } else { '' }
         $why = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
         $script:RestError = "HTTP $code for $Path - $why"
         return $null
@@ -388,7 +390,7 @@ function Set-AutoOSProviderNode {
     # src/shared/validation/schemas/provider.ts:307-385: name, prefix, baseUrl,
     # and - for type "openai-compatible" - an apiType, or the write is refused.
     # The CLI's own POST sends no body at all (bin/cli/api-commands/
-    # provider-nodes.mjs:20-28), so this is the REST call, not `omniroute api`.
+    # provider-nodes.mjs:18-25), so this is the REST call, not `omniroute api`.
     $body = [pscustomobject]@{
         name    = $ProviderId
         prefix  = $ProviderId
