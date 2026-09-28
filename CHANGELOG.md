@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - one home for the secret patterns survives the merge to main (REDACTMERGE, 2026-09-28)
+
+- **`tools/autoos_redact.py`**: `origin/main` hardened hostexec's stored-argv
+  redaction while this lane moved the same pattern set out of `audit.py`, so the
+  two sides met in conflict. The resolution keeps one home: main's
+  `_argv_text` (a non-str argv element — MCP JSON can carry a number/bool/null,
+  and a *refused* call is still recorded, so redaction may never raise on one —
+  renders through `json.dumps`, falling back to `repr`) moved into the shared
+  module and is what `redact_argv` runs per element, so the spawner's argv view
+  gets the same guarantee instead of only the audit's. The module's docstring
+  no longer claims the digest is over the raw argv: main's item 5 is correct and
+  kept — `audit.hash_argv` hashes the **redacted** form, because a digest of a
+  raw secret is offline-guessable.
+- **`tools/hostexec/audit.py`**: keeps only what is audit-specific — the `"***"`
+  mask its own tests pin, and `argv_sha256` — and imports the carriers
+  (`sanitize_text`, `redact_argv`) from the shared module. Nothing main tightened
+  was dropped: the widened `*KEY*`/`*TOKEN*` name rule, `Bearer` separate and
+  inside one token, `x-api-key:`, `user:pass@`, mysql `-pSECRET` / `-uUSER:PASS`,
+  the `--token`/`--password`/… flag list, LF/CR stripping, the redacted-form hash
+  and the non-str rendering all reach the audit path, and the audit path
+  additionally gains this lane's wider prefix set — `github_pat_`/`AIza`,
+  case-insensitive (REDACTFIX item 3), which is a widening and never a
+  narrowing.
+- **`tools/autoos-agent.py`**: both sides kept. The provider-stop classification
+  stays on the **raw** tail (`raw_tail`, falling back to the redacted tail) — a
+  stop line whose secret was masked must still be recognised (SPAWNREDACT item 2)
+  — and main's REVROUTE reset-window recording (`record_reset_stop`) now runs on
+  that same classification. The LEAK line's payload goes through `redact_output`
+  (worker text) and keeps main's LEAKFP2 procedural note.
+- Tests: no test on `origin/main` was changed. `tests/test_autoos_spawner.py`
+  gains **`SharedRedactPatternTests.test_non_string_argv_elements_render_from_the_shared_module`**
+  and **`test_audit_holds_no_pattern_set_of_its_own`** (the one-home guard:
+  `audit.redact_argv is autoos_redact.redact_argv`, plus a source scan that no
+  pattern constant reappears in `audit.py`); both were mutation-checked against a
+  scratch copy that redefined `redact_argv` in `audit.py` — they fail there and
+  pass here. No test that exists on `origin/main` was edited to make this merge
+  pass; the only hostexec-test edits are the lane's own pre-merge fixture splits
+  (`"gh" "p_abc123"` is the same string as `"ghp_abc123"`, written so GitHub push
+  protection sees no literal).
+
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.

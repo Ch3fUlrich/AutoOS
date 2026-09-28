@@ -2626,6 +2626,29 @@ class SharedRedactPatternTests(unittest.TestCase):
         self.assertEqual(r.redact_argv(["tool", "sk-or-v1-0123456789abcdef"]), ["tool", "***"])
         self.assertEqual(r.redact_argv(["env", "FOO=bar"]), ["env", "FOO=bar"])
 
+    def test_non_string_argv_elements_render_from_the_shared_module(self):
+        # REDACTMERGE: main's hx fix for a non-str argv element (MCP JSON can
+        # carry a number/bool/null, and a refused call must still be recorded)
+        # moved here with the rest of the pattern set, so the spawner's argv
+        # view gets it too and audit.py cannot drift from it.
+        self.assertEqual(self.r.redact_argv(["echo", 123, None, True]),
+                         ["echo", "123", "null", "true"])
+        # an element json.dumps cannot name falls back to repr, never raises
+        self.assertEqual(len(self.r.redact_argv(["echo", {1, 2}])), 2)
+
+    def test_audit_holds_no_pattern_set_of_its_own(self):
+        # REDACTMERGE resolution rule: ONE home for the patterns. hostexec keeps
+        # only what is audit-specific (its "***" mask and argv_sha256 over the
+        # redacted form); the carriers are the shared module's functions.
+        from hostexec import audit
+        self.assertIs(audit.redact_argv, self.r.redact_argv)
+        self.assertIs(audit.sanitize_text, self.r.sanitize_text)
+        src = (Path(__file__).resolve().parent.parent / "tools" / "hostexec"
+               / "audit.py").read_text(encoding="utf-8")
+        for own in ("_CONTROL_RE =", "_SECRET_PREFIX_RE =", "_BEARER_IN_TOKEN_RE =",
+                    "_URL_USERPASS_RE =", "_SECRET_VALUE_FLAGS ="):
+            self.assertNotIn(own, src, "the pattern set is duplicated in audit.py: " + own)
+
     def test_the_text_prefix_rule_stays_case_exact_on_aiza(self):
         # REDACTFIX item 3 pins the asymmetry review-spfix H1 accepted: hostexec's
         # argv path matches every prefix case-insensitively, the text stream
