@@ -90,7 +90,9 @@ Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headle
 exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit authored or
 committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
 branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
-before - the shas and paths are printed, nothing is reverted, the track record carries
+before - the one exemption being a ref that is another lane's own worktree branch at both ends of the run, and an
+orchestrator that merged or fast-forwarded this parent mid-run is expected to see it: freeze the parent (skill
+R-coord-01). The shas and paths are printed, nothing is reverted, the track record carries
 failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
 output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
@@ -2146,9 +2148,11 @@ def _branch_reflog_entries(root: str, branch: str, count: int) -> list:
 
 
 def parent_snapshot(root=None):
-    """(HEAD, branch, reflog count, ref tips, filtered porcelain) of the
-    parent checkout. `branch` is None on a detached HEAD (the commit-then-
-    reset check is skipped then)."""
+    """(HEAD, branch, reflog count, ref tips, filtered porcelain, worktree
+    branches) of the parent checkout. `branch` is None on a detached HEAD (the
+    commit-then-reset check is skipped then); the reflog count is the checked-out
+    branch's own log, and the worktree map bounds the single exemption the leak
+    check grants - another lane's own checked-out branch."""
     if root is None:
         root = ROOT
     head = None
@@ -2161,12 +2165,7 @@ def parent_snapshot(root=None):
                        capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.strip():
         branch = r.stdout.strip()
-    reflog_count = 0
-    if branch:
-        r = subprocess.run(["git", "-C", root, "reflog", "show",
-                            "refs/heads/" + branch], capture_output=True, text=True)
-        if r.returncode == 0:
-            reflog_count = len([ln for ln in r.stdout.splitlines() if ln.strip()])
+    reflog_count = _reflog_len(root, branch) if branch else 0
     refs = {}
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                         "--format=%(refname)%00%(objectname)"],
@@ -2176,31 +2175,58 @@ def parent_snapshot(root=None):
             name, _, sha = line.partition("\x00")
             if name and sha:
                 refs[name] = sha
-    return head, branch, reflog_count, refs, _filtered_parent_status(root)
+    return (head, branch, reflog_count, refs, _filtered_parent_status(root),
+            _worktree_branches(root))
 
 
-def _sibling_worktree_branches(root):
-    """Branch refs checked out in OTHER worktrees of root's repository.
+def _worktree_branches(root):
+    """{ref: worktree path} for the branches checked out in this repository.
 
-    Every lane is a worktree of one .git, so a parallel lane's worker commit
-    on its own checked-out branch moves an existing ref without touching this
-    run's parent checkout. Those refs are not scanned as side branches.
+    All lanes are worktrees of one .git, so a parallel lane's worker commit
+    moves its OWN checked-out branch without touching this run's parent
+    checkout. An empty dict when `git worktree list` fails, which exempts
+    nothing - the strict reading of every moved ref.
     """
     r = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        return set()
-    here = os.path.realpath(root)
-    out, path = set(), None
+        return {}
+    out, path = {}, None
     for line in r.stdout.splitlines():
         if line.startswith("worktree "):
             path = os.path.realpath(line[len("worktree "):])
-        elif line.startswith("branch ") and path and path != here:
-            out.add(line[len("branch "):])
+        elif line.startswith("branch ") and path:
+            out[line[len("branch "):].strip()] = path
     return out
 
 
-def parent_leak(snapshot, root=None):
+def _lane_worktree_moved(name, snap_wt, end_wt, root, sandbox):
+    """True when `name` is ANOTHER worktree's own branch, before and after.
+
+    The one exemption a moved ref gets (false positive B, LEAKFP2). Every leg
+    is required, because dropping any one of them is a leak shape:
+
+    - the same worktree holds the branch at the snapshot AND at the check - a
+      branch, or a worktree, that only appeared during the run is not excused;
+      that is exactly what a worker's `git switch -c` plus a fast-forward back
+      looks like;
+    - it is not this worktree - the parent's own branch moving IS the leak;
+    - it is not the run's sandbox - a worktree added inside the sandbox
+      directory belongs to this run, not to another lane.
+    """
+    at_snap = snap_wt.get(name)
+    if not at_snap or at_snap != end_wt.get(name):
+        return False
+    if at_snap == os.path.realpath(root):
+        return False
+    if sandbox:
+        sb = os.path.realpath(sandbox)
+        if at_snap == sb or at_snap.startswith(sb + os.sep):
+            return False
+    return True
+
+
+def parent_leak(snapshot, root=None, sandbox=None):
     """(leak lines) since a parent_snapshot; empty list = no leak.
 
     A LEAK is, since the snapshot:
@@ -2211,23 +2237,38 @@ def parent_leak(snapshot, root=None):
     - the same scan on every branch ref that EXISTED at the snapshot and
       moved (a worker committing on a side branch). NEW refs are never
       scanned: the orchestrator fetches or merges worker lanes into new refs
-      during a run - never a leak. A ref checked out in ANOTHER worktree of
-      the same repository is skipped too: that is a parallel lane's own
-      branch, not this parent; The --first-parent exemption assumes
-      lanes merge with --no-ff (repo convention); a fast-forward would land
-      worker commits on the first-parent chain and false-flag;
+      during a run - never a leak. A moved ref is exempted in exactly one
+      case, another lane's own worktree (_lane_worktree_moved): all lanes are
+      worktrees of one .git, so a parallel lane commits on the branch checked
+      out in ITS worktree and this worktree never visited it (false positive
+      B, MUSEAPI2.out). Nothing else is exempt - no run window, no
+      "contained in a new branch", no identity beyond the worker's own email;
+      75f2866 had all three and each was bypassable by a decoy `git branch`, a
+      backdated GIT_COMMITTER_DATE, or a `switch -c` plus a fast-forward back
+      (LEAKFP2 review). The --first-parent scan keeps an orchestrator's
+      --no-ff lane merge out; a mid-run merge or fast-forward of THIS parent
+      onto another lane is reported and only the frozen-parent rule (skill
+      R-coord-01) tells the operator it was their own move - the exit-7
+      message says so;
     - any tracked path outside logs/ whose porcelain state is DIRTY after
       and differs from before (new dirt is the worker-shaped signal; a path
       that became clean - the orchestrator committing its own WIP - is not a
       leak).
 
+    KNOWN HOLES, both inherited from 75f2866~1 and accepted with the strict
+    rule: a worker that commits on a branch CREATED during the run and then
+    moves HEAD back off it is missed, because new refs are never scanned (the
+    orchestrator fetches lanes into them); and plumbing that writes a commit
+    without moving a pre-existing ref or dirtying the tree is missed. A stale
+    worktree left behind by an earlier run can also carry the one exemption,
+    which is another reason the parent is frozen (skill R-coord-01).
+
     Git-ignored parent files (configuration/api-keys.yml, inventory.yml) are
-    NOT covered: porcelain cannot see them. Nothing here is reverted, and the
-    parent must stay untouched by anyone else during a run.
+    NOT covered: porcelain cannot see them. Nothing here is reverted.
     """
     if root is None:
         root = ROOT
-    before_head, branch, reflog_count, before_refs, before_status = snapshot
+    before_head, branch, reflog_count, before_refs, before_status, snap_wt = snapshot
     leaks = []
     after_head = None
     r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
@@ -2238,7 +2279,8 @@ def parent_leak(snapshot, root=None):
     if not shas and branch and after_head == before_head:
         # commit-then-reset: HEAD is back at the start; scan the reflog
         # entries appended during the run.
-        shas = _branch_reflog_entries(root, branch, max(0, _reflog_len(root, branch) - reflog_count))
+        shas = _branch_reflog_entries(
+            root, branch, max(0, _reflog_len(root, branch) - reflog_count))
     if shas:
         leaks.append("worker commits in the parent checkout: %s" % ", ".join(shas))
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
@@ -2250,10 +2292,10 @@ def parent_leak(snapshot, root=None):
             name, _, sha = line.partition("\x00")
             if name and sha and name in before_refs and before_refs[name] != sha:
                 moved[name] = (before_refs[name], sha)
-    siblings = _sibling_worktree_branches(root)
+    end_wt = _worktree_branches(root)
     side = []
     for name, (old, new) in sorted(moved.items()):
-        if name in siblings:
+        if _lane_worktree_moved(name, snap_wt, end_wt, root, sandbox):
             continue  # another lane's own worktree branch: not this run's parent
         # New refs are skipped: only refs that existed at the snapshot count.
         for sha in _scan_first_parent_range(root, old, new):
@@ -3375,13 +3417,20 @@ def cmd_run(args, cfg: dict) -> int:
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         override, message = sandbox_verdict(plan["route"], changed, ahead)
-        leak = parent_leak(parent_snap)
+        leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
             # anything.
             print("LEAK: the --isolate run wrote outside its sandbox "
                   "(containment failure, exit 7): %s" % "; ".join(leak), file=sys.stderr)
+            if any(ln.startswith("worker commits in the parent checkout") for ln in leak):
+                # LEAKFP2: no code can tell the orchestrator's own mid-run merge
+                # of this parent from the worker's write, so the message names
+                # the procedural rule instead of exempting the case.
+                print("LEAK: if you moved this branch yourself during the run "
+                      "(merge/ff), this is expected - do not move a parent while "
+                      "its child runs (skill R-coord-01)", file=sys.stderr)
             rc = 7
         elif override is not None and rc == 0:
             print(message)
