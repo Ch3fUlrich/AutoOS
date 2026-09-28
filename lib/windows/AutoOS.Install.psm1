@@ -3408,7 +3408,7 @@ profiles_dir = os.path.join(openhands_dir, 'profiles')
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
-    _profile_for('deepseek-v4-flash', deepseek_key),
+    _profile_for('deepseek-flash', deepseek_key),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
     _profile_for('openrouter-free', openrouter_key),
     _profile_for('openrouter-nemotron-ultra', openrouter_key),

@@ -928,7 +928,7 @@ function Set-AutoOSKeyValue {
             try {
                 $srcAcl = Get-Acl -LiteralPath $file
                 Set-Acl -LiteralPath $backup -AclObject $srcAcl -ErrorAction Stop
-            } catch { }
+            } catch { $null = $_ }  # best effort: the backup's bytes are what matters
         }
 
         $rand = [Guid]::NewGuid().ToString('N').Substring(0,8)
@@ -943,7 +943,7 @@ function Set-AutoOSKeyValue {
             try {
                 $srcAcl = Get-Acl -LiteralPath $file
                 Set-Acl -LiteralPath $tmp -AclObject $srcAcl -ErrorAction Stop
-            } catch { }
+            } catch { $null = $_ }  # best effort: a new file keeps the directory's default ACL
         }
         Move-Item -LiteralPath $tmp -Destination $file -Force
         $tmp = $null

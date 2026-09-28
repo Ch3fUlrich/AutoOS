@@ -236,7 +236,12 @@
         "t2-worker-clean": {
           "modelID": "t2-worker-clean",
           "name": "t2 smart-reasoning-128k — no training (sensitive data)",
-          "limit": { "context": 131072, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
         },
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
@@ -266,7 +271,12 @@
         "t3-driver-clean": {
           "modelID": "t3-driver-clean",
           "name": "t3 cheap-driver-128k — no training (sensitive data)",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 131072, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
+          ]
         },
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
@@ -308,6 +318,16 @@
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
             { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
+        },
+        "deepseek-v4.1-flash": {
+          "modelID": "deepseek-v4.1-flash",
+          "name": "deepseek-v4.1-flash — paid cheapest-first",
+          "limit": { "context": 131072, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
           ]
         },
         "auto/smart": {

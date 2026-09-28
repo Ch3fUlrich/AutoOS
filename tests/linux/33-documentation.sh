@@ -218,9 +218,10 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
     # A route that fails closed is named in combos.json's "omitted" and must
-    # never appear as a combo (t1-orchestrator-clean since DSMAX 2026-09-27,
-    # deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ). The set
-    # is read from the rendered file, never re-pinned here (lesson PROVPIN).
+    # never appear as a combo (t1-orchestrator-clean since DSMAX 2026-09-27).
+    # deepseek-v4.1-flash left that set on DSBACK 2026-09-28, when the operator
+    # top-up made providers.deepseek available again. The set is read from the
+    # rendered file, never re-pinned here (lesson PROVPIN).
     omitted="$(python3 - 2>&1 <<'PY'
 import json
 d = json.load(open("configuration/omniroute/combos.json", encoding="utf-8"))
@@ -315,8 +316,9 @@ by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
 # A route that declares legs but has none the gateway can serve fails closed:
 # never a combo, always named in "omitted" (t1-orchestrator-clean since DSMAX
-# 2026-09-27, deepseek-v4.1-flash since the deepseek 402 of 2026-09-27T16:4xZ,
-# and every future flip — derived, so no per-route list to keep current).
+# 2026-09-27; deepseek-v4.1-flash left this set on DSBACK 2026-09-28 when the
+# operator top-up made providers.deepseek available again — and every future
+# flip — derived, so no per-route list to keep current).
 for gone in expected_omitted:
     if gone in by:
         problems.append(gone + "-should-be-omitted")
@@ -488,13 +490,16 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
 
-# Regression lock for today's registry (2026-09-27): cerebras (402/401 credit
+# Regression lock for today's registry (2026-09-28): cerebras (402/401 credit
 # exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter (DSMAX
-# 401, 2026-09-27T15:05:54Z) and deepseek (402, 2026-09-27T16:4xZ) are, right
-# now, all-unavailable across every route that lists them - proves the real
-# catalog/ai-registry.json actually reaches apply.sh's live plan, not just the
-# synthetic fixture above. Antigravity still carries a live leg, so it is
-# offered and only skipped for the missing key.
+# 401, 2026-09-27T15:05:54Z) and opencode-zen (every deepseek-v4.1-flash leg
+# route-gated by the operator) are, right now, all-unavailable across every
+# route that lists them - proves the real catalog/ai-registry.json actually
+# reaches apply.sh's live plan, not just the synthetic fixture above.
+# Antigravity, mistral and deepseek still carry a live leg, so they are offered
+# and only skipped for the missing key - deepseek rejoined them on DSBACK
+# 2026-09-28 (operator top-up, router balance 19.99 USD) after the 402 of
+# 2026-09-27T16:4xZ.
 if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
@@ -505,12 +510,16 @@ if it "apply --dry-run against the real registry skips a provider whose every le
         || { ok=0; echo "groq was not flagged: $out" >&2; }
     [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
         || { ok=0; echo "openrouter was not flagged: $out" >&2; }
-    [[ "$out" == *"  - deepseek: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "deepseek was not flagged: $out" >&2; }
+    [[ "$out" == *"  - opencode-zen: all legs unavailable (skipped)"* ]] \
+        || { ok=0; echo "opencode-zen was not flagged: $out" >&2; }
     # A provider with a live leg must still be offered normally, even with no
-    # key: antigravity satisfies that today.
+    # key: antigravity and deepseek both satisfy that today.
     [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
         || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
+    [[ "$out" == *"  - deepseek: no key in api-keys.yml, skipped"* ]] \
+        || { ok=0; echo "deepseek has a live leg since DSBACK but was not offered: $out" >&2; }
+    [[ "$out" != *"  - deepseek: all legs unavailable"* ]] \
+        || { ok=0; echo "deepseek is still counted all-unavailable, the flip did not reach apply.sh" >&2; }
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
 fi
 
@@ -554,7 +563,7 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, AUTOOS_AGENT_RUN_ID, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi

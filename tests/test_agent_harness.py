@@ -491,6 +491,92 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertEqual(real.read_bytes(), before)
             self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
 
+    def test_a_managed_skill_left_in_agent_skills_is_replaced_not_duplicated(self):
+        # 2026-09-25: after .agents/skills became the home, the merge appended the
+        # new coding-principles entry and kept the agent-skills one, so OpenCode
+        # loaded two diverged copies of the same skill.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        old = "C:\\Users\\x\\Documents\\Code\\agent-skills\\skills/%s/SKILL.md" % skill
+        user = {"instructions": [
+            old,
+            "my-rules.md",
+            "/home/x/agent-skills/notes/%s.md" % skill,   # not a SKILL.md: the user's
+            "/home/x/agent-skills/skills/unlisted-skill/SKILL.md",  # not managed: the user's
+        ]}
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertNotIn(old, doc["instructions"])
+        self.assertIn("%s/%s/SKILL.md" % (SKILLS_SOURCE, skill), doc["instructions"])
+        for kept in user["instructions"][1:]:
+            self.assertIn(kept, doc["instructions"])
+
+    def test_stale_entry_matching_ignores_case_and_accepts_relative_paths(self):
+        # Windows paths are case-insensitive, and hand-written configs vary the
+        # drive letter, the clone's spelling and SKILL.md's case (review, WS-HARNESS).
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "C:/Users/x/Code/agent-skills-work/.agents/skills"
+        self.assertTrue(stale("C:\\Users\\x\\Code\\Agent-Skills\\skills\\coding-principles\\skill.md", skills, source))
+        self.assertTrue(stale("agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # The current entry, spelled with another drive-letter case, is never stale,
+        # even when the source itself sits under a directory named agent-skills.
+        nested = "C:/Users/x/Code/agent-skills/.agents/skills"
+        self.assertFalse(stale("c:/Users/x/Code/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, nested))
+        self.assertFalse(stale("my-agent-skills/skills/coding-principles/SKILL.md", skills, source))
+
+    def test_only_the_retired_clone_layout_is_stale(self):
+        # Muse review of 2b71861 (HIGH x2): the retired layout is exactly
+        # <clone>/agent-skills/skills/<skill>/SKILL.md (install.sh skills_source =
+        # $code_root/agent-skills/skills). Anything else under a directory named
+        # agent-skills is the user's.
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "/repo/.agents/skills"
+        self.assertFalse(stale("/home/x/agent-skills/my-notes/coding-principles/SKILL.md", skills, source))
+        self.assertFalse(stale("/backup/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # A trailing space or separator is the same entry (Muse MEDIUM 4).
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md ", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md/", skills, source))
+
+    def test_the_current_entry_in_another_spelling_is_not_appended_twice(self):
+        # Muse MEDIUM 3: the stale check folds case and separators, so the
+        # canonical-exists check must too, or a second spelling is appended.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        spelled = "c:\\r\\.agents\\skills\\%s\\skill.md " % skill
+        doc = module.desired_opencode({"instructions": [spelled]}, harness, REPO_ROOT, "C:/R/.agents/skills")
+        matching = [e for e in doc["instructions"] if e.strip().replace("\\", "/").casefold()
+                    == ("c:/r/.agents/skills/%s/skill.md" % skill)]
+        self.assertEqual(matching, [spelled])
+
+    def test_a_second_merge_changes_nothing(self):
+        # Muse MEDIUM 5: desired(desired(x)) == desired(x).
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        user = {"instructions": [
+            "/home/x/agent-skills/skills/%s/SKILL.md" % skill,
+            "/home/x/agent-skills/my-notes/%s/SKILL.md" % skill,
+            "my-rules.md",
+        ]}
+        once = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        twice = module.desired_opencode(once, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertEqual(twice, once)
+
+    def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
+        # No source means no replacement: dropping the old entry would leave
+        # OpenCode with no copy of the skill at all.
+        module = load_module()
+        harness = harness_data()
+        old = "/home/x/agent-skills/skills/%s/SKILL.md" % harness["rules"]["skills"][0]
+        doc = module.desired_opencode({"instructions": [old]}, harness, REPO_ROOT, "")
+        self.assertIn(old, doc["instructions"])
+
     def test_an_unexpected_instructions_type_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "opencode.json"
@@ -671,7 +757,7 @@ class VendoredProfileTests(unittest.TestCase):
             self.assertFalse(self.load(name)["enable_sub_agents"], name)
 
     def test_the_reviewer_profile_uses_the_deepseek_model(self):
-        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-v4-flash")
+        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-flash")
 
     def test_every_profile_names_agents_md_and_the_leaf_contract(self):
         for name in self.PROFILES:

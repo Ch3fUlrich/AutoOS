@@ -56,6 +56,19 @@ Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
 past the max is refused with exit code 4.
 
+Run identity: one canonical id per spawn, minted once in UTC as
+`YYYYMMDD-HHMMSS-<slug>-<hex6>` (slug from --title else the task, capped at 24
+chars). It names the sandbox dir, the `agent/<id>` branch, logs/workers/<id>.json
+and the child's AUTOOS_AGENT_RUN_ID, and rides the gateway as X-AutoOS-Run-Id
+beside x-omniroute-session-id. The record also stores the parent's id (that env
+var at spawn time), the host, and the full route_plan the run was scored on;
+`ps --tree` prints the spawn tree from the parent edge. An id minted elsewhere
+still keeps one spawn to one id: `run --run-id <id>` takes that id (the MCP
+server's `spawn` does, since it names its own run dir with it) and refuses a
+shape that is not canonical with exit 2. The parent edge is only ever the
+caller's own env var, never the handed-in id - else a child would be its parent.
+docs/routing.md.
+
 Usage:
     python3 tools/autoos-agent.py list
     python3 tools/autoos-agent.py run --card role=review "Review lib/linux/ui.sh"
@@ -65,6 +78,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
+    python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -74,6 +88,7 @@ Usage:
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
+    python3 tools/autoos-agent.py ps --tree                          # runs under their parent
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
@@ -152,6 +167,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -278,6 +294,39 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     if base not in declared_models(cfg):
         raise ValueError("%s is not declared in opencode.jsonc providers" % base)
     return base + ("#" + variant if variant else "")
+
+
+def declared_variants(cfg: dict, model: str) -> list:
+    """The variant ids opencode.jsonc declares for `model` ("provider/mid"),
+    [] for a model that declares none or names nothing opencode knows."""
+    base, _, _ = (model or "").partition("#")
+    provider, _, mid = base.partition("/")
+    entry = ((cfg.get("providers") or {}).get(provider) or {}).get("models") or {}
+    return [v["id"] for v in (entry.get(mid) or {}).get("variants") or [] if v.get("id")]
+
+
+def apply_effort_rung(cfg: dict, model: str, rung) -> str:
+    """Stamp the resolver's effort rung (spec 5.5) on an opencode model id.
+
+    opencode selects a per-request effort with a model VARIANT: `mid#high`
+    applies that variant entry's `settings.reasoningEffort`, which the
+    OpenAI-compatible protocol sends as `reasoning_effort=high`. Three cases
+    deliberately emit no suffix (DSBACK item 3, measured: the rung used to
+    reach only the track record, so every rung sent the same bare request):
+
+      * `none`/None — a non-reasoning leg, or a rung clamped to the ladder's
+        "none" rung. The base model entry carries no reasoning settings, so
+        the request goes out with NO reasoning param at all.
+      * a rung the model declares no variant for — dropped, never invented.
+        The render only generates variants for the leg that ANSWERS, so an
+        undeclared rung is a rung that leg would reject (PROVFIX3 finding 8).
+      * a model that already carries a variant — an explicit `--model x#low`
+        is the operator's choice and wins over the card's rung; appending a
+        second one would be an unresolvable id.
+    """
+    if not model or not rung or rung == "none" or "#" in model:
+        return model
+    return model + "#" + rung if rung in declared_variants(cfg, model) else model
 
 
 def free_overlay(model: str) -> dict:
@@ -716,9 +765,70 @@ def gateway_up() -> bool:
         return False
 
 
-def slugify(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].strip("-")
+def slugify(text: str, cap: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:cap].strip("-")
     return slug or "task"
+
+
+# FLEETSPEC P0 (FLEET): one canonical id per spawn. Before this a spawn minted
+# two ids from two clocks - the sandbox clone/branch was stamped in LOCAL time
+# from the task text, the worker record a separate UTC id - and nothing tied a
+# run dir, a record and a branch together.
+RUN_ID_SLUG_CAP = 24
+# The exact shape mint_run_id produces, and the check `run --run-id` holds an
+# id to: a run id is a filename, a branch name and a header value at once, so
+# anything else (a path, an empty or over-long slug, a stamp that is not a real
+# date and time, a non-hex tail) is refused rather than written into those three
+# places. A well-shaped stamp from the wrong clock cannot be told apart here -
+# that is why the minting lives in one function, not in each caller.
+RUN_ID_RE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{6})$")
+
+
+def is_canonical_run_id(run_id) -> bool:
+    """True for exactly what mint_run_id mints (a real UTC stamp, a slug of at
+    most RUN_ID_SLUG_CAP chars, a 6-hex tail)."""
+    match = RUN_ID_RE.match(run_id or "")
+    if not match or len(match.group(2)) > RUN_ID_SLUG_CAP:
+        return False
+    try:
+        datetime.datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return False
+    return True
+
+
+def mint_run_id(title: str | None, task: str, now=None) -> str:
+    """`YYYYMMDD-HHMMSS-<slug>-<hex6>`, always UTC.
+
+    The slug comes from the title the run is named by - a titleless spawn's
+    title is build_plan's own `tN <task head>`, so this is the same text a human
+    reads in `ps`, capped at RUN_ID_SLUG_CAP chars and reduced to [a-z0-9-]. A
+    run id is a filename, a branch name and a header value at once, so the slug
+    is scrubbed first (`slug_source`) and nothing past it is task text at
+    all. The hex tail is what keeps two spawns in the same second apart
+    (measured 2026-09-25, the bug `unique_suffix` names).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is not None:
+        now = now.astimezone(datetime.timezone.utc)
+    return "%s-%s-%s" % (now.strftime("%Y%m%d-%H%M%S"),
+                         slugify(slug_source(title or task or ""),
+                                 RUN_ID_SLUG_CAP), unique_suffix())
+
+
+def slug_source(text: str) -> str:
+    """The scrubbed copy of `text` that a slug is about to be cut from.
+
+    Both slug producers use it (`mint_run_id`, `session_tag`), because both cut
+    BELOW the length of a vendor key - 24 and 40 characters - so the cap that was
+    meant to keep task text out of an id kept a pasted key in it whole, into the
+    branch name, the sandbox dir, the gateway header and the printed `run-id:`
+    line. The shared redactor masks first; the mask token is then dropped rather
+    than slugged (an id that reads "autoos-redacted" names nothing and still
+    shows that a secret was there).
+    """
+    scrubbed = redact.Redactor().text(text or "")
+    return scrubbed.replace(redact.TEXT_MASK, " ")
 
 
 # --- redacting the worker's output (SPAWNREDACT item 2) --------------------
@@ -748,8 +858,24 @@ def redact_output(text: str) -> str:
 
 def redact_record(record: dict) -> dict:
     """Redact the string fields of a worker record / track entry. Keys and
-    non-text values (rc, cost, latency) pass through: the file stays readable."""
-    return {k: (redact_output(v) if isinstance(v, str) else v) for k, v in record.items()}
+    non-text values (rc, cost, latency) pass through: the file stays readable.
+    A nested value (the persisted route_plan) is walked the same way, because a
+    resolver `reason` carries whatever a probe line said."""
+    return {k: _redact_value(v) for k, v in record.items()}
+
+
+def _redact_value(value):
+    if isinstance(value, str):
+        return redact_output(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    # FLEETP0 review LOW: this walked dicts and lists only, so a secret inside
+    # any other container reached the record, `ps` and the log intact. The
+    # container type is kept, because the record's shape is what `ps --tree` and
+    # the console read.
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return type(value)(_redact_value(v) for v in value)
+    return value
 
 
 def report_redactions() -> None:
@@ -763,8 +889,54 @@ def report_redactions() -> None:
         _OUTPUT_REDACTOR.reset_count()
 
 
-SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+SESSION_TAG_MAX_LEN = 120
+SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,%d}$" % SESSION_TAG_MAX_LEN)
 SESSION_TAG_HEADER = "x-omniroute-session-id"
+# FLEETSPEC P0 item 5: the run id goes next to the session tag, so a gateway
+# row can be tied back to one spawn's sandbox, record and branch.
+RUN_ID_HEADER = "X-AutoOS-Run-Id"
+# Measured in the running gateway build (read-only, 2026-09-28): OmniRoute keys a
+# conversation on `headers.get("x-omniroute-session-id").trim().slice(0, 128)`
+# (resolveConversationId, in .build/next/server/chunks) and no charset check runs
+# on it at all. So the limit is a LENGTH and it is a silent TRUNCATION: a value
+# past 128 chars loses its tail, and the tail is where the run id lives. `/` is
+# accepted, which is what D-063 relies on.
+OMNIROUTE_SESSION_ID_MAX = 128
+
+
+def session_header_value(tag: str, run_id: str | None = None) -> str:
+    """The `x-omniroute-session-id` value for one run: `<tag>/<run-id>` (D-063).
+
+    OmniRoute's conversationTracker/chatCore path takes the header verbatim as
+    the conversation id, so one value per run threads every leg of that run
+    through one Conversation while the part before the first `/` stays the lane
+    (`autoos_usage.py --by lane`) and the part after the last `/` is the run
+    (`--by run`). `X-AutoOS-Run-Id` still rides beside it, unchanged.
+
+    A tag long enough that tag + "/" + run id would pass the gateway's 128-char
+    truncation is sent alone, with one warning: a silently cut run id would make
+    every run of that lane share one conversation and look like a working id.
+    """
+    if not run_id:
+        return tag
+    combined = "%s/%s" % (tag, run_id)
+    if len(combined) <= OMNIROUTE_SESSION_ID_MAX:
+        return combined
+    print("autoos-agent: session tag %r + run id would pass the gateway's %d-char "
+          "%s cap, sending the tag alone (this run is not traceable by session id, "
+          "only by %s)" % (tag, OMNIROUTE_SESSION_ID_MAX, SESSION_TAG_HEADER,
+                           RUN_ID_HEADER), file=sys.stderr)
+    return tag
+
+
+def gateway_headers(tag: str, run_id: str) -> dict:
+    """The two request headers one run stamps its gateway calls with (D-063).
+
+    One dict, so every client that can carry headers carries the same pair -
+    the session id (tag + run id, the conversation) and the bare run id.
+    """
+    return {SESSION_TAG_HEADER: session_header_value(tag, run_id),
+            RUN_ID_HEADER: run_id}
 
 
 def session_tag(title: str, env=None) -> str:
@@ -786,7 +958,9 @@ def session_tag(title: str, env=None) -> str:
     # The worktree name is not ours to trust: keep the header charset and
     # leave room for "/<slug>" (slugify caps it at 40) inside 120 chars.
     lane = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(ROOT)).strip("-")[:79] or "lane"
-    return "%s/%s" % (lane, slugify(title))
+    # The title is the same untrusted text the run id is cut from, and this tag
+    # rides the same gateway header (FLEETP0 review HIGH, item 3): scrubbed first.
+    return "%s/%s" % (lane, slugify(slug_source(title)))
 
 
 def unique_suffix() -> str:
@@ -1485,6 +1659,16 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         override, args.free)
     if reviewer_combo:
         combo = reviewer_combo
+    # DSBACK item 3: the rung the resolver scored has to reach the client that
+    # can honour it. opencode carries a per-request effort as a model variant
+    # (`omniroute/deepseek-v4.1-flash#high` -> that variant's
+    # settings.reasoningEffort -> reasoning_effort), so the stamp goes on the
+    # opencode model id only — an OmniRoute combo cannot carry a per-effort
+    # alias (pinned by tests/test_registry_render.py), and build_plan hands
+    # the gateway clients the bare combo. Until this, route["effort"] reached
+    # only the track record and every rung sent the same unadorned request.
+    if clients.CLIENTS[args.client].name == "opencode":
+        model = apply_effort_rung(cfg, model, result.get("effort"))
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
@@ -1497,6 +1681,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
             "read_only": read_only_run(args, card),
             "bucket": result["bucket"], "class": route_class, "resolver": True,
             "effort": result.get("effort"),
+            # FLEETSPEC P0 item 4: the resolver's own plan, whole (card, route,
+            # class, leg, effort, p, expected_cost, bucket, reviewers, review,
+            # reason, skipped_legs). The projection above is what the spawner
+            # acts on; this is what the run must be auditable against - an
+            # operator cannot re-derive it later, because the probes, the
+            # cooldowns and the track record it was scored from have moved on.
+            "route_plan": result,
             # who reviews this card (REVROUTE item 2); plan() already walked
             # policy.reviewers with the same registry/probes/clock it used to
             # pick the route, so the spawner never re-derives it.
@@ -1604,6 +1795,30 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
     title = args.title or ("t%d %s" % (route["tier"], args.task[:50]))
+    # FLEETSPEC P0 item 1: minted ONCE, here. The sandbox clone, its branch, the
+    # worker record and the child's own environment all carry this one id, so
+    # one run is nameable from any of the four (and the child that spawns again
+    # knows who its parent is).
+    # FLEETP0b: the caller may hand the id in instead (--run-id, which is how the
+    # MCP server's spawn keeps ONE id for a run it also names its own state dir
+    # with). A handed-in id wins over everything, including the sandbox-reuse
+    # line below: the caller owns the identity, and a handed-in id that disagreed
+    # with the clone it was told to reuse would be a lie either way.
+    given_run_id = getattr(args, "run_id", None)
+    run_id = given_run_id or mint_run_id(title, args.task)
+    if sandbox is not None and not given_run_id \
+            and (sandbox.get("branch") or "").startswith("agent/"):
+        # a fallthrough re-run shares the first attempt's clone and branch, so it
+        # shares its id: one spawn is one id, not one per attempt.
+        # FLEETP0 review LOW: only when that suffix IS a run id. A branch named
+        # by hand, or one from before the canonical id existed, is not an id, and
+        # pasting its tail into the header, the record and `ps` unvalidated is
+        # exactly what is_canonical_run_id was written to refuse. A fresh id
+        # still names a fresh record; the reused clone is unchanged either way.
+        inherited = sandbox["branch"][len("agent/"):]
+        if is_canonical_run_id(inherited):
+            run_id = inherited
+    env["AUTOOS_AGENT_RUN_ID"] = run_id
     tag = None
     if client.name == "opencode":
         agent = TIERS[route["tier"]]
@@ -1625,7 +1840,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         if (model or "").startswith("omniroute/"):
             tag = session_tag(title)
             prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
-            prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag
+            # D-063: the value is the tag AND the run id, one conversation per run.
+            # item 5: the same requests also carry the run id, so a call_logs
+            # row is not merely a lane's, it is one spawn's.
+            prov.setdefault("headers", {}).update(gateway_headers(tag, run_id))
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -1644,25 +1862,35 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
-        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
+        # FLEETP0 review item 4: the identity headers are not opencode's alone.
+        # Every gateway client that can put a header on its own requests gets the
+        # same pair (clients.HEADER_CLIENTS; the carriers and the qwen dead end
+        # are measured in autoos_clients.py and docs/routing.md), so a call_logs
+        # row is one spawn's wherever the work ran.
+        headers = None
+        if client.name in clients.HEADER_CLIENTS:
+            tag = session_tag(title)
+            headers = gateway_headers(tag, run_id)
+            if client.name == "gemini":
+                env[clients.GEMINI_CUSTOM_HEADERS_ENV] = clients.gemini_custom_headers(headers)
+        cmd = clients.build_command(client, args.task, route["combo"], level, model,
+                                    joinable, headers)
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         if client.name == "qoder":
             model = model or clients.QODER_DEFAULT_MODEL
         model = model or (route["combo"] if client.gateway else "(client default)")
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.isolate:
         if sandbox is None:
-            # The readable prefix stays; the random suffix keeps two spawns in the
-            # same second (same task) from naming the same clone (bug 1).
-            slug = slugify(args.task)
-            uniq = unique_suffix()
-            name = "%s-%s-%s-%s" % (os.path.basename(ROOT), stamp, slug, uniq)
+            # The readable prefix stays; the hex tail inside the run id is what
+            # keeps two spawns in the same second (same task) from naming the
+            # same clone (bug 1).
+            name = "%s-%s" % (os.path.basename(ROOT), run_id)
             # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
             # its own .git, so opencode resolves it as its own project root.
             sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                       "branch": "agent/%s-%s-%s" % (stamp, slug, uniq)}
+                       "branch": "agent/%s" % run_id}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -1687,7 +1915,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # brief echoed back at it (SPAWNFIX3c).
             "brief": cmd[-1],
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
-            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            "run_id": run_id, "sandbox": sandbox,
+            "cwd": sandbox["path"] if sandbox else os.getcwd(),
             "session_tag": tag}
 
 
@@ -3564,18 +3793,38 @@ def _write_worker_record(path: str, record: dict) -> None:
 
 
 def _worker_record_start(plan: dict, args, directory: str):
-    """Write the live record; return (id, record) for the ended rewrite."""
-    wid = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
+    """Write the live record; return (id, record) for the ended rewrite.
+
+    FLEETSPEC P0: the record's id IS the run id the plan minted (it used to be a
+    second, unrelated id), so `ps`, the sandbox clone, its branch and the child's
+    own AUTOOS_AGENT_RUN_ID name the same run. ``parent_run_id`` is the id this
+    spawner was itself spawned with (None at top level): the spawn tree a console
+    reads. ``host`` and the full ``route_plan`` are for the record only - the
+    host is a git-ignored file, never a committed fixture.
+    """
+    wid = plan.get("run_id") or mint_run_id(args.title or None, args.task or "")
     pid = os.getpid()
     task = (args.task or "").splitlines()
+    route = plan.get("route") or {}
+    # FLEETP0 review LOW: the caller's own id is the parent, EXCEPT when it is
+    # this run's id - a fallthrough re-run adopts the reused branch's id, and a
+    # caller can hand --run-id down to the very run it spawned. A record parented
+    # to itself is a cycle in the tree `ps --tree` prints.
+    parent = os.environ.get("AUTOOS_AGENT_RUN_ID") or None
+    if parent == wid:
+        parent = None
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
-        "route": (plan.get("route") or {}).get("combo") or "",
+        "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
-        "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]})
+        "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0],
+        "parent_run_id": parent,
+        "host": socket.gethostname(),
+        "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
+        "route_plan": route.get("route_plan")})
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -3688,6 +3937,7 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
                      "lane": record.get("session_tag") or "", "pid": record.get("pid"),
                      "title": record.get("title") or "", "task": record.get("task_head") or "",
                      "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
+                     "parent_run_id": record.get("parent_run_id") or None,
                      "started": record.get("started"), "ended": record.get("ended"),
                      "rc": record.get("rc"), "depth": record.get("depth")})
     rows.sort(key=lambda r: (r.get("started") or "", r.get("id") or ""))
@@ -3735,6 +3985,58 @@ def _print_worker_table(rows: list) -> None:
         print(fmt % tuple(cell))
 
 
+def worker_tree(rows: list) -> list:
+    """The ps rows as ``(depth, row)`` pairs in tree order (FLEETSPEC P0 item 2).
+
+    A row hangs under its ``parent_run_id`` while that parent is still listed.
+    A row whose parent record is gone (pruned, or spawned on another host) is a
+    root: `ps --tree` says so on its line, because a silent top-level row reads
+    as "nobody spawned this". A parent that is its own descendant would hang the
+    walk, so an unvisited row is emitted as a root too - `ps` never loses one.
+    """
+    by_id = {r["id"]: r for r in rows if r.get("id")}
+    children = {}
+    for row in rows:
+        parent = row.get("parent_run_id")
+        if parent and parent in by_id and parent != row.get("id"):
+            children.setdefault(parent, []).append(row)
+    out, visited = [], set()
+
+    def walk(row, depth):
+        if row.get("id") in visited:
+            return
+        visited.add(row.get("id"))
+        out.append((depth, row))
+        for child in children.get(row.get("id"), []):
+            walk(child, depth + 1)
+
+    for row in rows:
+        parent = row.get("parent_run_id")
+        if not parent or parent not in by_id or parent == row.get("id"):
+            walk(row, 0)
+    for row in rows:  # a cycle: still listed, never swallowed by the walk
+        walk(row, 0)
+    return out
+
+
+def _print_worker_tree(rows: list) -> None:
+    """The same columns as `ps`, in tree order and indented by depth."""
+    gone = {r.get("parent_run_id") for r in rows} - {r["id"] for r in rows if r.get("id")} - {None}
+    shown = []
+    for depth, row in worker_tree(rows):
+        row = dict(row)
+        row["id"] = "  " * depth + str(row.get("id") or "")
+        parent = row.get("parent_run_id")
+        if parent in gone:
+            # the note comes first: the last column is the one the width budget
+            # clips, and a clipped prose tail still says who the orphan is.
+            # `ps --json` is the untruncated source of the edge.
+            row["title"] = ("(parent %s gone) " % parent
+                            + (row.get("title") or row.get("task") or "")).strip()
+        shown.append(row)
+    _print_worker_table(shown)
+
+
 def cmd_ps(args) -> int:
     directory = workers_dir()
     rows = visible_workers(directory, include_ended=args.all)
@@ -3743,6 +4045,9 @@ def cmd_ps(args) -> int:
         return 0
     if not rows:
         print("no workers running")
+        return 0
+    if args.tree:
+        _print_worker_tree(rows)
         return 0
     _print_worker_table(rows)
     return 0
@@ -3765,6 +4070,14 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
+    # that is not the canonical one is refused here - before any clone, record or
+    # client start (and before the MCP server's own state dir is created for it).
+    if getattr(args, "run_id", None) and not is_canonical_run_id(args.run_id):
+        return refuse("--run-id %r is not a canonical run id "
+                      "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
+                      "the spawner or the MCP server's spawn)"
+                      % (args.run_id, RUN_ID_SLUG_CAP), 2)
     # SPAWNCAP (S2): decide the client from the task's shell/write needs before
     # anything is planned or started. An explicit --client that lacks one is
     # refused with the capable clients named; with no --client the first capable
@@ -3849,6 +4162,7 @@ def cmd_run(args, cfg: dict) -> int:
     if route.get("reviewer_note"):
         print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
+    print("run-id: %s" % plan["run_id"])
     if route.get("read_only"):
         print("read-only: this run's success is an unchanged sandbox and a REPORT "
               "(an edit in it exits %d)" % EXIT_READ_ONLY_WRITE)
@@ -4354,6 +4668,9 @@ def _parser_ps(sub):
                                    "(or died) more than 7 days ago")
     ps.add_argument("--all", action="store_true",
                     help="also show exited workers from the last 24 h")
+    ps.add_argument("--tree", action="store_true",
+                    help="indent each run under the run that spawned it (the "
+                         "parent_run_id edge; --json wins over --tree)")
     ps.add_argument("--json", action="store_true", help="print the rows as JSON")
 
 
@@ -4388,6 +4705,11 @@ def _parser_run(sub):
                           "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
                           "run without this flag")
     run.add_argument("--title")
+    run.add_argument("--run-id", dest="run_id", metavar="ID",
+                     help="use this id (a canonical one, as minted by the MCP server's spawn) "
+                          "instead of minting a new one, so one spawn has one id: it names the "
+                          "branch, the sandbox, logs/workers/<id>.json and the child env; a bad "
+                          "shape is refused with exit 2")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
 

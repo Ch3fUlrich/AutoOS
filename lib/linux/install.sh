@@ -5877,7 +5877,7 @@ if secrets_file and os.path.isfile(secrets_file):
 muse_key = os.environ.get("META_API_KEY") or os.environ.get("MUSE_API_KEY") or secrets.get("muse")
 deepseek_key = os.environ.get("DEEPSEEK_API_KEY") or secrets.get("deepseek")
 # NOTE: no direct Meta/DeepSeek provider is emitted by the writers; both keys
-# feed _profile_for (muse-spark contributor + deepseek-v4-flash below).
+# feed _profile_for (muse-spark contributor + the native deepseek-flash row below).
 openrouter_key = os.environ.get("OPENROUTER_API_KEY") or secrets.get("openrouter")
 context7_key = os.environ.get("CONTEXT7_API_KEY") or secrets.get("context7")
 
@@ -6057,7 +6057,7 @@ profiles_dir = os.path.join(openhands_dir, "profiles")
 # $0 while under the daily cap; paid_*_cost_per_token applies past it, so
 # spend = in_tokens*in_price + out_tokens*out_price stays auditable.
 profiles = dict([
-    _profile_for("deepseek-v4-flash", deepseek_key),
+    _profile_for("deepseek-flash", deepseek_key),
     _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
     _profile_for("openrouter-free", openrouter_key),
     _profile_for("openrouter-nemotron-ultra", openrouter_key),

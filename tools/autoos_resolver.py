@@ -22,7 +22,8 @@ from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
-                      _parse_until, leg_denied, leg_rule_for)
+                      _parse_until, leg_denied, leg_rule_for,
+                      plan_dead_reasons)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -324,10 +325,12 @@ def provider_tpm(provider_id, model_id, registry):
 
     Brief R4 (2026-09-27): providers.<id>.limits is keyed by the provider's own
     model spelling (the part of a leg after its ``<provider>/`` prefix), which
-    is exactly ``model_id`` as resolve_leg returns it. Only ``tpm`` is read
-    today -- a request-size filter in usable_legs; rpm/rpd/tpd are data only
-    for now (no clock, no counters). A missing limits table or a missing model
-    key means the leg is not size-filtered.
+    is exactly ``model_id`` as resolve_leg returns it. This function reads
+    ``tpm`` only -- a request-size filter in usable_legs. ``rpm`` is read
+    separately, and only for its zero, by registry.plan_dead_reasons()
+    (MISTRALFIX 2026-09-28); rpd/tpd stay data only (no clock, no counters). A
+    missing limits table or a missing model key means the leg is not
+    size-filtered.
 
     The estimate compared against tpm is *input only* (review R4FIX,
     2026-09-27): ``need_tokens`` is the brief plus the files, with no output
@@ -467,11 +470,20 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     Per-leg filters (replacing the old route-level context/tool_calls/
     client_bound checks, which blocked the whole route on one bad leg):
 
+    - plan limits (MISTRALFIX, 2026-09-28): a leg the recorded plan cannot
+      answer at all is skipped -- ``providers.<id>.limits.<model>.rpm`` of 0
+      (reason ``plan: 0 rpm``) or ``plan_available: false`` (reason
+      ``plan: plan_available false``), both read by
+      `registry.plan_dead_reasons`. A small-but-real quota is *not* dead, and a
+      model with no limits row is not gated at all: no measurement is never a
+      deny.
     - context: ``need_tokens * 1.3 <= usable_context``.
     - tpm (brief R4, 2026-09-27): a leg whose provider limits for that model
       carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
       request-size cap Groq's free tier enforces (a request above ~8K tokens
-      413s there). rpm/rpd/tpd are data only for now (no clock, no counters).
+      413s there). rpd/tpd are data only for now (no clock, no counters), and a
+      non-zero ``rpm`` is no size filter -- only ``rpm: 0`` gates, through the
+      plan-limits bullet above.
       Keep-on-equal (review R4FIX): ``need_tokens * 1.3 == tpm`` keeps the leg;
       only a strictly greater need skips it. The estimate is input only --
       ``need_tokens`` is the brief plus the files, no output reserve -- so a
@@ -534,6 +546,15 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
         reasons = []
 
+        # MISTRALFIX (2026-09-28): the plan itself can veto a leg. Measured on
+        # api.mistral.ai with the operator's key, four of its models answer 429
+        # at 0 requests/minute and one 403 (not on the plan) -- nothing read
+        # `rpm` before, so such a leg was planned as if it answered and the
+        # gateway burned the request falling through. One predicate,
+        # registry.plan_dead_reasons(), shared with the route-liveness
+        # invariant test.
+        reasons.extend(plan_dead_reasons(provider_id, model_id, registry))
+
         usable = usable_context(model_id, registry, overlay)
         if need * 1.3 > usable:
             reasons.append("context: need %sx1.3 > usable %s on %s/%s"
@@ -542,8 +563,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # Brief R4 (2026-09-27): a request-size cap from the provider's own
         # limits table -- need * 1.3 > tpm skips the leg, same shape as the
         # context filter. tpm is a per-minute token cap Groq's free tier
-        # enforces (a request above ~8K tokens 413s there); rpm/rpd/tpd stay
-        # data-only for now (no clock, no counters).
+        # enforces (a request above ~8K tokens 413s there); rpd/tpd stay
+        # data-only for now (no clock, no counters) and a non-zero rpm is no
+        # size filter -- only `rpm: 0` gates, through the plan check above.
         tpm = provider_tpm(provider_id, model_id, registry)
         if tpm is not None and need * 1.3 > tpm:
             reasons.append("limit: %s/%s tpm %s < need %s"
@@ -1155,6 +1177,12 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     leg. Every ``route_id`` here already survived ``filter_routes``, so
     ``usable_legs`` is never empty for it; a caller that passes one that did
     not gets a ValueError naming it, the same fail-closed shape as before.
+
+    Spec 4's ``override.effort`` replaces the bucket's rung on the leg that
+    would answer (DSBACK: it was parsed, validated and then dropped, so a card
+    pinning ``effort=max`` silently ran the bucket's rung). It is clamped to
+    that leg's ladder exactly like a bucket-derived rung, so a pin cannot
+    invent a rung the model lacks and cannot make a non-reasoning leg reason.
     """
     out = []
     for route_id in route_ids:
@@ -1168,6 +1196,9 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
         model = registry["models"][model_id]
         eff = effort(bucket_name, card["kind"], route["class"],
                     model["effort_ladder"], model["reasoning"])
+        pinned = (card.get("override") or {}).get("effort")
+        if pinned:
+            eff = _clamp(pinned, model["effort_ladder"])
         score = dict(score_route(route_id, bucket_name, eff, features, registry,
                                  track_record, orchestrator_model, mode,
                                  leg=leg))

@@ -49,13 +49,23 @@ drives the block order; `combos.json` names the same set minus `opus-4-6`.
 `LITELLM_MASTER_KEY` from `.env`; unreadable or empty is a hard error). Values
 are never printed, only key names.
 
-Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane` (`--json` for machine-readable).
+Usage report: `autoos-agent.py usage --since 1h --by provider,combo,lane,run` (`--json` for machine-readable).
 It reads the OmniRoute gateway's `/api/usage/call-logs` with the manage-scoped key from the ai-stack
 config dir. Heartbeats print `usage --since 1h --by provider,lane`.
 `--cost` adds estimated `cost_in`/`cost_out` (USD) per group, priced from the
 registry's per-token `price_in`/`price_out`; the JSON names its source and how
 many models it had no price for, so a 0 row reads as free or unknown. Off by
 default — `--json` readers get the same shape as before.
+`--spend-since [DATE]` (bare: the 1st of the current month UTC) and
+`--balance-usd N` add a `paid_spend` block for the one provider the operator
+budgets in dollars — DeepSeek. It costs each of that provider's rows at the
+registry's per-token price times the factor in `providers.deepseek.windows` at
+the row's own timestamp (`autoos_resolver.price_factor`, the same function the
+router uses to pick a cheap hour), reaches the row fetch back as far as that
+date even when `--since` is an hour, and prints `WARN` at 20 USD of spend
+(the monthly cap) or when `--balance-usd` — a balance the caller measured at
+the gateway — is below 5 USD. A window that hit the paging cap says
+`incomplete`: the figure is a floor, not a total.
 
 Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
 <position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).
@@ -75,12 +85,63 @@ behind `--since` says nothing, and one dropped with the record it rode on by
 `--max-records` is named in the cut line instead ("cut N earlier records and M
 malformed entries").
 
-Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
-header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
-tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).
-OmniRoute copies that header into the `session_tag` field of each `call_logs` row, so a lane's calls
-are the rows of `/api/usage/call-logs` whose `session_tag` equals the tag (the route has no
-`session_tag` filter param yet — page and match client-side).
+Attribution: every spawned run that reaches the gateway through a client able to stamp a request sends
+the header `x-omniroute-session-id: <tag>/<run-id>` (D-063; tag = env `AUTOOS_SESSION_TAG` when valid,
+else `<lane worktree basename>/<slugified title>`). Which clients can stamp it, and with what, is the
+table below.
+OmniRoute copies that header into the `session_tag` field of each `call_logs` row **and** keys its
+conversation on the whole value (`resolveConversationId` → `header.trim().slice(0, 128)`, measured in the
+running build), so one run threads one Conversation while the part before the first `/` still names the
+lane: `usage --by lane` groups the old `<tag>` rows and the new `<tag>/<run-id>` rows together, and
+`--by run` splits a lane's rows by the id after the last `/` (`(no run id)` for a row whose tail is not
+one). A tag long enough that tag + `/` + id would pass the gateway's 128-char **truncation** is sent
+alone, with one warning line — a cut id would silently merge the lane's runs into one conversation.
+
+**How each client carries them** (FLEETP0 review item 4; `omniroute run` itself has no header option —
+`omniroute run --help`). Measured 2026-09-28 by pointing the launcher at a local listener
+(`omniroute run <target> --remote http://127.0.0.1:<port>`) and reading the request headers back, so no
+gateway spend and no live completion was involved:
+
+| client | carrier | note |
+|---|---|---|
+| `opencode` | provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay | merged into any existing `providers.omniroute` block |
+| `codex` | `-c 'model_providers.omniroute.http_headers.<name>="<value>"'` in its argv | **must precede the `exec` subcommand**: after it the override replaces the whole `model_providers` table and codex aborts with "provider name must not be empty". A dotted segment with dashes parses; a quoted segment (`."x-…"`) is dropped silently. |
+| `gemini` | env `GEMINI_CLI_CUSTOM_HEADERS="<name>:<value>,<name2>:<value2>"` | the child inherits the spawner's env; parsed by the CLI's `parseCustomHeaders` (split on `/,(?=\s*[^,:]+:)/`, first `:` divides) |
+| `qwen` | **nothing** | `customHeaders` exists only inside `settings.json`, and the launcher writes the temporary `QWEN_HOME` it reads from and deletes it on exit; the one env hook, `QWEN_CODE_SYSTEM_SETTINGS_PATH`, is the machine-wide system settings file — not something one spawn may write |
+
+So a `qwen` run's rows stay `session_tag = null` — `usage --by lane` lists them under `(untagged)` and
+`--by run` under `(no run id)` — and that run is attributable host-side only: the
+`logs/workers/<run-id>.json` record, the `agent/<run-id>` branch and the child's `AUTOOS_AGENT_RUN_ID`
+still name it exactly. Closing qwen needs an upstream `omniroute run --header` (or a header env var).
+A client that cannot stamp a header is given no `session-tag:` line in its plan either, so nothing
+claims an attribution the gateway never received.
+
+Run identity (FLEET): one spawn mints one id, `YYYYMMDD-HHMMSS-<slug>-<hex6>` in UTC
+(`autoos-agent.py` `mint_run_id`), and the same string is the `--isolate` clone's directory suffix,
+its branch `agent/<id>`, the git-ignored record `logs/workers/<id>.json`, the header
+`X-AutoOS-Run-Id` sent beside `x-omniroute-session-id`, and the child's `AUTOOS_AGENT_RUN_ID`. The slug
+is scrubbed through the shared redactor before it is cut to 24 characters and the mask token is dropped
+(FLEETP0 review): the cap is shorter than a vendor key, so a pasted key used to fit into all four of
+those places intact. A fallthrough re-run adopts the reused clone's `agent/<id>` suffix only when that
+suffix *is* a canonical id (`is_canonical_run_id`); anything else — a hand-named branch, a pre-FLEET
+stamp — gets a freshly minted id and keeps the clone. The
+child's own spawns read that variable and store it as their `parent_run_id`, so `autoos-agent.py ps
+--tree` prints the spawn tree (an orphan whose parent record is gone is a top-level row that says
+`(parent <id> gone)`; `ps --json` carries the edge untruncated, the tree being a display of it; a record
+whose caller's id equals its own has no parent edge at all, and a cycle between two records still lists
+both rows). A
+record also keeps the host it ran on, the `logs/agents/<id>` run dir it was given
+(`AUTOOS_TASK_DIR`) and the resolver's whole `route_plan`, so a run stays auditable after the probes
+and cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
+included — dicts, lists, tuples, sets and frozensets alike.
+
+The id may also be handed in rather than minted here (FLEETP0b, FLEETSPEC §5.1): `run --run-id <id>`
+takes a canonical id and refuses a shape that is not one with exit 2. That is how the MCP server's
+`spawn` keeps its promise — it calls the same `mint_run_id`, names its own `logs/agents/<id>` dir
+with the result and passes it as `--run-id`, so an MCP spawn has one id and not a run-dir id beside a
+record id. The `parent_run_id` edge is still only ever the caller's own `AUTOOS_AGENT_RUN_ID` at
+spawn time, never the handed-in id: a child that read its own new id as its parent would be its own
+parent.
 
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which

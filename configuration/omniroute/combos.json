@@ -15,8 +15,20 @@
     "a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek",
     "credit is out (L0: every tier keeps a free leg). cheaperinference legs",
     "omitted: wallet exhausted 2026-09-27T17:2xZ (402).",
-    "t1-orchestrator-clean, deepseek-v4.1-flash and samba/* still omitted",
-    "(contributor-only, paid, or provider-off)."
+    "DSBACK 2026-09-28: providers.deepseek is available again after the",
+    "operator top-up (router balance 19.99 USD), so deepseek/deepseek-flash",
+    "heads t2-worker-clean/t3-driver-clean again and deepseek-v4.1-flash is",
+    "no longer omitted. t1-orchestrator-clean and samba/* still omitted",
+    "(contributor-only, paid, or provider-off).",
+    "MISTRALFIX 2026-09-28: mistral/mistral-small-latest left the last routes",
+    "it was a leg of (t3-driver L11, t2-worker-clean, t3-driver-clean) - a",
+    "direct probe of api.mistral.ai with this key measured 429 at 0",
+    "requests/minute for it on this plan and the gateway's own 7-day log failed",
+    "51 of 51 calls on it. Both -clean twins keep the live",
+    "deepseek/deepseek-flash head, so neither is marked unavailable;",
+    "mistral/mistral-code-latest (measured 200, 125 rpm) stays t3-driver's",
+    "head. The numbers live on providers.mistral.limits, read by",
+    "tools/registry.py plan_dead_reasons() - never restated here."
   ],
   "retired": [
     "tier1",
@@ -35,12 +47,19 @@
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
-    "deepseek-v4.1-flash",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "t1-orchestrator-clean"
   ],
   "combos": [
+    {
+      "name": "deepseek-v4.1-flash",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "deepseek/deepseek-flash"
+      ]
+    },
     {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
@@ -105,6 +124,7 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
+        "deepseek/deepseek-flash",
         "meta-api/muse-spark-1.3-contributor",
         "free-ai/qwen7b"
       ]
@@ -114,7 +134,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "mistral/mistral-small-latest"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -133,7 +153,7 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
-        "mistral/mistral-small-latest",
+        "deepseek/deepseek-flash",
         "meta-api/muse-spark-1.3-contributor"
       ]
     },
@@ -142,7 +162,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "mistral/mistral-small-latest"
+        "deepseek/deepseek-flash"
       ]
     },
     {

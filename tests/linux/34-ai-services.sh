@@ -245,12 +245,123 @@ _prune_sandbox() {
     # answers here instead of falling back.
     printf '%s\n' free-ai opencode-zen openai groq openrouter sambanova cerebras \
         >"$d/builtins.txt"
+    # The combo store the stand-in CLI keeps state in (live.json), shared by
+    # `combo list`, `--output json combo list`, `combo create` and `combo
+    # delete` so the fake holds the real CLI's observable contract: creating a
+    # name the store already has fails "already exists" (which is exactly why
+    # apply.sh's re-run fell through to delete+create every time), and a delete
+    # of an absent name fails too.
+    cat >"$d/store.py" <<'STORE'
+import json, os, sys
+
+D = os.path.dirname(os.path.abspath(__file__))
+PATH = os.path.join(D, "live.json")
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+
+
+def load():
+    """The store document. A live.json that is not a JSON object is what the
+    CLI would have printed: `list` echoes it verbatim (so the caller sees a
+    non-JSON answer), the write modes treat the store as empty."""
+    raw = ""
+    if os.path.exists(PATH):
+        with open(PATH, encoding="utf-8") as fh:
+            raw = fh.read()
+    if raw.strip():
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict):
+            doc.setdefault("combos", [])
+            return doc
+        if mode == "list":
+            sys.stdout.write(raw if raw.endswith("\n") else raw + "\n")
+            sys.exit(0)
+        return {"combos": []}
+    return {"combos": [], "active": None, "error": None}
+
+
+def save(doc):
+    with open(PATH, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+
+
+def save_combos(rows):
+    doc = load()
+    doc["combos"] = rows
+    save(doc)
+
+
+mode = sys.argv[1]
+combos = load()["combos"]
+if mode == "list":
+    # The JSON document form, with the step shape the live 3.8.51 store prints
+    # (measured 2026-09-27T08:4xZ): "model" carries the full provider/model ref.
+    print(json.dumps(load()))
+elif mode == "has":
+    sys.exit(0 if any(c.get("name") == sys.argv[2] for c in combos) else 1)
+elif mode == "put":
+    name, strategy, models = sys.argv[2], sys.argv[3], sys.argv[4]
+    refs = [r for r in models.split(",") if r]
+    combos.append({"name": name, "strategy": strategy,
+                   "models": [{"kind": "model",
+                               "providerId": r.partition("/")[0], "model": r}
+                              for r in refs]})
+    save_combos(combos)
+elif mode == "drop":
+    kept = [c for c in combos if c.get("name") != sys.argv[2]]
+    if len(kept) == len(combos):
+        print("Error: combo %r not found" % sys.argv[2], file=sys.stderr)
+        sys.exit(1)
+    save_combos(kept)
+STORE
     cat >"$d/bin/omniroute" <<'SH'
 #!/usr/bin/env bash
 d="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ "${1:-} ${2:-}" == "combo list" ]]; then
     printf '%s\n' "$*" >>"$d/listed"
     cat "$d/list.txt"
+    exit 0
+fi
+# apply.sh reads the live store before writing combos (--output json, the same
+# call --drift uses): answered from live.json through store.py.
+if [[ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" == "--output json --no-color combo list" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    if [[ -e "$d/live.fail" ]]; then
+        echo "Error: connect ECONNREFUSED" >&2
+        exit 1
+    fi
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
+    python3 "$d/store.py" list
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "combo create" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    name="${3:-}"; strategy="priority"; models=""
+    shift 3
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --strategy) strategy="${2:-}"; shift 2 ;;
+            --models)   models="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if ! [[ -s "$d/live.json" ]]; then
+        printf 'Created combo %s.\n' "$name"; exit 0
+    fi
+    if python3 "$d/store.py" has "$name"; then
+        printf 'Error: Combo "%s" already exists\n' "$name" >&2
+        exit 1
+    fi
+    python3 "$d/store.py" put "$name" "$strategy" "$models"
+    printf 'Created combo %s.\n' "$name"
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "combo delete" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    [[ -s "$d/live.json" ]] || exit 0
+    python3 "$d/store.py" drop "${3:-}"
     exit 0
 fi
 if [[ "${1:-} ${2:-}" == "providers available" ]]; then
@@ -379,18 +490,19 @@ fi
 # OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
 # declared legs but has no servable one left. A live combo with such an id is a
 # managed orphan, so apply prunes it - but never a user-made combo, and never a
-# current combo.
+# current combo. t1-orchestrator-clean is the orphan on show today; DSBACK
+# 2026-09-28 re-serviced deepseek-v4.1-flash, so it is no longer one.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" deepseek-v4.1-flash t2-worker my-own-combo
+    _prune_list "$d" t1-orchestrator-clean t2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete deepseek-v4.1-flash --yes" ]] \
+    [[ "$deletes" == "combo delete t1-orchestrator-clean --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - t1-orchestrator-clean: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -398,12 +510,12 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" deepseek-v4.1-flash my-own-combo
+    _prune_list "$d" t1-orchestrator-clean my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - t1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -415,13 +527,13 @@ fi
 # "t2-worker-paid") is never deleted - and a dry run never even names it.
 if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto t2-worker-paid deepseek-v4.1-flash my-own-combo
+    _prune_list "$d" auto t2-worker-paid t1-orchestrator-clean my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
     [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - deepseek-v4.1-flash: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - t1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
@@ -1254,6 +1366,242 @@ if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
     [[ "$out" == *unreadable* ]] || { ok=0; echo "no reason line: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "--drift crashed on a JSON list instead of exiting 3"; fi
+fi
+
+# ─── APPLYIDEM S1: apply.sh leaves an unchanged combo alone ─────────────────
+# AGENTS.md rule 4 ("A component that is already installed reports skipped, not
+# failed") and the header's own "safe to re-run" promise were both false for
+# combos: the Combos loop always tried `omni combo create`, the CLI refuses an
+# existing name, and the retry path deleted and re-created the combo. Measured
+# 2026-09-28: a re-run against a store --drift reports in sync printed
+# "+ <name> replaced" for every combo (14 of them), and each delete+create is a
+# window where the tier does not exist. The fix reads the live store once with
+# the same call --drift uses and skips a combo that already equals the file.
+# The stand-in this needs, all of it inside _prune_sandbox (line numbers as of
+# this change): the store itself is store.py (:254-318, seeded from live.json),
+# `--output json --no-color combo list` answers it verbatim (:329-338), `combo
+# create` refuses a name the store holds with 'Error: Combo "x" already exists'
+# (:339-360, the refusal at :354 — the real CLI's observable contract, and the
+# exact fact that drove apply.sh into delete+create), and `combo delete` fails on
+# an absent name (:361-366, store.py's "not found" at :315). Every one of them
+# logs its argv to calls.log, which is how "zero combo create/delete calls" is
+# asserted rather than inferred.
+# The default document carries a "strategy" per combo because _drift_json renders
+# it from combos.json (:1207-1228, the field at :1219) — that is RICHER than the
+# live 3.8.51 document recorded at 59aa3a9 apply.sh:252-253, which names no
+# strategy field. The "no strategy field" case below is therefore the one that
+# matches the measured gateway, and it must reach the same verdict; a fake that
+# only ever answered the rich shape would hide the bug it is meant to prevent.
+# _combo_live_json <dir> [swap] [split] - seed the stand-in store from
+# combos.json itself: the same document _drift_json renders for --drift, so the
+# two paths cannot drift apart.
+_combo_live_json() {
+    local d="$1" swap="${2:-}" split="${3:-}"
+    _drift_json "$d" "$swap" "$split"
+    mv "$d/drift.json" "$d/live.json"
+}
+# _combo_names - every combo id in combos.json, one per line.
+_combo_names() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    print(c["name"])' "$ROOT/configuration/omniroute/combos.json"
+}
+
+if it "apply combos: an in-sync store is left alone and every combo reports unchanged"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    out="$(_prune_apply "$d")"; rc=$?
+    ok=1
+    want="$(_combo_names)"
+    want_n="$(printf '%s\n' "$want" | grep -c .)"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        [[ "$out" == *"  = $name unchanged"* ]] || { ok=0; echo "no unchanged line for $name" >&2; }
+    done <<<"$want"
+    (( "$(grep -c '^  = .* unchanged' <<<"$out")" == want_n )) \
+        || { ok=0; echo "unchanged lines: [$(grep '^  = ' <<<"$out")]" >&2; }
+    # The whole point: not one write to the store.
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the store was written: [$(grep '^combo' "$d/calls.log")]" >&2; }
+    [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    (( "$(grep -cE '^  \+ .* (created|replaced) \(' <<<"$out")" == 0 )) \
+        || { ok=0; echo "a combo change was announced: $out" >&2; }
+    # And an unchanged combo is still probed: --probe lists every managed combo.
+    printf 'omniroute: not-a-real-key-123\n' >"$d/keys.yml"
+    out2="$(_prune_apply "$d" --probe)"
+    [[ "$out2" == *"  = $(_combo_names | head -1) unchanged"* ]] \
+        || { ok=0; echo "second run: $out2" >&2; }
+    [[ "$out2" == *"Probe (one tiny request per combo)"* ]] \
+        || { ok=0; echo "probe skipped although the run manages combos: $out2" >&2; }
+    # Run it twice and the section is identical — AGENTS.md §4's acceptance bar.
+    # out3 is compared against out2 (same key file, so the same catalog-filtered
+    # legs); only --probe differs, and that is outside the Combos section. The
+    # section alone is compared because the rest of the output carries the
+    # stand-in gateway's port, which is a different number every run.
+    : >"$d/calls.log"
+    out3="$(_prune_apply "$d")"
+    if ! diff -q <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out2") \
+                  <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3") >/dev/null; then
+        ok=0
+        echo "second run differs: [$(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3")]" >&2
+    fi
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the second run wrote the store: [$(grep '^combo' "$d/calls.log")]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply re-created combos the store already had"; fi
+fi
+
+if it "apply combos: only the combo that differs from the file is replaced"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    swapped="$(python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"]); break' "$ROOT/configuration/omniroute/combos.json")"
+    out="$(_prune_apply "$d")"
+    ok=1
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"  + $swapped replaced ("* ]] || { ok=0; echo "no replaced line for $swapped: $out" >&2; }
+    (( "$(grep -c '^  = .* unchanged' <<<"$out")" == want_n - 1 )) \
+        || { ok=0; echo "unchanged lines: [$(grep '^  = ' <<<"$out")]" >&2; }
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete $swapped --yes" ]] \
+        || { ok=0; echo "deletes: [$deletes]" >&2; }
+    (( "$(grep -c '^combo create' "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 1 replaced, 0 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    # The replacement landed: a second run leaves every combo alone.
+    : >"$d/calls.log"
+    out="$(_prune_apply "$d")"
+    [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+        || { ok=0; echo "second run: $out" >&2; }
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "second run wrote the store" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply replaced more than the combo that differs"; fi
+fi
+
+if it "apply combos: a strategy that differs from the file replaces that combo"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_names | head -1)"
+    python3 - "$d/live.json" "$victim" <<'PY' >"$d/live.json.new"
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+doc = json.load(open(path, encoding="utf-8"))
+for c in doc["combos"]:
+    if c["name"] == name:
+        c["strategy"] = "roundRobin"
+print(json.dumps(doc))
+PY
+    mv "$d/live.json.new" "$d/live.json"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + $victim replaced ("* ]] || { ok=0; echo "no replaced line for $victim: $out" >&2; }
+    [[ "$out" == *"  = $victim unchanged"* ]] && { ok=0; echo "a wrong strategy was kept" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ignored the live combo's strategy"; fi
+fi
+
+# The two live shapes the recorded measurement leaves open: the JSON document
+# this script was written against (59aa3a9 apply.sh:252-253) names no "strategy"
+# field at all, and the upstream step shape splits providerId from a bare model.
+# Both must read as unchanged — the comparison takes the strategy only when the
+# store reports one, and the refs come from the same normaliser --drift uses, so
+# a shape --drift calls in sync cannot make the loop rewrite the tier.
+if it "apply combos: no strategy field, and the upstream split step shape, are both unchanged"; then
+    ok=1
+    for shape in nostrategy split; do
+        d="$(_prune_sandbox)"
+        _prune_list "$d"
+        if [[ "$shape" == "nostrategy" ]]; then
+            _combo_live_json "$d"
+            python3 - "$d/live.json" >"$d/live.json.new" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in doc["combos"]:
+    c.pop("strategy", None)
+print(json.dumps(doc))
+PY
+            mv "$d/live.json.new" "$d/live.json"
+        else
+            _combo_live_json "$d" "" split
+        fi
+        out="$(_prune_apply "$d")"
+        want_n="$(_combo_names | grep -c .)"
+        [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+            || { ok=0; echo "$shape: $out" >&2; }
+        grep -qE '^combo (create|delete)' "$d/calls.log" \
+            && { ok=0; echo "$shape: the store was written: $(grep '^combo' "$d/calls.log")" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "apply replaced a combo the store already had in another shape"; fi
+fi
+
+if it "apply combos: an unreadable live list falls back to replacing every combo, with one warning"; then
+    ok=1
+    for shape in refused notjson; do
+        d="$(_prune_sandbox)"
+        _prune_list "$d"
+        if [[ "$shape" == "refused" ]]; then
+            : >"$d/live.fail"
+        else
+            printf 'not a JSON document\n' >"$d/live.json"
+        fi
+        out="$(_prune_apply "$d")"
+        [[ "$out" == *"! live combo list unreadable - replacing every combo"* ]] \
+            || { ok=0; echo "$shape: no fallback line: $out" >&2; }
+        (( "$(grep -c 'live combo list unreadable' <<<"$out")" == 1 )) \
+            || { ok=0; echo "$shape: not exactly one fallback line: $out" >&2; }
+        # Today's behaviour: create first, so a failed create leaves the old tier.
+        want_n="$(_combo_names | grep -c .)"
+        (( "$(grep -c '^combo create' "$d/calls.log")" == want_n )) \
+            || { ok=0; echo "$shape: creates: $(grep -c '^combo create' "$d/calls.log") of $want_n" >&2; }
+        [[ "$out" == *"Combos: 0 unchanged, $want_n created, 0 replaced, 0 failed"* ]] \
+            || { ok=0; echo "$shape: tally: $out" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "an unreadable live combo list did not fall back to today's behaviour"; fi
+fi
+
+if it "apply combos: --dry-run says what it would keep, what it would replace, and writes nothing"; then
+    ok=1
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    out="$(_prune_apply "$d" --dry-run)"
+    want_n="$(_combo_names | grep -c .)"
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == want_n )) \
+        || { ok=0; echo "plan: $out" >&2; }
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the dry run wrote the store" >&2; }
+    [[ "$out" == *"Combos: $want_n would keep unchanged, 0 would create, 0 would replace"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    # One combo differs: the plan names it as a replace, the rest stay. The
+    # ": " anchor skips the section's own tally line.
+    _combo_live_json "$d" swap
+    out="$(_prune_apply "$d" --dry-run)"
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == want_n - 1 )) \
+        || { ok=0; echo "swap plan: $out" >&2; }
+    (( "$(grep -c '^  - .*: would replace' <<<"$out")" == 1 )) \
+        || { ok=0; echo "no would-replace line: $out" >&2; }
+    # Unreadable list - the shape a host without a running gateway gives on a
+    # dry run: today's "would create" plan, and no claim about keeping anything.
+    : >"$d/live.fail"
+    out="$(_prune_apply "$d" --dry-run)"
+    [[ "$out" == *"would create"* ]] || { ok=0; echo "no would-create plan: $out" >&2; }
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == 0 )) \
+        || { ok=0; echo "claimed a live read it could not make: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the combos dry run does not say what it would keep"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
