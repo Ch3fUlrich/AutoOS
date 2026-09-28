@@ -101,6 +101,25 @@ class FakeFetch:
                 for c in self.calls]
 
 
+class MonthlyCapTests(unittest.TestCase):
+    """WS-DSCALL (2026-09-28): the one reader of providers.<id>.monthly_cap_usd."""
+
+    def test_the_cap_is_read_from_the_registry(self):
+        reg = {"providers": {"deepseek": {"monthly_cap_usd": 25}}}
+        self.assertEqual(usage.monthly_cap_usd(reg), 25.0)
+
+    def test_a_missing_or_bad_cap_raises(self):
+        for entry in ({}, {"monthly_cap_usd": 0}, {"monthly_cap_usd": "25"},
+                      {"monthly_cap_usd": True}):
+            with self.assertRaises(ValueError):
+                usage.monthly_cap_usd({"providers": {"deepseek": entry}})
+        with self.assertRaises(ValueError):
+            usage.monthly_cap_usd({})
+
+    def test_the_warning_line_is_not_the_cap(self):
+        self.assertEqual(usage.SPEND_WARN_USD, 20.0)
+
+
 class UsageCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

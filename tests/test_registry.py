@@ -1204,6 +1204,31 @@ class LegRulesTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class MonthlyCapTests(unittest.TestCase):
+    """WS-DSCALL (2026-09-28): providers.<id>.monthly_cap_usd is the paid cap a
+    caller refuses at; the validator accepts only a positive number with a
+    monthly_cap_source."""
+
+    def test_the_live_deepseek_cap_is_25_with_a_source(self):
+        deepseek = load_registry()["providers"]["deepseek"]
+        self.assertEqual(deepseek["monthly_cap_usd"], 25)
+        self.assertTrue(deepseek["monthly_cap_source"].strip())
+        self.assertEqual(registry._check_monthly_caps(load_registry()), [])
+
+    def test_a_bad_cap_is_flagged_naming_the_provider(self):
+        for bad in (0, -1, "25", True, None):
+            reg = mutated()
+            reg["providers"]["deepseek"]["monthly_cap_usd"] = bad
+            problems = [p for p in registry.check_registry(reg) if "monthly_cap_usd" in p]
+            self.assertTrue(problems, bad)
+            self.assertIn("deepseek", problems[0])
+
+    def test_a_cap_without_a_source_is_flagged(self):
+        reg = mutated()
+        del reg["providers"]["deepseek"]["monthly_cap_source"]
+        self.assertTrue([p for p in registry.check_registry(reg) if "monthly_cap_source" in p])
+
+
 class ProviderLimitsTests(unittest.TestCase):
     """providers.<id>.limits: per-model free-tier rate caps as data (brief R4,
     2026-09-27). Keyed by the provider's own model spelling (the part of the

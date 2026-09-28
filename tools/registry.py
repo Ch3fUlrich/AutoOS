@@ -184,7 +184,8 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
 # unavailable_until's whole job is to hold a date (rule 7 checks the value
 # parses); version is a date by definition. Neither is a rule-5 violation.
-DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until")
+# monthly_cap_source is a source like any other: who set the cap, and when.
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -2592,6 +2593,29 @@ def _check_risk_policy(registry) -> list:
 # ===========================================================================
 
 
+def _check_monthly_caps(registry) -> list:
+    """providers.<id>.monthly_cap_usd, when present, is a positive number with a
+    non-empty monthly_cap_source (WS-DSCALL, 2026-09-28).
+
+    A paid caller (deepseek_call.py) refuses at or above the cap, so a zero,
+    negative, string or boolean cap would either block every call or none; a
+    bool is rejected explicitly because it is an int to Python.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or "monthly_cap_usd" not in provider:
+            continue
+        cap = provider["monthly_cap_usd"]
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+            problems.append("providers.%s.monthly_cap_usd must be a positive number, got %r"
+                            % (provider_id, cap))
+        source = provider.get("monthly_cap_source")
+        if not isinstance(source, str) or not source.strip():
+            problems.append("providers.%s.monthly_cap_usd has no monthly_cap_source"
+                            % provider_id)
+    return problems
+
+
 def check_registry(registry) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -2605,6 +2629,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_unavailable_until_pairs_available(registry))
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
+    problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_risk_policy(registry))
     return problems

@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
+
+- **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid
+  completion through the OmniRoute gateway, asked for the allowed registry leg
+  with `max_tokens` 4096; never local Ollama. Which served models count is
+  `catalog/ai-registry.json`'s call: exactly a leg of route `deepseek-v4.1-flash`
+  that `policy.leg_rules` allows, checked as served (via
+  `tools/registry.leg_denied`), so V4 Pro, a dated snapshot or another provider
+  never passes. Keys come from `configuration/api-keys.yml` in-process, never
+  argv, scrubbed from errors.
+- **Monthly DeepSeek cap, fail-closed:** `providers.deepseek.monthly_cap_usd: 25`
+  (with `monthly_cap_source`; schema entry; `tools/registry.py` requires a positive
+  number and a source) is read through the one reader
+  `autoos_usage.monthly_cap_usd`. `deepseek_call.py` is orchestrator-only: before
+  each call it reads this month's spend from the gateway's call logs and refuses
+  (exit 3) at or above the cap or when the spend cannot be read.
+  `SPEND_WARN_USD` (20) stays the warning line.
+- **OpenRouter dropped** from the helper: `providers.openrouter` has no credit
+  (BYOK answered 401), so there is nothing to fall back to.
+- **`deepseek_review.sh`, `deepseek_chunked_review.sh`** call it instead of
+  opencode in WSL, whose `--file` silently reviewed only the first ~1,000 lines
+  and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
+  Re-created from the operator's local work (2026-09-25) and reworked for the
+  DSBACK policy (2026-09-28).
+
 ### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
 
 - **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
