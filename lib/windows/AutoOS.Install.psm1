@@ -2249,23 +2249,51 @@ function Set-AutoOSOpenCodeConfig {
     # muse-spark-1.3-contributor.json template needs fresh catalog numbers
     # projected at setup (catalog wins). Tier ids are the stable contract
     # (docs/models.md) — same list as the repo config and the Zed writer.
-    # Keys stay out of the file: {env:...} placeholders resolve at runtime.
+    # Keys stay out of the file: {env:...} placeholders resolve at runtime —
+    # EXCEPT that a placeholder no environment can fill breaks the whole parse.
+    # REVROUTE (S2) item 4 (measured on L1-backlog, Linux twin in
+    # lib/linux/install.sh): with META_API_KEY unset, opencode reports "Expected
+    # string at [META_API_KEY]" for the USER config and every bare `opencode`
+    # start fails, in every cwd. So the direct provider is written only when the
+    # variable it names exists, and a placeholder an earlier keyed run left is
+    # taken back. The Muse contributor stays selectable either way as
+    # omniroute/spark-1.3-contributor - the gateway heading this config also
+    # declares, and the one policy.reviewers names for the paid reviewer.
     $muse = $repoById['muse-spark']
     $museModelId = $muse.direct.model.Split('/', 2)[1]
-    $providers['meta'] = [ordered]@{
-        npm     = $muse.direct.npm
-        name    = 'Meta'
-        options = [ordered]@{
-            baseURL = $muse.direct.base_url
-            apiKey  = '{env:META_API_KEY}'
-        }
-        models  = [ordered]@{
-            $museModelId = [ordered]@{
-                name      = $muse.name
-                reasoning = $true
-                limit     = [ordered]@{ context = $muse.context; output = $muse.output }
-                options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
+    if ($env:META_API_KEY) {
+        $providers['meta'] = [ordered]@{
+            npm     = $muse.direct.npm
+            name    = 'Meta'
+            options = [ordered]@{
+                baseURL = $muse.direct.base_url
+                apiKey  = '{env:META_API_KEY}'
             }
+            models  = [ordered]@{
+                $museModelId = [ordered]@{
+                    name      = $muse.name
+                    reasoning = $true
+                    limit     = [ordered]@{ context = $muse.context; output = $muse.output }
+                    options   = [ordered]@{ reasoningEffort = $muse.direct.reasoning_effort }
+                }
+            }
+        }
+    } elseif ($providers.Contains('meta')) {
+        # Only this writer's own shape: its placeholder, or the package it
+        # names. A `meta` provider of the user's making is theirs (AGENTS.md 4).
+        # Set-StrictMode Latest turns a missing property - and a value of JSON
+        # null - into a terminating error, so each lookup is guarded first.
+        $stale = $providers['meta']
+        $staleKey = if ($null -ne $stale -and
+                        $stale.PSObject.Properties['options'] -and
+                        $stale.options.PSObject.Properties['apiKey']) {
+            [string]$stale.options.apiKey
+        } else { '' }
+        $staleNpm = if ($null -ne $stale -and $stale.PSObject.Properties['npm']) {
+            [string]$stale.npm
+        } else { '' }
+        if ($staleKey -eq '{env:META_API_KEY}' -or $staleNpm -eq [string]$muse.direct.npm) {
+            $providers.Remove('meta')
         }
     }
     $providers['omniroute'] = [ordered]@{
@@ -2312,7 +2340,8 @@ function Set-AutoOSOpenCodeConfig {
 
     # Retired 2026-09-22: drop the direct deepseek provider a previous setup
     # wrote, so a re-run converges instead of preserving it via the merge.
-    # The meta provider (muse-spark contributor) above is intentional and stays.
+    # The meta provider above is conditional (REVROUTE item 4) and prunes its
+    # own stale entry; nothing to do here.
     foreach ($dead in @('deepseek')) {
         if ($providers.Contains($dead)) { $providers.Remove($dead) }
     }

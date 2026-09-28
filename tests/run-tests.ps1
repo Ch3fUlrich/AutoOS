@@ -4444,6 +4444,22 @@ Test-Case 'opencode user config carries global gateway providers without secrets
     Assert-True ($body -match 'muse-spark') 'muse-spark contributor provider missing'
 }
 
+Test-Case 'opencode user config: the direct meta provider needs META_API_KEY to exist' {
+    # REVROUTE (S2) item 4, measured on L1-backlog: a {env:META_API_KEY}
+    # placeholder with no such variable in the environment does not resolve to a
+    # string, and opencode then fails the WHOLE user config ("Expected string at
+    # [META_API_KEY]") in every cwd. The writer may emit it only when the key it
+    # names exists, and must take back the one a keyed run left behind. Muse
+    # stays selectable as omniroute/spark-1.3-contributor either way. The Linux
+    # twin runs the writer for real; HOME is read-only here, so this pins the
+    # definition.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match 'if\s*\(\s*\$env:META_API_KEY\s*\)') `
+        'the meta provider is not guarded by the environment variable it names'
+    Assert-True ($body -match "Remove\('meta'\)") `
+        'a meta provider with an unfillable placeholder is never pruned'
+}
+
 Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
     $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
     $hands = (Get-Command Set-AutoOSOpenHandsConfig).Definition
