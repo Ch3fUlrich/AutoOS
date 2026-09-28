@@ -145,13 +145,14 @@ def _is_real_timestamp(stamp: str) -> bool:
 
 
 def _iter_records(lines):
-    """Yield (record, malformed_line_number) decisions over readlines() output.
+    """Yield one (payload, line_number, is_record) per decision over readlines().
 
-    The caller owns line numbering; this owns the record boundaries: a
-    timestamp line opens a record, a line without one continues it, a line that
-    looks like a timestamp but fails the parse is malformed and closes it (its
-    following lines belong to nothing and are skipped, exactly like the leading
-    header block).
+    The caller owns line numbering and the ordinals; this owns the record
+    boundaries: a timestamp line opens a record, a line without one continues
+    it, and a line that looks like a timestamp but fails the parse is malformed
+    and closes the record it follows — never glued onto it (§0). The lines after
+    a malformed one belong to nothing and are skipped, exactly like the leading
+    header block.
     """
     current = None
     for number, raw in enumerate(lines, 1):
@@ -170,10 +171,6 @@ def _iter_records(lines):
                 yield current
                 current = None
             yield None, number, False
-            continue
-        if not line.strip():
-            if current is not None:
-                current[0].continuations.append(line)
             continue
         if current is not None:
             current[0].continuations.append(line)
