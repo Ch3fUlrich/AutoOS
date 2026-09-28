@@ -73,9 +73,6 @@ class Position:
     def key(self):
         return (self.stamp, self.ordinal)
 
-    def __str__(self):
-        return "%s#%d" % (self.stamp, self.ordinal)
-
 
 @dataclass
 class Record:
@@ -95,10 +92,6 @@ class Record:
     @property
     def key(self):
         return (self.timestamp, self.ordinal)
-
-    @property
-    def lines(self) -> list:
-        return ["%s %s" % (self.timestamp, self.text)] + list(self.continuations)
 
 
 def run_dir(env=None) -> str:
