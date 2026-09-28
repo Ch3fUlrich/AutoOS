@@ -549,6 +549,13 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RESTART spec §0/§2 (lane R1): the shared inbox reader (tools/autoos_inbox.py),
+# the `inbox` verb and the explicit verb->handler dispatch table. Fixtures are
+# temp files; nothing is spawned and no inbox outside the sandbox is read.
+if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch table (unit tests)"; then
+    out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
