@@ -404,8 +404,12 @@ def spawn(req: dict) -> dict:
     try:
         budget_refusal, budget_note = agent.claude_spawn_refusal(
             req.get("client") or "opencode", os.environ,
-            model=req.get("model") or (agent.DEFAULT_FREE_MODEL if req.get("free") else None),
-            card=req.get("card"), tier=req.get("tier"),
+            # CLAUDEBUDGET-f item 3: the same one resolution the CLI's build_plan
+            # runs -- the flags go in as flags, and `free` is priced at the promo
+            # model the argv carries (this tool passes --free, never --free-model).
+            model=req.get("model"), card=req.get("card"), tier=req.get("tier"),
+            free=bool(req.get("free")), free_model=agent.DEFAULT_FREE_MODEL,
+            clean=bool(req.get("clean")),
             reason=req.get("claude_reason"))
     except (OSError, ValueError) as exc:
         return _refused("cannot read the Claude budget: %s" % exc)

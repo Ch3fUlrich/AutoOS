@@ -9266,15 +9266,18 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
     def test_agy_default_model_is_a_claude_spend(self):
         # agy answers with clients.AGY_DEFAULT_MODEL when the caller names none,
         # and that model IS Claude -- the client-name-only gate saw "agy" and
-        # waved it through. Unit level, not CLI level: cmd_run's capability check
-        # refuses agy (it declares shell=false, write=false) before the budget
-        # gate is reached, so a CLI-level run of this case tests the wrong door.
-        cli = load_agent()
-        registry = self.shipped_budget()
-        refusal, note = cli.claude_spawn_refusal("agy", {}, registry)
-        self.assertIsNotNone(refusal, note)
-        self.assertIn("claude-opus", refusal)
-        self.assertIn("claude_budget", refusal)
+        # waved it through. CLAUDEBUDGET-f item 6: this is the CLI path, not a
+        # unit call. The old version used a `role=implement` card, which the
+        # capability check (SPAWNCAP: agy declares shell=false, write=false)
+        # refuses before the budget gate is reached -- so it tested the wrong
+        # door and stayed green even if the budget gate vanished. A read-only
+        # card asks for no capability, and the run gets to the budget gate.
+        r = run_agent("run", "--client", "agy", "--dry-run",
+                      "--card", "role=review", "reply with exactly: ack",
+                      env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("claude-opus", r.stderr)
 
     def test_the_orchestrator_declaration_unlocks_a_claude_defaulted_client(self):
         cli = load_agent()
@@ -9295,8 +9298,13 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
     def test_a_named_client_on_a_non_claude_model_is_never_gated(self):
         # qoder's own default is Qwen3.8-Flash: the name check must not become a
         # blanket refusal of every client that CAN take a Claude model.
+        # CLAUDEBUDGET-f item 6: assert the door is OPEN, not only that the
+        # budget said nothing -- a run that died at some other check would have
+        # satisfied a `NotIn claude_budget` and hidden the regression.
         r = run_agent("run", "--client", "qoder", "--dry-run", "--card",
                       self.CARD, "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
         self.assertNotIn("claude_budget", r.stderr, r.stdout + r.stderr)
 
     def test_an_unknown_effective_model_fails_closed(self):
@@ -9412,3 +9420,200 @@ class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
                                          "claude_reason": "trust me"},
                                 "dry_run": True})
         self.assertEqual(out.get("state"), "rejected", out)
+
+
+class ClaudeBudgetSameModelTests(unittest.TestCase):
+    """CLAUDEBUDGET-f items 1/2/3/5: the gate judges the model the run launches.
+
+    One resolution, in the runner's own precedence order (an explicit --model,
+    then the tier agent's model for a client that goes through the gateway, then
+    the client's own default, then the card's combo), and that value is what both
+    the gate and the argv carry. Two extra doors HEAD had: a combo the registry
+    does not carry was priced as *free* for a caller-named value (1/5), and a
+    `--free`/`--model` string short-circuited the resolution before the tier was
+    ever consulted (3) -- so the gate could read one model while the run answered
+    with another.
+    """
+
+    UNKNOWN_COMBO = "omniroute/not-a-route-at-all"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.real_cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def cli(self):
+        return self.agent
+
+    def shipped(self, **row):
+        """A deep copy of the shipped registry, optionally with a clients row."""
+        import copy
+        registry = copy.deepcopy(SHIPPED_REGISTRY)
+        for name, value in row.items():
+            registry.setdefault("clients", {}).setdefault(name, {}).update(value)
+        return registry
+
+    def off(self, registry):
+        import copy
+        off = copy.deepcopy(registry)
+        off["policy"]["claude_budget"] = {"mode": "normal",
+                                          "weekly_share_left": 0.9,
+                                          "budget_below": 0.25}
+        return off
+
+    # --- item 1: an unknown combo is not free, it is unknowable ----------------
+
+    def test_an_unknown_combo_named_by_the_caller_is_refused(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, self.shipped(),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+        # The message names the value it could not price, or the operator cannot
+        # tell a typo from a policy change.
+        self.assertIn(self.UNKNOWN_COMBO, refusal)
+
+    def test_an_unknown_combo_is_not_refused_outside_budget_mode(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {},
+                                                 self.off(self.shipped()),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNone(refusal, note)
+
+    def test_an_unknown_combo_on_the_cli_is_refused(self):
+        r = run_agent("run", "--client", "opencode", "--model", self.UNKNOWN_COMBO,
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.UNKNOWN_COMBO, r.stderr)
+
+    # --- item 2: the tier agent model is consulted before any client default ---
+
+    def claude_tier_cfg(self):
+        """opencode.jsonc whose t2-worker agent answers on an all-Claude route."""
+        import copy
+        cfg = copy.deepcopy(self.real_cfg)
+        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        return cfg
+
+    def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
+        cli = self.cli()
+        # An operator-written clients row is the client's *default*, and a tier
+        # replaces it -- reading the row first is what let a Claude tier agent
+        # walk past the gate wearing a free model's name.
+        registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
+        model, source = cli.effective_spawn_model(
+            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
+        self.assertEqual(model, "omniroute/opus-4-6")
+        self.assertIn("t2-worker", source)
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
+                                                 cfg=self.claude_tier_cfg(), tier=2)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+
+    def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
+        # The same fixture through `cmd_run`: the budget's own refusal, not a
+        # route error further down, and it names the Claude model the tier agent
+        # carries. The live registry on this host is the shipped one (budget ON).
+        cli = self.agent
+        out, err = io.StringIO(), io.StringIO()
+        env = clean_env()
+        env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_run(self.args(tier=2, card=None), self.claude_tier_cfg())
+        self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("claude_budget", err.getvalue())
+        self.assertIn("opus-4-6", err.getvalue())
+
+    # --- item 5: a mutated registry clients row is refused, not assumed free ---
+
+    def test_a_typo_in_the_registry_clients_row_is_refused(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "Qwen3.8-Flas"})
+        model, source = cli.effective_spawn_model("qoder", registry=registry)
+        self.assertEqual((model, source), ("Qwen3.8-Flas", "registry clients row"))
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("Qwen3.8-Flas", refusal)
+
+    def test_a_registry_row_the_registry_can_price_still_runs(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "deepseek-v4.1-flash"})
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNone(refusal, note)
+
+    # --- item 3: one resolution, so the gate input IS the launch model ---------
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="role=review", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.cli().DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def launch_model(self, **overrides):
+        """The `--model` value build_plan actually hands the client."""
+        plan = self.agent.build_plan(self.args(**overrides), self.real_cfg)
+        cmd = plan["cmd"]
+        return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
+
+    def gate_model(self, **overrides):
+        cli = self.agent
+        return cli.effective_spawn_model(
+            overrides.get("client", "opencode"), model=overrides.get("model"),
+            card=overrides.get("card"), registry=SHIPPED_REGISTRY,
+            cfg=self.real_cfg, tier=overrides.get("tier"),
+            free=bool(overrides.get("free")),
+            free_model=overrides.get("free_model", cli.DEFAULT_FREE_MODEL),
+            clean=bool(overrides.get("clean")))[0]
+
+    COMBINATIONS = (
+        dict(client="opencode", tier=1),
+        dict(client="opencode", tier=2, clean=True),
+        dict(client="opencode", tier=3),
+        dict(client="opencode", card="role=implement,complexity=hard"),
+        dict(client="opencode", free=True),
+        dict(client="opencode", free=True, tier=2),
+        dict(client="opencode", model="omniroute/t1-orchestrator", tier=2),
+        dict(client="qwen", tier=1),
+        dict(client="qwen", card="role=implement"),
+        dict(client="qoder", tier=2),
+        dict(client="qoder", card="role=review"),
+        dict(client="qoder", model="Efficient", tier=2),
+    )
+
+    def test_a_v2_card_is_not_refused_for_the_client_it_can_price(self):
+        # A v2 card names no combo — the resolver routes it and holds its own
+        # Claude legs — so the spawn gate prices it at the client's configured
+        # default. A gateway client this config says nothing about stays
+        # unpriced, and unpriced under a budget is a refusal, not a free pass.
+        cli = self.agent
+        registry = self.shipped()
+        card = {"kind": "review", "paths": "tools/registry.py"}
+        self.assertIsNone(cli.claude_spawn_refusal("opencode", {}, registry,
+                                                  cfg=self.real_cfg, card=card)[0])
+        self.assertIsNotNone(cli.claude_spawn_refusal("codex", {}, registry,
+                                                     cfg=self.real_cfg, card=card)[0])
+
+    def test_the_gate_reads_the_model_the_launch_carries(self):
+        self.agent = load_agent()
+        for case in self.COMBINATIONS:
+            with self.subTest(**case):
+                gate = self.gate_model(**case)
+                launch = self.launch_model(**case)
+                # Both sides compared as the route/model id the client receives:
+                # a gateway argv carries the bare combo, the gate may spell it
+                # `omniroute/<combo>#<effort>`.
+                norm = lambda v: (v or "").partition("#")[0].replace("omniroute/", "", 1)
+                self.assertEqual(norm(gate), norm(launch),
+                                 "gate %r vs launch %r for %s" % (gate, launch, case))
+
+    def test_a_free_spawn_is_priced_at_the_free_model_not_the_tier(self):
+        # --free replaces the route with the promo model in build_plan, so the
+        # gate must price THAT, and a tier behind it changes nothing.
+        cli = self.agent = load_agent()
+        free = cli.DEFAULT_FREE_MODEL
+        self.assertEqual(self.gate_model(client="opencode", free=True, tier=3), free)
+        self.assertEqual(self.launch_model(client="opencode", free=True, tier=3), free)

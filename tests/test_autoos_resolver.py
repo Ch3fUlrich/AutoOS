@@ -4084,14 +4084,34 @@ class ClaudeBudgetGateTests(unittest.TestCase):
                              self.registry())["closer"]
         self.assertIsNone(closer)
 
+    def test_the_high_risk_closer_needs_both_the_final_card_and_the_declaration(self):
+        # CLAUDEBUDGET-f item 4: HEAD asked only the env half. `AUTOOS_CLAUDE_FINAL`
+        # is one declaration about ONE named final, and the card is what says
+        # whether THIS plan is that final -- a risk=high implement card with the
+        # variable sitting in a profile bought the fourth Claude door anyway,
+        # which is the leak item 1 removed and the env variable handed back.
+        out = self.review({"kind": "implement", "risk": "high"}, self.registry(),
+                          env=self.FINAL)
+        self.assertIsNone(out["closer"])
+
     def test_the_high_risk_closer_applies_for_a_declared_final(self):
         out = self.review({"kind": "final", "risk": "high"}, self.registry(),
                           env=self.FINAL)
         self.assertEqual(out["closer"], {"client": "claude", "model": "sonnet"})
 
-    def test_the_high_risk_closer_applies_when_the_run_is_declared_critical(self):
+    def test_a_critical_declaration_alone_does_not_emit_the_closer(self):
+        # The critical declaration opens the *legs* (a declared run is on the
+        # critical path); the closer is not a leg, it is the final's last word,
+        # and a non-final card is not that final (item 4).
         out = self.review({"kind": "implement", "risk": "high"}, self.registry(),
                           env=self.DECLARED)
+        self.assertIsNone(out["closer"])
+
+    def test_a_role_final_card_is_the_same_card_as_kind_final(self):
+        # v1 cards say `role`, v2 say `kind`; the card test must read both, or a
+        # v1 final loses its closer while a v2 one keeps it.
+        out = self.review({"role": "final", "risk": "high"}, self.registry(),
+                          env=self.FINAL)
         self.assertEqual(out["closer"], {"client": "claude", "model": "sonnet"})
 
     def test_budget_off_still_emits_the_high_risk_closer(self):

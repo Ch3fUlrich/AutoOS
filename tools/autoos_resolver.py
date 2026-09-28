@@ -1631,8 +1631,14 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     # emitted it for every risk=high card with no gate at all, which handed a
     # worker that could write `kind=final` a fourth Claude door (client claude,
     # model sonnet) beside the leg, the reviewer and the escalation ladder.
+    # CLAUDEBUDGET-f item 4: the gate was only half the answer. The env says an
+    # orchestrator declared ONE final; the card says whether THIS plan is a final
+    # at all. Asking the env alone gave every risk=high card the closer whenever
+    # the variable happened to be set -- so the closer needs both, and a
+    # non-budget run keeps the behaviour it always had (off-mode is unchanged).
     closer = None
-    if risk == "high":
+    if risk == "high" and (is_final_card(card)
+                            or not claude_budget_of(registry)["on"]):
         allowed, _gate = claude_allowed("final", env, registry)
         closer = dict(_CLOSER) if allowed else None
     return {"routes": list(picked), "closer": closer, "reason": reason}

@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the budget gate judges the model the runner launches (CLAUDEBUDGET-f, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-d, from `rev-claudebudget3.out` (FIX-FIRST). One design rule for all
+  of it: **the gate must read the same value the argv carries**, computed once in the runner's own
+  precedence order — explicit `--model` > the tier agent's model (for a client that goes through
+  the gateway) > the client's own default > the card's combo.
+  - **An unknown combo was priced as free.** `spawn_spends_claude` returned `False` whenever the
+    caller named the string itself (`--model`, a registry `clients` row), so an attacker naming an
+    all-Claude combo the registry does not carry was told the run costs nothing. A combo the
+    registry cannot price is now "cannot tell" — refused under the budget, unchanged with the
+    budget off, with the value named in the message. The name still decides for the two values that
+    are not route ids at all: a client default compiled into the adapter
+    (`clients.QODER_DEFAULT_MODEL`) and a caller's `--model` on an own-account client, which goes
+    to that CLI verbatim. A typo in a registry `clients` row is registry data and refuses (item 5).
+  - **The client default shadowed the tier.** `effective_spawn_model` consulted the registry row /
+    `AGY` / `QODER` default *before* the tier, so a tier agent whose `opencode.jsonc` model IS
+    Claude was priced as a free client default. The tier branch now calls the launcher's own
+    `resolve_model`, so a `--clean` tier and a declared variant come back spelled exactly as the
+    run receives them.
+  - **`model or free_model` short-circuited the resolution.** Both spawn paths pre-OR'd the promo
+    model into `model`, so `--free`/`--tier` never reached the tier branch. The flags are passed as
+    flags now (`free`, `free_model`, `clean`), and the tests assert gate input == launch model
+    across 12 client/tier/card/free/`--model` combinations.
+  - **`AUTOOS_CLAUDE_FINAL` leaked to the closer.** `_select_reviewers` gated the `risk=high`
+    closer on the env declaration alone, so any high-risk non-final card with the variable in the
+    profile got client `claude` / model `sonnet`. The closer now needs the card to be a final
+    (`kind`/`role`) *and* the declaration; a non-budget run keeps the behaviour it always had.
+  - Two tests asserted the wrong door (item 6): `agy_default_model_is_a_claude_spend` fell back to
+    a unit call because its `role=implement` card hit the capability check first — it is a CLI run
+    with a read-only card now; `qoder` non-Claude never-gated asserts the run is *allowed*
+    (`would run:`), not only that the budget said nothing.
+
 ### Fixed — a Claude final is declared, never claimed; the spawn gate reads the model (CLAUDEBUDGET-d, D-102, 2026-09-28)
 
 - Follow-up on CLAUDEBUDGET-b, from `rev-claudebudget2.out` (FIX-FIRST). Three holes, all of them
