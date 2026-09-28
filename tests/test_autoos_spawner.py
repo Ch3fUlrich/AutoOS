@@ -2534,11 +2534,12 @@ def load_redact():
 REDACT_SAMPLES = (
     ("curl -H 'Authorization: Bearer abcdef1234567890ABCD' https://h",
      "abcdef1234567890ABCD"),
-    ("wrote sk-ABCDEFGHIJKLMNOP1234 into the file", "sk-ABCDEFGHIJKLMNOP1234"),
-    ("leg sk-or-v1-0123456789abcdef0123456789abcdef is down",
-     "sk-or-v1-0123456789abcdef0123456789abcdef"),
-    ("key sk-ant-api03-0123456789abcdef0123456789abcdef",
-     "sk-ant-api03-0123456789abcdef0123456789abcdef"),
+    ("wrote sk-" "ABCDEFGHIJKLMNOP1234 into the file",
+     "sk-" "ABCDEFGHIJKLMNOP1234"),
+    ("leg sk-" "or-v1-0123456789abcdef0123456789abcdef is down",
+     "sk-" "or-v1-0123456789abcdef0123456789abcdef"),
+    ("key sk-" "ant-api03-0123456789abcdef0123456789abcdef",
+     "sk-" "ant-api03-0123456789abcdef0123456789abcdef"),
     ("pushed with gh" "p_0123456789abcdef0123456789abcd now",
      "gh" "p_0123456789abcdef0123456789abcd"),
     ("gh" "o_0123456789abcdef0123456789abcd", "gh" "o_0123456789abcdef0123456789abcd"),
@@ -6959,6 +6960,26 @@ class ProviderResetStateTests(unittest.TestCase):
         self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
         self.assertEqual(entry["combo"], "r-cheap")
         self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_line_carrying_a_secret_records_a_redacted_reason(self):
+        # REDACTFIX3 (S1): `record_reset_stop` is handed the child's OWN line
+        # because only that copy can still be classified (REDACTFIX item 2) --
+        # but it stored that copy in logs/routing/provider-state.json, which
+        # outlives the run. The classification keeps reading the raw line; the
+        # stored dict gets the redaction every other copy of it has.
+        key = "sk-" "ABCDEFGHIJKLMNOP1234"
+        stop = "%s (the worker echoed the key it was given: %s)" % (self.AGY_STOP, key)
+        recorded = self.agent.record_reset_stop(stop, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "the window is still parsed from the raw line and the "
+                         "provider still resolved off it")
+        stored = json.dumps(self.state())
+        self.assertNotIn(key, stored, "the key reached the state file")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertIn(load_redact().TEXT_MASK, entry["reason"])
+        self.assertIn("resets in ~83h", entry["reason"],
+                      "the reason must still say what the client stated")
 
     def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
         self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",

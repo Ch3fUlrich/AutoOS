@@ -2234,7 +2234,15 @@ def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
     if previous_until is not None and _iso_utc(until) < previous_until:
         until = previous["unavailable_until"]
     providers[provider_id] = {"unavailable_until": until, "combo": combo,
-                              "reason": stop_line, "recorded_at": _iso_zulu(now)}
+                              # REDACTFIX3 (S1): `stop_line` is the child's OWN
+                              # text (REDACTFIX item 2 kept it raw so a masked
+                              # stop marker can still be classified), and the
+                              # window and the provider above are read off it
+                              # while that is true. This dict is a copy that
+                              # leaves the process into logs/, where it outlives
+                              # the run, so it is redacted like every other one.
+                              "reason": redact_output(stop_line),
+                              "recorded_at": _iso_zulu(now)}
     directory = os.path.dirname(path) or "."
     try:
         os.makedirs(directory, exist_ok=True)

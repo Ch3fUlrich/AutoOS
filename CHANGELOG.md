@@ -5,6 +5,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - the raw provider-stop line stops being recorded (REDACTFIX3, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: `record_reset_stop` stored the stop line it is
+  handed as the `reason` of a `logs/routing/provider-state.json` row. Since
+  REDACTFIX item 2 that line is the child's **raw** text — deliberately, because
+  redaction can mask the very marker the classification reads — so a worker that
+  echoed an injected key on its stop line wrote that key, verbatim, into a file
+  that outlives the run. The classification (`parse_reset`, `stop_provider_id`)
+  still reads the raw line; the stored dict is redacted, like every other copy
+  that leaves the process. The four other sinks of the same string (the
+  `PROVIDER-STOP` and `HEADLESS-REFUSAL` prints, the WIP commit message, the
+  fall-through line) already redacted and are unchanged.
+- **`tests/test_autoos_spawner.py`**:
+  `ProviderResetStateTests.test_a_stop_line_carrying_a_secret_records_a_redacted_reason`
+  (fails first: the key was in the stored JSON) and `REDACT_SAMPLES` now builds
+  its three `sk-`/`sk-or-`/`sk-ant-` fakes by concatenation, like the `ghp_`/
+  `gho_`/`github_pat_` samples already did, so the shared-pattern table holds no
+  contiguous token-shaped literal.
+
 ### Fixed - one home for the secret patterns survives the merge to main (REDACTMERGE, 2026-09-28)
 
 - **`tools/autoos_redact.py`**: `origin/main` hardened hostexec's stored-argv
