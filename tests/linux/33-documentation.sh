@@ -563,7 +563,7 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, AUTOOS_AGENT_RUN_ID, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi
