@@ -95,7 +95,7 @@ class FakeServerContractTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 rows = json.loads(resp.read().decode("utf-8"))["rows"]
             self.assertEqual(rows[0]["p.slug"], "autoos")
-            self.assertIn("p.repository", rows[0])
+            self.assertNotIn("p.repository", rows[0])
 
     def test_a_path_the_bridge_never_calls_is_404(self):
         with module.FakeOmnigraphServer(graph_id="autoos") as srv:

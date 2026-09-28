@@ -221,8 +221,8 @@ def _make_handler(server: FakeOmnigraphServer):
             if length:
                 self.rfile.read(length)
             self._reply(200, {
-                "rows": [{WHOAMI_SLUG_KEY: server.slug, "p.repository": "AutoOS"}],
-                "columns": [WHOAMI_SLUG_KEY, "p.repository"],
+                "rows": [{WHOAMI_SLUG_KEY: server.slug}],
+                "columns": [WHOAMI_SLUG_KEY],
             })
 
     return Handler
