@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the native DeepSeek id is `deepseek-flash` only, and V4 Pro is denied by name (DSAMEND, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: routing-00 measured `GET /models` on
+  `api.deepseek.com` at 10:0xZ — the live catalog is exactly
+  `['deepseek-flash', 'deepseek-v4-pro']` — so the `direct` row that used to
+  hang off `models.'deepseek-v4-flash'` (`model: deepseek/deepseek-v4-flash`,
+  `base_url: https://api.deepseek.com`) was sending an **alias**, not a catalog
+  model: it answers 200 but `served=deepseek-flash`, while the v4.1 spelling is a
+  flat 400. The native `direct` block now belongs to `models.'deepseek-flash'`,
+  the only entry that names a model the vendor actually serves, and
+  `models.'deepseek-v4-flash'` keeps its reseller leg
+  (`cheaperinference/deepseek-v4-flash`) with no native row. The other
+  providers' spellings — `openrouter/deepseek/deepseek-v4.1-flash`,
+  opencode-zen's bare `deepseek-v4.1-flash` — are their ids, not ours, and were
+  left alone.
+- **`policy.leg_rules`**: a new **first** rule `deny-deepseek-pro`
+  (`match: *deepseek*pro*`, `allow: false`) makes the operator's standing "never
+  route or fall back to V4 Pro" a structural gate instead of a side effect of
+  rule order. Before this, `deepseek/deepseek-v4-pro` was denied only by the
+  catch-all `deny-deepseek`, which sits *after* `allow-deepseek-native-flash` —
+  one future allow rule (a wildcard, a BYOK exception) would have opened the
+  paid model. First in the list, no DeepSeek allow can reach it: it denies the
+  native, `openrouter/`, `cheaperinference/` and `opencode-zen/` spellings alike
+  (`source`: operator via routing-00 2026-09-28T10:0xZ; Server 719cee9).
+- **Consumers of that row** moved with it (R-orch-11: an id change is grepped
+  through every reader): `openhands/profiles/deepseek-v4-flash.json` →
+  `deepseek-flash.json` with the native model's real window (131072/32768,
+  `reasoning_effort: high`), `lib/linux/install.sh` and
+  `lib/windows/AutoOS.Install.psm1` (`_profile_for('deepseek-flash', …)`),
+  `openhands/agent-profiles/worker.json` and `catalog/agent-harness.json`
+  (`leaf-reviewer`: opencode `deepseek/deepseek-flash`, profile ref
+  `deepseek-flash`), and the two fixtures that pin those projections
+  (`tests/fixtures/legacy-models.golden.json`,
+  `tests/fixtures/agent-harness/opencode.expected.json`).
+- **Effort ladder, measured rather than assumed** (19 charged one-word calls
+  plus one rejected value, ~0.0005 USD total): the wire parameter for `models.'deepseek-flash'.effort_ladder` is
+  `reasoning_effort`, and a bad value names the accepted set — `none, minimal,
+  low, medium, high, xhigh, ultra, max` — so all four declared rungs are real
+  and the ladder needed no re-mapping. What the measurement *did* overturn is
+  the assumption behind expressing rung `none` as an omission: with no parameter
+  the model **reasons** (20 of 22 completion tokens), and it is
+  `reasoning_effort: "none"` (or `thinking: {"type": "disabled"}`) that turns
+  thinking off. Recorded on the leg, pinned by
+  `tests/test_registry.py::DeepSeekNativeEffortLadderTests`, and left as an open
+  item for the emitter (see below).
+- **`tests/`**: `DeepSeekNativeIdAndProDenialTests` (13 cases) — no render or
+  config sends a non-canonical id to the native API (registry `direct` rows,
+  route legs, the vendored profiles, and every render and committed config
+  scanned as text), `deny-deepseek-pro` exists, precedes every DeepSeek allow,
+  is the rule that answers for each pro spelling, and no pro id appears in any
+  render, `router_settings.fallbacks` stays empty and DeepSeek-free, and the
+  registry still passes `check` with the new rule. Written failing first: 8 of
+  the 13 red before the change, green after, no other case moved.
+
+
 ### Added — the usage report prices the operator's DeepSeek cap (DSGUARD, 2026-09-28)
 
 - **`tools/autoos_usage.py`** (spend guard): a `paid_spend` section, asked for

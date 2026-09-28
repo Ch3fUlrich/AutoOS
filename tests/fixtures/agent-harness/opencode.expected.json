@@ -233,7 +233,7 @@
     "leaf-reviewer": {
       "description": "Reviews one change under the leaf contract. Never spawns or commits.",
       "mode": "subagent",
-      "model": "deepseek/deepseek-v4-flash",
+      "model": "deepseek/deepseek-flash",
       "permission": {
         "task": "deny",
         "bash": {

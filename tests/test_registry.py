@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1761,6 +1762,261 @@ class DeepSeekBackTests(unittest.TestCase):
 
     def test_real_registry_passes_check_after_the_flip(self):
         self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
+    """BRIEF DSAMEND (S1-S2, operator 2026-09-28 10:0xZ, measured on
+    api.deepseek.com by routing-00): the native DeepSeek catalog is exactly
+    ['deepseek-flash', 'deepseek-v4-pro'], so
+
+      1. `deepseek-flash` is the ONLY id that may ever be sent to
+         api.deepseek.com — every other native spelling (the legacy
+         `deepseek/deepseek-v4-flash` row, which the API accepts only as an
+         alias that answers served=deepseek-flash) is a defect, and
+      2. `deepseek-v4-pro` is DENIED by standing operator rule: never route or
+         fall back to it. It must be denied by an explicit leg_rule that is
+         evaluated BEFORE any DeepSeek allow rule, so no future allow rule can
+         let it through, and it must appear in no render.
+
+    The other providers' spellings (`openrouter/deepseek/deepseek-v4.1-flash`,
+    opencode-zen's bare `deepseek-v4.1-flash`, `cheaperinference/deepseek-v4-
+    flash`) are other vendors' ids and are deliberately NOT touched here.
+    """
+
+    #: The only id allowed on the wire to the native DeepSeek API.
+    NATIVE = "deepseek/deepseek-flash"
+    #: A native spelling is `deepseek/deepseek-<x>` NOT prefixed by another
+    #: provider's segment (openrouter/deepseek/deepseek-v4.1-flash is
+    #: OpenRouter's own vendor-prefixed id, not a native call).
+    NATIVE_ID_RE = re.compile(r"([a-z0-9][a-z0-9._-]*/)?deepseek/deepseek-[a-z0-9._-]+")
+    #: Any DeepSeek id carrying a "pro" segment (the denied family).
+    PRO_ID_RE = re.compile(r"deepseek[a-z0-9._/-]*pro", re.IGNORECASE)
+
+    LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
+
+    def _prefixed_by_other_provider(self, text: str, at: int) -> bool:
+        """True when the bare `deepseek/<id>` match at `at` is really another
+        provider's id written with a separator instead of a slash — the shape
+        docs/models.md uses in its tables and prose ('openrouter
+        `deepseek/deepseek-v4.1-flash`'). A structured config always spells the
+        prefix with the slash, which match.group(1) already covers."""
+        return bool(re.search(r"openrouter[\s`'\"|>~=-]*$", text[:at]))
+
+    def _surfaces(self) -> dict:
+        """Every machine-readable render and config that can put a DeepSeek id
+        on the wire, keyed by a name a failure can point at. Renders come from
+        the registry's own render functions (R-worker-01: never a hand-written
+        expectation of a render); the committed files are read so drift in a
+        file a render does not own (the hand-curated LiteLLM groups, the
+        vendored OpenHands profiles, the agent harness) is caught too."""
+        reg = self.reg
+        combo = registry.render_omniroute(reg)
+        surfaces = {
+            "render omniroute": json.dumps(combo, sort_keys=True),
+            "render litellm": "\n".join(
+                registry.render_litellm_blocks(reg, self._litellm_text()).values()),
+            "render ide": json.dumps(registry.render_ide(reg), sort_keys=True),
+            "render openhands": json.dumps(registry.render_openhands(reg),
+                                           sort_keys=True),
+            "render models-doc": registry.render_models_doc(reg),
+            "configuration/omniroute/combos.json": self._read(
+                ROOT / "configuration" / "omniroute" / "combos.json"),
+            "configuration/litellm/config.yaml": self._litellm_text(),
+            "catalog/ide-models.json": self._read(ROOT / "catalog" / "ide-models.json"),
+            "configuration/openhands/tier-profiles.json": self._read(
+                ROOT / "configuration" / "openhands" / "tier-profiles.json"),
+            "catalog/agent-harness.json": self._read(
+                ROOT / "catalog" / "agent-harness.json"),
+            "routes.*.legs": json.dumps(
+                {rid: r.get("legs") for rid, r in reg["routes"].items()},
+                sort_keys=True),
+        }
+        for path in sorted((ROOT / "openhands").glob("*/*.json")):
+            surfaces[str(path.relative_to(ROOT))] = path.read_text(encoding="utf-8")
+        return surfaces
+
+    def _read(self, path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    def _litellm_text(self) -> str:
+        return self.LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def _rule_ids(self) -> list:
+        return [r.get("id") for r in self.reg["policy"]["leg_rules"]]
+
+    # -- 1. the native id --------------------------------------------------
+
+    def test_registry_projects_no_native_deepseek_id_but_flash(self):
+        # models.<id>.direct is what the installers and the vendored OpenHands
+        # profiles take their wire model from, so a stale native spelling here is
+        # the root cause, not a render bug.
+        offenders = {}
+        for mid, entry in self.reg["models"].items():
+            direct = entry.get("direct")
+            if not isinstance(direct, dict):
+                continue
+            native = (direct.get("provider") == "deepseek"
+                      or "api.deepseek.com" in str(direct.get("base_url", "")))
+            if native and direct.get("model") != self.NATIVE:
+                offenders[mid] = direct.get("model")
+        self.assertEqual(offenders, {}, "models.<id>.direct sends a non-canonical "
+                                        "id to the native DeepSeek API")
+
+    def test_no_route_leg_uses_a_non_canonical_native_deepseek_leg(self):
+        for rid, route in self.reg["routes"].items():
+            for leg in list(route.get("legs") or []):
+                if leg.startswith("deepseek/"):
+                    self.assertEqual(leg, self.NATIVE, rid)
+
+    def test_every_vendored_profile_that_calls_deepseek_directly_uses_flash(self):
+        for path in sorted((ROOT / "openhands" / "profiles").glob("*.json")):
+            profile = json.loads(path.read_text(encoding="utf-8"))
+            if "api.deepseek.com" in str(profile.get("base_url", "")):
+                self.assertEqual(profile.get("model"), self.NATIVE,
+                                 str(path.relative_to(ROOT)))
+
+    def test_no_surface_sends_a_non_canonical_native_deepseek_id(self):
+        for name, text in self._surfaces().items():
+            for match in self.NATIVE_ID_RE.finditer(text):
+                if match.group(1) or self._prefixed_by_other_provider(
+                        text, match.start()):
+                    continue  # another provider's vendor-prefixed id
+                self.assertEqual(match.group(0), self.NATIVE,
+                                 "%s sends %r to the native DeepSeek API"
+                                 % (name, match.group(0)))
+
+    # -- 2. deepseek-v4-pro is denied everywhere ---------------------------
+
+    def test_deny_deepseek_pro_rule_exists(self):
+        rules = self.reg["policy"]["leg_rules"]
+        entry = next((r for r in rules if r.get("id") == "deny-deepseek-pro"), None)
+        self.assertIsInstance(entry, dict,
+                              "no deny-deepseek-pro rule (ids: %s)" % self._rule_ids())
+        self.assertIs(entry["allow"], False)
+        self.assertEqual(entry["match"], "*deepseek*pro*")
+        self.assertIn("routing-00", entry.get("source", ""))
+        self.assertIn("719cee9", entry.get("source", ""))
+
+    def test_deny_deepseek_pro_precedes_every_deepseek_allow_rule(self):
+        rules = self.reg["policy"]["leg_rules"]
+        try:
+            deny_at = [r.get("id") for r in rules].index("deny-deepseek-pro")
+        except ValueError:
+            self.fail("no deny-deepseek-pro rule (ids: %s)" % self._rule_ids())
+        for at, rule in enumerate(rules):
+            if rule.get("allow") is True and "deepseek" in str(rule.get("match", "")):
+                self.assertLess(deny_at, at,
+                                "deny-deepseek-pro must be evaluated before %s"
+                                % rule.get("id"))
+
+    def test_leg_rules_deny_the_pro_ids_though_deepseek_is_allowed(self):
+        self.assertIs(registry.leg_denied(self.NATIVE, self.reg), False,
+                      "the allowed native flash leg must stay allowed")
+        # Every spelling of the pro model, including the ones a wildcard allow
+        # rule (opencode-zen/*, cc/*) would otherwise have opened: the deny is
+        # first in the list precisely so no allow can reach it.
+        for leg in ("deepseek/deepseek-v4-pro",
+                    "openrouter/deepseek/deepseek-v4-pro",
+                    "cheaperinference/deepseek-v4-pro",
+                    "opencode-zen/deepseek-v4-pro",
+                    "samba/deepseek-v4-pro"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    "deny-deepseek-pro", leg)
+
+    def _pro_surfaces(self) -> dict:
+        """The machine surfaces the operator rule is about: docs/models.md is
+        prose about the ids, not a config that sends one, so it is scanned for
+        the native id above but excluded here."""
+        return {k: v for k, v in self._surfaces().items()
+                if k != "render models-doc"}
+
+    def test_no_render_or_config_contains_a_pro_deepseek_id(self):
+        for name, text in self._pro_surfaces().items():
+            found = self.PRO_ID_RE.findall(text)
+            self.assertEqual(found, [], "%s carries a DeepSeek pro id: %s"
+                             % (name, sorted(set(found))))
+
+    def test_litellm_router_fallbacks_carry_no_deepseek(self):
+        # The router's own fallback list is hand-curated, outside every managed
+        # block, so the surface scan above would miss a fallback added there.
+        block = re.search(r"^router_settings:\n((?:[ #].*\n)*)",
+                          self._litellm_text(), re.MULTILINE)
+        self.assertIsNotNone(block, "config.yaml has no router_settings block")
+        # The prose in there explains why the chains are empty and names the
+        # deployment they used to end in; only the settings themselves route.
+        settings = "\n".join(line for line in block.group(1).splitlines()
+                             if not line.lstrip().startswith("#"))
+        self.assertIn("fallbacks: []", settings)
+        self.assertNotIn("deepseek", settings.lower())
+
+    def test_real_registry_still_passes_check_with_the_deny_rule(self):
+        # rule 9 (_check_leg_rules) must stay clean: a deny rule may not strand
+        # a serving leg, and no route may leg into the pro model.
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepSeekNativeEffortLadderTests(unittest.TestCase):
+    """DSAMEND item 3, measured live (routing-00, 2026-09-28T10:0xZ, source
+    'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): 13 one-word
+    calls to POST https://api.deepseek.com/chat/completions as
+    model=deepseek-flash, max_tokens 16 and 512.
+
+    The wire parameter is `reasoning_effort`, and a deliberately bad value came
+    back 422 naming the whole accepted enum — quoted verbatim below, because
+    that string IS the vendor's contract for this leg:
+
+        reasoning_effort: unknown variant `zzz`, expected one of `none`,
+        `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max`
+
+    Measured per call (HTTP 200 unless noted), completion_tokens_details.
+    reasoning_tokens at max_tokens 512: no param 20 (content 'ok', thinking
+    ran), low 18, high 25, max 18, `reasoning_effort: none` → no
+    completion_tokens_details at all (thinking off), `thinking:
+    {"type": "disabled"}` → same off. So the declared ladder needs no
+    re-mapping — every rung is a real wire value — but rung "none" is a LITERAL
+    the API must be told, not an omission: sending nothing gets thinking ON.
+    """
+
+    #: The vendor's own accepted set, from the 422 above.
+    WIRE_ENUM = ("none", "minimal", "low", "medium",
+                 "high", "xhigh", "ultra", "max")
+    MODEL_ID = "deepseek-flash"
+
+    @property
+    def model(self):
+        return load_registry()["models"][self.MODEL_ID]
+
+    def test_every_declared_rung_is_a_wire_value_this_api_accepts(self):
+        ladder = self.model["effort_ladder"]
+        self.assertEqual(ladder, ["none", "low", "high", "max"])
+        for rung in ladder:
+            self.assertIn(rung, self.WIRE_ENUM,
+                          "rung %r is not a reasoning_effort value the native "
+                          "API accepts (measured enum: %s)"
+                          % (rung, ", ".join(self.WIRE_ENUM)))
+
+    def test_the_off_rung_is_declared_because_omission_is_not_off(self):
+        # Removing "none" from this ladder would silently mean something else:
+        # callers that express rung none by sending no parameter (render_ide's
+        # filter, tools/autoos-agent.py apply_effort_rung) would leave this leg
+        # reasoning — measured 20 of 22 completion tokens with no parameter at
+        # all. The declared rung is what keeps that trap visible.
+        self.assertIn("none", self.model["effort_ladder"])
+        self.assertIs(self.model["reasoning"], True)
+
+    def test_the_measured_mapping_stays_recorded_on_the_leg(self):
+        # The registry is where a reader looks for what a rung costs on the
+        # wire; the measurement may be superseded but never quietly dropped.
+        note = self.model.get("$comment", "")
+        self.assertIn("reasoning_effort", note)
+        self.assertIn("reasoning is ON by default".lower(), note.lower())
 
 
 if __name__ == "__main__":

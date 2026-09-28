@@ -262,6 +262,20 @@ client (`omniroute run qwen --model <combo>`, `tools/autoos_clients.py`) still
 cannot carry it: a combo has no per-effort alias, so there the rung stays
 record-only.
 
+**That omission is not "off" on DeepSeek's own API** (DSAMEND, measured
+2026-09-28T10:0xZ against `api.deepseek.com` as `deepseek-flash`): a call with
+no `reasoning_effort` reasons (20 of 22 completion tokens were
+`reasoning_tokens`), because thinking is enabled by default there. The off
+switches are the literal `reasoning_effort: "none"` — the vendor's accepted set,
+named by its own 422, is `none, minimal, low, medium, high, xhigh, ultra, max`,
+so all four rungs of `models.'deepseek-flash'.effort_ladder` are real wire
+values — or `thinking: {"type": "disabled"}`; both return no
+`completion_tokens_details` and answer immediately. So `#low`/`#high`/`#max` are
+faithful for this leg and `none` is the one rung the chain above cannot express:
+a resolver that scores `none` for a DeepSeek card still pays for reasoning.
+`tests/test_registry.py::DeepSeekNativeEffortLadderTests` pins the rung set
+against the measured enum.
+
 Measured 2026-09-27 via `tools/autoos-agent.py run --model
 omniroute/t1-orchestrator#xhigh`: before the render `Variant unavailable for
 omniroute/t1-orchestrator: xhigh`; after it the call answered, and
