@@ -56,12 +56,19 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    fences match spaces only), and any git push whose text contains a
    double quote, a single quote, a dollar sign or a backtick is denied
    on every role (the fences see literal refs only - quoted, variable
-   and substituted refs deny outright, fail closed).
+   and substituted refs deny outright, fail closed); plus the round-7
+   class fences (spec 3.3): any git push whose text contains a
+   backslash, a brace, an ampersand, a `>` or a `<` is denied on every
+   role (the ref must be plain literal text - any bash metacharacter
+   that rewrites or ends a word next to it denies, fail closed).
 2. the ``gh workflow run --ref main`` fence (spec Q4): the L1
    ``gh workflow run`` grant stays, an explicit ``--ref main`` (or
    ``--ref=main``) dispatch does not - and the round-6 class fence: a
    dispatch whose text contains a quote, a dollar sign or a backtick
-   denies on every role (the fences see literal refs only).
+   denies on every role (the fences see literal refs only) - and the
+   round-7 class fence: a dispatch whose text contains a backslash, a
+   brace, an ampersand, a `>` or a `<` denies on every role (the ref
+   must be plain literal text, fail closed).
 3. the secret/credential entries of ``fences.bash_deny_all``, selected by
    ``bash_secret_patterns``: an entry is secret-relevant when its
    ``*``-stripped core contains a ``*``-stripped core of some
@@ -310,6 +317,25 @@ MAIN_FENCE = (
     "Bash(*git push*'*)",
     "Bash(*git push*$*)",
     "Bash(*git push*`*)",
+    # Round 7, metacharacter class: the ref must be plain literal text;
+    # any bash metacharacter that rewrites or ends a word next to it is
+    # denied on every role (fail closed) - a backslash (`m\ain` -> bash
+    # removes it and pushes main), a brace (`{main,}` always expands to
+    # main), or an operator glued to the ref (`main&` backgrounds,
+    # `main>/dev/null` / `main</dev/null` redirect - the `* main` fence
+    # needs main at end of text and `* main *` needs a space after, so
+    # neither matches, yet bash pushes main). Written with a Python
+    # `\\` escape so the rendered JSON carries one escaped backslash.
+    # Residual limit, stated here and in spec 3.3: glob characters `?`,
+    # `[`, `*` cannot be fenced in rule syntax (`*`/`?` are pattern
+    # characters there) and only expand when a matching file exists in
+    # the cwd; server-side branch protection is load-bearing for them
+    # and for aliases/functions.
+    "Bash(*git push*\\*)",
+    "Bash(*git push*{*)",
+    "Bash(*git push*&*)",
+    "Bash(*git push*>*)",
+    "Bash(*git push*<*)",
 )
 
 # gh workflow run naming main stays denied under the L1 grant. Round 6,
@@ -317,7 +343,12 @@ MAIN_FENCE = (
 # fences see literal `--ref <name>` text only, so a quoted, variable or
 # substituted ref (`--ref "main"`, `--ref $R`, `--ref $(...)`) must deny
 # outright on every role - the ref must be literal text so the fences can
-# see it (fail closed).
+# see it (fail closed). Round 7, metacharacter class (same
+# plain-literal-text rule): a `--ref` carrying a backslash, a brace, an
+# ampersand, a `>` or a `<` denies outright on every role (fail closed).
+# Same residual limit as the push class above: `?`, `[`, `*` cannot be
+# fenced in rule syntax; server-side branch protection carries them and
+# aliases/functions.
 GH_REF_MAIN = (
     "Bash(gh workflow run *--ref *main*)",
     "Bash(gh workflow run *--ref=*main*)",
@@ -325,6 +356,11 @@ GH_REF_MAIN = (
     "Bash(*gh workflow run*'*)",
     "Bash(*gh workflow run*$*)",
     "Bash(*gh workflow run*`*)",
+    "Bash(*gh workflow run*\\*)",
+    "Bash(*gh workflow run*{*)",
+    "Bash(*gh workflow run*&*)",
+    "Bash(*gh workflow run*>*)",
+    "Bash(*gh workflow run*<*)",
 )
 
 # Shell-only secret-disclosure vectors with no read_deny_all counterpart,

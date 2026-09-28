@@ -547,6 +547,38 @@ QUOTED_WORKFLOW_DENY_COMMANDS = (
     "gh workflow run ci.yml --ref `main`",
 )
 
+# Round 7, metacharacter class: bash rewrites or ends the word next to
+# the ref before git sees it, while the fences match the literal text -
+# so `git push origin m\ain` (backslash removed -> pushes main),
+# `git push origin {main,}` (brace expansion -> main) and
+# `git push origin main&` / `main>/dev/null` / `main</dev/null`
+# (the `* main` fence needs main at end of text and `* main *` needs a
+# space after, so neither matches, yet bash pushes main) all allowed on
+# l1 before this round (measured with decide() - the five push forms
+# plus `gh --ref m\ain`; the `gh --ref {main,}` / `--ref main&` forms
+# already denied via the `*main*` fence since their literal text still
+# carries `main`, and gain the class fence as defence in depth). The
+# ref must be plain literal text, so each must deny on EVERY profile
+# now. The backslash below is one real backslash in the command text.
+METACHAR_PUSH_DENY_COMMANDS = (
+    "git push origin m\\ain",
+    "git push origin {main,}",
+    "git push origin main&",
+    "git push origin main>/dev/null",
+    "git push origin main</dev/null",
+)
+
+# Round 7, metacharacter class for dispatch: same plain-literal-text
+# rule for `--ref` - a ref carrying a backslash, brace or operator
+# denies on EVERY profile now (`--ref {main,}` / `--ref main&` already
+# denied via `*main*`; `--ref m\ain` allowed on l1 before this round,
+# measured with decide()).
+METACHAR_WORKFLOW_DENY_COMMANDS = (
+    "gh workflow run ci.yml --ref m\\ain",
+    "gh workflow run ci.yml --ref {main,}",
+    "gh workflow run ci.yml --ref main&",
+)
+
 # Round-6 restatement: the plain same-name pushes still allow on l2, and
 # the L1 lane-push / lane-dispatch shapes still allow on l1.
 ROUND6_L2_ALLOW_COMMANDS = (
@@ -994,6 +1026,52 @@ class Round6LiteralRefTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# round 7: the ref must be plain literal text - backslash, brace, &, >
+# and < next to it deny on every role
+
+
+class Round7MetacharRefTests(unittest.TestCase):
+    def test_metachar_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in METACHAR_PUSH_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_metachar_workflow_dispatch_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in METACHAR_WORKFLOW_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_plain_l2_push_still_allows(self):
+        profile = load_profile("l2-orchestrator")
+        for command in ("git push origin L2-x", "git push -u origin L2-x"):
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l1_lane_push_and_dispatch_still_allow(self):
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in (
+                "git push origin L1-routing/x",
+                "git push -u origin L1-routing/x",
+                "gh workflow run ci.yml --ref L1-routing/x",
+            ):
+                with self.subTest(role=role, command=command):
+                    self.assertFalse(decide_deny(profile, "Bash", command))
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+
+
+# ---------------------------------------------------------------------------
 # wrapper/option forms and compound commands (H3), prefix divergences (M1)
 
 
@@ -1354,6 +1432,20 @@ CONTRADICTION_TARGETS = {
     "Bash(*gh workflow run*'*)": "gh workflow run ci.yml --ref='main'",
     "Bash(*gh workflow run*$*)": "gh workflow run ci.yml --ref $R",
     "Bash(*gh workflow run*`*)": "gh workflow run ci.yml --ref `main`",
+    # Round-7 metacharacter class (MAIN_FENCE, every role): each target
+    # carries the denied metacharacter after a `git push` prefix, so the
+    # contradiction test proves the class fence fires.
+    "Bash(*git push*\\*)": "git push origin m\\ain",
+    "Bash(*git push*{*)": "git push origin {main,}",
+    "Bash(*git push*&*)": "git push origin main&",
+    "Bash(*git push*>*)": "git push origin main>/dev/null",
+    "Bash(*git push*<*)": "git push origin main</dev/null",
+    # Round-7 metacharacter class (GH_REF_MAIN, every role).
+    "Bash(*gh workflow run*\\*)": "gh workflow run ci.yml --ref m\\ain",
+    "Bash(*gh workflow run*{*)": "gh workflow run ci.yml --ref {main,}",
+    "Bash(*gh workflow run*&*)": "gh workflow run ci.yml --ref main&",
+    "Bash(*gh workflow run*>*)": "gh workflow run ci.yml --ref main>/dev/null",
+    "Bash(*gh workflow run*<*)": "gh workflow run ci.yml --ref main</dev/null",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that
