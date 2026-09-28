@@ -82,7 +82,11 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    `--ref` flags or any `-r` (gh's short `--ref`, last-flag-wins)
    denies on every role, and any dispatch containing a tab, CR or
    LF denies on every role (the whitespace class push got in
-   round 6).
+   round 6) - and the round-9 fences: an empty/valueless `--ref`
+   (`--ref=`, `--ref= ` with a trailing option, and a bare
+   `--ref` flag) denies on every role (gh resolves an empty ref
+   to the default branch = main), and the `-R` fence is ` -R*`
+   so the attached `-Rother/repo` shorthand denies too.
 3. the secret/credential entries of ``fences.bash_deny_all``, selected by
    ``bash_secret_patterns``: an entry is secret-relevant when its
    ``*``-stripped core contains a ``*``-stripped core of some
@@ -97,8 +101,10 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
 4. every ``fences.read_deny_all`` pattern as a ``Read(...)`` deny.
 5. profile-specific secret extras the harness does not list
    (``*.vault.yml``, ``*.pem`` - spec 3.3 names them).
-6. ``~/.claude.json`` writes (``Edit``, ``Write`` and the shell
-   ``tee``/redirect/``sed -i`` forms - spec 3.3).
+6. ``~/.claude.json`` writes (``Edit`` and ``Write`` - spec 3.3; round
+   9: the shell ``tee``/redirect/``sed -i`` Bash forms were dead
+   duplicates of the harness-rendered ``Bash(*.claude.json*)`` and
+   are dropped, the generic entry carries those cases).
 7. the l2-orchestrator-only single-ref push fences (round 4, F1/F2;
    tightened round 5, by shape not tokens): ``*git push * *:*`` (any
    refspec colon), ``*git push *refs/*`` (any refs/ path),
@@ -136,8 +142,10 @@ Role table (spec 2 launch identities; the Q2 default - the ``role`` field
 carries the launch identity, the MCP document rides as ``mcpConfig``):
 
 - ``l1-coordinator`` and ``l1-routing`` are the only roles with the
-  lane-branch push and workflow-dispatch pre-grants (review round 1,
-  spec 3.2; narrowed round 8): the push grant requires an explicit
+  pre-grants (review round 1,
+  spec 3.2; narrowed round 8): the L1 grant is "any non-main ref on
+  origin, including refspecs and lane deletes" - the push grant
+  requires an explicit
   origin ref - ``Bash(git push origin *)`` plus the ``-u``/``-q``
   spellings - and the dispatch grant requires an explicit ``--ref``
   (``Bash(gh workflow run * --ref *)`` plus the ``--ref=`` spelling),
@@ -198,7 +206,7 @@ ROLES = {
 }
 
 # The shared grant sets, rendered per role so they cannot drift: only the L1
-# roles share the lane-push / workflow pre-grants, l1-routing extends
+# roles share the pre-grants, l1-routing extends
 # them with exactly the apply.sh grant, l2-orchestrator carries exactly the
 # narrower L2-*-only set (plus its L2-only same-name-push deny fences, not
 # part of the allow set), every other role carries no pre-grant (spec 3.2
@@ -207,6 +215,11 @@ ROLES = {
 # see it - forms not matching an allow are not blocked, they fall to the
 # permission prompt (fail safe), so narrowing never breaks a legitimate
 # unusual push, it only stops pre-granting it).
+# The L1 grant is "any non-main ref on origin, including refspecs and
+# lane deletes": L1 coordinators legitimately push
+# `FETCH_HEAD:refs/heads/<lane>` and delete merged lane branches; main
+# in every spelling stays fenced and server-side branch protection
+# covers main (round 9 DECISION).
 COORDINATOR_ALLOW = (
     "Bash(git push origin *)",
     "Bash(git push -u origin *)",
@@ -441,8 +454,10 @@ GH_REF_MAIN = (
     # on the default branch (main) and `-R`/`--repo` dispatches on
     # another repo - both deny outright on every role. Neither
     # denies the intended allows (`--ref <lane>` carries no `-R`
-    # and no `--repo`).
-    "Bash(*gh workflow run* -R *)",
+    # and no `--repo`). Round 9: the `-R` fence is ` -R*` (not
+    # ` -R `) so the attached `-Rother/repo` shorthand denies too;
+    # no intended allow contains ` -R` (pinned by test).
+    "Bash(*gh workflow run* -R*)",
     "Bash(*gh workflow run* --repo*)",
     # Round 8, last-flag-wins class (spec 3.3): pflag takes the LAST
     # `--ref`, so a second `--ref` decides the dispatch, and `-r`
@@ -461,6 +476,19 @@ GH_REF_MAIN = (
     "Bash(*gh workflow run*\t*)",
     "Bash(*gh workflow run*\r*)",
     "Bash(*gh workflow run*\n*)",
+    # Round 9, empty/valueless --ref (HIGH, spec 3.3): the
+    # `gh workflow run * --ref=*` allow glob matches an empty value
+    # and gh resolves an empty ref to the repo default branch
+    # (main), so `--ref=` (and `--ref= ` / `--ref= --json`)
+    # allowed on l1 before this round. Each denies on every role:
+    # `--ref=` at end of text, `--ref= ` plus anything (trailing
+    # space or a trailing option), and a bare `--ref` flag with no
+    # value at the end. None denies the intended single-`--ref`
+    # allows (`--ref L1-routing/x`, `--ref=L1-routing/x`, and the
+    # l2 `--ref L2-x` forms carry a value after `=`/space).
+    "Bash(*gh workflow run*--ref=)",
+    "Bash(*gh workflow run*--ref= *)",
+    "Bash(*gh workflow run*--ref)",
 )
 
 # Shell-only secret-disclosure vectors with no read_deny_all counterpart,
@@ -481,15 +509,16 @@ BASH_SECRET_EXTRA = (
 SECRET_EXTRA_BASH = ("*.vault.yml", "*.pem")
 SECRET_EXTRA_READ = ("*.vault.yml", "*.pem")
 
-# ~/.claude.json writes: Edit, Write and the shell forms (spec 3.3).
-# Note: the CLI does not consult Write path rules - the Read/Edit fences
-# carry that case; the Write entry stays rendered anyway (harmless).
+# ~/.claude.json writes: Edit and Write (spec 3.3). Round 9: the shell
+# tee/redirect/sed-i Bash forms were dead duplicates of the
+# harness-rendered `Bash(*.claude.json*)` (decide() rows prove the
+# generic entry matches the same commands), so they are dropped here -
+# the generic entry carries those cases. Note: the CLI does not consult
+# Write path rules - the Read/Edit fences carry that case; the Write
+# entry stays rendered anyway (harmless).
 CLAUDE_JSON_WRITES = (
     "Edit(*.claude.json*)",
     "Write(*.claude.json*)",
-    "Bash(*>*.claude.json*)",
-    "Bash(*tee *.claude.json*)",
-    "Bash(*sed*-i*.claude.json*)",
 )
 
 

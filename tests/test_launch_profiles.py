@@ -42,13 +42,21 @@ here):
   unlisted (``none`` - denied automatically under the non-interactive
   launch flags, the Phase 2 concern noted in the generator docstring).
 - ``deny`` is evaluated before ``allow`` (the precedence rule the
-  contradiction test pins).
+  contradiction test pins). Source: the Claude Code permissions
+  documentation - deny rules are evaluated before ask and allow, and a
+  matching deny wins regardless of order. The contradiction test pins
+  that the RENDERED profiles keep every deny reachable under that
+  documented rule; it cannot verify the CLI itself.
 
-Assumptions taken from the Claude Code documentation and pinned ONLY in
-this model (re-verify when the CLI changes): deny-before-allow
-precedence, and ``*`` crossing ``/`` in path rules. If the CLI ever
-stops evaluating deny first, or stops letting ``*`` span ``/``, the
-tables below prove nothing until this model is updated.
+Assumptions taken from the Claude Code permissions documentation and
+pinned ONLY in this model (re-verify when the CLI changes):
+deny-before-allow precedence (deny rules are evaluated before ask and
+allow, and a matching deny wins regardless of order), and ``*``
+crossing ``/`` in path rules. If the CLI ever stops evaluating deny
+first, or stops letting ``*`` span ``/``, the tables below prove
+nothing until this model is updated. The contradiction test pins that
+the RENDERED profiles keep every deny reachable under that documented
+rule; it cannot verify the CLI itself.
 
 KNOWN divergences of this model from the real CLI (each pinned by a deny
 test, so the gap fails closed, never open):
@@ -639,6 +647,41 @@ ROUND8_GH_REPO_DENY_COMMANDS = (
     "gh workflow run ci.yml -R other/repo --ref x",
     "gh workflow run ci.yml --repo other/repo --ref x",
     "gh workflow run ci.yml --ref x --repo other/repo",
+    # Round 9, attached repo shorthand: `-Rother/repo` (no space) allowed
+    # on l1 before this round (measured with decide() - the
+    # `* -R *` fence needs spaces around `-R`); the spaced
+    # `-R other/repo` form already denied. Both must deny on EVERY
+    # profile now via `* -R*`.
+    "gh workflow run ci.yml --ref wt-x -Rother/repo",
+    "gh workflow run ci.yml --ref wt-x -R other/repo",
+)
+
+# Round 9, empty/valueless --ref (HIGH): `gh workflow run * --ref=*`
+# matches an empty value, and gh resolves an empty ref to the repo
+# default branch (main) - so each allowed on l1 before this round
+# (measured with decide()). Each must deny on EVERY profile now:
+# `--ref=` (empty value), `--ref= ` (empty value, trailing space),
+# `--ref= --json` (empty value plus a trailing option), `--ref`
+# (flag with no value at the end).
+ROUND9_GH_EMPTYREF_DENY_COMMANDS = (
+    "gh workflow run ci.yml --ref=",
+    "gh workflow run ci.yml --ref= ",
+    "gh workflow run ci.yml --ref= --json",
+    "gh workflow run ci.yml --ref",
+)
+
+# Round 9, L1 grant restated as any non-main ref on origin (DECISION,
+# not a code change): L1 coordinators legitimately push
+# `FETCH_HEAD:refs/heads/<lane>` and delete merged lane branches, so
+# refspecs and lane deletes stay pre-granted on l1 - main in every
+# spelling stays fenced and server-side branch protection covers main.
+ROUND9_L1_REFSPEC_ALLOW_COMMANDS = (
+    "git push origin FETCH_HEAD:refs/heads/L1-routing/x",
+    "git push origin :L1-routing/x",
+)
+ROUND9_L1_MAIN_REFSPEC_DENY_COMMANDS = (
+    "git push origin :main",
+    "git push origin x:main",
 )
 
 # Round 8, trailing-separator class: each allowed on l1 before this round
@@ -1352,6 +1395,81 @@ class Round8ExplicitRefTests(unittest.TestCase):
                     self.assertNotIn("\r", rule)
                     self.assertNotIn("\n", rule)
 
+    def test_empty_valueless_ref_dispatch_is_denied_by_every_profile(self):
+        # Round 9 (HIGH): `gh workflow run * --ref=*` matches an empty
+        # value and gh resolves it to the default branch (main) - each
+        # allowed on l1 before this round (measured with decide()).
+        # Each must deny on EVERY profile now, while the valued
+        # `--ref L1-routing/x` / `--ref=L1-routing/x` (l1) and
+        # `--ref L2-x` / `--ref=L2-x` (l2) forms still allow.
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND9_GH_EMPTYREF_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in (
+                "gh workflow run ci.yml --ref L1-routing/x",
+                "gh workflow run ci.yml --ref=L1-routing/x",
+            ):
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+        profile = load_profile("l2-orchestrator")
+        for command in (
+            "gh workflow run ci.yml --ref L2-x",
+            "gh workflow run ci.yml --ref=L2-x",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_attached_repo_shorthand_is_denied_by_every_profile(self):
+        # Round 9: `-Rother/repo` (attached, no space) allowed on l1
+        # before this round (measured with decide() - the `* -R *`
+        # fence needs spaces around `-R`); the spaced `-R other/repo`
+        # already denied. Both deny on EVERY profile now, and no
+        # intended allow contains ` -R` (checked below).
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in (
+                "gh workflow run ci.yml --ref wt-x -Rother/repo",
+                "gh workflow run ci.yml --ref wt-x -R other/repo",
+            ):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+        for role in ROLES:
+            allow = perms_of(load_profile(role))["allow"]
+            for rule in allow:
+                with self.subTest(role=role, rule=rule):
+                    self.assertNotIn(" -R", rule)
+
+    def test_l1_grant_covers_any_non_main_origin_ref(self):
+        # Round 9 DECISION: the L1 grant is "any non-main ref on
+        # origin, including refspecs and lane deletes" - L1
+        # coordinators legitimately push `FETCH_HEAD:refs/heads/<lane>`
+        # and delete merged lane branches. Both allow on l1, while
+        # `git push origin :main` and `git push origin x:main`
+        # stay deny on EVERY profile.
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in ROUND9_L1_REFSPEC_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND9_L1_MAIN_REFSPEC_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
 
 # ---------------------------------------------------------------------------
 # wrapper/option forms and compound commands (H3), prefix divergences (M1)
@@ -1485,14 +1603,24 @@ EXTRA_TARGETS = (
     ("Read", "*.pem", "/example/certs/deploy.pem", "/example/certs/deploy.pem.example"),
 )
 
-# Profile-specific ~/.claude.json write patterns (Edit, Write and the shell
-# tee / redirect / sed -i forms): (tool, pattern, target, look-alike).
+# Profile-specific ~/.claude.json write patterns (Edit, Write only -
+# round 9: the shell tee/redirect/sed-i Bash forms were dead duplicates
+# of the harness-rendered `Bash(*.claude.json*)` - decide() rows prove
+# the generic entry matches the same commands - so they are dropped
+# from the render and pinned by test_claude_json_shell_forms_still_deny
+# instead): (tool, pattern, target, look-alike).
 CLAUDE_WRITE_TARGETS = (
     ("Edit", "*.claude.json*", "/home/x/.claude.json", "/home/x/claude.json"),
     ("Write", "*.claude.json*", "/home/x/.claude.json", "/home/x/claude.json"),
-    ("Bash", "*>*.claude.json*", "echo x >> /home/x/.claude.json", "echo x >> /home/x/claude.json"),
-    ("Bash", "*tee *.claude.json*", "printf x | tee /home/x/.claude.json", "printf x | tee /home/x/claude.json"),
-    ("Bash", "*sed*-i*.claude.json*", "sed -i s/a/b/ /home/x/.claude.json", "sed s/a/b/ /home/x/claude.json"),
+)
+
+# Shell forms formerly covered by the dropped duplicates: each must
+# still deny on every profile via the harness-rendered
+# `Bash(*.claude.json*)` generic entry.
+CLAUDE_SHELL_FORM_TARGETS = (
+    "echo x >> /home/x/.claude.json",
+    "printf x | tee /home/x/.claude.json",
+    "sed -i s/a/b/ /home/x/.claude.json",
 )
 
 # The current secret/credential entries of fences.bash_deny_all, pinned so
@@ -1630,6 +1758,23 @@ class SecretScopeTests(unittest.TestCase):
                     self.assertTrue(decide(profile, tool, target) == "deny")
                     self.assertFalse(decide_deny(profile, tool, lookalike))
 
+    def test_claude_json_shell_forms_still_deny(self):
+        # Round 9: the dropped tee/redirect/sed-i Bash duplicates are
+        # carried by the harness-rendered `Bash(*.claude.json*)`
+        # generic entry - each shell form still denies on EVERY
+        # profile, and the generic rule is present to carry it.
+        for role in ROLES:
+            profile = load_profile(role)
+            with self.subTest(role=role):
+                self.assertIn(
+                    "Bash(*.claude.json*)", perms_of(profile)["deny"]
+                )
+            for target in CLAUDE_SHELL_FORM_TARGETS:
+                with self.subTest(role=role, target=target):
+                    self.assertTrue(
+                        decide(load_profile(role), "Bash", target) == "deny"
+                    )
+
     def test_example_templates_stay_denied(self):
         # Claude Code evaluates deny before allow, so the harness
         # read_allow_all hole (which the opencode overlay expresses as a
@@ -1749,8 +1894,9 @@ CONTRADICTION_TARGETS = {
     "Bash(*git push*;*)": "git push origin main;",
     "Bash(*git push*#*)": "git push origin #x",
     # Round-8 default-branch / other-repo shapes (GH_REF_MAIN, every
-    # role).
-    "Bash(*gh workflow run* -R *)": "gh workflow run ci.yml -R other/repo --ref x",
+    # role). Round 9: the ` -R ` fence widened to ` -R*` so the
+    # attached `-Rother/repo` shorthand denies too.
+    "Bash(*gh workflow run* -R*)": "gh workflow run ci.yml --ref wt-x -Rother/repo",
     "Bash(*gh workflow run* --repo*)": "gh workflow run ci.yml --repo other/repo --ref x",
     # Round-8 last-flag-wins class (GH_REF_MAIN, every role): the
     # double---ref target matches an L1 allow glob too, so the
@@ -1764,6 +1910,13 @@ CONTRADICTION_TARGETS = {
     "Bash(*gh workflow run*\t*)": "gh workflow run ci.yml\t--ref L2-x",
     "Bash(*gh workflow run*\r*)": "gh workflow run ci.yml\r--ref L2-x",
     "Bash(*gh workflow run*\n*)": "gh workflow run ci.yml\n--ref L2-x",
+    # Round-9 empty/valueless --ref (GH_REF_MAIN, every role): the
+    # `--ref=` allow glob matches the empty value, so the contradiction
+    # test proves the fence beats the allow; the bare `--ref` matches
+    # no allow entry and proves the explicit deny.
+    "Bash(*gh workflow run*--ref=)": "gh workflow run ci.yml --ref=",
+    "Bash(*gh workflow run*--ref= *)": "gh workflow run ci.yml --ref= --json",
+    "Bash(*gh workflow run*--ref)": "gh workflow run ci.yml --ref",
     # Round-8 L2 dispatch trailing shape (l2 only, mirrors round 5 for
     # push): each target matches an L2 allow glob, so the contradiction
     # test proves the shape fence beats the allow.
@@ -1789,7 +1942,14 @@ LEAF_CONTRADICTION_TARGETS = {
 
 
 class ContradictionTests(unittest.TestCase):
-    """A1-D5: deny takes precedence over allow."""
+    """A1-D5: deny takes precedence over allow.
+
+    Source: the Claude Code permissions documentation - deny rules are
+    evaluated before ask and allow, and a matching deny wins regardless
+    of order. This test pins that the RENDERED profiles keep every deny
+    reachable under that documented rule; it cannot verify the CLI
+    itself.
+    """
 
     def contradiction_target(self, rule):
         """One (tool, target) the deny rule matches, for every deny entry."""

@@ -69,7 +69,7 @@
       "Bash(*gh workflow run*&*)",
       "Bash(*gh workflow run*>*)",
       "Bash(*gh workflow run*<*)",
-      "Bash(*gh workflow run* -R *)",
+      "Bash(*gh workflow run* -R*)",
       "Bash(*gh workflow run* --repo*)",
       "Bash(*gh workflow run*--ref*--ref*)",
       "Bash(*gh workflow run* -r *)",
@@ -78,6 +78,9 @@
       "Bash(*gh workflow run*\t*)",
       "Bash(*gh workflow run*\r*)",
       "Bash(*gh workflow run*\n*)",
+      "Bash(*gh workflow run*--ref=)",
+      "Bash(*gh workflow run*--ref= *)",
+      "Bash(*gh workflow run*--ref)",
       "Bash(*git push * *:*)",
       "Bash(*git push *refs/*)",
       "Bash(*git push *--delete*)",
@@ -117,10 +120,7 @@
       "Read(*.vault.yml)",
       "Read(*.pem)",
       "Edit(*.claude.json*)",
-      "Write(*.claude.json*)",
-      "Bash(*>*.claude.json*)",
-      "Bash(*tee *.claude.json*)",
-      "Bash(*sed*-i*.claude.json*)"
+      "Write(*.claude.json*)"
     ]
   }
 }
