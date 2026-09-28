@@ -54,7 +54,9 @@ Three subcommands:
        ONE-ROUTER 2026-09-27.
     10. every providers.<id>.limits key resolves to one of that provider's
         models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
-        2026-09-27);
+        2026-09-27); plan_available, when present, is a boolean (MISTRALFIX
+        2026-09-28 - rpm 0 and plan_available false are the two recorded shapes
+        of "this plan cannot answer", read by plan_dead_reasons());
     11. policy.reviewers is a non-empty ordered list, each entry carrying a
         client that exists in ``clients``, a non-empty model/family, a boolean
         paid and -- when it names one -- a ``leg`` that resolves and whose
@@ -63,6 +65,28 @@ Three subcommands:
         2026-09-27). ``model`` is the client's own spelling and is deliberately
         not resolved against providers/models; ``leg`` is the gateway path and
         is resolved with the same rule 1 predicate everything else uses.
+    12. policy.risk_rules, policy.risk_audit_percent and policy.review_counts
+        are shapes tools/autoos_risk.py and the resolver can actually apply
+        (RISKTIER-a, operator Q-013 2026-09-28; fields widened by RISKTIER-a2):
+        every rule's ``type`` is one classify() implements, it carries the fields
+        that type reads and no others — ``exclude`` (a path_glob's second glob)
+        and ``min_deleted_lines`` (a diff_deletion's numstat threshold) among them
+        — a glob/regex rule has a non-empty ``pattern`` (an added_regex
+        one compiles), the audit percent is an int 0-100, and each review count
+        is a non-negative int with a boolean ``final``. classify() raises on an
+        unknown type rather than ignoring it, so this is what keeps such a rule
+        out of the committed registry.
+    13. every policy.handoff_caps row is self-consistent -- ``cap_tokens`` equals
+        ``round(window * cap_fraction)``, spec 8.3's own formula -- and one row
+        matches ``"*"``, the fallback the cap reader uses for a model no other
+        row names. ``tools/autoos_context.py`` reads ``cap_tokens`` and never
+        recomputes it, so a row whose pair disagrees states two caps at once and
+        the lane hands off at the stale one; a registry with no ``"*"`` row gets
+        no cap from the policy at all and silently falls back to that tool's own
+        hand-maintained DEFAULT_CAPS (brief AUTHORS (S1) item 2, 2026-09-28).
+        A *missing* policy.handoff_caps stays rule 6's (the schema marks it
+        required); this rule owns what the schema cannot see - the relation
+        between the fields and the existence of the default row.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -171,7 +195,8 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMMENT_KEYS = ("$comment", "comment")
 # unavailable_until's whole job is to hold a date (rule 7 checks the value
 # parses); version is a date by definition. Neither is a rule-5 violation.
-DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until")
+# monthly_cap_source is a source like any other: who set the cap, and when.
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -1816,6 +1841,56 @@ def gateway_legs(route: dict, registry: dict) -> list:
     return out
 
 
+def provider_plan_limits(provider_id: str, model_id: str, registry: dict):
+    """The measured `providers.<provider_id>.limits.<model_id>` row, or None.
+
+    Brief R4 (2026-09-27) keyed that table by the provider's own model spelling,
+    which is exactly `model_id` as `resolve_leg` returns it. None means "no
+    measurement on record" -- never a deny: an unmeasured leg stays plannable.
+    """
+    provider = (_section(registry, "providers").get(provider_id) or {})
+    if not isinstance(provider, dict):
+        return None
+    limits = provider.get("limits")
+    if not isinstance(limits, dict):
+        return None
+    entry = limits.get(model_id)
+    return entry if isinstance(entry, dict) else None
+
+
+def plan_dead_reasons(provider_id: str, model_id: str, registry: dict) -> list:
+    """MISTRALFIX (2026-09-28) -- why this plan cannot answer `provider_id`'s
+    `model_id` at all; [] means the plan carries no veto.
+
+    Measured directly against api.mistral.ai with the operator's key: the
+    x-ratelimit headers said four of its models get **0 requests/minute** on
+    this plan (HTTP 429 on every call, 51/51 in the gateway's own 7-day log)
+    and a fifth answers 403 because the plan does not carry it. Before this
+    predicate nothing read `rpm`, so the resolver planned such a leg as if it
+    served and the fall-through burned the request.
+
+      - ``rpm: 0`` -> ``plan: 0 rpm`` (a zero request quota);
+      - ``plan_available: false`` -> ``plan: plan_available false`` (not on the
+        plan; the 403 shape). Only an explicit boolean false denies -- a string,
+        a null or a missing key is "not measured", and rule 10 rejects a
+        non-boolean rather than let one read as truthy here.
+
+    A small-but-real quota (rpm 10, rpm 125) is NOT dead: this is about a model
+    that cannot answer, not one that answers slowly. Time-independent and pure,
+    like every other predicate here -- it reads the recorded plan, no clock and
+    no counters.
+    """
+    entry = provider_plan_limits(provider_id, model_id, registry)
+    if entry is None:
+        return []
+    reasons = []
+    if entry.get("rpm") == 0:
+        reasons.append("plan: 0 rpm")
+    if entry.get("plan_available") is False:
+        reasons.append("plan: plan_available false")
+    return reasons
+
+
 # A declared context is a PROMISE the gateway hands the client ("a request this
 # big gets answered"), and a priority combo keeps falling to its next leg while
 # that promise stands. So the promise may only be as big as the smallest window
@@ -2179,6 +2254,123 @@ def leg_rule_for(leg: str, registry: dict):
     return None
 
 
+# ---------------------------------------------------------------------------
+# policy.claude_budget (D-102 CLAUDEBUDGET, S2 item 1, 2026-09-28)
+# ---------------------------------------------------------------------------
+
+CLAUDE_BUDGET_MODES = ("normal", "budget")
+CLAUDE_BUDGET_DEFAULT_BELOW = 0.25
+_CLAUDE_BUDGET_KEYS = ("mode", "weekly_share_left", "budget_below", "source")
+
+
+def claude_budget(registry) -> dict:
+    """The shipped Claude-budget state, as one resolved dict.
+
+    `policy.claude_budget` is the single home for "how much of this week's
+    Claude allowance is left" (operator D-102: Claude only orchestrates and
+    gives finals; writers, researchers and first reviewers use free/cheap legs).
+    The resolver and every CLI reader call this instead of reading the JSON, so
+    the ON/OFF rule exists exactly once:
+
+        on = mode == "budget" OR weekly_share_left < budget_below
+
+    `weekly_share_left` may be null (nobody has measured it yet), which is only
+    decisive through `mode`. A registry with no `claude_budget` key at all is
+    OFF -- an older catalog keeps routing exactly as it did before the field,
+    and a missing measurement never silently restricts the routes.
+    """
+    entry = _section(registry, "policy").get("claude_budget")
+    entry = entry if isinstance(entry, dict) else {}
+    mode = entry.get("mode") if entry.get("mode") in CLAUDE_BUDGET_MODES \
+        else "normal"
+    share = entry.get("weekly_share_left")
+    share = share if isinstance(share, (int, float)) and \
+        not isinstance(share, bool) else None
+    below = entry.get("budget_below")
+    below = float(below) if isinstance(below, (int, float)) and \
+        not isinstance(below, bool) else CLAUDE_BUDGET_DEFAULT_BELOW
+    return {
+        "on": mode == "budget" or (share is not None and share < below),
+        "mode": mode,
+        "weekly_share_left": share,
+        "budget_below": below,
+        "source": entry.get("source"),
+    }
+
+
+def _check_claude_budget(registry) -> list:
+    """rule 12 - policy.claude_budget is shaped like the resolver reads it.
+
+    Every field is checked rather than defaulted, because each one fails in the
+    direction the operator is trying to avoid: an unknown key (a typo'd
+    `budget_bellow`) silently means "no threshold", a share of 1.5 means
+    "nothing is left to ration" -- and both keep planning Claude work after the
+    weekly allowance is gone. `source` must be a string for the same reason the
+    dated-value rule exists: a number or a list is not an attribution.
+    """
+    entry = _section(registry, "policy").get("claude_budget")
+    if entry is None:
+        return []
+    if not isinstance(entry, dict):
+        return ["claude_budget: policy.claude_budget must be an object"]
+    problems = []
+    for field in sorted(entry):
+        if field not in _CLAUDE_BUDGET_KEYS and field != "$comment":
+            problems.append(
+                "claude_budget: policy.claude_budget.%s unknown key "
+                "(allowed: %s)" % (field, ", ".join(_CLAUDE_BUDGET_KEYS)))
+    if "mode" not in entry:
+        problems.append("claude_budget: policy.claude_budget.mode is missing")
+    elif entry["mode"] not in CLAUDE_BUDGET_MODES:
+        problems.append(
+            "claude_budget: policy.claude_budget.mode %r is not one of %s"
+            % (entry["mode"], ", ".join(CLAUDE_BUDGET_MODES)))
+
+    def _number(value):
+        # A bool is an int in Python, and `True < 0.25` would read as a share of
+        # 1 -- the one shape that turns budget mode off by accident.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    if "weekly_share_left" in entry and entry["weekly_share_left"] is not None:
+        share = _number(entry["weekly_share_left"])
+        if share is None:
+            problems.append(
+                "claude_budget: policy.claude_budget.weekly_share_left must be "
+                "a number 0..1 or null (got %r)"
+                % (entry["weekly_share_left"],))
+        elif not 0.0 <= share <= 1.0:
+            problems.append(
+                "claude_budget: policy.claude_budget.weekly_share_left %s is "
+                "outside 0..1 - a share above 1 would read as \"nothing left to "
+                "ration\"" % (entry["weekly_share_left"],))
+    if "budget_below" not in entry:
+        problems.append("claude_budget: policy.claude_budget.budget_below is "
+                        "missing")
+    else:
+        below = _number(entry["budget_below"])
+        if below is None:
+            problems.append(
+                "claude_budget: policy.claude_budget.budget_below must be a "
+                "number 0..1 (got %r) - claude_budget() only falls back to %s "
+                "when the key is absent, so a string here is a threshold that "
+                "never applies"
+                % (entry["budget_below"], CLAUDE_BUDGET_DEFAULT_BELOW))
+        elif not 0.0 <= below <= 1.0:
+            problems.append(
+                "claude_budget: policy.claude_budget.budget_below %s is outside "
+                "0..1" % (entry["budget_below"],))
+    if "source" not in entry:
+        problems.append("claude_budget: policy.claude_budget.source is missing "
+                        "- name the decision this value came from")
+    elif not isinstance(entry["source"], str) or not entry["source"].strip():
+        problems.append(
+            "claude_budget: policy.claude_budget.source must be a non-empty "
+            "string (got %r)" % (entry["source"],))
+    return problems
+
+
 def leg_denied(leg: str, registry: dict) -> bool:
     """Whether policy.leg_rules denies `leg` (first matching rule has allow false)."""
     rule = leg_rule_for(leg, registry)
@@ -2216,9 +2408,10 @@ def _check_leg_rules(registry) -> list:
 
 # The allowed keys of a providers.<id>.limits.<model> entry, exactly the
 # properties of catalog/ai-registry.schema.json's $defs.provider_limits
-# (rpm/rpd/tpm/tpd + the D20 source tag). Kept as a module constant next to
-# _check_provider_limits rather than read from the schema at check time.
-_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "source")
+# (rpm/rpd/tpm/tpd + the MISTRALFIX plan_available flag + the D20 source tag).
+# Kept as a module constant next to _check_provider_limits rather than read from
+# the schema at check time.
+_LIMITS_ENTRY_KEYS = ("rpm", "rpd", "tpm", "tpd", "plan_available", "source")
 
 
 def _check_provider_limits(registry) -> list:
@@ -2229,14 +2422,19 @@ def _check_provider_limits(registry) -> list:
     part of a leg after its '<provider>/' prefix). Reusing resolve_leg -- the
     same one-leg rule the validator and the resolver share -- means an unknown
     model spelling fails closed here exactly as it would at route time. The
-    tpm/rpm/rpd/tpd values are each optional, but when present must be
-    non-negative ints; the resolver reads only tpm today (a request-size
-    filter), the rest are data only.
+    rpm/rpd/tpm/tpd values are each optional, but when present must be
+    non-negative ints; the resolver reads tpm as a request-size filter (brief
+    R4) and, since MISTRALFIX (2026-09-28), rpm and plan_available as a
+    cannot-serve gate via plan_dead_reasons().
 
     Review R4FIX (2026-09-27): a limits entry may carry only the keys of the
     schema's provider_limits def -- an unknown key (measured: a 'tmp' key
     passed this check) is a malformed entry and is reported naming the
     provider, the model and the key.
+
+    MISTRALFIX: `plan_available` must be a boolean. The gate tests
+    `is False`, and a recorded string "false" would read truthy there -- so the
+    type is checked here, where the malformed value can still be named.
     """
     problems = []
     for provider_id, provider in sorted(_section(registry, "providers").items()):
@@ -2270,6 +2468,12 @@ def _check_provider_limits(registry) -> list:
                     problems.append(
                         "limits: %s.%s must be a non-negative int (got %r)"
                         % (label, field, value))
+            if "plan_available" in entry \
+                    and not isinstance(entry["plan_available"], bool):
+                problems.append(
+                    "limits: %s.plan_available must be a boolean (got %r) - "
+                    "plan_dead_reasons() tests `is False`, so a string would "
+                    "read as available" % (label, entry["plan_available"]))
     return problems
 
 
@@ -2356,8 +2560,268 @@ def _check_reviewers(registry) -> list:
 
 
 # ===========================================================================
+# rule 12 - the risk policy is a policy tools/autoos_risk.py can actually apply
+# ===========================================================================
+
+# The rule types `autoos_risk.classify()` implements. A rule of any other type
+# is data without a reader: the registry would say "high risk" about a shape no
+# code looks at, and the diff would be classified as if the rule did not exist.
+_RISK_RULE_TYPES = ("path_glob", "diff_deletion", "added_regex", "registry_policy")
+# Rule types whose whole match is their pattern, so a missing one matches nothing.
+_RISK_PATTERN_TYPES = ("path_glob", "added_regex")
+# Every field `classify()` reads for a given type, beyond the shared three. A
+# field outside its type's set is inert: `paths` on a path_glob looks like a
+# scope and is not one, and a stray key says nothing at all.
+# (RISKTIER-a2: `exclude` is the second glob a path_glob reads — the tracked
+# `.env.example` template a `**/.env.*` rule must not catch — and
+# `min_deleted_lines` is the numstat threshold a diff_deletion reads.)
+_RISK_RULE_FIELDS = {
+    "path_glob": {"pattern", "exclude"},
+    "diff_deletion": {"min_deleted_lines"},
+    "added_regex": {"pattern", "paths"},
+    "registry_policy": set(),
+}
+# Spec 4: the only two risk classes a card can carry.
+_RISK_CLASSES = ("normal", "high")
+
+
+def _check_risk_policy(registry) -> list:
+    """rule 12 - policy.risk_rules / risk_audit_percent / review_counts are the
+    shapes the classifier and the resolver read (RISKTIER-a, operator Q-013
+    2026-09-28).
+
+    `autoos_risk.classify()` raises on an unknown rule type rather than skipping
+    it, and this check is what keeps such a rule out of the committed registry in
+    the first place. The same reasoning covers a pattern-less glob (matches
+    nothing, silently), a regex that does not compile (raises at classify time on
+    someone else's machine), an audit percent outside 0-100 (a sample that is
+    either never drawn or always), and a review count that is negative or
+    non-integer (the resolver would ask for a fraction of a reviewer).
+
+    Like rule 11, this stays clock-free and never reads availability: the audit
+    draw is a property of a sha the caller supplies, not of the registry.
+    """
+    problems = []
+    policy = _section(registry, "policy")
+
+    rules = policy.get("risk_rules")
+    if rules is None:
+        problems.append("risk_rules: policy.risk_rules is missing - the classifier "
+                        "has no rules to apply to a diff")
+    elif not isinstance(rules, list):
+        problems.append("risk_rules: policy.risk_rules must be a list")
+    else:
+        for index, rule in enumerate(rules):
+            label = "policy.risk_rules[%d]" % index
+            if not isinstance(rule, dict):
+                problems.append("risk_rules: %s is not an object" % label)
+                continue
+            rule_type = rule.get("type")
+            if rule_type not in _RISK_RULE_TYPES:
+                problems.append(
+                    "risk_rules: %s has unknown type %r - tools/autoos_risk.py "
+                    "classify() applies %s and raises on anything else"
+                    % (label, rule_type, ", ".join(_RISK_RULE_TYPES)))
+            else:
+                allowed = ({"type", "reason", "source"}
+                           | _RISK_RULE_FIELDS[rule_type])
+                for field in sorted(set(rule) - allowed):
+                    problems.append(
+                        "risk_rules: %s.%s is not read by a %s rule - classify() "
+                        "ignores it, so the rule does not say what it looks like "
+                        "it says (a %s rule carries %s)"
+                        % (label, field, rule_type, rule_type,
+                           ", ".join(sorted(_RISK_RULE_FIELDS[rule_type]))
+                           or "no further fields"))
+            for field in ("reason", "source"):
+                value = rule.get(field)
+                if not isinstance(value, str) or not value:
+                    problems.append("risk_rules: %s.%s must be a non-empty string"
+                                    % (label, field))
+            pattern = rule.get("pattern")
+            if rule_type in _RISK_PATTERN_TYPES and (
+                    not isinstance(pattern, str) or not pattern):
+                problems.append("risk_rules: %s (%s) needs a non-empty pattern - "
+                                "without one it matches nothing" % (label, rule_type))
+            if rule_type == "added_regex" and isinstance(pattern, str) and pattern:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    problems.append("risk_rules: %s pattern %r does not compile (%s)"
+                                    % (label, pattern, exc))
+            if "paths" in rule and (not isinstance(rule["paths"], str)
+                                    or not rule["paths"]):
+                problems.append("risk_rules: %s.paths must be a non-empty string "
+                                "(added_regex only)" % label)
+            if "exclude" in rule and (not isinstance(rule["exclude"], str)
+                                      or not rule["exclude"]):
+                problems.append("risk_rules: %s.exclude must be a non-empty glob "
+                                "(path_glob only) - an empty one excludes nothing, "
+                                "which is the opposite of why the field is there"
+                                % label)
+            threshold = rule.get("min_deleted_lines")
+            if "min_deleted_lines" in rule and (
+                    isinstance(threshold, bool)
+                    or not isinstance(threshold, int)
+                    or threshold < 0):
+                problems.append("risk_rules: %s.min_deleted_lines must be an int "
+                                ">= 0, got %r - classify() compares it against the "
+                                "diff's own deleted-line count" % (label, threshold))
+
+    percent = policy.get("risk_audit_percent")
+    if percent is None:
+        problems.append("risk_audit_percent: policy.risk_audit_percent is missing - "
+                        "the audit would fall back to the code's default instead of "
+                        "the operator's sampling rate")
+    else:
+        entry = percent if isinstance(percent, dict) else {}
+        value = entry.get("value", percent) if isinstance(percent, dict) else percent
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+            problems.append("risk_audit_percent: policy.risk_audit_percent must be an "
+                            "int 0-100, got %r" % (value,))
+        source = entry.get("source")
+        if not isinstance(source, str) or not source:
+            problems.append("risk_audit_percent: policy.risk_audit_percent.source must "
+                            "be a non-empty string (D20)")
+
+    counts = policy.get("review_counts")
+    if counts is None:
+        problems.append("review_counts: policy.review_counts is missing - the resolver "
+                        "would review by its own hard-coded counts, not by policy")
+    elif not isinstance(counts, dict):
+        problems.append("review_counts: policy.review_counts must be an object keyed "
+                        "by risk class")
+    else:
+        for risk_class in sorted(set(counts) - set(_RISK_CLASSES) - {"$comment"}):
+            problems.append("review_counts: policy.review_counts.%s is not a risk "
+                            "class (spec 4: %s)" % (risk_class, " | ".join(_RISK_CLASSES)))
+        for risk_class in _RISK_CLASSES:
+            entry = counts.get(risk_class)
+            label = "policy.review_counts.%s" % risk_class
+            if not isinstance(entry, dict):
+                problems.append("review_counts: %s must be an object" % label)
+                continue
+            cross_family = entry.get("cross_family")
+            if (isinstance(cross_family, bool) or not isinstance(cross_family, int)
+                    or cross_family < 0):
+                problems.append("review_counts: %s.cross_family must be an int >= 0, "
+                                "got %r" % (label, cross_family))
+            if not isinstance(entry.get("final"), bool):
+                problems.append("review_counts: %s.final must be a boolean, got %r"
+                                % (label, entry.get("final")))
+            source = entry.get("source")
+            if not isinstance(source, str) or not source:
+                problems.append("review_counts: %s.source must be a non-empty string "
+                                "(D20)" % label)
+    return problems
+
+
+# ===========================================================================
+# rule 13 - policy.handoff_caps: the cap a lane stops at
+# ===========================================================================
+
+_CAP_NUMBER_FIELDS = ("window", "cap_fraction", "cap_tokens")
+
+
+def _cap_row_problem(label, entry):
+    """One ``policy.handoff_caps`` row's problem line, or None when it holds.
+
+    The invariant is spec 8.3's own formula: the row states ``window`` and
+    ``cap_fraction`` *and* the derived ``cap_tokens``, and the two can disagree.
+    They disagree silently, because ``tools/autoos_context.py`` reads
+    ``cap_tokens`` and never recomputes it from the other pair -- so the hand
+    edit that moved Sonnet's row to 250k / 0.25 (routing-00 D-085, 2026-09-28)
+    had to change three fields to agree, and nothing read the pair to confirm it
+    did.
+
+    The line names the row and prints every number it compared, so the reader
+    does not have to open the registry to know which of the three to fix.
+    """
+    if not isinstance(entry, dict):
+        return ("handoff_caps: %s is not an object (got %r)" % (label, entry))
+    for field in _CAP_NUMBER_FIELDS:
+        value = entry.get(field)
+        # bool is an int in Python, and `true` as a cap or a fraction is a
+        # mistake, not a number to multiply.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ("handoff_caps: %s.%s must be a number (got %r) - the cap is "
+                    "round(window * cap_fraction), and %s has to be a number for "
+                    "that to mean anything" % (label, field, value, field))
+    window, fraction, cap = (entry["window"], entry["cap_fraction"],
+                             entry["cap_tokens"])
+    expected = round(window * fraction)
+    if cap != expected:
+        return ("handoff_caps: %s.cap_tokens %s != round(window %s * "
+                "cap_fraction %s) = %s - autoos_context reads cap_tokens and "
+                "never recomputes it, so this row states two caps at once"
+                % (label, cap, window, fraction, expected))
+    return None
+
+
+def _check_handoff_caps(registry) -> list:
+    """rule 13 - every hand-off cap row is self-consistent and a default exists
+    (brief AUTHORS (S1) item 2, 2026-09-28).
+
+    Two facts, both of which the schema is silent on because each is about the
+    *relation* between fields rather than their types:
+
+      - ``cap_tokens == round(window * cap_fraction)``, per row;
+      - at least one row carries ``"*"`` in its ``match`` list. That row is the
+        only fallback ``tools/autoos_context.py`` can use for a model no other
+        row names, so without it a cap is not read from this registry at all --
+        ``load_caps`` falls through to its own hand-maintained ``DEFAULT_CAPS``
+        and reports ``source='default'``, and the policy nobody checks is the
+        policy that drifts.
+
+    A *missing* section is not this rule's: the schema marks
+    ``policy.handoff_caps`` required, so rule 6 names it once. A present section
+    of the wrong shape is here, because nothing else multiplies it. Clock-free
+    and pure, like every other rule.
+    """
+    caps = _section(registry, "policy").get("handoff_caps")
+    if caps is None:
+        return []
+    if not isinstance(caps, dict):
+        return ["handoff_caps: policy.handoff_caps must be an object keyed by "
+                "orchestrator-model class (got %r)" % (caps,)]
+    problems = [_cap_row_problem("policy.handoff_caps.%s" % key, entry)
+                for key, entry in caps.items()]
+    problems = [problem for problem in problems if problem]
+    if not any(isinstance(entry, dict) and "*" in (entry.get("match") or [])
+               for entry in caps.values()):
+        problems.append('handoff_caps: policy.handoff_caps has no row matching '
+                        '"*" - a model no other row names gets no cap from this '
+                        'registry and falls through to autoos_context '
+                        'DEFAULT_CAPS (hand-maintained, not policy)')
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
+
+
+def _check_monthly_caps(registry) -> list:
+    """providers.<id>.monthly_cap_usd, when present, is a positive number with a
+    non-empty monthly_cap_source (WS-DSCALL, 2026-09-28).
+
+    A paid caller (deepseek_call.py) refuses at or above the cap, so a zero,
+    negative, string or boolean cap would either block every call or none; a
+    bool is rejected explicitly because it is an int to Python.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or "monthly_cap_usd" not in provider:
+            continue
+        cap = provider["monthly_cap_usd"]
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+            problems.append("providers.%s.monthly_cap_usd must be a positive number, got %r"
+                            % (provider_id, cap))
+        source = provider.get("monthly_cap_source")
+        if not isinstance(source, str) or not source.strip():
+            problems.append("providers.%s.monthly_cap_usd has no monthly_cap_source"
+                            % provider_id)
+    return problems
 
 
 def check_registry(registry) -> list:
@@ -2373,7 +2837,11 @@ def check_registry(registry) -> list:
     problems.extend(_check_unavailable_until_pairs_available(registry))
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
+    problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_reviewers(registry))
+    problems.extend(_check_claude_budget(registry))
+    problems.extend(_check_risk_policy(registry))
+    problems.extend(_check_handoff_caps(registry))
     return problems
 
 

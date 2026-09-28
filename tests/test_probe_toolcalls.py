@@ -460,7 +460,8 @@ class OverlayTests(unittest.TestCase):
 
     def test_save_leaves_no_temp_file_behind(self):
         self.mod.save_overlay(self.path, {"legs": {}})
-        self.assertEqual(os.listdir(self.tmpdir), ["measured.json"])
+        # The lock file beside it is deliberate (OVERLAYHOME: locked read-modify-write).
+        self.assertEqual(sorted(os.listdir(self.tmpdir)), ["measured.json", "measured.json.lock"])
 
     def test_record_verdict_keeps_unrelated_keys(self):
         overlay = {"legs": {"other/leg": {"tool_calls": {"value": "proven"}},

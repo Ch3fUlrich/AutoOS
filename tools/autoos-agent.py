@@ -62,6 +62,19 @@ Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
 past the max is refused with exit code 4.
 
+Run identity: one canonical id per spawn, minted once in UTC as
+`YYYYMMDD-HHMMSS-<slug>-<hex6>` (slug from --title else the task, capped at 24
+chars). It names the sandbox dir, the `agent/<id>` branch, logs/workers/<id>.json
+and the child's AUTOOS_AGENT_RUN_ID, and rides the gateway as X-AutoOS-Run-Id
+beside x-omniroute-session-id. The record also stores the parent's id (that env
+var at spawn time), the host, and the full route_plan the run was scored on;
+`ps --tree` prints the spawn tree from the parent edge. An id minted elsewhere
+still keeps one spawn to one id: `run --run-id <id>` takes that id (the MCP
+server's `spawn` does, since it names its own run dir with it) and refuses a
+shape that is not canonical with exit 2. The parent edge is only ever the
+caller's own env var, never the handed-in id - else a child would be its parent.
+docs/routing.md.
+
 Usage:
     python3 tools/autoos-agent.py list
     python3 tools/autoos-agent.py run --card role=review --isolate "Review lib/linux/ui.sh"
@@ -71,6 +84,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
+    python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -80,6 +94,8 @@ Usage:
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
+    python3 tools/autoos-agent.py ps --tree                          # runs under their parent
+    python3 tools/autoos-agent.py risk --sha <sha> --base origin/main   # the diff's risk class
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
@@ -158,6 +174,8 @@ import re
 import shlex
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -171,10 +189,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
+import autoos_overlay as overlay_mod  # noqa: E402
 import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
+import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
@@ -195,7 +215,10 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # operator request 2026-09-26: propose a tool-calling re-probe whenever a real
 # run's gate contradicts the recorded status of its route's legs.
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
-MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+# OVERLAYHOME (2026-09-28): one tool_calls overlay per machine, not per checkout
+# (tools/autoos_overlay.py). The old per-checkout file is a read-only fallback.
+MEASURED_OVERLAY_PATH = overlay_mod.default_path()
+LEGACY_OVERLAY_PATH = overlay_mod.legacy_path(ROOT)
 # REVROUTE (S2) item 3: the spawner's own transient note about which provider
 # just told it a reset time. Git-ignored beside measured.json - the registry is
 # the operator's file, this one is the machine's observation, and a record whose
@@ -356,20 +379,454 @@ def isolate_source(cwd: str | None = None) -> str:
 def isolate_clone(root: str, path: str, branch: str) -> str:
     """Create the --isolate sandbox and return its base sha.
 
-    The three git calls are one step because the containment claim is about the
+    The steps are one function because the containment claim is about the
     directory the worker lands in: `git clone --local` copies HEAD's tracked
     files, so nothing git-ignored and nothing untracked exists in the clone
-    (KEYDENY3b), and the push URL is disabled so the clone cannot write back.
+    (KEYDENY3b), and the push fence plus the credential-free env make a push
+    out of it an accident guard, not a boundary (FF1, D-106).
     """
     subprocess.run(["git", "clone", "-q", "--local", root, path], check=True)
-    # The orchestrator still fetches from the sandbox path (unchanged); only the
-    # push URL is disabled, so `git push` from the sandbox cannot update the
-    # parent's branches.
-    subprocess.run(["git", "-C", path, "remote", "set-url", "--push",
-                    "origin", ISOLATE_PUSH_DISABLED], check=True)
+    # The orchestrator still fetches from the sandbox path (unchanged); every
+    # remote's push URL is disabled and a pre-push hook is installed, so an
+    # unplanned `git push` — to origin or to the parent's absolute path the
+    # containment brief names — fails. ACCIDENT GUARD, not containment: see
+    # fence_sandbox_push. The credentials it cannot use are what really
+    # keeps the parent safe (worker_env, FF1b).
+    fence_sandbox_push(path)
     subprocess.run(["git", "-C", path, "switch", "-q", "-c", branch], check=True)
+    # FF1c: the clone gets its own identity, local to itself. The worker's
+    # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
+    # path), so the operator's `user.name` is gone — and a worker that ends
+    # its brief with `git commit` would die on "Author identity unknown",
+    # leaving the run's work uncommitted. Same author the spawner's own
+    # end-of-run commit signs with.
+    for name, value in (("user.name", "autoos-worker"),
+                        ("user.email", WORKER_EMAIL)):
+        subprocess.run(["git", "-C", path, "config", "--local", name, value],
+                       check=True)
     return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
+
+# FF1 (D-106): what a spawned worker inherits. The caller's environment on this
+# host carries GitHub, provider and cloud credentials plus an ssh-agent socket,
+# and a worker reads its own env (`env`, `git`, a script it was told to run).
+# So the set is chosen by an ALLOWLIST: a denylist only ever covers the names
+# somebody remembered to write down, and an unlisted name is a name that got
+# through.
+WORKER_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
+                    "SHELL", "NVM_DIR",
+                    # Windows: a process with no SYSTEMROOT cannot start a
+                    # thread, and a client with no USERPROFILE finds no home.
+                    # None of these carry a credential.
+                    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+                    "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
+                    "PROGRAMDATA")
+WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
+# AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
+# here: the child gets the minted key, never the path to the file it came from.
+WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
+                     "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
+                     "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
+                     "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
+                     "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN")
+# Cross-check on top of the allowlist, applied to what the *plan* injects too:
+# no secret-shaped name reaches the child from either side.
+WORKER_ENV_DENY = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                   "SSH_AUTH_SOCK", "SSH_ASKPASS", "AUTOOS_OMNIROUTE_KEY",
+                   # Loader/interpreter injection: a value under any of these
+                   # names repoints what the child executes before its first
+                   # line runs, so no amount of allowlisting the name is safe.
+                   "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                   "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
+                   "NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+                   # git reaching a credential or a helper of the operator's.
+                   "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+                   "GIT_PROXY_COMMAND", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                   "GIT_DIR", "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_CONFIG",
+                   "SUDO_ASKPASS", "SSH_ASKPASS_REQUIRE",
+                   # Other credential caches the child would read by itself.
+                   "KUBECONFIG", "DOCKER_CONFIG", "NETRC", "_NETRC",
+                   "AUTOOS_KEYS_FILE")
+WORKER_ENV_DENY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+                            "_ACCESS_KEY", "_CREDENTIALS", "_ASKPASS",
+                            "_CONFIG_FILE", "_CONFIG_PATH")
+WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
+                            "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
+                            "GITHUB_", "GITLAB_", "SLACK_",
+                            "LD_", "DYLD_", "GIT_", "SSH_", "KUBE", "DOCKER_")
+# And what the *plan* is allowed to add, on top of clearing the deny check. The
+# allowlist above only ever covered the caller's own exports: plan["env"] was
+# copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
+# owned the child without anyone noticing (FF1b, Muse#high on 362b8af..6bdeca5).
+# This is the list of names the spawner's builders genuinely set; anything else
+# is refused and announced, because a name nobody wrote down here is a name
+# nobody decided the child should have.
+WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
+                            "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                            clients.GEMINI_CUSTOM_HEADERS_ENV)
+WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
+
+# git in the worker must fail rather than ask: askpass helpers that always exit
+# non-zero, no terminal prompt, and a config that cancels any stored credential.
+_GIT_ASKPASS_FALSE = ("/bin/false" if os.path.exists("/bin/false")
+                      else "/usr/bin/false")
+# The only git config the worker may read: these two, cancelling the credential
+# helper and askPass. GIT_CONFIG_COUNT has to equal their number — a parent's
+# leftover GIT_CONFIG_KEY_n/VALUE_n (what `git -c ...` exports, and the
+# orchestrator runs `git -c` a lot) is read by name, so anything past the count
+# would be an unreviewed channel.
+_GIT_GUARD_CONFIG = (("credential.helper", ""), ("core.askPass", ""))
+WORKER_GIT_GUARDS = ((
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", _GIT_ASKPASS_FALSE),
+    # GIT_CONFIG_PARAMETERS is how `git -c key=value` reaches a child git; it
+    # is read before GIT_CONFIG_KEY_n, so forcing it empty is not optional.
+    ("GIT_CONFIG_PARAMETERS", ""),
+    # FF1c item 1: the two numbered channels *cancel* settings, they do not stop
+    # git reading a config. $GIT_CONFIG_GLOBAL overrides both $HOME/.gitconfig
+    # and $XDG_CONFIG_HOME/git/config; naming a dead path is the only way to shut
+    # the file itself, and an inherited HOME reopened it — url.insteadOf (a
+    # remote repointed at the parent), core.sshCommand and core.hooksPath (a
+    # program of the operator's) are all beyond the reach of the guard above.
+    # NOSYSTEM shuts /etc/gitconfig, which the repo's own installers write.
+    ("GIT_CONFIG_GLOBAL", os.devnull),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_COUNT", str(len(_GIT_GUARD_CONFIG))))
+    + tuple(("GIT_CONFIG_KEY_%d" % i, k) for i, (k, _v) in enumerate(_GIT_GUARD_CONFIG))
+    + tuple(("GIT_CONFIG_VALUE_%d" % i, v) for i, (_k, v) in enumerate(_GIT_GUARD_CONFIG))
+)
+# Named off rather than left to the deny patterns, because these are the three
+# ways git reaches a *program* the operator installed (FF1b item 2): an ssh
+# transport, a proxy command, and an askpass helper. The guards above cannot
+# cancel them, and an allowlist miss is silent.
+WORKER_ENV_FORCED_OFF = ("GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+                         "SSH_ASKPASS", "SUDO_ASKPASS", "GIT_ASKPASS_REQUIRE")
+
+
+def _worker_env_denied(name: str) -> bool:
+    return (name in WORKER_ENV_DENY or
+            name.endswith(WORKER_ENV_DENY_SUFFIXES) or
+            name.startswith(WORKER_ENV_DENY_PREFIXES))
+
+
+def _worker_env_allowed(name: str) -> bool:
+    if _worker_env_denied(name):
+        return False
+    return (name in WORKER_ENV_ALLOW or name in WORKER_ENV_AUTOOS or
+            name.startswith(WORKER_ENV_ALLOW_PREFIXES))
+
+
+def _plan_env_passed(name: str) -> bool:
+    return (name in WORKER_PLAN_ENV_PASSLIST or
+            name.startswith(WORKER_PLAN_ENV_PASSLIST_PREFIXES))
+
+
+def _drop_extra_git_config(env: dict) -> None:
+    """Keep git's numbered config channels to the guards (FF1b item 2).
+
+    GIT_CONFIG_KEY_n/VALUE_n are read *by index*, so a leftover GIT_CONFIG_KEY_3
+    from a parent's `git -c ...` is consulted even with GIT_CONFIG_COUNT right,
+    as long as it is present. Anything at or past the guard count is removed.
+    """
+    for name in list(env):
+        for prefix in ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"):
+            if name.startswith(prefix):
+                tail = name[len(prefix):]
+                if not tail.isdigit() or int(tail) >= len(_GIT_GUARD_CONFIG):
+                    del env[name]
+                break
+
+
+def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
+    """The environment of one spawned worker: an allowlist of the caller's
+    environment, the plan's own passlisted entries, the worker's single gateway
+    ``key``, and the guards that stop git from prompting or reading a stored
+    credential.
+
+    The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
+    added only when this run genuinely goes through the gateway. ``base`` exists
+    so the scrub is testable without touching the real environment.
+    """
+    src = os.environ if base is None else base
+    env = {n: v for n, v in src.items() if _worker_env_allowed(n)}
+    # The operator's session directory (bus, sockets, sometimes the agent's own)
+    # is not the worker's, whatever the XDG_ prefix rule above decided (FF1b
+    # item 4). The plan puts a private one back.
+    env.pop("XDG_RUNTIME_DIR", None)
+    # Same rule, same reason, one round later (FF1c item 1): $XDG_CONFIG_HOME is
+    # not only git's config file, it is where gh, npm, pip and the clients look
+    # for the operator's own settings and any token they stored there. git is
+    # already shut by GIT_CONFIG_GLOBAL above; nothing else is.
+    env.pop("XDG_CONFIG_HOME", None)
+    for n, v in (plan.get("env") or {}).items():
+        # A plan entry is our own code talking, so a name that is not on the
+        # passlist is drift, not an attack — refuse it and say so loudly rather
+        # than let the child quietly run under a repointed PATH or loader.
+        if not _plan_env_passed(n):
+            print("autoos-agent: refused plan env %s: not on the plan passlist"
+                  % n, file=sys.stderr)
+            continue
+        if _worker_env_denied(n):
+            print("autoos-agent: refused plan env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
+    env["PWD"] = plan["cwd"]
+    for n, v in WORKER_GIT_GUARDS:
+        env[n] = v
+    _drop_extra_git_config(env)
+    for n in WORKER_ENV_FORCED_OFF:
+        env.pop(n, None)
+    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    if key:
+        env["AUTOOS_OMNIROUTE_KEY"] = key
+    # CLAUDEBUDGET item 1 (ccf6f84) crossed with FF1 (D-106): this is the one
+    # place a worker's env is built, so the orchestrator's Claude declaration is
+    # stripped *here* rather than at each call site. The allowlist above already
+    # never let an AUTOOS_CLAUDE* in from the caller's environment — this is the
+    # half that stops a plan (or a name added to the prefix later) from carrying
+    # one down the tree.
+    return strip_claude_env(env)
+
+
+def _child_env_passed(name: str) -> bool:
+    """Whether an ``extra`` entry may reach a CLI child (FF1c item 2).
+
+    The plan passlist plus the spawner's own ``AUTOOS_*`` state names — the same
+    decision the plan side makes. ``PATH`` is deliberately *not* in here: it is
+    inheritable, and an extra that repoints it is not something a caller should
+    get to decide on the child's behalf.
+
+    The one exception is the Claude budget declaration (CLAUDEBUDGET item 3,
+    ccf6f84): an MCP caller's ``claude_reason`` is materialized for the CLI
+    processes of *that* spawn only, and the CLI re-reads it at its own gate. It
+    is named here rather than left to a wholesale ``dict(os.environ)``, so the
+    fence stays the only channel a child env is built through. A client worker
+    never gets it — ``worker_env`` strips the namespace on its way out.
+    """
+    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS or
+            name == resolver.CLAUDE_CRITICAL_ENV)
+
+
+def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> dict:
+    """The environment of a child that is *our own CLI*, not a worker.
+
+    The MCP server preflights a plan and runs a detached job, both by exec'ing
+    ``tools/autoos-agent.py``, which scrubs again for the client it launches. The
+    child still gets the same allowlist — a token does not need to travel to the
+    process that only forwards it — plus the one credential the CLI reads
+    directly (``AUTOOS_OMNIROUTE_KEY``, which it mints the worker's client key
+    from) and whatever ``extra`` names for itself. The path to the keys file is
+    not among them: the CLI finds it under ``ROOT``.
+
+    ``extra`` is a caller's own dictionary, which is exactly why it has to clear
+    the same checks as everything else: a bare ``env.update(extra)`` made the
+    whole policy a matter of caller discipline (FF1c item 2).
+    """
+    env = worker_env({"cwd": os.getcwd(), "env": {}}, None, base=base)
+    src = os.environ if base is None else base
+    if src.get("AUTOOS_OMNIROUTE_KEY"):
+        env["AUTOOS_OMNIROUTE_KEY"] = src["AUTOOS_OMNIROUTE_KEY"]
+    # CLAUDEBUDGET item 1/3 (ccf6f84) meeting FF1 (D-106): the budget
+    # declaration is the orchestrator's authority over *one* run, and the CLI
+    # child re-reads it — the MCP server's preflight and detached runner both
+    # reach the last-mile gate inside that CLI. So it is forwarded here, by
+    # name, to our own CLI only. One line above, worker_env stripped the whole
+    # AUTOOS_CLAUDE* namespace out of what a client worker gets, and nothing
+    # else in it is let back in.
+    if src.get(resolver.CLAUDE_CRITICAL_ENV):
+        env[resolver.CLAUDE_CRITICAL_ENV] = src[resolver.CLAUDE_CRITICAL_ENV]
+    for n, v in (extra or {}).items():
+        if _worker_env_denied(n):
+            print("autoos-agent: refused child env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        if not _child_env_passed(n):
+            print("autoos-agent: refused child env %s: not on the child passlist"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
+    return env
+
+
+def _provision_path_usable(st, path: str, what: str) -> str | None:
+    """Why an already-present `path` may not be provisioned through, or None.
+
+    The same three rules judge the leaf and its parent (FF1c item 3, and the
+    parent half the Sonnet review of FF1 asked for): ``makedirs`` and ``chmod``
+    both follow a symlink, and a directory belonging to another uid is somebody
+    else's tree on a shared host — tightening it is a denial of service on its
+    real owner, writing into it is the leak.
+    """
+    if stat.S_ISLNK(st.st_mode):
+        return "%s is a symlink" % what
+    if not stat.S_ISDIR(st.st_mode):
+        return "%s is not a directory" % what
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return "%s is owned by uid %d" % (what, st.st_uid)
+    return None
+
+
+def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
+    """Create the worker's private ``XDG_RUNTIME_DIR``: empty, mode 0700.
+
+    Provisioned at the launch site, not in the plan builder — a dry run writes
+    nothing, and git refuses to clone into a directory that is not empty, so a
+    dir beside the clone would have to come after it. Failing to make it is not
+    fatal: a client with an unusable runtime dir falls back to its own default,
+    which is exactly the state before this change.
+
+    A leaf that is already there is judged, not inherited (FF1c item 3).
+    ``makedirs(exist_ok=True)`` happily walked *through* a pre-existing symlink
+    and then chmod 0700'd whatever it pointed at: on a shared host, where the
+    state tree is reachable by more than one account, that is both a write into
+    someone else's directory and a denial of service on it. Same for a leaf of
+    another owner, and for a leaf that is not a directory at all.
+
+    The parent is judged by the same rule (FF1 Sonnet LOW): ``os.path.isdir``
+    follows a symlink, so a parent that is a link — or a directory of another
+    uid — was walked through and chmod'd from underneath, which is the leaf bug
+    one level up and the only path the leaf check could not see.
+    """
+    if not path or not os.path.isabs(path):
+        return None
+    try:
+        st = os.lstat(path)
+    except OSError:
+        st = None                    # absent: the normal case
+    if st is not None:
+        why = _provision_path_usable(st, path, "it")
+        if why is not None:
+            print("autoos-agent: refusing to provision %s: %s" % (path, why),
+                  file=sys.stderr)
+            return None
+        os.chmod(path, 0o700)        # ours already: re-tighten, idempotent
+        return path
+    try:
+        parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            pst = None               # absent too: makedirs creates it
+        if pst is not None:
+            why = _provision_path_usable(pst, parent, "its parent")
+            if why is not None:
+                print("autoos-agent: refusing to provision %s (%s): %s"
+                      % (path, parent, why), file=sys.stderr)
+                return None
+        if not os.path.isdir(parent):
+            # 0700 on the parent too — makedirs(mode) only ever applies it to
+            # the leaf, and a world-readable sibling is the same leak.
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            os.chmod(parent, 0o700)
+        # mkdir, not makedirs: the leaf is created atomically, so a competitor
+        # that wins the race is seen as an existing entry instead of merged into.
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        # Something appeared in the window between the lstat and the mkdir.
+        # Re-check it under the same rules, once: a racer that pre-creates the
+        # leaf as a symlink must still be refused, not followed.
+        if _retry:
+            print("autoos-agent: refusing to provision %s: still there after "
+                  "a retry" % path, file=sys.stderr)
+            return None
+        return provision_runtime_dir(path, _retry=True)
+    except OSError as exc:
+        print("autoos-agent: could not provision the worker's runtime dir %s: %s"
+              % (path, exc), file=sys.stderr)
+    return path
+
+
+def worker_dir_refusal(path: str) -> str | None:
+    """Why ``path`` cannot serve as the worker's private dir; None if it can.
+
+    Judged by the same rule `provision_runtime_dir` applies, and one level up:
+    a leaf that was never created is only fine if it could have been.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        parent = os.path.dirname(path)
+        try:
+            pst = os.lstat(parent)
+        except OSError:
+            return "it was never created"
+        return _provision_path_usable(pst, parent, "its parent") or "it was never created"
+    return _provision_path_usable(st, path, "it")
+
+
+def provision_worker_dirs(env: dict) -> bool:
+    """Provision both private XDG dirs a worker launches with; False = refuse it.
+
+    `provision_runtime_dir` returns the path it made usable and None when it
+    REFUSES — a symlink, a tree of another uid, a non-dir leaf, a parent like
+    that, or a racer still there after the retry. Both launch sites used to drop
+    that result (FF1 merge review, rev-merge MED), so the worker started with the
+    very directory the fence had just refused: its sockets, tokens and client
+    state land wherever the link points, and the 0700 chmod punches a hole in a
+    directory it never owned. A directory that merely could not be created keeps
+    the old fallback — the client uses its own default — but only once verified,
+    because an absent or hostile one is the same exposure the refusal was for.
+
+    An env that names no dir (the scrub pops both when the plan has no state
+    tree) is not a refusal: there is nothing to provision.
+    """
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+        path = env.get(name)
+        if not path:
+            continue
+        provision_runtime_dir(path)
+        why = worker_dir_refusal(path)
+        if why is not None:
+            print("autoos-agent: refusing to launch the worker: its %s %s "
+                  "could not be provisioned: %s" % (name, path, why),
+                  file=sys.stderr)
+            return False
+    return True
+
+
+def fence_sandbox_push(sandbox: str) -> None:
+    """Make the obvious push out of an --isolate clone fail: every remote's push
+    URL is disabled, and the clone gets a pre-push hook that exits 1.
+
+    This is an ACCIDENT GUARD, not a containment boundary, and it must not be
+    described as one. `git push --no-verify` skips the hook, `core.hooksPath`
+    points it somewhere else, and `git remote set-url` (or a URL-addressed push,
+    which never consults the disabled pushurl) sidesteps both — all three in one
+    command, with nothing stolen to do it. `tests/test_autoos_spawner.py`
+    `PushFenceHonestyTests.test_a_no_verify_push_is_NOT_blocked_by_the_hook`
+    asserts the bypass works, so a future reader cannot take this for a fence.
+
+    What it is for: a worker that *means* no harm and types `git push` — which a
+    brief that names the parent's path invites, since `pushurl` alone does not
+    cover `git push </parent>`. The containment is elsewhere: the clone is
+    disposable, and the worker's environment (worker_env, FF1b items 1, 2 and 4)
+    carries no credential, no ssh transport and no config channel to push with.
+    """
+    remotes = subprocess.run(["git", "-C", sandbox, "remote"],
+                             capture_output=True, text=True).stdout.split()
+    for remote in remotes:
+        subprocess.run(["git", "-C", sandbox, "remote", "set-url", "--push",
+                        remote, ISOLATE_PUSH_DISABLED], check=True)
+    hooks = os.path.join(sandbox, ".git", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    path = os.path.join(hooks, "pre-push")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\n"
+                 "# autoos --isolate: a worker's work leaves the sandbox by the\n"
+                 "# spawner's take-it step, never by push.\n"
+                 "#\n"
+                 "# This is an ACCIDENT GUARD, not a security boundary:\n"
+                 "# `git push --no-verify` skips it, `core.hooksPath` moves it,\n"
+                 "# and `git remote set-url`/a URL-addressed push walks past the\n"
+                 "# disabled pushurl. Containment is the disposable clone plus\n"
+                 "# an env with no credential in it (tools/autoos-agent.py\n"
+                 "# worker_env). Do not add a check here and call the sandbox\n"
+                 "# sealed.\n"
+                 'echo "autoos: git push is disabled in an --isolate sandbox" >&2\n'
+                 "exit 1\n")
+    os.chmod(path, 0o755)
 
 
 def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
@@ -785,6 +1242,531 @@ def free_slot_refusal(plan: dict, policy: dict | None, directory: str | None = N
             % (provider, live, FREE_QUEUE_TIMEOUT_SECONDS // 60, cap), None)
 
 
+# CLAUDEBUDGET-b item 1: the prefix the orchestrator's Claude declarations
+# live under. A worker must never hold one, so this is both the gate's env
+# namespace and the strip list -- one home for the spelling.
+CLAUDE_ENV_PREFIX = "AUTOOS_CLAUDE"
+
+
+def model_route_id(value) -> str:
+    """The route/model id a model spelling denotes: no `omniroute/` prefix, no
+    `#effort` suffix (CLAUDEBUDGET-g item C).
+
+    The launcher and the gate used to normalise by hand in five places, and the
+    spellings differ by path: `build_plan` hands the client `omniroute/<combo>`
+    (or that plus `#<rung>` from the effort stamp), a card names the bare combo,
+    a registry row names whatever the operator typed. Two spellings of one route
+    read as two values, so a route the resolution already priced looked like a
+    caller's unknown model -- this is the one function both sides call.
+    """
+    text = str(value or "").strip()
+    if text.startswith("omniroute/"):
+        text = text[len("omniroute/"):]
+    return text.partition("#")[0].strip()
+
+
+def _combo_of(model: str) -> str:
+    """The route id a configured model string names, if it names one.
+
+    A gateway model string is `omniroute/<combo>#<effort>` (opencode.jsonc spells
+    its defaults that way), and a card's combo is the bare id -- both reduce to
+    the id through `model_route_id`, the one normaliser. Anything else --
+    "sonnet", "groq/openai/gpt-oss-120b" -- is a model, not a combo, and yields "".
+    """
+    base = model_route_id(model)
+    return base if "/" not in base else ""
+
+
+def _leg_is_claude(leg, registry) -> bool:
+    """`is_claude_leg` for a string the registry may simply not know.
+
+    The resolver raises on an unresolvable provider on purpose (a broken registry
+    fails closed there); here an unknown name is a *client default* like
+    "Qwen3.8-Flash", which no registry row describes, and calling that Claude
+    would refuse every qoder run. So: the name decides, and the name says nothing
+    about anything that is not spelled like Claude.
+    """
+    try:
+        return resolver.is_claude_leg(leg, registry)
+    except ValueError:
+        return resolver.claude_model_name(leg)
+
+
+def _gateway_client(client_name: str) -> bool:
+    """Whether this client's model is resolved *through* the gateway/registry.
+
+    Read from the adapter table, which is what builds the argv — the one place
+    that knows whether the run receives a gateway route id or a vendor-native
+    model id. An unknown client is assumed gateway (fail closed: a name this
+    host does not know is a name nobody can price).
+    """
+    client = clients.CLIENTS.get(client_name)
+    return True if client is None else client.gateway
+
+
+def _native_model_name(source: str | None) -> bool:
+    """Whether this value is a vendor-native model id rather than a route id.
+
+    CLAUDEBUDGET-g item A (review finding 1): only the defaults compiled into the
+    adapter are. A caller's `--model` on an own-account client is the same kind of
+    string -- qoder, agy and claude pass it to their own CLI verbatim -- and that
+    is exactly why it cannot be priced by name: the name is the caller's, and a
+    client that runs on the operator's own account answers with whatever it is
+    handed. Reading "Efficient" as *not Claude* because no marker matched is a
+    guess on the side that spends. A compiled default is code this host reviewed,
+    so its name is evidence; a named string is not.
+    """
+    return (source or "").startswith("clients.")
+
+
+def spawn_spends_claude(client_name: str, model, registry: dict,
+                        source: str | None = None):
+    """True / False / None for what running `client_name` at `model` costs.
+
+    None is "cannot tell", and the caller treats it as a spend (CLAUDEBUDGET-d
+    item 2): under a budget, an unknown model for a client that can reach Claude
+    is refused rather than assumed free.
+
+    A gateway spawn names a *combo route id*, and the registry is what says what
+    a combo answers with — so a combo the registry does not carry is unknowable,
+    not free. CLAUDEBUDGET-f item 1/5 removed the exception that used to price it
+    as free whenever the caller named the string itself (`--model`, a registry
+    `clients` row): an attacker could name an all-Claude combo the registry does
+    not carry and be told the run costs nothing. CLAUDEBUDGET-g item A removed the
+    mirror of that exception on the own-account side, where the same trick worked
+    on a bare name. The name still decides for a default compiled into the adapter
+    (`_native_model_name`) — reading `Qwen3.8-Flash` as an unknown combo would
+    bench every qoder worker on a string no registry row describes.
+    """
+    if resolver.is_claude_client(client_name):
+        return True
+    if not model:
+        return None
+    if resolver.claude_model_name(model):
+        return True
+    combo = _combo_of(model)
+    if combo:
+        route = (registry.get("routes") or {}).get(combo)
+        if route is None:
+            if _native_model_name(source):
+                return _leg_is_claude(model, registry)
+            return None
+        # A combo route is what the gateway resolves; it falls through past a
+        # rate-limited leg to the next one, so the route is a Claude spend
+        # only when every leg of it is — one non-Claude leg is the leg that
+        # answers, exactly as the resolver's own leg filter reads it.
+        legs = route.get("legs") or []
+        return bool(legs) and all(_leg_is_claude(leg, registry) for leg in legs)
+    return _leg_is_claude(model, registry)
+
+
+def opencode_cfg(cfg: dict | None = None) -> dict:
+    """`cfg` when the caller brought a real one (main loads opencode.jsonc for
+    `run`), else read the same file -- the MCP server calls the gate with none, and
+    in-process callers pass an empty stub. Either way the gate reads the config the
+    spawn itself is about to read."""
+    if cfg:
+        return cfg
+    try:
+        return load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
+    except (OSError, ValueError):
+        return {}
+
+
+def effective_spawn_model(client_name: str, model=None, card=None,
+                          registry: dict | None = None, cfg: dict | None = None,
+                          tier=None, free: bool = False, free_model=None,
+                          clean: bool = False) -> tuple:
+    """``(model, source)`` this spawn answers with, or ``(None, None)``.
+
+    CLAUDEBUDGET-f item 2/3: this is the runner's own order, in the one place the
+    gate reads it, so the value the gate judges is the value the argv carries --
+    there is no second resolution path to fall out of agreement with `build_plan`.
+
+      * an explicit `--model` replaces everything (for a gateway client it is the
+        `override` `resolve_model` puts first; for an own-account client it goes
+        to the CLI verbatim);
+      * a gateway client with `--free` runs the promo model, not the tier's;
+      * a gateway client with `--tier` runs that tier agent's `model` in
+        opencode.jsonc -- through `resolve_model`, the launcher's own function, so
+        a `--clean` tier and a declared-variant model come back spelled exactly as
+        the run receives them. HEAD read the client default first, which let a
+        tier agent whose model IS Claude be priced as a free client default;
+      * a gateway client with neither runs the card's combo (an absent card is the
+        empty card the CLI parses, whose combo the router picks); a v2 card names
+        no combo and is priced at the client's configured default, because the
+        resolver that routes it already held its Claude legs behind this gate;
+      * an own-account client (agy, qoder, claude) takes the caller's `--model` or
+        its own default -- the registry's `clients` row first if the operator wrote
+        one, else the adapter's constant -- and no tier agent ever reaches it,
+        because `clients.build_command` never receives one.
+
+    ``(None, None)`` means nothing answered, and the gate refuses rather than
+    guesses.
+    """
+    given = str(model or "").strip()
+    if given:
+        return given, "--model"
+    if _gateway_client(client_name):
+        if free:
+            return str(free_model or DEFAULT_FREE_MODEL), "--free-model"
+        if tier is not None:
+            agent = TIERS.get(_as_int(tier))
+            if agent is None:
+                return None, None
+            # The launcher's own function: the same clean suffix, the same
+            # "is this declared" refusal, which the caller turns into its message.
+            try:
+                return (resolve_model(opencode_cfg(cfg), _as_int(tier), clean, None),
+                        "opencode.jsonc agent %s" % agent)
+            except (KeyError, TypeError) as exc:
+                raise ValueError("tier %s has no model in opencode.jsonc: %s"
+                                 % (tier, exc))
+        parsed = card if isinstance(card, dict) else routing.parse_card(card or "")
+        if _is_v2_card(parsed):
+            # A v2 card names no combo: `_resolve_route_v2` lets the resolver pick
+            # the route, and the resolver holds every Claude leg behind this same
+            # gate (`claude_allowed`), so the leg half is already answered here.
+            # Refusing would bench every resolver-routed worker; what the spawn
+            # gate still has to read is the client's own configured default —
+            # which exists only for opencode, the one client whose config this
+            # is. Any other gateway client on a v2 card stays (None, None) and is
+            # refused: not seeing a model is not the same as seeing a free one.
+            if client_name != "opencode":
+                return None, None
+            default = str(opencode_cfg(cfg).get("model") or "").strip()
+            return (default, "opencode.jsonc default") if default else (None, None)
+        # An absent card is the empty card the CLI parses, so the gate and the
+        # plan read the same default: a gateway spawn that names nothing is
+        # t2-worker, not "unknown". A card the router refuses raises here, and
+        # the caller passes its own words through — they carry the next steps,
+        # and a refused card spends nothing whatever the budget says.
+        combo, _ = routing.select_combo(parsed)
+        return (combo, "card combo") if combo else (None, None)
+    row = ((registry or {}).get("clients") or {}).get(client_name) or {}
+    configured = str(row.get("default_model") or "").strip()
+    if configured:
+        return configured, "registry clients row"
+    if client_name == "agy":
+        return clients.AGY_DEFAULT_MODEL, "clients.AGY_DEFAULT_MODEL"
+    if client_name == "qoder":
+        return clients.QODER_DEFAULT_MODEL, "clients.QODER_DEFAULT_MODEL"
+    return None, None
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = None,
+                         now=None, model: str | None = None, card=None,
+                         cfg: dict | None = None, reason: str | None = None,
+                         tier=None, free: bool = False, free_model=None,
+                         clean: bool = False) -> tuple:
+    """``(refusal, note)`` for a spawn of `client_name` under the Claude budget.
+
+    CLAUDEBUDGET-b item 3(d): the resolver holds Claude *legs*, and HEAD had
+    nothing at all for the case where the caller simply names the client --
+    `--client claude` ran inside Claude Code and spent the allowance on ordinary
+    implement work, which is the exact spend D-102 reserved for finals. The
+    answer comes from the resolver's one gate (`claude_allowed`), so a budget
+    that flips in the registry flips this too, and a card's own `critical=true`
+    is not input: only the orchestrator's declaration is.
+
+    CLAUDEBUDGET-d item 2: the client NAME was not enough, and was the hole. What
+    spends the allowance is the model that answers, and three other ways reach a
+    Claude model than naming the client: `--model sonnet` on any client, a combo
+    route whose legs are all Claude, and a client whose own configured default IS
+    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-4-6-thinking` today). So
+    the gate reads the effective model through `effective_spawn_model` and
+    `spawn_spends_claude`, and refuses when it cannot tell what will answer --
+    guessing free is the side that spends.
+
+    `reason` (item 3) is the orchestrator's per-spawn declaration, the MCP
+    request's `claude_reason`; it is authority for this call only, so an
+    orchestrator need not export `AUTOOS_CLAUDE_CRITICAL` server-wide.
+
+    `note` is the reason an *allowed* Claude spawn is allowed, with the model and
+    where it came from, so the run says out loud what let it happen (item 1: the
+    record has to cite the authority).
+    """
+    if registry is None:
+        registry = load_live_registry()
+    try:
+        eff, source = effective_spawn_model(client_name, model, card, registry, cfg,
+                                           tier, free, free_model, clean)
+    except ValueError as exc:
+        # CLAUDEBUDGET-g item B (review finding 5): a card or tier the *router*
+        # refuses is a routing error, and it has to leave as one. HEAD answered it
+        # with a `claude_budget:` refusal on every host, budget or not: a different
+        # door than the one that actually refused, the next steps hidden behind a
+        # policy that had no opinion, and a behavior change for every non-budget
+        # run. Out of budget mode the router's own exception goes back to the
+        # caller, which is where the "(see: … list)" advice lives; in budget mode
+        # the run is still refused, but the first words name the error.
+        if not resolver.claude_budget_of(registry)["on"]:
+            raise
+        return ("routing error: %s (claude_budget: nothing was priced, so nothing "
+                "was spent)" % exc), None
+    spends = spawn_spends_claude(client_name, eff, registry, source)
+    if spends is False:
+        return None, None
+    allowed, gate = resolver.claude_allowed("spawn", env, registry, now,
+                                           reason=reason)
+    if spends is None:
+        if allowed:
+            # Budget off, or the orchestrator declared this run: there is still
+            # nothing to say about a model nobody identified, and nothing to
+            # refuse -- the gate is open regardless of what turns out to answer.
+            return None, None
+        unpriced = ("no model was resolved at all -- no --model, no tier agent, "
+                    "no client default and no card combo the registry can read"
+                    if not eff else
+                    "the model %r (from %s) is no route the registry carries, so "
+                    "nothing can say what it costs" % (eff, source))
+        return ("claude_budget: %s cannot be priced -- %s. The budget is on, so "
+                "the gate will not assume the free answer. Name a route the "
+                "registry carries (--model=<provider/leg>), or declare the run "
+                "with %s=<why>." % (client_name, unpriced,
+                                    resolver.CLAUDE_CRITICAL_ENV), None)
+    if allowed:
+        return None, "%s (client %s, model %s from %s)" % (gate, client_name,
+                                                           eff, source)
+    return ("%s runs the Claude model %s (from %s), which spends the Claude "
+            "allowance whatever a route leg says: %s. Finals only, unless the "
+            "orchestrator declares this spawn -- %s=<why> in its environment, or "
+            "the MCP request's claude_reason (a card's own critical=true does "
+            "not)." % (client_name, eff, source, gate,
+                       resolver.CLAUDE_CRITICAL_ENV), None)
+
+
+def _argv_flag_values(cmd, flag) -> list:
+    """Every value of `flag <value>` / `flag=<value>` in argv (CLAUDEBUDGET-h 2).
+
+    The `=` spelling is the same flag to every parser here and used to be
+    invisible to this gate, which read only the two-token form.
+    """
+    out = [cmd[index + 1] for index, token in enumerate(cmd[:-1]) if token == flag]
+    out += [token.split("=", 1)[1] for token in cmd
+            if str(token).startswith(flag + "=")]
+    return out
+
+
+def _overlay_models(env):
+    """The models in the OPENCODE_CONFIG_CONTENT document, or None if unreadable.
+
+    `free_overlay` writes `model` and every agent's model there (build_plan), and
+    opencode merges that document last, so it beats the jsonc AND the argv: a model
+    named in it is a model the process answers with. A document that will not parse
+    is a channel this gate cannot read, and None says so — the caller refuses rather
+    than pricing half of it.
+    """
+    raw = (env or {}).get("OPENCODE_CONFIG_CONTENT") or ""
+    if not str(raw).strip():
+        return []
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    out = [doc["model"]] if doc.get("model") else []
+    for agent in (doc.get("agents") or {}).values():
+        if isinstance(agent, dict) and agent.get("model"):
+            out.append(agent["model"])
+    return out
+
+
+def plan_launch_models(plan, args=None, cfg: dict | None = None,
+                      registry: dict | None = None) -> list:
+    """``[(value, source)]`` the FINAL plan can answer with (CLAUDEBUDGET-g item A).
+
+    The spawn gate reads the *flags*; this reads what the flags became. Three
+    rewrites happen after it and none of them is visible in a flag: the reviewer
+    resolution swaps in the model the review list picked
+    (`reviewer_run_override`), a v2 card runs on whatever combo the resolver
+    settled on (`_resolve_route_v2`), and `--free` replaces the model with the
+    promo one. So the authority prices everything the launch itself carries.
+
+    CLAUDEBUDGET-h item 2 (findings 2+4) is *how* it reads them: through
+    `clients.MODEL_INPUT`, the one table that says how each client receives its
+    model — its argv flag, whatever that client spells it and in either spelling,
+    the gateway route it resolves to legs, the config documents (opencode.jsonc's
+    tier-agent model and the overlay injected through the child env), and the
+    registry `clients` row this host resolves ahead of the adapter constant. HEAD
+    scanned argv for the literal `--model` and nothing else, so a row swap or a
+    config model reached the process unpriced.
+
+    What it does NOT do is fall back to `effective_spawn_model` when the plan names
+    nothing readable (finding 4): that resolution is the early value this gate
+    exists to replace, and pricing it is gating a run on a value the launch may
+    never carry. An unreadable plan — a client with no row, a client whose every
+    channel is empty, an overlay that will not parse — comes back as the single
+    ``("", …)`` entry, which the budget gate reads as a refusal.
+
+    Raises the router's ``ValueError`` for a card or tier it refuses (finding 5):
+    that is a routing error, and the caller has to label it one.
+
+    An argv value that IS the resolution's own answer keeps that resolution's
+    source, so a default compiled into the adapter is still read by name; every
+    other value is priced as a caller-named model, the strict reading.
+    """
+    client = (plan or {}).get("client") or getattr(args, "client", None) or ""
+    eff, eff_source = effective_spawn_model(
+        client, getattr(args, "model", None), getattr(args, "card", None),
+        registry, cfg, getattr(args, "tier", None),
+        bool(getattr(args, "free", False)),
+        getattr(args, "free_model", None) or DEFAULT_FREE_MODEL,
+        bool(getattr(args, "clean", False)))
+    out = []
+    seen = set()
+
+    def add(value, source):
+        text = str(value or "").strip()
+        if not text:
+            return
+        if eff and model_route_id(text) == model_route_id(eff):
+            source = eff_source or source
+        key = (model_route_id(text), source)
+        if key not in seen:
+            seen.add(key)
+            out.append((text, source))
+
+    cmd = [str(token) for token in ((plan or {}).get("cmd") or [])]
+    route = (plan or {}).get("route") or {}
+    env = (plan or {}).get("env") or {}
+    row = ((registry or {}).get("clients") or {}).get(client) or {}
+    unreadable = False
+    for entry in clients.MODEL_INPUT.get(client, ()):
+        kind, key = entry if len(entry) == 2 else (entry[0], "")
+        if kind == "flag":
+            for value in _argv_flag_values(cmd, key):
+                add(value, "argv %s" % key)
+        elif kind == "route":
+            # The route combo is what the gateway resolves to its legs, so it is a
+            # launch model for a gateway client (only gateway clients carry the
+            # row) -- and `--free` replaces it with the promo model before the argv
+            # is built, so pricing it anyway would bench a free run for a route it
+            # does not run.
+            if not bool(getattr(args, "free", False)):
+                add(route.get("combo"), "route combo")
+        elif kind == "config" and key == "agent":
+            agent = (plan or {}).get("agent")
+            if agent:
+                add(((cfg or {}).get("agents") or {}).get(agent, {}).get("model"),
+                    "opencode.jsonc agent %s" % agent)
+        elif kind == "config" and key == "overlay":
+            models = _overlay_models(env)
+            if models is None:
+                unreadable = True
+            else:
+                for value in models:
+                    add(value, "OPENCODE_CONFIG_CONTENT overlay")
+        elif kind == "registry":
+            add(row.get(key), "registry clients row %s" % key)
+    if unreadable or not out:
+        # Nothing the table names says what this process answers with. Under a
+        # budget that is a refusal, never a free pass (finding 3).
+        out.append(("", "no model in the final plan"))
+    return out
+
+
+def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | None = None,
+                        cfg: dict | None = None) -> tuple:
+    """``(refusal, note)`` for the launch this plan describes: the last-mile gate.
+
+    CLAUDEBUDGET-g item A (Muse#high on 2dff253..4fc082b, findings 1/2/3/6): the
+    early gate proves the model the *flags* imply, and the flags are not the last
+    word — a reviewer override, a resolver-routed v2 combo, or a registry clients
+    row can all replace it after the gate has said "free". A gate that prices an
+    earlier resolution is a gate on a value the run will never use. This one runs
+    on the final plan, immediately before the client is started, in `cmd_run`'s own
+    launch loop (so a fallthrough re-plan passes it too) and in the MCP spawn path
+    through the CLI it invokes; the early gate stays, for the fast message that
+    comes before any planning.
+
+    CLAUDEBUDGET-h (Muse#high on 4fc082b..d1eb9c8): it prices the model the way
+    each client receives it, through `clients.MODEL_INPUT` (findings 2+4); an
+    unpriceable plan is a refusal rather than a fallback to the early value
+    (findings 3+4); and a card the router refuses leaves as the routing error it
+    is, with the router's own words, never as a `claude_budget:` refusal (finding
+    5). Accepted residual, stated rather than fixed: the `AUTOOS_CLAUDE*`
+    declaration this gate honours is forgeable by a worker that re-exports it in
+    its own shell — this is a budget control, not a security fence, and children
+    are stripped of it on the way out (`strip_claude_env`).
+
+    Like the early gate it reads the model, not the client name, and refuses both a
+    Claude answer and one that cannot be priced — an own-account client handed a
+    model string no registry row describes answers with whatever it is handed, so
+    under a budget "the name has no Claude marker in it" is not evidence of free.
+    """
+    env = os.environ if env is None else env
+    if registry is None:
+        registry = load_live_registry()
+    if not resolver.claude_budget_of(registry)["on"]:
+        # Nothing to enforce, and nothing to mislabel: out of budget mode the plan
+        # launches exactly as it did before this gate existed.
+        return None, None
+    client = plan.get("client") or getattr(args, "client", None) or "opencode"
+    try:
+        pairs = plan_launch_models(plan, args, cfg, registry)
+    except ValueError as exc:
+        # Finding 5: the router refused the card, and the router's door is the one
+        # the caller has to be pointed at — a budget label here hides the next
+        # steps behind a policy that had no opinion on the card.
+        return ("routing error: %s (claude_budget: the run stopped before anything "
+                "was priced, so nothing was spent; the words above are the router's, "
+                "and `list` prints the values a card may take)" % exc), None
+    spends = []
+    for value, source in pairs:
+        verdict = spawn_spends_claude(client, value, registry, source)
+        if verdict is not False:
+            spends.append((value, source, verdict))
+    if not spends:
+        return None, None
+    allowed, gate = resolver.claude_allowed("spawn", env, registry)
+    named = ", ".join("%s (from %s)" % (value, source) for value, source, _ in spends)
+    if allowed:
+        # The record cites the authority and the value it let through — the same
+        # rule as the early gate, on the model the run really starts on. The
+        # declaration is the orchestrator taking responsibility for whatever
+        # answers, priced or not, which is why it is read before the refusal below.
+        return None, "%s (final plan for %s: %s)" % (gate, client, named)
+    if not any(value for value, _s, _v in spends):
+        return ("claude_budget: the plan %s is about to launch cannot be priced at "
+                "all — no argv flag this client is known to take, no route combo, no "
+                "injected config model and no registry clients row says what answers "
+                "(clients.MODEL_INPUT reads no model input for %r, or the plan "
+                "carries none). The budget is on, so an unpriced launch is a refusal, "
+                "not a free pass: name a model the registry can price, declare this "
+                "run with %s=<why>, or add the client's model input to "
+                "clients.MODEL_INPUT." % (client, client,
+                                          resolver.CLAUDE_CRITICAL_ENV), None)
+    return ("claude_budget: the plan %s is about to launch carries %s, which this "
+            "budget holds for finals and nothing declares: %s. This is the last "
+            "gate, after every model the flags implied was rewritten (the "
+            "reviewer resolution, the resolver's route, --free). Declare this run "
+            "with %s=<why> in the orchestrator's environment, or the MCP request's "
+            "claude_reason, or name a model the registry can price." % (
+                client, named, gate, resolver.CLAUDE_CRITICAL_ENV), None)
+
+
+def strip_claude_env(env: dict) -> dict:
+    """`env` without any `AUTOOS_CLAUDE*` key -- the child's view of it.
+
+    The declaration is one process's authority over one run. If it were
+    inherited, the first worker spawned under it could spawn its own Claude
+    workers with the reason it was handed, and the budget would be back where
+    item 1 started. Stripped on the way out, at the one place a child env is
+    built (and in the MCP server's own launch), so no lane has to remember it.
+    """
+    return {k: v for k, v in env.items()
+            if not k.startswith(CLAUDE_ENV_PREFIX)}
+
+
 def lean_decision(client_name: str, route: dict) -> tuple:
     """(note, refusal) for `--lean` on `client_name` given a planned `route`.
 
@@ -889,9 +1871,70 @@ def gateway_up() -> bool:
         return False
 
 
-def slugify(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].strip("-")
+def slugify(text: str, cap: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:cap].strip("-")
     return slug or "task"
+
+
+# FLEETSPEC P0 (FLEET): one canonical id per spawn. Before this a spawn minted
+# two ids from two clocks - the sandbox clone/branch was stamped in LOCAL time
+# from the task text, the worker record a separate UTC id - and nothing tied a
+# run dir, a record and a branch together.
+RUN_ID_SLUG_CAP = 24
+# The exact shape mint_run_id produces, and the check `run --run-id` holds an
+# id to: a run id is a filename, a branch name and a header value at once, so
+# anything else (a path, an empty or over-long slug, a stamp that is not a real
+# date and time, a non-hex tail) is refused rather than written into those three
+# places. A well-shaped stamp from the wrong clock cannot be told apart here -
+# that is why the minting lives in one function, not in each caller.
+RUN_ID_RE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{6})$")
+
+
+def is_canonical_run_id(run_id) -> bool:
+    """True for exactly what mint_run_id mints (a real UTC stamp, a slug of at
+    most RUN_ID_SLUG_CAP chars, a 6-hex tail)."""
+    match = RUN_ID_RE.match(run_id or "")
+    if not match or len(match.group(2)) > RUN_ID_SLUG_CAP:
+        return False
+    try:
+        datetime.datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return False
+    return True
+
+
+def mint_run_id(title: str | None, task: str, now=None) -> str:
+    """`YYYYMMDD-HHMMSS-<slug>-<hex6>`, always UTC.
+
+    The slug comes from the title the run is named by - a titleless spawn's
+    title is build_plan's own `tN <task head>`, so this is the same text a human
+    reads in `ps`, capped at RUN_ID_SLUG_CAP chars and reduced to [a-z0-9-]. A
+    run id is a filename, a branch name and a header value at once, so the slug
+    is scrubbed first (`slug_source`) and nothing past it is task text at
+    all. The hex tail is what keeps two spawns in the same second apart
+    (measured 2026-09-25, the bug `unique_suffix` names).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is not None:
+        now = now.astimezone(datetime.timezone.utc)
+    return "%s-%s-%s" % (now.strftime("%Y%m%d-%H%M%S"),
+                         slugify(slug_source(title or task or ""),
+                                 RUN_ID_SLUG_CAP), unique_suffix())
+
+
+def slug_source(text: str) -> str:
+    """The scrubbed copy of `text` that a slug is about to be cut from.
+
+    Both slug producers use it (`mint_run_id`, `session_tag`), because both cut
+    BELOW the length of a vendor key - 24 and 40 characters - so the cap that was
+    meant to keep task text out of an id kept a pasted key in it whole, into the
+    branch name, the sandbox dir, the gateway header and the printed `run-id:`
+    line. The shared redactor masks first; the mask token is then dropped rather
+    than slugged (an id that reads "autoos-redacted" names nothing and still
+    shows that a secret was there).
+    """
+    scrubbed = redact.Redactor().text(text or "")
+    return scrubbed.replace(redact.TEXT_MASK, " ")
 
 
 # --- redacting the worker's output (SPAWNREDACT item 2) --------------------
@@ -921,8 +1964,24 @@ def redact_output(text: str) -> str:
 
 def redact_record(record: dict) -> dict:
     """Redact the string fields of a worker record / track entry. Keys and
-    non-text values (rc, cost, latency) pass through: the file stays readable."""
-    return {k: (redact_output(v) if isinstance(v, str) else v) for k, v in record.items()}
+    non-text values (rc, cost, latency) pass through: the file stays readable.
+    A nested value (the persisted route_plan) is walked the same way, because a
+    resolver `reason` carries whatever a probe line said."""
+    return {k: _redact_value(v) for k, v in record.items()}
+
+
+def _redact_value(value):
+    if isinstance(value, str):
+        return redact_output(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    # FLEETP0 review LOW: this walked dicts and lists only, so a secret inside
+    # any other container reached the record, `ps` and the log intact. The
+    # container type is kept, because the record's shape is what `ps --tree` and
+    # the console read.
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return type(value)(_redact_value(v) for v in value)
+    return value
 
 
 def report_redactions() -> None:
@@ -936,8 +1995,54 @@ def report_redactions() -> None:
         _OUTPUT_REDACTOR.reset_count()
 
 
-SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+SESSION_TAG_MAX_LEN = 120
+SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,%d}$" % SESSION_TAG_MAX_LEN)
 SESSION_TAG_HEADER = "x-omniroute-session-id"
+# FLEETSPEC P0 item 5: the run id goes next to the session tag, so a gateway
+# row can be tied back to one spawn's sandbox, record and branch.
+RUN_ID_HEADER = "X-AutoOS-Run-Id"
+# Measured in the running gateway build (read-only, 2026-09-28): OmniRoute keys a
+# conversation on `headers.get("x-omniroute-session-id").trim().slice(0, 128)`
+# (resolveConversationId, in .build/next/server/chunks) and no charset check runs
+# on it at all. So the limit is a LENGTH and it is a silent TRUNCATION: a value
+# past 128 chars loses its tail, and the tail is where the run id lives. `/` is
+# accepted, which is what D-063 relies on.
+OMNIROUTE_SESSION_ID_MAX = 128
+
+
+def session_header_value(tag: str, run_id: str | None = None) -> str:
+    """The `x-omniroute-session-id` value for one run: `<tag>/<run-id>` (D-063).
+
+    OmniRoute's conversationTracker/chatCore path takes the header verbatim as
+    the conversation id, so one value per run threads every leg of that run
+    through one Conversation while the part before the first `/` stays the lane
+    (`autoos_usage.py --by lane`) and the part after the last `/` is the run
+    (`--by run`). `X-AutoOS-Run-Id` still rides beside it, unchanged.
+
+    A tag long enough that tag + "/" + run id would pass the gateway's 128-char
+    truncation is sent alone, with one warning: a silently cut run id would make
+    every run of that lane share one conversation and look like a working id.
+    """
+    if not run_id:
+        return tag
+    combined = "%s/%s" % (tag, run_id)
+    if len(combined) <= OMNIROUTE_SESSION_ID_MAX:
+        return combined
+    print("autoos-agent: session tag %r + run id would pass the gateway's %d-char "
+          "%s cap, sending the tag alone (this run is not traceable by session id, "
+          "only by %s)" % (tag, OMNIROUTE_SESSION_ID_MAX, SESSION_TAG_HEADER,
+                           RUN_ID_HEADER), file=sys.stderr)
+    return tag
+
+
+def gateway_headers(tag: str, run_id: str) -> dict:
+    """The two request headers one run stamps its gateway calls with (D-063).
+
+    One dict, so every client that can carry headers carries the same pair -
+    the session id (tag + run id, the conversation) and the bare run id.
+    """
+    return {SESSION_TAG_HEADER: session_header_value(tag, run_id),
+            RUN_ID_HEADER: run_id}
 
 
 def session_tag(title: str, env=None) -> str:
@@ -959,7 +2064,9 @@ def session_tag(title: str, env=None) -> str:
     # The worktree name is not ours to trust: keep the header charset and
     # leave room for "/<slug>" (slugify caps it at 40) inside 120 chars.
     lane = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(ROOT)).strip("-")[:79] or "lane"
-    return "%s/%s" % (lane, slugify(title))
+    # The title is the same untrusted text the run id is cut from, and this tag
+    # rides the same gateway header (FLEETP0 review HIGH, item 3): scrubbed first.
+    return "%s/%s" % (lane, slugify(slug_source(title)))
 
 
 def unique_suffix() -> str:
@@ -1377,6 +2484,48 @@ def print_review_report(label, report):
     print("ready: %s" % ("yes" if report["ready"] else "no"))
 
 
+def cmd_risk(args) -> int:
+    """Classify a commit's diff by risk (RISKTIER-a, operator Q-013/D-060).
+
+    The writer does not grade its own work: the class comes from the diff, read
+    against `policy.risk_rules` by tools/autoos_risk.py. The rev is resolved to one
+    commit hex first, so `--sha HEAD`, a branch and the full sha all classify the
+    same commit the same way. Prints
+
+        commit: 59aa3a9794f4d81a1a67241a202eb4fb7de3e527
+        risk: high
+          reason: secrets handling: configuration/api-keys.yml
+        audit: no (20%)
+
+    on stdout; `--json` prints the whole assessment (reasons, the resolved commit,
+    the audit draw and the changed files) instead. Exit 0 classified, 2 the diff or
+    the registry could not be read — an unclassified diff is never reported as
+    `normal`, because a secrets change that reads as low risk gets one cheap
+    review.
+    """
+    try:
+        registry = load_registry(args.registry or REGISTRY_PATH)
+    except (OSError, ValueError) as exc:
+        print("risk: cannot read the registry %s: %s" % (args.registry or REGISTRY_PATH, exc),
+              file=sys.stderr)
+        return 2
+    try:
+        out = risk.assess(args.repo, args.base, args.sha, registry)
+    except risk.RiskError as exc:
+        print("risk: %s" % exc, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+    print("commit: %s" % out["sha"])
+    print("risk: %s" % out["risk"])
+    for reason in out["reasons"]:
+        print("  reason: %s" % reason)
+    print("audit: %s (%d%%)" % ("yes" if out["audit"] else "no",
+                                out["audit_percent"]))
+    return 0
+
+
 def cmd_review_status(args) -> int:
     """Report whether a lane record carries both reviews a ready lane needs.
 
@@ -1592,7 +2741,7 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
     if not entry["model"].partition("#")[0].startswith("omniroute/"):
         return entry["model"], None, "reviewer-model: %s" % asked
     return (resolve_model(cfg, tier, False, entry["model"]),
-            entry["model"].partition("#")[0].replace("omniroute/", "", 1),
+            model_route_id(entry["model"]),
             "reviewer-model: %s" % asked)
 
 
@@ -1629,11 +2778,19 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         registry = dict(registry)
         registry["routes"] = {rid: route for rid, route in (registry.get("routes") or {}).items()
                               if rid not in exclude_routes}
-    overlay = load_overlay(MEASURED_OVERLAY_PATH)
+    overlay, overlay_missing_at = load_measured_overlay()
     track_record = track.load(TRACK_RECORD)
     client_state = measure_mod.client_state(clients)
-    result = route_plan_for(parsed_card, args.task, ROOT, DEFAULT_ORCHESTRATOR_MODEL,
-                            now, registry, overlay, track_record, client_state)
+    # CLAUDEBUDGET-b item 3(d): `run` and `route` share this core, so the client
+    # being spawned has to reach it -- a card routed for client "claude" is a
+    # Claude spend even where no route leg names Claude. `env` carries the
+    # orchestrator's critical-path declaration (item 1); it is this process's
+    # env, which is where a declaration can come from with authority.
+    result = route_plan_for(parsed_card, args.task, ROOT,
+                            DEFAULT_ORCHESTRATOR_MODEL, now, registry, overlay,
+                            track_record, client_state,
+                            getattr(args, "client", None) or "opencode",
+                            os.environ, overlay_missing_at=overlay_missing_at)
 
     if result["state"] == "input_required":
         raise RouteInputRequired(result["reason"])
@@ -1648,7 +2805,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         reason = "resolver-v2 (ignoring defer until %s via --no-defer): %s" % (
             result["defer_until"], result["reason"])
     if override and model:  # an explicit --model wins over the resolver's route, and says so
-        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+        combo, reason = model_route_id(model), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
     # An authored review card runs its reviewer, not just any survivable route
@@ -1680,6 +2837,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
             "read_only": read_only_run(args, card),
             "bucket": result["bucket"], "class": route_class, "resolver": True,
             "effort": result.get("effort"),
+            # FLEETSPEC P0 item 4: the resolver's own plan, whole (card, route,
+            # class, leg, effort, p, expected_cost, bucket, reviewers, review,
+            # reason, skipped_legs). The projection above is what the spawner
+            # acts on; this is what the run must be auditable against - an
+            # operator cannot re-derive it later, because the probes, the
+            # cooldowns and the track record it was scored from have moved on.
+            "route_plan": result,
             # who reviews this card (REVROUTE item 2); plan() already walked
             # policy.reviewers with the same registry/probes/clock it used to
             # pick the route, so the spawner never re-derives it.
@@ -1744,7 +2908,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     override = args.model if client.gateway else None
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
-        combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
+        combo = model_route_id(model) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3, "read_only": read_only_run(args, None),
@@ -1757,7 +2921,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
-        combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+        combo, reason = model_route_id(model), reason + "+model"
     review = resolve_review_plan(card)
     model, reviewer_combo, reviewer_note = reviewer_run_override(
         review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
@@ -1787,6 +2951,30 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
     title = args.title or ("t%d %s" % (route["tier"], args.task[:50]))
+    # FLEETSPEC P0 item 1: minted ONCE, here. The sandbox clone, its branch, the
+    # worker record and the child's own environment all carry this one id, so
+    # one run is nameable from any of the four (and the child that spawns again
+    # knows who its parent is).
+    # FLEETP0b: the caller may hand the id in instead (--run-id, which is how the
+    # MCP server's spawn keeps ONE id for a run it also names its own state dir
+    # with). A handed-in id wins over everything, including the sandbox-reuse
+    # line below: the caller owns the identity, and a handed-in id that disagreed
+    # with the clone it was told to reuse would be a lie either way.
+    given_run_id = getattr(args, "run_id", None)
+    run_id = given_run_id or mint_run_id(title, args.task)
+    if sandbox is not None and not given_run_id \
+            and (sandbox.get("branch") or "").startswith("agent/"):
+        # a fallthrough re-run shares the first attempt's clone and branch, so it
+        # shares its id: one spawn is one id, not one per attempt.
+        # FLEETP0 review LOW: only when that suffix IS a run id. A branch named
+        # by hand, or one from before the canonical id existed, is not an id, and
+        # pasting its tail into the header, the record and `ps` unvalidated is
+        # exactly what is_canonical_run_id was written to refuse. A fresh id
+        # still names a fresh record; the reused clone is unchanged either way.
+        inherited = sandbox["branch"][len("agent/"):]
+        if is_canonical_run_id(inherited):
+            run_id = inherited
+    env["AUTOOS_AGENT_RUN_ID"] = run_id
     tag = None
     if client.name == "opencode":
         agent = TIERS[route["tier"]]
@@ -1808,7 +2996,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         if (model or "").startswith("omniroute/"):
             tag = session_tag(title)
             prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
-            prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag
+            # D-063: the value is the tag AND the run id, one conversation per run.
+            # item 5: the same requests also carry the run id, so a call_logs
+            # row is not merely a lane's, it is one spawn's.
+            prov.setdefault("headers", {}).update(gateway_headers(tag, run_id))
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -1829,27 +3020,37 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
         # that gate denied in argv; opencode's gate is the overlay below.
+        # FLEETP0 review item 4: the identity headers are not opencode's alone.
+        # Every gateway client that can put a header on its own requests gets the
+        # same pair (clients.HEADER_CLIENTS; the carriers and the qwen dead end
+        # are measured in autoos_clients.py and docs/routing.md), so a call_logs
+        # row is one spawn's wherever the work ran.
+        headers = None
+        if client.name in clients.HEADER_CLIENTS:
+            tag = session_tag(title)
+            headers = gateway_headers(tag, run_id)
+            if client.name == "gemini":
+                env[clients.GEMINI_CUSTOM_HEADERS_ENV] = clients.gemini_custom_headers(headers)
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable,
                                     deny_spawn=role_is_leaf(route.get("tier"),
-                                                            route.get("card")))
+                                                            route.get("card")),
+                                    headers=headers)
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         if client.name == "qoder":
             model = model or clients.QODER_DEFAULT_MODEL
         model = model or (route["combo"] if client.gateway else "(client default)")
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.isolate:
         if sandbox is None:
-            # The readable prefix stays; the random suffix keeps two spawns in the
-            # same second (same task) from naming the same clone (bug 1).
-            slug = slugify(args.task)
-            uniq = unique_suffix()
-            name = "%s-%s-%s-%s" % (os.path.basename(ROOT), stamp, slug, uniq)
+            # The readable prefix stays; the hex tail inside the run id is what
+            # keeps two spawns in the same second (same task) from naming the
+            # same clone (bug 1).
+            name = "%s-%s" % (os.path.basename(ROOT), run_id)
             # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
             # its own .git, so opencode resolves it as its own project root.
             sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                       "branch": "agent/%s-%s-%s" % (stamp, slug, uniq),
+                       "branch": "agent/%s" % run_id,
                        # Forked from the caller's checkout, not from wherever this
                        # script happens to live (KEYDENY3g item 7).
                        "source": isolate_source()}
@@ -1879,13 +3080,28 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         overlay.setdefault("permissions", []).extend(spawn_gate_rules(route["tier"]))
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
+    # FF1b item 4: a private, empty XDG_RUNTIME_DIR of its own instead of the
+    # operator's session one (message bus, sockets, sometimes the ssh-agent).
+    # Keyed by run id inside the git-ignored state tree, so a non-isolate run
+    # does not leave a directory in the checkout it works in. Only the *name* is
+    # decided here: provisioning happens at the launch site, because a dry run
+    # writes nothing and git will not clone into a directory that has content.
+    env["XDG_RUNTIME_DIR"] = os.path.join(clients.state_dir(), "runtimes", run_id)
+    # FF1c item 1: the same treatment for the config home. Inheriting the
+    # operator's $XDG_CONFIG_HOME handed the worker git's global config (the
+    # guard above only cancels two settings, it cannot hide a file) along with
+    # wherever else a tool reads a config and finds a token. Private, per run,
+    # inside the same git-ignored state tree; provisioning at the launch site
+    # for the same reason as the runtime dir — a dry run writes nothing.
+    env["XDG_CONFIG_HOME"] = os.path.join(clients.state_dir(), "configs", run_id)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
             # brief echoed back at it (SPAWNFIX3c).
             "brief": cmd[-1],
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
-            "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            "run_id": run_id, "sandbox": sandbox,
+            "cwd": sandbox["path"] if sandbox else os.getcwd(),
             "session_tag": tag}
 
 
@@ -2034,6 +3250,7 @@ def heartbeat_state(inbox: str | None, transcript: str | None, repos: list | Non
     else:
         rc = 0
     data = {"pause": pause, "repos": repo_rows, "context": ctx_data, "over_cap": over_cap,
+            "overlay": overlay_mod.status(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH),
             "exit_code": rc}
     return data, rc
 
@@ -2045,7 +3262,8 @@ def cmd_heartbeat(args) -> int:
     data, rc = heartbeat_state(args.inbox, args.transcript, args.repos, args.cap)
     if args.json:
         print(json.dumps({k: data[k] for k in
-                          ("pause", "repos", "context", "over_cap", "exit_code")}))
+                          ("pause", "repos", "context", "over_cap", "exit_code",
+                           "overlay")}))
         return rc
     pause = data["pause"]
     if pause["active"]:
@@ -2093,23 +3311,34 @@ def load_registry(path: str) -> dict:
         return json.load(fh)
 
 
-def load_overlay(path: str) -> dict:
-    """logs/routing/measured.json if present, else {} (spec 3.1: git-ignored)."""
-    if not os.path.isfile(path):
-        return {}
-    with io.open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+def load_measured_overlay() -> tuple:
+    """(overlay, missing_at): the machine-wide overlay, else the legacy per-checkout
+    one (with a stderr note), else ({}, MEASURED_OVERLAY_PATH) so `route` can say
+    so out loud instead of calling every agentic leg "unproven" (OVERLAYHOME)."""
+    missing = None
+    if overlay_mod.found(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH) is None:
+        missing = MEASURED_OVERLAY_PATH
+    return overlay_mod.load(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH), missing
 
 
 def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
-                   client_state: dict) -> dict:
+                   client_state: dict, client: str = "opencode",
+                   env: dict | None = None,
+                   overlay_missing_at: str | None = None) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
     `card` is a task card exactly as `run --card` accepts it - text
     (``kind=review,paths=...`` or a JSON object string, parsed by
     ``routing.parse_card``) - or already a dict (the MCP tool's own shape).
+    `client`/`env` (CLAUDEBUDGET-b item 3) are the two things the Claude gate
+    asks about: the client because a run *inside* Claude Code spends the
+    allowance whatever the route says, and the env because the critical-path
+    exception belongs to the orchestrator that set it, not to the card. A caller
+    that left them out gets the conservative answer -- client "opencode", no
+    declaration -- never a Claude leg it was not entitled to.
+
     Either way it is normalized to v2 with ``routing.normalize_v2`` (a
     ``routing.CardError`` on a bad one propagates to the caller). Features come
     from ``autoos_measure.measure`` against `repo`; the resolver itself
@@ -2123,8 +3352,26 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
-    return resolver.plan(normalized, features, client_state, registry, overlay,
-                         track_record, orchestrator_model, now)
+    result = resolver.plan(normalized, features, client_state, registry,
+                           overlay, track_record, orchestrator_model, now,
+                           client, env)
+    # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
+    # the machine's missing data, not the legs' verdict - say which.
+    if (overlay_missing_at and result.get("state") == "input_required"
+            and result.get("unproven_toolcalls")):
+        result = dict(result)
+        result["reason"] = "%s; %s" % (overlay_mod.missing_reason(overlay_missing_at),
+                                       result["reason"])
+    # D-102 CLAUDEBUDGET: the budget state leads every explain block, ON or off.
+    # A plan that dropped a Claude leg looks identical to one that never had a
+    # Claude candidate, and `route --explain` is what an operator reads to tell
+    # them apart. A budget-deferred plan already carries the line (plan() has no
+    # routes to explain), so it is not added twice.
+    budget_line = resolver.claude_budget_explain(registry)[0]
+    explain = result.get("explain") or []
+    if explain and explain[0].startswith("claude_budget:"):
+        return result
+    return dict(result, explain=[budget_line] + list(explain))
 
 
 def cmd_route(args) -> int:
@@ -2145,7 +3392,7 @@ def cmd_route(args) -> int:
     repo = args.repo or ROOT
     try:
         registry = load_live_registry()
-        overlay = load_overlay(MEASURED_OVERLAY_PATH)
+        overlay, overlay_missing_at = load_measured_overlay()
     except (OSError, ValueError) as exc:
         return refuse("cannot load routing data: %s" % exc)
     track_record = track.load(TRACK_RECORD)
@@ -2153,7 +3400,9 @@ def cmd_route(args) -> int:
     try:
         result = route_plan_for(args.card, args.brief or "", repo,
                                 args.orchestrator_model, now, registry, overlay,
-                                track_record, client_state)
+                                track_record, client_state,
+                                getattr(args, "client", None) or "opencode",
+                                os.environ, overlay_missing_at=overlay_missing_at)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
@@ -2161,7 +3410,12 @@ def cmd_route(args) -> int:
             print(line, file=sys.stderr)
         print(result.get("reason", ""), file=sys.stderr)
     print(json.dumps(result, sort_keys=True, indent=2))
-    return 0 if result.get("route") is not None else 5
+    # A budget-deferred plan carries no route (there is nothing to run yet), but
+    # it is an answer, not a refusal: exit 5 means "input_required", and a
+    # caller that retries on 5 would spin against a policy that is working.
+    if result.get("route") is not None or result.get("state") == "deferred":
+        return 0
+    return 5
 
 
 def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
@@ -3417,7 +4671,8 @@ def record_probe_proposal(path: str, entry: dict) -> bool:
 
 
 def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
-                    proposals_path: str, sandbox_path: str) -> None:
+                    proposals_path: str, sandbox_path: str,
+                    legacy_path: str | None = None) -> None:
     """Compute and log a probe proposal for a finished run's track entry.
 
     Never raises and never touches the run's exit code: a registry that
@@ -3433,13 +4688,14 @@ def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
               % (registry_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
         return
     overlay = {}
-    if os.path.isfile(overlay_path):
+    used = overlay_mod.found(overlay_path, legacy_path)
+    if used is not None:
         try:
-            with io.open(overlay_path, encoding="utf-8") as fh:
+            with io.open(used, encoding="utf-8") as fh:
                 overlay = json.load(fh)
         except (OSError, ValueError) as exc:
             print("autoos-agent: probe proposal skipped (cannot load %s): %s"
-                  % (overlay_path, getattr(exc, "strerror", None) or exc), file=sys.stderr)
+                  % (used, getattr(exc, "strerror", None) or exc), file=sys.stderr)
             return
     try:
         proposal = probe_proposal(entry["route"], entry["gate"], entry["failure_class"], registry, overlay)
@@ -3762,18 +5018,38 @@ def _write_worker_record(path: str, record: dict) -> None:
 
 
 def _worker_record_start(plan: dict, args, directory: str):
-    """Write the live record; return (id, record) for the ended rewrite."""
-    wid = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex()
+    """Write the live record; return (id, record) for the ended rewrite.
+
+    FLEETSPEC P0: the record's id IS the run id the plan minted (it used to be a
+    second, unrelated id), so `ps`, the sandbox clone, its branch and the child's
+    own AUTOOS_AGENT_RUN_ID name the same run. ``parent_run_id`` is the id this
+    spawner was itself spawned with (None at top level): the spawn tree a console
+    reads. ``host`` and the full ``route_plan`` are for the record only - the
+    host is a git-ignored file, never a committed fixture.
+    """
+    wid = plan.get("run_id") or mint_run_id(args.title or None, args.task or "")
     pid = os.getpid()
     task = (args.task or "").splitlines()
+    route = plan.get("route") or {}
+    # FLEETP0 review LOW: the caller's own id is the parent, EXCEPT when it is
+    # this run's id - a fallthrough re-run adopts the reused branch's id, and a
+    # caller can hand --run-id down to the very run it spawned. A record parented
+    # to itself is a cycle in the tree `ps --tree` prints.
+    parent = os.environ.get("AUTOOS_AGENT_RUN_ID") or None
+    if parent == wid:
+        parent = None
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
-        "route": (plan.get("route") or {}).get("combo") or "",
+        "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
-        "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0]})
+        "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0],
+        "parent_run_id": parent,
+        "host": socket.gethostname(),
+        "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
+        "route_plan": route.get("route_plan")})
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -3886,6 +5162,7 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
                      "lane": record.get("session_tag") or "", "pid": record.get("pid"),
                      "title": record.get("title") or "", "task": record.get("task_head") or "",
                      "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
+                     "parent_run_id": record.get("parent_run_id") or None,
                      "started": record.get("started"), "ended": record.get("ended"),
                      "rc": record.get("rc"), "depth": record.get("depth")})
     rows.sort(key=lambda r: (r.get("started") or "", r.get("id") or ""))
@@ -3933,6 +5210,58 @@ def _print_worker_table(rows: list) -> None:
         print(fmt % tuple(cell))
 
 
+def worker_tree(rows: list) -> list:
+    """The ps rows as ``(depth, row)`` pairs in tree order (FLEETSPEC P0 item 2).
+
+    A row hangs under its ``parent_run_id`` while that parent is still listed.
+    A row whose parent record is gone (pruned, or spawned on another host) is a
+    root: `ps --tree` says so on its line, because a silent top-level row reads
+    as "nobody spawned this". A parent that is its own descendant would hang the
+    walk, so an unvisited row is emitted as a root too - `ps` never loses one.
+    """
+    by_id = {r["id"]: r for r in rows if r.get("id")}
+    children = {}
+    for row in rows:
+        parent = row.get("parent_run_id")
+        if parent and parent in by_id and parent != row.get("id"):
+            children.setdefault(parent, []).append(row)
+    out, visited = [], set()
+
+    def walk(row, depth):
+        if row.get("id") in visited:
+            return
+        visited.add(row.get("id"))
+        out.append((depth, row))
+        for child in children.get(row.get("id"), []):
+            walk(child, depth + 1)
+
+    for row in rows:
+        parent = row.get("parent_run_id")
+        if not parent or parent not in by_id or parent == row.get("id"):
+            walk(row, 0)
+    for row in rows:  # a cycle: still listed, never swallowed by the walk
+        walk(row, 0)
+    return out
+
+
+def _print_worker_tree(rows: list) -> None:
+    """The same columns as `ps`, in tree order and indented by depth."""
+    gone = {r.get("parent_run_id") for r in rows} - {r["id"] for r in rows if r.get("id")} - {None}
+    shown = []
+    for depth, row in worker_tree(rows):
+        row = dict(row)
+        row["id"] = "  " * depth + str(row.get("id") or "")
+        parent = row.get("parent_run_id")
+        if parent in gone:
+            # the note comes first: the last column is the one the width budget
+            # clips, and a clipped prose tail still says who the orphan is.
+            # `ps --json` is the untruncated source of the edge.
+            row["title"] = ("(parent %s gone) " % parent
+                            + (row.get("title") or row.get("task") or "")).strip()
+        shown.append(row)
+    _print_worker_table(shown)
+
+
 def cmd_ps(args) -> int:
     directory = workers_dir()
     rows = visible_workers(directory, include_ended=args.all)
@@ -3941,6 +5270,9 @@ def cmd_ps(args) -> int:
         return 0
     if not rows:
         print("no workers running")
+        return 0
+    if args.tree:
+        _print_worker_tree(rows)
         return 0
     _print_worker_table(rows)
     return 0
@@ -3963,6 +5295,14 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
+    # that is not the canonical one is refused here - before any clone, record or
+    # client start (and before the MCP server's own state dir is created for it).
+    if getattr(args, "run_id", None) and not is_canonical_run_id(args.run_id):
+        return refuse("--run-id %r is not a canonical run id "
+                      "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
+                      "the spawner or the MCP server's spawn)"
+                      % (args.run_id, RUN_ID_SLUG_CAP), 2)
     # SPAWNCAP (S2): decide the client from the task's shell/write needs before
     # anything is planned or started. An explicit --client that lacks one is
     # refused with the capable clients named; with no --client the first capable
@@ -3983,6 +5323,33 @@ def cmd_run(args, cfg: dict) -> int:
         if refusal is not None:
             return refuse(refusal)
     client = clients.CLIENTS[args.client]
+    # CLAUDEBUDGET-b item 3(d): the client is a spend, so it is gated here --
+    # ahead of build_plan, so a refused Claude spawn clones no sandbox, writes no
+    # worker record and burns no route. CLAUDEBUDGET-d item 2: the gate reads the
+    # model that answers (--model, --free-model, the client's own default, the
+    # tier/card combo), because a non-Claude client name never was a claim that
+    # the run is free.
+    try:
+        budget_refusal, budget_note = claude_spawn_refusal(
+            client.name, os.environ, registry,
+            # CLAUDEBUDGET-f item 3: the flags are passed as the flags, not
+            # pre-OR'd into one string -- `args.model or args.free_model` hid the
+            # tier from the resolution, which is a second path from the one
+            # build_plan takes. One resolution, same inputs, same value.
+            model=args.model, card=args.card, cfg=cfg, tier=args.tier,
+            free=bool(args.free), free_model=args.free_model,
+            clean=bool(args.clean))
+    except OSError as exc:
+        return refuse("cannot read the Claude budget: %s" % exc)
+    except ValueError as exc:
+        # CLAUDEBUDGET-g item B (finding 5): a card or tier the router itself
+        # refuses is the routing error it always was, in the router's own words
+        # with the router's own next step. Only the budget speaks as a budget.
+        return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    if budget_refusal is not None:
+        return refuse(budget_refusal)
+    if budget_note is not None:
+        print("claude-budget: %s" % budget_note, file=sys.stderr)
     # SPAWNFREE (S2) item 3: a mode the CLI does not offer is not rejected by
     # the CLI - qodercli 1.1.63 took `--permission-mode accept_edits`, ignored
     # it, and refused every write (62 runs). Check the adapter's modes against
@@ -4037,7 +5404,11 @@ def cmd_run(args, cfg: dict) -> int:
         if lean_refusal is not None:
             return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
-    env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
+    # FF1 (D-106): the dry run names what the child actually gets, so an
+    # operator can see the containment instead of trusting it. Item 1: that is
+    # the *child's* env, not this process's, so a Claude declaration this
+    # orchestrator holds never looks like it was passed on.
+    env_names = sorted(worker_env(plan, "x" if uses_key else None))
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     if route.get("review_plan"):
@@ -4057,6 +5428,7 @@ def cmd_run(args, cfg: dict) -> int:
     if route.get("reviewer_note"):
         print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
+    print("run-id: %s" % plan["run_id"])
     if route.get("read_only"):
         print("read-only: this run's success is an unchanged sandbox and a REPORT "
               "(an edit in it exits %d)" % EXIT_READ_ONLY_WRITE)
@@ -4072,6 +5444,19 @@ def cmd_run(args, cfg: dict) -> int:
               "opencode-only, but every client gets the containment prompt line and the "
               "post-run leak check (exit 7)." % client.name)
     if args.dry_run:
+        # CLAUDEBUDGET-g item A: the last-mile gate, on the plan this process would
+        # hand the client. The early gate proved the *flags*; a reviewer override,
+        # the resolver's v2 route and --free have rewritten the model since, so the
+        # value the run answers with only exists here. A dry run is checked too,
+        # because a dry run is exactly what the MCP spawn path preflights with: an
+        # override that turns the plan Claude has to be refused before a caller
+        # reads "would run:" and hands the child its key.
+        last_mile_refusal, last_mile_note = claude_plan_refusal(
+            args, plan, cfg=cfg, registry=registry)
+        if last_mile_refusal is not None:
+            return refuse(last_mile_refusal)
+        if last_mile_note is not None:
+            print("claude-budget: %s" % last_mile_note, file=sys.stderr)
         if plan["sandbox"]:
             print("would run: git clone --local %s %s && git switch -c %s" % (
                 plan["sandbox"].get("source") or isolate_source(),
@@ -4096,8 +5481,11 @@ def cmd_run(args, cfg: dict) -> int:
     # PWD too, not just cwd=: opencode takes the project directory from $PWD,
     # so an inherited PWD sent an isolated worker's writes to the caller's
     # checkout (live 2026-09-24).
-    env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-    env.pop("AUTOOS_OMNIROUTE_KEY", None)
+    # FF1 (D-106): the rest of what the worker gets is chosen, not inherited —
+    # see worker_env, which also strips this process's Claude declaration
+    # (CLAUDEBUDGET item 1) on the way out. The key is minted first so the scrub
+    # can add it.
+    key = None
     if uses_key:
         key = client_key(ROOT)
         if not key:
@@ -4108,7 +5496,14 @@ def cmd_run(args, cfg: dict) -> int:
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
-        env["AUTOOS_OMNIROUTE_KEY"] = key
+    env = worker_env(plan, key)
+    # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
+    # this is the first point past the dry run, where a directory is allowed.
+    # FF1c item 1: the private config home is named in the plan and created
+    # here, under the same rule — a dry run writes nothing.
+    if not provision_worker_dirs(env):
+        # FF1d: a dir the provisioner refused is not a dir to launch into.
+        return 2
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -4177,6 +5572,20 @@ def cmd_run(args, cfg: dict) -> int:
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
     while True:
+        # CLAUDEBUDGET-g item A: the authority. Checked on every plan this run is
+        # about to launch, here and not only at the dry-run branch above, because a
+        # provider-stopped fallthrough re-plans *after* the early gate ran, and the
+        # route it falls through to is a different model. A refusal stops the run
+        # before the worker record, the clone and the child: 2 is the code a refused
+        # card or route already returns.
+        launch_refusal, launch_note = claude_plan_refusal(args, plan, cfg=cfg,
+                                                         registry=registry)
+        if launch_refusal is not None:
+            print("autoos-agent: %s" % launch_refusal, file=sys.stderr)
+            rc = 2
+            break
+        if launch_note is not None:
+            print("claude-budget: %s" % launch_note, file=sys.stderr)
         # SPAWNFREE (S2) item 2: a fallthrough re-run is a fresh start on the
         # same shared free account, so it passes the same gate (the first
         # attempt passed it before the clone was made). Breaking here still
@@ -4328,10 +5737,23 @@ def cmd_run(args, cfg: dict) -> int:
                 plan = next_plan
                 # The re-run runs under the new plan's env (its OPENCODE_CONFIG_CONTENT
                 # and session tag), not the stopped route's (qoder review 2026-09-27).
-                env = dict(os.environ, **plan["env"], PWD=plan["cwd"])
-                env.pop("AUTOOS_OMNIROUTE_KEY", None)
-                if uses_key:
-                    env["AUTOOS_OMNIROUTE_KEY"] = key
+                # Scrubbed the same way as the first launch (FF1, D-106): the
+                # fallthrough must not be the site that inherits the caller's
+                # tokens back in.
+                env = worker_env(plan, key if uses_key else None)
+                # FF1 Sonnet LOW: the re-plan minted a fresh run id, and the
+                # private runtime/config dirs are named after it — so the
+                # re-run's dirs are the ones that do not exist yet. The first
+                # launch provisioned the stopped attempt's; without this the
+                # fallthrough worker runs with an XDG dir nobody created (and
+                # may create itself, outside the 0700 rule).
+                if not provision_worker_dirs(env):
+                    # FF1d: same rule as the first launch — a refused dir stops
+                    # the re-run (2 is the code a refused card or route gives),
+                    # and the break still announces the stopped attempt's WIP.
+                    rc = 2
+                    break
+                register_secret_env(env)
         if not fell_through:
             break
     # Nothing that runs after here occupies the free leg: whatever is left of the
@@ -4411,7 +5833,7 @@ def cmd_run(args, cfg: dict) -> int:
             tracked = redact_record(tracked)
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
-                            PROBE_PROPOSALS_LOG, sb["path"])
+                            PROBE_PROPOSALS_LOG, sb["path"], LEGACY_OVERLAY_PATH)
     # SPAWNREDACT item 2: tell the caller its worker's output was altered,
     # once, after every stream of this run has been written.
     report_redactions()
@@ -4568,6 +5990,9 @@ def _parser_ps(sub):
                                    "(or died) more than 7 days ago")
     ps.add_argument("--all", action="store_true",
                     help="also show exited workers from the last 24 h")
+    ps.add_argument("--tree", action="store_true",
+                    help="indent each run under the run that spawned it (the "
+                         "parent_run_id edge; --json wins over --tree)")
     ps.add_argument("--json", action="store_true", help="print the rows as JSON")
 
 
@@ -4605,6 +6030,11 @@ def _parser_run(sub):
                           "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
                           "run without this flag")
     run.add_argument("--title")
+    run.add_argument("--run-id", dest="run_id", metavar="ID",
+                     help="use this id (a canonical one, as minted by the MCP server's spawn) "
+                          "instead of minting a new one, so one spawn has one id: it names the "
+                          "branch, the sandbox, logs/workers/<id>.json and the child env; a bad "
+                          "shape is refused with exit 2")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
 
@@ -4632,6 +6062,10 @@ def _parser_route(sub):
     route.add_argument("--card", required=True,
                        help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
     route.add_argument("--brief", default="", help="the task brief text (counts toward need_tokens)")
+    route.add_argument("--client", choices=sorted(clients.CLIENTS),
+                       help="the client the card would run under, so the Claude "
+                            "budget is answered for that client (CLAUDEBUDGET-b "
+                            "item 3); default opencode")
     route.add_argument("--explain", action="store_true",
                        help="print the explain lines and reason to stderr before the JSON")
     route.add_argument("--orchestrator-model", dest="orchestrator_model",
@@ -4639,6 +6073,27 @@ def _parser_route(sub):
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+
+
+def _parser_risk(sub):
+    risk_p = sub.add_parser(
+        "risk", help="classify a commit's diff as normal or high risk from "
+                     "policy.risk_rules (RISKTIER-a): the writer does not grade "
+                     "its own work, the diff does")
+    risk_p.add_argument("--sha", required=True,
+                        help="the commit to classify: any rev git resolves to a "
+                             "commit (HEAD, a branch, a short sha); resolved with "
+                             "rev-parse --verify before the audit draw")
+    risk_p.add_argument("--base", default="origin/main",
+                        help="the diff's other end, compared at its merge base "
+                             "with --sha (default: %(default)s)")
+    risk_p.add_argument("--repo", default=".",
+                        help="git checkout to read the diff from (default: the cwd)")
+    risk_p.add_argument("--registry",
+                        help="registry holding policy.risk_rules "
+                             "(default: catalog/ai-registry.json)")
+    risk_p.add_argument("--json", action="store_true",
+                        help="print the whole assessment as one JSON object")
 
 
 def _parser_review_status(sub):
@@ -4709,6 +6164,7 @@ VERB_PARSERS = {
     "context": _parser_context,
     "heartbeat": _parser_heartbeat,
     "route": _parser_route,
+    "risk": _parser_risk,
     "review-status": _parser_review_status,
     "ready": _parser_ready,
     "inbox": _parser_inbox,
@@ -4728,6 +6184,7 @@ VERB_HANDLERS = {
     "ready": lambda args, cfg: cmd_ready(args),
     "review-status": lambda args, cfg: cmd_review_status(args),
     "route": lambda args, cfg: cmd_route(args),
+    "risk": lambda args, cfg: cmd_risk(args),
     "run": lambda args, cfg: cmd_run(args, cfg),
 }
 

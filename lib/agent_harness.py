@@ -327,6 +327,31 @@ def _role_bash(role, fences):
     return bash
 
 
+def _path_key(path):
+    """Comparison form of an instructions path: trimmed, '/' separators, case-folded.
+
+    Case-folded because Windows paths are case-insensitive and hand-written
+    entries vary the drive letter, the clone's spelling and SKILL.md's case.
+    """
+    return "/" + str(path).strip().replace("\\", "/").casefold().strip("/")
+
+
+def _stale_skill_entry(entry, skills, skills_source):
+    """True for a managed skill's SKILL.md in the retired agent-skills clone layout.
+
+    That layout is exactly <clone>/agent-skills/skills/<skill>/SKILL.md (the
+    installers' old skills_source); anything else under a directory named
+    agent-skills is the user's, and so is anything under `skills_source`.
+    """
+    if not isinstance(entry, str):
+        return False
+    norm = _path_key(entry)
+    if norm.startswith(_path_key(skills_source) + "/"):
+        return False
+    return any(norm.endswith("/agent-skills/skills/%s/skill.md" % skill.casefold())
+               for skill in skills)
+
+
 def desired_opencode(user, harness, repo_root, skills_source):
     """Return the merged OpenCode config; `user` is the parsed existing config."""
     doc = copy.deepcopy(user)
@@ -399,10 +424,22 @@ def desired_opencode(user, harness, repo_root, skills_source):
     # a relative path that resolves nowhere but reads, in the merged config,
     # exactly like a skills install that worked.
     if skills_source:
+        # A managed skill still read from an agent-skills clone (the skills home
+        # before .agents/skills, retired 2026-09-25) would load the same skill
+        # twice, from two copies that have since diverged. Drop only those, and
+        # only here, where the replacement entry is about to be written.
+        instructions = [
+            entry for entry in instructions
+            if not _stale_skill_entry(entry, harness["rules"]["skills"], skills_source)
+        ]
+        # Same comparison form as the stale check, so the current entry in
+        # another spelling is not appended a second time.
+        present = {_path_key(e) for e in instructions if isinstance(e, str)}
         for skill in harness["rules"]["skills"]:
             entry = _join(skills_source, skill, "SKILL.md")
-            if entry not in instructions:
+            if _path_key(entry) not in present:
                 instructions.append(entry)
+                present.add(_path_key(entry))
     leaf_contract = _join(repo_root, harness["rules"]["leaf_contract"])
     if leaf_contract not in instructions:
         instructions.append(leaf_contract)
@@ -592,9 +629,96 @@ def _backup_and_write(path, text, stamp=None):
     return True
 
 
+# FF1 (D-106): a lane sandbox (`.../AutoOS-lanes/<lane>/logs/sandboxes/<run>`) is
+# a throwaway clone a spawned worker edits. Rendering a USER-level config from
+# one bakes paths that are deleted with it into ~/.config/opencode, ~/.openhands,
+# ~/.claude.json — the next session there reads instructions and fences pointing
+# at a directory that no longer exists. So: refuse, and say what to run instead.
+# A non-user target (the tests, a staged directory) is not the hazard and stays
+# allowed, so the fence cannot break a rendering that never reaches a home dir.
+LANE_PATH_MARKERS = ("/AutoOS-lanes/", "/logs/sandboxes/")
+
+
+def case_insensitive_paths():
+    """True where one directory opens under two spellings.
+
+    Windows and macOS format volumes are case-insensitive by default, so
+    `autoos-lanes` and `AutoOS-lanes` reach the same lane there. On a
+    case-sensitive filesystem they are two directories and the fence must not
+    invent a lane out of a name.
+    """
+    return os.name == "nt" or sys.platform == "darwin"
+
+
+def _norm(path, fold=False):
+    """Absolute, slash-separated, links and `..` resolved — the path as the
+    operating system opens it, not as it was typed (FF1b item 5).
+
+    `os.path.abspath` folds `..` lexically and never follows a symlink, so a lane
+    reached through a link (or through a link and back up) read as an ordinary
+    checkout and the fence let the render through.
+    """
+    norm = os.path.realpath(os.path.abspath(str(path)))
+    norm = norm.replace(os.sep, "/").replace("\\", "/")
+    if fold:
+        norm = os.path.normcase(norm).casefold()
+    return norm
+
+
+def is_lane_checkout(path, fold=None):
+    """True when `path` is a checkout that is going away with its sandbox.
+
+    `fold` overrides the platform's case rule (the suite runs on a
+    case-sensitive host and has to be able to prove the Windows/macOS branch).
+    """
+    fold = case_insensitive_paths() if fold is None else fold
+    # The text as given is always judged. It is resolved too — a symlink or a
+    # `..` that walks through one reaches the same directory the OS would open —
+    # unless it is an absolute path on the *other* platform, which would resolve
+    # against this one's cwd and mark every argument a lane from a lane checkout.
+    given = str(path).replace(os.sep, "/").replace("\\", "/")
+    foreign_abs = (len(given) > 2 and given[1] == ":") if os.sep == "/" \
+        else given.startswith("/")
+    forms = [given if not fold else given.casefold()]
+    if not foreign_abs:
+        forms.append(_norm(path, fold))
+    markers = [m if not fold else m.casefold() for m in LANE_PATH_MARKERS]
+    return any(marker in form.rstrip("/") + "/"
+               for form in forms for marker in markers)
+
+
+def is_user_level_target(path, fold=None):
+    """True when `path` sits under a home directory the child agents read from."""
+    fold = case_insensitive_paths() if fold is None else fold
+    target = _norm(path, fold)
+    homes = [os.path.expanduser("~"), os.environ.get("XDG_CONFIG_HOME"),
+             os.environ.get("XDG_DATA_HOME"), os.environ.get("XDG_STATE_HOME")]
+    for home in homes:
+        if not home:
+            continue
+        base = _norm(home, fold)
+        if target == base or target.startswith(base + "/"):
+            return True
+    return False
+
+
+def user_config_fence(repo_root, target, fold=None):
+    """(ok, reason): a user-level config must not be rendered from a lane."""
+    if is_lane_checkout(repo_root, fold) and is_user_level_target(target, fold):
+        return False, ("refusing to write %s into a home directory from the lane "
+                       "sandbox checkout %s — run the installer from the real "
+                       "checkout instead" % (_norm(target, fold),
+                                             _norm(repo_root, fold)))
+    return True, ""
+
+
 def cmd_opencode(args):
     harness = load_harness(args.harness)
     config_path = args.config
+    ok, reason = user_config_fence(args.repo_root, config_path)
+    if not ok:
+        print("agent-harness opencode: refused, %s" % reason)
+        return 1
     existed = os.path.exists(config_path)
     if existed:
         # utf-8-sig: a BOM written by an editor must not make the file "invalid".
@@ -806,6 +930,10 @@ def _settings_status(settings_path, enable, dry_run):
 
 def cmd_openhands(args):
     harness = load_harness(args.harness)
+    ok, reason = user_config_fence(args.repo_root, args.openhands_dir)
+    if not ok:
+        print("agent-harness openhands: refused, %s" % reason)
+        return 1
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))

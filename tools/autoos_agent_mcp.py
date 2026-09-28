@@ -8,9 +8,13 @@ asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
-AUTOOS_STATE_DIR overrides <repo>/logs):
+AUTOOS_STATE_DIR overrides <repo>/logs), where <id> is the spawner's own
+canonical run id (tools/autoos-agent.py mint_run_id) handed to the run as
+`run --run-id`, so the run dir, logs/workers/<id>.json, the branch and the
+child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
-    job.json     the request, the autoos-agent.py argv, pid, route, start time
+    job.json     the request, the canonical run id, the autoos-agent.py argv
+                 (which carries that id as --run-id), pid, route, start time
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
@@ -34,8 +38,10 @@ route, list_agents and context (spec 6.1/6.2) are resolver v2: they import
 tools/autoos-agent.py as a module (its own hyphenated filename, loaded via
 importlib the way the test suite's load_agent() does) and call its
 route_plan_for/context_state directly, so this server and the CLI can never
-disagree on a plan. Nothing is spawned for them; they only read the registry,
-the git-ignored overlay/track-record and each client's own sign-in probe.
+disagree on a plan. spawn calls the same module's mint_run_id for the same
+reason: one id, minted in one place. Nothing is spawned for the three; they only
+read the registry, the git-ignored overlay/track-record and each client's own
+sign-in probe.
 
 Start it the way the registrations do (the `mcp` pin lives in
 catalog/agent-harness.json):
@@ -54,7 +60,6 @@ import io
 import json
 import os
 import re
-import secrets
 import signal
 import subprocess
 import sys
@@ -175,12 +180,13 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
     try:
         now = agent.parse_now(None)
         registry = agent.load_registry(agent.REGISTRY_PATH)
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, overlay_missing_at = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         client_state = agent.measure_mod.client_state(agent.clients)
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
-                                      registry, overlay, track_record, client_state)
+                                      registry, overlay, track_record, client_state,
+                                      overlay_missing_at=overlay_missing_at)
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:
@@ -283,8 +289,12 @@ def context_info(transcript: str | None = None) -> dict:
     return data
 
 
-def build_argv(req: dict) -> tuple:
-    """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one."""
+def build_argv(req: dict, run_id: str | None = None) -> tuple:
+    """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
+
+    `run_id` is the canonical id this server minted for the run (FLEETP0b): it
+    goes to the CLI as `--run-id`, so the run dir named here and the record,
+    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1)."""
     client = req.get("client") or "opencode"
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
@@ -333,16 +343,43 @@ def build_argv(req: dict) -> tuple:
     for opt in ("model", "title", "max_depth"):
         if req.get(opt) is not None:
             argv += ["--" + opt.replace("_", "-"), str(req[opt])]
+    if run_id:
+        argv += ["--run-id", run_id]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
         argv.append("--dry-run")
     argv.append(task)
     return argv, route
 
 
-def preflight(argv: list, cwd: str):
+def spawn_budget_env(req: dict) -> dict:
+    """The env entries to add for the CLI processes THIS spawn starts (its
+    preflight and its runner), on top of the scrubbed child env.
+
+    `claude_reason` (CLAUDEBUDGET-d item 3) is the orchestrator's declaration for
+    one spawn, so it has to reach the gate the CLI re-reads on the way in -- and
+    it is materialized for these two processes only, rather than exported to the
+    server where every later caller inherits it. It does not go further: the
+    spawner strips every `AUTOOS_CLAUDE*` key out of the worker's own env
+    (`strip_claude_env`), so a worker never holds a declaration to pass down.
+
+    FF1 (D-106) crosses it: this returns the *delta* to hand to
+    `agent.spawner_child_env(extra=...)`, never a copy of `os.environ` — the
+    fence is the only place a child's environment is chosen, and a wholesale
+    copy would put the server's tokens back into the child.
+    """
+    reason = str(req.get("claude_reason") or "").strip()
+    return {agent.resolver.CLAUDE_CRITICAL_ENV: reason} if reason else {}
+
+
+def preflight(argv: list, cwd: str, env: dict | None = None):
     """The CLI's own dry run: every refusal (promo, flag clashes, route) comes back now."""
     dry = argv if "--dry-run" in argv else argv[:-1] + ["--dry-run", argv[-1]]
+    # FF1b item 6: a child of ours, so a chosen env — the caller's GitHub,
+    # provider and cloud tokens have nothing to do with resolving a plan.
+    # CLAUDEBUDGET: `env` is this spawn's declaration delta, added *after* the
+    # fence filtered the server's environment.
     r = subprocess.run([sys.executable, AGENT] + dry, cwd=cwd, stdin=subprocess.DEVNULL,
+                       env=agent.spawner_child_env(extra=env),
                        capture_output=True, text=True)
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
@@ -381,19 +418,60 @@ def spawn(req: dict) -> dict:
             os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return _refused("PAUSE active (%s): %s" % (pause["at"], pause["text"]))
+    # CLAUDEBUDGET-b item 3(e): this tool is a spawn path, and the preflight
+    # below was not enough to make it a gated one. A caller that never reads the
+    # CLI's exit code -- an agent that only looks at this dict -- would have seen
+    # a refusal arrive as a mysterious "route refused" string instead of the
+    # budget's own reason, and a future launch path that skipped preflight would
+    # have skipped the policy entirely. Checked here, before any run dir exists.
+    # CLAUDEBUDGET-d item 2/3: the gate reads the model the request names (or the
+    # client's default, or the tier/card combo), and `claude_reason` is this
+    # spawn's own declaration -- so the exception is one call wide instead of an
+    # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
     try:
-        argv, route = build_argv(req)
-    except (ValueError, clients.DepthError) as exc:
-        return _refused(str(exc))
+        budget_refusal, budget_note = agent.claude_spawn_refusal(
+            req.get("client") or "opencode", os.environ,
+            # CLAUDEBUDGET-f item 3: the same one resolution the CLI's build_plan
+            # runs -- the flags go in as flags, and `free` is priced at the promo
+            # model the argv carries (this tool passes --free, never --free-model).
+            model=req.get("model"), card=req.get("card"), tier=req.get("tier"),
+            free=bool(req.get("free")), free_model=agent.DEFAULT_FREE_MODEL,
+            clean=bool(req.get("clean")),
+            reason=req.get("claude_reason"))
+    except (OSError, ValueError) as exc:
+        return _refused("cannot read the Claude budget: %s" % exc)
+    if budget_refusal is not None:
+        return _refused(budget_refusal)
+    budget_env = spawn_budget_env(req)
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
-    refused = preflight(argv, cwd)
-    if refused:
-        return _refused(refused)
     max_attempts = 5
     for attempt in range(max_attempts):
-        run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
+        # FLEETP0b (FLEETSPEC §5.1): the spawner's own mint, so this run dir, the
+        # CLI's record/branch/child env and the gateway header carry one id. The
+        # 6-hex tail is what separates two spawns in the same second; the retry
+        # stays for the id that still collides with a live run dir. The argv is
+        # built with it, so the CLI's dry run checks the id it will be started
+        # with, and nothing is created before that says yes.
+        run_id = agent.mint_run_id(req.get("title"), req.get("task") or "")
+        try:
+            argv, route = build_argv(req, run_id)
+        except (ValueError, clients.DepthError) as exc:
+            return _refused(str(exc))
+        if budget_note is not None:
+            route["claude_budget"] = budget_note
+        refused = preflight(argv, cwd, budget_env)
+        if refused:
+            # CLAUDEBUDGET-g item A: this is also where the last-mile gate reaches
+            # the MCP path. `preflight` IS the CLI's own dry run, and the CLI
+            # checks the final plan with the shared `claude_plan_refusal` before it
+            # prints "would run:", so a model that only the reviewer resolution or
+            # the resolver's route made Claude is refused here, before this server
+            # has a run dir to write -- and again in the runner, on the plan it
+            # launches. The dry run is re-run per attempt because main's loop mints
+            # a fresh run id and rebuilds the argv each time.
+            return _refused(refused)
         path = os.path.join(state_root(), run_id)
         try:
             # Private like the spawner's workers dir: the run dir holds the task
@@ -410,13 +488,20 @@ def spawn(req: dict) -> dict:
                 return {"error": "Failed to create run directory after %d attempts" % max_attempts,
                         "state": "failed"}
             continue
-    job = {"id": run_id, "request": {k: v for k, v in req.items() if k != "task"},
+    job = {"id": run_id, "run_id": run_id,
+           "request": {k: v for k, v in req.items() if k != "task"},
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
+                            # FF1b item 6: the detached runner is a child of
+                            # ours, so it gets the fence — and the runner repeats
+                            # it for the CLI it starts. CLAUDEBUDGET: this spawn's
+                            # declaration rides along as the delta, so it survives
+                            # to the runner and the gate inside its CLI.
                             cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            env=agent.spawner_child_env(extra=budget_env))
     job["pid"] = proc.pid
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
@@ -456,10 +541,13 @@ def run_job(path: str) -> int:
     job = _read_json(os.path.join(path, "job.json"))
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
-        # at this run dir; the CLI forwards os.environ to the client, so the
+        # at this run dir; the CLI forwards its own chosen env onward, so the
         # worker sees it too.
+        # FF1b item 6: this used to be `dict(os.environ, ...)`. The detached
+        # runner above already got a scrubbed env, so this is the same scrub run
+        # a second time rather than a copy of the caller's tokens.
         rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             env=dict(os.environ, AUTOOS_TASK_DIR=path),
+                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)
@@ -688,7 +776,8 @@ def serve() -> None:
                tier: int | None = None, model: str | None = None, isolate: bool = False,
                lean: bool | None = None, free: bool = False, allow_training: bool = False,
                joinable: bool = False, max_depth: int | None = None, title: str | None = None,
-               cwd: str | None = None, dry_run: bool = False) -> dict:
+               cwd: str | None = None, dry_run: bool = False,
+               claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
@@ -704,11 +793,18 @@ def serve() -> None:
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
-        inert there; it only waives the privacy check on an explicit --model)."""
+        inert there; it only waives the privacy check on an explicit --model).
+
+        claude_reason: this spawn's own Claude-budget declaration, for a `model`
+        that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that
+        needs it rather than exporting AUTOOS_CLAUDE_CRITICAL server-wide, where
+        every later caller would inherit it; it is what the returned route cites.
+        A card field of the same name is not one — the card is the worker's text."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
-                      "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run})
+                      "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
+                      "claude_reason": claude_reason})
 
     @app.tool(name="status")
     def _status(run_id: str | None = None) -> dict:

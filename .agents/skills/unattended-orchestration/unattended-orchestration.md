@@ -166,6 +166,16 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   because grep/glob is fenced on the search *pattern*: `grep "sk-" .` in a
   working checkout reads `configuration/api-keys.yml` right through the fence,
   while an ignored file cannot exist in a `--local` clone (KEYDENY3b).
+  A push out of the clone is stopped by an **accident guard** — every remote's
+  push URL is disabled and a `pre-push` hook exits 1. It is not a boundary:
+  `git push --no-verify`, `core.hooksPath` and `git remote set-url` walk past
+  both, and `PushFenceHonestyTests` asserts that. What contains the worker is
+  that the clone is disposable and its environment carries no credential, no ssh
+  transport and no git config channel (`worker_env`, D-106) — the guards force
+  `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM`, so the operator's own
+  `~/.gitconfig` (`url.insteadOf`, `core.sshCommand`, `core.hooksPath`) is not
+  what a worker's git reads — which is also why
+  the parent's ssh state cannot ride along with a spawned run.
 - **`--free`** maps every tier to opencode's own free model (default
   `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
   exercise the chain and the fences before any provider key exists. Free

@@ -22,7 +22,8 @@ from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
-                      _parse_until, leg_denied, leg_rule_for)
+                      _parse_until, leg_denied, leg_rule_for,
+                      plan_dead_reasons, claude_budget as claude_budget_of)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -61,7 +62,7 @@ DEFAULT_BUCKET_TABLE = {
     "spec": {"exact": 0, "partial": 1, "vague": 2},
     "tests": {True: 0, False: 1},
     "kind": {"implement": 0, "bulk": 0, "review": 0, "research": 0,
-             "debug": 2, "plan": 3},
+             "debug": 2, "plan": 3, "final": 0},
     "buckets": (
         {"name": "S0", "max": 1},
         {"name": "S1", "max": 3},
@@ -324,10 +325,12 @@ def provider_tpm(provider_id, model_id, registry):
 
     Brief R4 (2026-09-27): providers.<id>.limits is keyed by the provider's own
     model spelling (the part of a leg after its ``<provider>/`` prefix), which
-    is exactly ``model_id`` as resolve_leg returns it. Only ``tpm`` is read
-    today -- a request-size filter in usable_legs; rpm/rpd/tpd are data only
-    for now (no clock, no counters). A missing limits table or a missing model
-    key means the leg is not size-filtered.
+    is exactly ``model_id`` as resolve_leg returns it. This function reads
+    ``tpm`` only -- a request-size filter in usable_legs. ``rpm`` is read
+    separately, and only for its zero, by registry.plan_dead_reasons()
+    (MISTRALFIX 2026-09-28); rpd/tpd stay data only (no clock, no counters). A
+    missing limits table or a missing model key means the leg is not
+    size-filtered.
 
     The estimate compared against tpm is *input only* (review R4FIX,
     2026-09-27): ``need_tokens`` is the brief plus the files, with no output
@@ -449,8 +452,337 @@ def _leg_availability(leg, provider_id, unavailable, registry, now):
     return None, notes
 
 
+# ---------------------------------------------------------------------------
+# Claude budget (D-102 CLAUDEBUDGET, S2 item 2, operator 2026-09-28)
+# ---------------------------------------------------------------------------
+
+# The provider ids that are Claude, whatever a model's family row says. `cc` is
+# the Claude Code subscription and `anthropic` the direct API; both spellings
+# have to hold, or a route renamed onto one of them escapes the budget.
+CLAUDE_PROVIDERS = ("cc", "anthropic")
+
+# The clients that ARE Claude: a run inside Claude Code spends the allowance
+# whether or not a route leg names it.
+CLAUDE_CLIENTS = ("claude",)
+
+# The card kinds that name the reserved final review (the same spelling the
+# report line already uses: "AutoOS-Review: kind=final reviewer=sonnet
+# verdict=READY"). Naming it is not permission to spend Claude on it: only the
+# orchestrator's declaration in `env` is (CLAUDEBUDGET-d item 1).
+CLAUDE_BUDGET_ALLOWED_KINDS = ("final",)
+
+# CLAUDEBUDGET-b item 1: the critical-path exception is the ORCHESTRATOR's
+# declaration, not the card's. A card field is self-grantable -- every worker
+# can edit its own card, so `critical: true` was a permission a worker handed
+# itself. An environment variable only the spawning process can set (and which
+# the spawner strips from every child, see `autoos-agent.py` CLAUDE_ENV_PREFIX)
+# is the difference between a declaration and an excuse.
+# Accepted residual (CLAUDEBUDGET-h, finding 1 REJECTED by the operator): the
+# declaration is still forgeable by a worker that re-exports `AUTOOS_CLAUDE_*` in
+# its own shell, because this is a budget control that rationates an operator's
+# credits, not a security fence that denies a hostile principal.
+CLAUDE_CRITICAL_ENV = "AUTOOS_CLAUDE_CRITICAL"
+
+# CLAUDEBUDGET-d item 1: the same rule for the `final` exemption. D-102 reserved
+# Claude for the finals, and CLAUDEBUDGET-b read that as "kind=final is exempt on
+# its own" -- but `kind` is a card field and the card is what the worker that
+# wants the model writes. A worker could fork `kind=final` and get a Claude leg,
+# the claude client, a Claude reviewer and the high-risk closer, all without
+# asking. The final is therefore what the ORCHESTRATOR declares, in the shape the
+# declaration is only worth having: which final, on which lane at which sha.
+CLAUDE_FINAL_ENV = "AUTOOS_CLAUDE_FINAL"
+
+# CLAUDEBUDGET-b item 5: Claude's own model names. A leg whose model id carries
+# one of these is Claude whatever provider it is spelled under -- a proxy, an
+# `openrouter/anthropic/*` combo, or a provider that renamed the model. Checked
+# on the model id, so a family row that says nothing cannot hide it.
+CLAUDE_MODEL_MARKERS = ("claude", "opus", "sonnet", "haiku", "fable")
+
+# What each caller is asking Claude for (item 3). `final` is the exemption;
+# every other kind is a spend that needs the declaration.
+CLAUDE_USE_KINDS = ("final", "leg", "review", "escalation", "spawn")
+
+CLAUDE_BUDGET_HELD = "claude_budget: %s held for finals"
+CLAUDE_BUDGET_HELD_CLIENT = "claude_budget: client %s held for finals"
+CLAUDE_BUDGET_OVERRIDE = "claude_budget: critical-path override"
+CLAUDE_BUDGET_CRITICAL_NEEDED = ("claude_budget: critical needs the "
+                                 "orchestrator's %s" % CLAUDE_CRITICAL_ENV)
+CLAUDE_BUDGET_FINAL_NEEDED = ("claude_budget: a final needs the orchestrator's "
+                              "%s=<lane>@<sha>" % CLAUDE_FINAL_ENV)
+CLAUDE_BUDGET_FINAL_DECLARED = "claude_budget: final declared"
+
+
+def claude_model_name(model_id) -> bool:
+    """Whether a model id names Claude in any of its spellings.
+
+    Case-insensitive: `Sonnet-5` and `sonnet-5` are one model to the gateway and
+    must be one verdict to the budget.
+    """
+    low = str(model_id or "").lower()
+    return any(marker in low for marker in CLAUDE_MODEL_MARKERS)
+
+
+def leg_text(leg, registry) -> str:
+    """One leg spelling for the predicates: a `provider/model` string, whether
+    the caller has the string from `route["legs"]` or the `(provider_id,
+    model_id)` tuple `usable_legs` returns.
+
+    Scores carry the tuple, routes carry the string, and a predicate that only
+    accepted one of them silently missed half the legs -- which for a spend
+    filter is the side that costs money.
+    """
+    if isinstance(leg, (tuple, list)):
+        return "%s/%s" % (leg[0], leg[1])
+    return str(leg)
+
+
+def is_claude_leg(leg, registry) -> bool:
+    """Whether `leg` is a Claude leg (CLAUDEBUDGET-b item 5).
+
+    The name check comes FIRST and reads the raw leg string, not the resolved
+    model row, for one reason: a provider the registry does not know --
+    `openrouter/anthropic/claude-opus-4-6`, a proxy nobody added yet -- has no
+    row to look up, and `resolve_leg` raises on it. An unknown provider is not
+    evidence of a non-Claude model, and in budget mode guessing "no" is the side
+    that spends the allowance. The rest is the registry's own data: the
+    `anthropic` family, and the two provider ids that are Claude by definition.
+
+    A leg whose provider IS known but whose model row is missing still raises
+    through resolve_leg, exactly as everywhere else in the resolver: a broken
+    registry fails closed.
+    """
+    text = leg_text(leg, registry)
+    model_part = text.partition("/")[2] or text
+    if claude_model_name(model_part) or claude_model_name(text):
+        return True
+    provider_id, model_id = resolve_leg(text, registry)
+    if provider_id in CLAUDE_PROVIDERS:
+        return True
+    model = (registry.get("models") or {}).get(model_id) or {}
+    return str(model.get("family") or "").lower() == "anthropic"
+
+
+def is_claude_client(client) -> bool:
+    """Whether running the work *inside* `client` spends the Claude allowance."""
+    return client in CLAUDE_CLIENTS
+
+
+def is_claude_provider(provider_id, registry) -> bool:
+    """Whether `provider_id` can only ever answer with Claude.
+
+    CLAUDEBUDGET-b item 2 asks the wait-side question: is a cheap window on this
+    provider a window worth waiting for? A provider whose every leg is Claude is
+    not -- waiting for it means waiting to run Claude, which is the one thing the
+    budget forbids. A provider that also serves non-Claude models (the
+    antigravity bridge: Gemini and Claude legs) IS worth waiting for, because
+    the held work can run on its non-Claude leg when the window opens.
+
+    So: the two Claude-by-name provider ids always; otherwise every leg the
+    registry routes through it must be a Claude leg, and it must have at least
+    one. The `>= 1 leg` half matters -- `all([])` is True, and a provider with
+    no legs is a provider with no Claude exposure, not a pure-Claude one.
+    """
+    if provider_id in CLAUDE_PROVIDERS:
+        return True
+    legs = provider_legs(provider_id, registry)
+    return bool(legs) and all(is_claude_leg(leg, registry) for leg in legs)
+
+
+def provider_legs(provider_id, registry):
+    """Every leg string in the registry's routes that resolves to `provider_id`.
+
+    The routes are the only provider -> model association the registry keeps (a
+    model row names no provider, because the same model id is served by several),
+    so this is what "what can this provider answer with" means. Unresolvable legs
+    are skipped rather than raised: this is a survey of the whole graph, and one
+    broken leg elsewhere must not hide the provider's other legs.
+    """
+    out = []
+    for route in (registry.get("routes") or {}).values():
+        for leg in route.get("legs") or []:
+            try:
+                found_id, _ = resolve_leg(leg, registry)
+            except ValueError:
+                continue
+            if found_id == provider_id:
+                out.append(leg)
+    return out
+
+
+def critical_declaration(env) -> str | None:
+    """The orchestrator's critical-path reason, or None.
+
+    Whitespace-only is None: `AUTOOS_CLAUDE_CRITICAL=""` in a shell profile is
+    not a declaration about a specific run, and an empty reason would make the
+    DONE line cite nothing.
+    """
+    return _declaration(env, CLAUDE_CRITICAL_ENV)
+
+
+def final_declaration(env) -> str | None:
+    """The orchestrator's declared final ("<lane>@<sha>"), or None.
+
+    The same whitespace rule as `critical_declaration`: a blank `AUTOOS_CLAUDE_FINAL`
+    exported once in a profile would otherwise exempt every run the shell ever
+    spawns, which is the self-grant item 1 removed, bought back with an env var.
+    """
+    return _declaration(env, CLAUDE_FINAL_ENV)
+
+
+def _declaration(env, name) -> str | None:
+    value = (env or {}).get(name)
+    value = value if isinstance(value, str) else ""
+    return value.strip() or None
+
+
+def claude_allowed(kind, env, registry, now=None, reason=None):
+    """``(allowed, reason)`` -- the one Claude gate (CLAUDEBUDGET-b item 3,
+    amended by CLAUDEBUDGET-d item 1 and 3).
+
+    Every Claude decision routes through here: the resolver's leg filter, the
+    client-bound hold in `filter_routes`, cross-family reviewer selection, the
+    escalation ladders, the high-risk closer, and both spawn paths (`autoos-agent.py
+    run --client claude` and the MCP `spawn` tool). HEAD had the same policy written
+    three times in three shapes, and the shape a caller forgot to copy is the
+    hole: reviewer selection was one of them.
+
+    `kind` is what the Claude spend is FOR -- one of `CLAUDE_USE_KINDS`. Nothing is
+    exempt on its own any more: a `final` needs the orchestrator's
+    `AUTOOS_CLAUDE_FINAL=<lane>@<sha>`, everything else needs
+    `AUTOOS_CLAUDE_CRITICAL=<why>`, and a critical declaration opens the final too
+    (it declared the bigger thing). A card's own `kind`/`critical` fields are not
+    input here, because the card is what a worker writes.
+
+    `reason` is the same authority as an env declaration, one call wide: the MCP
+    `spawn` request's `claude_reason` (item 3), so an orchestrator declares the
+    single spawn instead of exporting an exception every later caller inherits.
+    It comes from the request, never from the card.
+
+    `reason`'s text and the declaration's text both travel in the returned reason,
+    which is what goes into the plan and the DONE line, so a Claude run always
+    cites what let it happen. `now` is the caller's clock, unused by the rule
+    itself and kept in the signature because every caller already threads one -- a
+    time-window rule added later must not need the callers changed again.
+    """
+    if kind not in CLAUDE_USE_KINDS:
+        raise ValueError("unknown Claude use %r (one of %s)"
+                         % (kind, ", ".join(CLAUDE_USE_KINDS)))
+    if not claude_budget_of(registry)["on"]:
+        return True, "claude_budget: off - %s may use Claude" % kind
+    declared = (str(reason).strip() if reason else "") or critical_declaration(env)
+    if kind == "final":
+        declared_final = final_declaration(env)
+        if declared_final:
+            return True, "%s (%s)" % (CLAUDE_BUDGET_FINAL_DECLARED, declared_final)
+        if declared:
+            return True, "%s (%s)" % (CLAUDE_BUDGET_OVERRIDE, declared)
+        return False, CLAUDE_BUDGET_FINAL_NEEDED
+    if declared:
+        return True, "%s (%s)" % (CLAUDE_BUDGET_OVERRIDE, declared)
+    return False, CLAUDE_BUDGET_CRITICAL_NEEDED
+
+
+def is_final_card(card) -> bool:
+    """Whether `card` is the reserved final review (by v2 `kind` or v1 `role`).
+
+    A description of the card, nothing more: it selects which gate question gets
+    asked ("is this the spend the budget reserves?"), it never answers it. The
+    answer comes from the orchestrator's `AUTOOS_CLAUDE_FINAL` (item 1).
+    """
+    return (card or {}).get("kind") in CLAUDE_BUDGET_ALLOWED_KINDS or \
+        (card or {}).get("role") in CLAUDE_BUDGET_ALLOWED_KINDS
+
+
+def budget_holds_claude(card, registry, env=None, kind="leg", reason=None) -> bool:
+    """Whether the Claude budget is on *and* nothing permits this spend.
+
+    `kind` is what the caller wants Claude for -- "leg", "review", "escalation" or
+    "spawn" -- so the answer names the true spend, and a card that says it is a
+    final is asked the final question (`is_final_card`), because D-102 reserves the
+    model for exactly that. Exempt in exactly two cases, both D-102's wording as
+    amended by CLAUDEBUDGET-b and CLAUDEBUDGET-d: the orchestrator declared this
+    run's final in `env`, or it declared the run critical path. Neither a card's
+    `kind=final` nor its `critical` field alone is an exemption -- both are
+    self-grantable.
+    """
+    allowed, _ = claude_allowed("final" if is_final_card(card) else kind,
+                                env, registry, reason=reason)
+    return not allowed
+
+
+def claude_budget_explain(registry) -> list:
+    """One line saying what the budget is doing, for `route --explain`.
+
+    The state has to be visible when it is OFF too: an orchestrator reading a
+    plan cannot tell "no Claude leg appeared because the budget held it" from
+    "this registry has no Claude legs" without the line.
+    """
+    state = claude_budget_of(registry)
+    numbers = ("weekly_share_left=%s, budget_below=%s"
+               % (_share_text(state["weekly_share_left"]),
+                  _share_text(state["budget_below"])))
+    if not state["on"]:
+        return ["claude_budget: off (mode=%s, %s) - Claude legs route normally"
+                % (state["mode"], numbers)]
+    # Which half of the rule flipped it matters to the reader: a share under the
+    # threshold says the allowance ran down, mode=budget says the operator said
+    # so before it did.
+    reason = ("mode" if state["mode"] == "budget"
+              else "share below %s" % _share_text(state["budget_below"]))
+    return ["claude_budget: ON (%s, %s, by %s) - Claude legs held; only the "
+            "orchestrator's %s=<lane>@<sha> (a final) or %s=<why> (critical "
+            "path) may use them -- a card's own kind/critical grants nothing "
+            "(source: %s)"
+            % (state["mode"], numbers, reason, CLAUDE_FINAL_ENV,
+               CLAUDE_CRITICAL_ENV, state["source"])]
+
+
+def _share_text(value) -> str:
+    return "null" if value is None else ("%g" % value)
+
+
+def budget_wait_until(registry, now):
+    """When deferrable work may run again: the earliest cheap/off-peak window
+    of a provider that is NOT Claude (CLAUDEBUDGET-b item 2).
+
+    Reuses the same window data `defer_until` reads (`providers.<id>.windows`,
+    price_factor < 1.0), scanned over every provider rather than one chosen leg
+    -- with every Claude leg held there is no chosen leg to ask about.
+
+    A Claude provider's window is skipped on purpose. HEAD read every provider's
+    and so produced the one sentence the operator must never see: `wait_until
+    21:00`, which is `cc`'s quiet hour -- a deferred card told to wait for the
+    moment Claude gets cheap, i.e. told to run on Claude. A wait is only a wait
+    if something non-Claude can serve it. When nothing can, the honest answer is
+    "free capacity": the work waits for a free leg, and the operator sees why.
+    """
+    best = None
+    for provider_id in sorted(registry.get("providers") or {}):
+        if is_claude_provider(provider_id, registry):
+            continue
+        start = next_cheap_start(provider_id, registry, now)
+        if start is not None and (best is None or start < best):
+            best = start
+    if best is None:
+        return "free capacity", "claude_budget"
+    return (_format_iso_z(best),
+            "claude_budget: Claude held for finals, cheapest window from %s"
+            % _format_iso_z(best))
+
+
+def _claude_budget_removed(removed) -> bool:
+    """Whether a no-survivors result was caused by the Claude hold.
+
+    Required before deferring, so a card that failed for an unrelated reason
+    (privacy, a client nobody installed) is not reported as "waiting for free
+    capacity" when nothing is waiting for it.
+    """
+    return any("claude_budget" in reason
+               for reasons in removed.values() for reason in reasons)
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
-               client="opencode", now=None):
+               client="opencode", now=None, env=None, toolcalls_skips=None):
     """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
     operator decision): the serving legs of `route` that also pass every
     *per-leg* filter, and why each rejected leg did not.
@@ -467,11 +799,28 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     Per-leg filters (replacing the old route-level context/tool_calls/
     client_bound checks, which blocked the whole route on one bad leg):
 
+    - claude_budget (D-102, 2026-09-28): while budget mode is on, a Claude leg
+      is held for finals -- reason ``claude_budget: <leg> held for finals`` --
+      unless the card is ``kind=final`` or the orchestrator set
+      ``AUTOOS_CLAUDE_CRITICAL`` in `env`. One predicate,
+      `budget_holds_claude`, over the one gate `claude_allowed`, and
+      `is_claude_leg` is the leg half of it. A card's own ``critical`` field is
+      not an exemption (it is self-grantable); a held card that claimed it gets
+      the reason that names what would unlock it.
+    - plan limits (MISTRALFIX, 2026-09-28): a leg the recorded plan cannot
+      answer at all is skipped -- ``providers.<id>.limits.<model>.rpm`` of 0
+      (reason ``plan: 0 rpm``) or ``plan_available: false`` (reason
+      ``plan: plan_available false``), both read by
+      `registry.plan_dead_reasons`. A small-but-real quota is *not* dead, and a
+      model with no limits row is not gated at all: no measurement is never a
+      deny.
     - context: ``need_tokens * 1.3 <= usable_context``.
     - tpm (brief R4, 2026-09-27): a leg whose provider limits for that model
       carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
       request-size cap Groq's free tier enforces (a request above ~8K tokens
-      413s there). rpm/rpd/tpd are data only for now (no clock, no counters).
+      413s there). rpd/tpd are data only for now (no clock, no counters), and a
+      non-zero ``rpm`` is no size filter -- only ``rpm: 0`` gates, through the
+      plan-limits bullet above.
       Keep-on-equal (review R4FIX): ``need_tokens * 1.3 == tpm`` keeps the leg;
       only a strictly greater need skips it. The estimate is input only --
       ``need_tokens`` is the brief plus the files, no output reserve -- so a
@@ -515,6 +864,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         raise ValueError("missing feature 'need_tokens' in features")
     need = features["need_tokens"]
     agentic = card.get("kind") in AGENTIC_KINDS
+    holds = budget_holds_claude(card, registry, env, kind="leg")
+    # The card claimed blocking work but nobody in authority backed the claim,
+    # so the plain "held for finals" line would leave the reader asking why a
+    # `critical` card was refused. Say what unlocks it.
+    critical_untethered = holds and bool(card.get("critical"))
     unavailable = route.get("unavailable_legs") or {}
 
     legs = []
@@ -534,6 +888,25 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
         reasons = []
 
+        # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
+        # reserved for finals. Held per leg, not per route, so a mixed route
+        # keeps its cheap legs instead of being dropped along with the Claude
+        # one -- dropping the route would send work to no model that free
+        # capacity can serve.
+        if holds and is_claude_leg(leg, registry):
+            reasons.append(CLAUDE_BUDGET_HELD % leg)
+            if critical_untethered:
+                reasons.append(CLAUDE_BUDGET_CRITICAL_NEEDED)
+
+        # MISTRALFIX (2026-09-28): the plan itself can veto a leg. Measured on
+        # api.mistral.ai with the operator's key, four of its models answer 429
+        # at 0 requests/minute and one 403 (not on the plan) -- nothing read
+        # `rpm` before, so such a leg was planned as if it answered and the
+        # gateway burned the request falling through. One predicate,
+        # registry.plan_dead_reasons(), shared with the route-liveness
+        # invariant test.
+        reasons.extend(plan_dead_reasons(provider_id, model_id, registry))
+
         usable = usable_context(model_id, registry, overlay)
         if need * 1.3 > usable:
             reasons.append("context: need %sx1.3 > usable %s on %s/%s"
@@ -542,8 +915,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # Brief R4 (2026-09-27): a request-size cap from the provider's own
         # limits table -- need * 1.3 > tpm skips the leg, same shape as the
         # context filter. tpm is a per-minute token cap Groq's free tier
-        # enforces (a request above ~8K tokens 413s there); rpm/rpd/tpd stay
-        # data-only for now (no clock, no counters).
+        # enforces (a request above ~8K tokens 413s there); rpd/tpd stay
+        # data-only for now (no clock, no counters) and a non-zero rpm is no
+        # size filter -- only `rpm: 0` gates, through the plan check above.
         tpm = provider_tpm(provider_id, model_id, registry)
         if tpm is not None and need * 1.3 > tpm:
             reasons.append("limit: %s/%s tpm %s < need %s"
@@ -554,6 +928,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if agentic and not proven:
             reasons.append("tool_calls: %s/%s is %s"
                            % (provider_id, model_id, value))
+            # OVERLAYHOME: a structured record of the skip, so a caller can
+            # tell "no overlay" apart without parsing reason text.
+            if toolcalls_skips is not None:
+                toolcalls_skips.add(leg)
 
         bound = registry["models"][model_id].get("client_bound")
         if bound:
@@ -584,7 +962,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
 
 def filter_routes(card, features, client_state, registry, overlay,
-                  client="opencode", now=None):
+                  client="opencode", now=None, env=None, toolcalls_skips=None):
     """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
     amended by FT (2026-09-26 operator decision): "a leg that is
     rate-limited or unproven makes the combo fall through to the next proven
@@ -625,6 +1003,17 @@ def filter_routes(card, features, client_state, registry, overlay,
     now = _now_or_default(now)
     privacy_sensitive = card.get("privacy") == "sensitive"
     client_reason = _client_reason(client_state, client, registry, now)
+    # D-102 CLAUDEBUDGET: the client half of the same rule. Running the work
+    # *inside* Claude Code spends the allowance exactly as a Claude leg does,
+    # and no leg filter would catch it -- a client-native run never reads
+    # route["legs"]. Route-level, because for a bound client the whole route is
+    # that client.
+    # CLAUDEBUDGET-d item 3: this is a *spawn*, and it asks with the spawn kind --
+    # HEAD asked with the default "leg", so the plan's client hold and the spawn
+    # gate answered to two different kinds, and a caller's per-spawn declaration
+    # had no kind to arrive under.
+    client_held = (is_claude_client(client)
+                   and budget_holds_claude(card, registry, env, kind="spawn"))
 
     survivors = []
     removed = {}
@@ -647,8 +1036,12 @@ def filter_routes(card, features, client_state, registry, overlay,
         if client_reason:
             reasons.append(client_reason)
 
+        if client_held:
+            reasons.append(CLAUDE_BUDGET_HELD_CLIENT % client)
+
         usable, skipped, _ = usable_legs(route, card, features, client_state,
-                                        registry, overlay, client, now)
+                                        registry, overlay, client, now, env,
+                                        toolcalls_skips)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -1116,12 +1509,41 @@ _REQUIRED_CARD_KEYS = ("kind", "mode", "risk")
 # free < cheap < mid < frontier (spec 3.1); used to find "the next class up".
 _CLASS_ORDER = ("free", "cheap", "mid", "frontier")
 
-# D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
-# Sonnet close.
+# D2's numbers, kept only as the fallback for a registry that declares no
+# policy.review_counts (RISKTIER-a): normal risk gets 1 cross-family API review,
+# high risk gets 2 plus a Sonnet close.
 _REVIEW_COUNTS = {"normal": 1, "high": 2}
 # The high-risk closer is a Claude client run (Agent-tool Sonnet), not a
 # registry route, so it has its own key beside the reviewer routes.
 _CLOSER = {"client": "claude", "model": "sonnet"}
+
+
+def _review_policy(risk, registry):
+    """`(cross_family_count, final?)` for a risk class (RISKTIER-a).
+
+    `policy.review_counts.<risk>` is what a class costs; the constants above are
+    the fallback for a registry that predates the field, so the field's absence
+    changes no routing. An unknown class still raises, and a declared count that
+    is not a non-negative int raises too -- a resolver that guessed at "1.5
+    reviewers" would review less than the policy asked for and say nothing.
+    """
+    if risk not in _REVIEW_COUNTS:
+        raise ValueError("unknown card risk %r" % (risk,))
+    entry = (((registry or {}).get("policy") or {}).get("review_counts")
+             or {}).get(risk)
+    if entry is None:
+        return _REVIEW_COUNTS[risk], risk == "high"
+    if not isinstance(entry, dict):
+        raise ValueError("policy.review_counts.%s is not an object: %r" % (risk, entry))
+    count = entry.get("cross_family", _REVIEW_COUNTS[risk])
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("policy.review_counts.%s.cross_family must be an int "
+                         ">= 0, got %r" % (risk, count))
+    final = entry.get("final", risk == "high")
+    if not isinstance(final, bool):
+        raise ValueError("policy.review_counts.%s.final must be a boolean, got %r"
+                         % (risk, final))
+    return count, final
 
 
 def _leg_model_id(leg):
@@ -1146,7 +1568,7 @@ def _next_rung(ladder, current):
 
 def _score_candidates(route_ids, bucket_name, card, features, client_state,
                       registry, overlay, track_record, orchestrator_model,
-                      mode, client="opencode", now=None):
+                      mode, client="opencode", now=None, env=None):
     """``score_route`` (with ``effort`` kept on it) for each id, in order.
 
     Mirrors spec 5.3 step 4 as amended by FT: for every route, its first
@@ -1166,7 +1588,7 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     for route_id in route_ids:
         route = registry["routes"][route_id]
         legs, _, _ = usable_legs(route, card, features, client_state, registry,
-                                overlay, client, now)
+                                overlay, client, now, env)
         if not legs:
             raise ValueError("route %r has no usable leg to score" % route_id)
         leg = legs[0]
@@ -1187,7 +1609,8 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
 
 def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
                       client_state, registry, overlay, track_record,
-                      orchestrator_model, mode, client="opencode", now=None):
+                      orchestrator_model, mode, client="opencode", now=None,
+                      env=None):
     """``{"routes": [...], "reason": ...}`` reviewer routes, spec 5.7 / D2.
 
     Candidates come from the already-scored routes when there is more than
@@ -1200,14 +1623,17 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     shortfall in ``reason`` rather than silently reviewing with fewer eyes.
     """
     risk = card["risk"]
-    try:
-        needed = _REVIEW_COUNTS[risk]
-    except KeyError:
-        raise ValueError("unknown card risk %r" % (risk,))
+    needed, final = _review_policy(risk, registry)
 
     pool = scores if len(scores) > 1 else _score_candidates(
         survivors, bucket_name, card, features, client_state, registry,
-        overlay, track_record, orchestrator_model, mode, client, now)
+        overlay, track_record, orchestrator_model, mode, client, now, env)
+    # CLAUDEBUDGET-b item 3(b): a reviewer is a model choice, and HEAD made it
+    # with no budget check at all -- a non-final card could be handed a Claude
+    # reviewer by the route that policy.reviewers listed first. D-102's answer is
+    # narrower: a Claude reviewer only for the final it is reserved for (or a
+    # run the orchestrator declared critical).
+    holds = budget_holds_claude(card, registry, env, kind="review")
 
     # Compared in family_key form: two legs of one family spelled two ways
     # ("meta", "Meta") are one pair of eyes, not two distinct reviewers.
@@ -1219,13 +1645,18 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     picked = []
     excluded = {chosen_family}
     for score in ranked:
+        # The cap is checked BEFORE the append: a policy that asks for zero
+        # cross-family reviewers means zero, not one (the append-then-check shape
+        # this replaced returned one — tests/test_autoos_resolver.py).
+        if len(picked) >= needed:
+            break
+        if holds and is_claude_leg(score["leg"], registry):
+            continue
         family = family_key(_model_family(score["leg"], registry))
         if family in excluded:
             continue
         picked.append(score["route"])
         excluded.add(family)
-        if len(picked) == needed:
-            break
 
     if len(picked) < needed:
         reason = "only %d of %d distinct-family reviewer(s) available: %s" % (
@@ -1233,7 +1664,22 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     else:
         reason = "cross-family reviewer(s): %s" % ", ".join(picked)
 
-    closer = dict(_CLOSER) if risk == "high" else None
+    # CLAUDEBUDGET-d item 1: the closer is a Claude client run, so it is a Claude
+    # spend and it asks the final question -- it closes the final review. HEAD
+    # emitted it for every risk=high card with no gate at all, which handed a
+    # worker that could write `kind=final` a fourth Claude door (client claude,
+    # model sonnet) beside the leg, the reviewer and the escalation ladder.
+    # CLAUDEBUDGET-f item 4: the gate was only half the answer. The env says an
+    # orchestrator declared ONE final; the card says whether THIS plan is a final
+    # at all. Asking the env alone gave every risk=high card the closer whenever
+    # the variable happened to be set -- so the closer needs both, and a
+    # non-budget run keeps the behaviour it always had (off-mode is unchanged).
+    # RISKTIER: `final` is policy's answer to *which* tiers close at all, so it
+    # replaces the hardcoded risk == "high" HEAD carried here.
+    closer = None
+    if final and (is_final_card(card) or not claude_budget_of(registry)["on"]):
+        allowed, _gate = claude_allowed("final", env, registry)
+        closer = dict(_CLOSER) if allowed else None
     return {"routes": list(picked), "closer": closer, "reason": reason}
 
 
@@ -1611,7 +2057,7 @@ def reviewer_explain_lines(result):
             for entry in (result or {}).get("skipped") or []]
 
 
-def _escalation(chosen, scores, registry):
+def _escalation(chosen, scores, registry, card=None, env=None):
     """The two escalation steps, spec 5.7.
 
     ``logic`` raises effort one rung on the chosen leg's ladder; ``capability``
@@ -1619,7 +2065,13 @@ def _escalation(chosen, scores, registry):
     this plan (never at unscored survivors): an override that narrowed
     scoring to one route correctly reports no capability escalation rather
     than inventing one from routes nobody costed.
+
+    CLAUDEBUDGET-b item 3(c): the ladder picks a model too, so it asks the same
+    gate the legs asked. `card`/`env` are the gate's inputs; a plan that never
+    had a Claude question still passes them through.
     """
+    holds = budget_holds_claude(card or {}, registry, env,
+                                kind="escalation")
     model = registry["models"][_leg_model_id(chosen["leg"])]
     ladder = model["effort_ladder"]
     logic_step = {
@@ -1639,6 +2091,13 @@ def _escalation(chosen, scores, registry):
     if next_class is not None:
         up = [s for s in scores
               if registry["routes"][s["route"]]["class"] == next_class]
+        # CLAUDEBUDGET-b item 3(c): an escalation ladder is a second place a plan
+        # chooses a model, and HEAD checked none of them against the budget -- a
+        # card refused a Claude leg came back with a Claude *escalation*. The
+        # held candidates are dropped rather than the whole step, so a route that
+        # is one rung up and not Claude still escalates.
+        if holds:
+            up = [s for s in up if not is_claude_leg(s["leg"], registry)]
         if up:
             capability_route = min(up, key=lambda s: s["expected_cost"])["route"]
 
@@ -1647,7 +2106,7 @@ def _escalation(chosen, scores, registry):
 
 
 def plan(card, features, client_state, registry, overlay, track_record,
-        orchestrator_model, now=None, client="opencode"):
+        orchestrator_model, now=None, client="opencode", env=None):
     """The resolver v2 entry point: compose the pure functions into a ``route_plan``.
 
     Pure -- no I/O, no clock of its own; `now` is the caller's clock reading,
@@ -1669,13 +2128,43 @@ def plan(card, features, client_state, registry, overlay, track_record,
             raise ValueError("missing card key %r" % key)
 
     now = _now_or_default(now)
+    toolcalls_skips = set()
     survivors, removed = filter_routes(card, features, client_state, registry,
-                                       overlay, client, now)
+                                       overlay, client, now, env,
+                                       toolcalls_skips)
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
+        # D-102 CLAUDEBUDGET: deferrable work that lost its last leg to the
+        # Claude hold waits for free/off-peak capacity -- it never falls back to
+        # Claude, because "the cheap legs are busy" and "there are no cheap
+        # legs" are the same sentence to an operator reading a `ready` plan.
+        if card.get("deferrable") and _claude_budget_removed(removed):
+            wait_until, wait_reason = budget_wait_until(registry, now)
+            # CLAUDEBUDGET-b item 4: the deferred dict used to be its own small
+            # shape, so a caller that read plan["reviewers"] on every plan it got
+            # raised only on a deferred one -- the state that arrives most when
+            # the fleet is busy. Same keys as a ready plan, with the values a
+            # plan that chose nothing has for them.
+            return {
+                "route": None,
+                "leg": None,
+                "state": "deferred",
+                "bucket": bucket_name,
+                "p": None,
+                "theta": None,
+                "expected_cost": None,
+                "reviewers": [],
+                "escalation": [],
+                "wait_until": wait_until,
+                "reason": wait_reason,
+                "explain": claude_budget_explain(registry),
+            }
         result = no_route(removed)
         result["bucket"] = bucket_name
+        # True when a leg was skipped as not proven for tool calls, so the
+        # caller can name a missing overlay without parsing the reason.
+        result["unproven_toolcalls"] = bool(toolcalls_skips)
         return result
 
     override_route, override_reason = apply_override(card, survivors, removed)
@@ -1690,10 +2179,25 @@ def plan(card, features, client_state, registry, overlay, track_record,
     route_ids = [override_route] if override_route else survivors
     scores = _score_candidates(route_ids, bucket_name, card, features,
                                client_state, registry, overlay, track_record,
-                               orchestrator_model, card["mode"], client, now)
+                               orchestrator_model, card["mode"], client, now,
+                               env)
 
     chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
+
+    # D-102 CLAUDEBUDGET: the Claude spend a plan may still carry is one the
+    # ORCHESTRATOR declared -- a critical path, or this run's final -- and the plan
+    # has to say so, because a DONE line citing a Claude leg with no authority
+    # named looks like a violated policy and the operator cannot tell the two
+    # apart without reading the card. The gate's own text (which carries what was
+    # declared) is what goes on the plan, so the record cites why, not just that.
+    # CLAUDEBUDGET-d item 1: "final declared (<lane>@<sha>)" is an authority line
+    # too, not only the critical-path override.
+    allowed, gate_reason = claude_allowed("final" if is_final_card(card)
+                                          else "leg", env, registry, now)
+    if allowed and is_claude_leg(chosen["leg"], registry) and gate_reason.startswith(
+            (CLAUDE_BUDGET_OVERRIDE, CLAUDE_BUDGET_FINAL_DECLARED)):
+        reason_parts.append(gate_reason)
 
     theta = _policy_value(registry, "modes", card["mode"], "theta", "value")
     eligible = [s for s in scores if s["p"] >= theta]
@@ -1708,7 +2212,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
     _, skipped_legs, re_probe_notes = usable_legs(
         registry["routes"][chosen["route"]], card,
         features, client_state, registry, overlay,
-        client, now)
+        client, now, env)
     if skipped_legs:
         reason_parts.append(
             "falls through %d skipped leg(s)" % len(skipped_legs))
@@ -1727,8 +2231,8 @@ def plan(card, features, client_state, registry, overlay, track_record,
     reviewers = _select_reviewers(scores, survivors, chosen, card, bucket_name,
                                   features, client_state, registry, overlay,
                                   track_record, orchestrator_model,
-                                  card["mode"], client, now)
-    escalation = _escalation(chosen, scores, registry)
+                                  card["mode"], client, now, env)
+    escalation = _escalation(chosen, scores, registry, card, env)
 
     # REVROUTE (S2) item 2: an authored review card also gets the *client/model*
     # that must read the diff, resolved from policy.reviewers. Only a review
