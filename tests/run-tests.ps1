@@ -6366,7 +6366,12 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
     $realPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $scratch = Join-Path $env:TEMP "autoos-qoder-$([Guid]::NewGuid().ToString('N'))"
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoderkey-$PID.yml"
+    # A host with qodercli set up already carries the PAT in its env (WS-OS11,
+    # 2026-09-28): the leak check below must start from an empty variable, or it
+    # fails on the host's own value, not on anything the dry run did.
+    $realPat = $env:QODER_PERSONAL_ACCESS_TOKEN
     try {
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $null
         $null = New-Item -ItemType Directory -Path $scratch -Force
         $env:USERPROFILE = $scratch
         'qoder_pat: dummy-pat' | Out-File $tmp -Encoding utf8
@@ -6385,6 +6390,7 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
         Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
     } finally {
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $realPat
         $env:USERPROFILE = $realHome
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
