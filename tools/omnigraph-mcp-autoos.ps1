@@ -21,13 +21,31 @@ if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     # holding $(...) must not be evaluated here, and a value the caller already
     # exported wins over the file.
     $wanted = @('OMNIGRAPH_BASE_URL', 'OMNIGRAPH_TOKEN', 'OMNIGRAPH_GRAPH_ID')
+    $dq = [char]34
+    $sq = [char]39
     foreach ($line in [System.IO.File]::ReadAllLines($envFile)) {
-        $text = $line.TrimEnd([char]13)
+        # The same forms the shell twin reads: an indent, an 'export ' prefix,
+        # and one layer of matching quotes round a value. Nothing else is
+        # stripped, so a value that merely starts with a quote keeps its text.
+        $text = $line.Trim()
+        # -ceq, not -eq: PowerShell's default string compare is case-insensitive
+        # and `Export FOO=bar` is not something a shell reads as an export.
+        if ($text.Length -gt 7 -and $text.Substring(0, 6) -ceq 'export') {
+            $sep = $text[6]
+            if ($sep -eq [char]32 -or $sep -eq [char]9) { $text = $text.Substring(7).Trim() }
+        }
         $cut = $text.IndexOf('=')
         if ($cut -lt 1) { continue }
         $key = $text.Substring(0, $cut).Trim()
         if ($wanted -notcontains $key) { continue }
-        $value = $text.Substring($cut + 1)
+        $value = $text.Substring($cut + 1).Trim()
+        if ($value.Length -ge 2) {
+            $first = $value[0]
+            $last = $value[$value.Length - 1]
+            if (($first -eq $dq -and $last -eq $dq) -or ($first -eq $sq -and $last -eq $sq)) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
         if (-not $value) { continue }
         if (-not (Get-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue)) {
             Set-Item -LiteralPath "Env:$key" -Value $value
