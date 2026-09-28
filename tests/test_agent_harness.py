@@ -568,6 +568,19 @@ class OpencodeMergeTests(unittest.TestCase):
         twice = module.desired_opencode(once, harness, REPO_ROOT, SKILLS_SOURCE)
         self.assertEqual(twice, once)
 
+    def test_a_leaf_contract_entry_from_a_removed_worktree_is_dropped(self):
+        # D-106h: a lane worktree's install run wrote its own repo_root's
+        # leaf-contract path into the operator's global opencode config; the
+        # worktree was later removed, leaving a dead path behind. A re-merge
+        # from the current repo_root must drop it, not just add its own copy
+        # alongside it.
+        module = load_module()
+        harness = harness_data()
+        stale = "/fake/removed-worktree/docs/agents/leaf-contract.md"
+        doc = module.desired_opencode({"instructions": [stale]}, harness, REPO_ROOT, "")
+        self.assertNotIn(stale, doc["instructions"])
+        self.assertIn("%s/docs/agents/leaf-contract.md" % REPO_ROOT, doc["instructions"])
+
     def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
         # No source means no replacement: dropping the old entry would leave
         # OpenCode with no copy of the skill at all.

@@ -356,6 +356,18 @@ def desired_opencode(user, harness, repo_root, skills_source):
                 instructions.append(entry)
                 present.add(_path_key(entry))
     leaf_contract = _join(repo_root, harness["rules"]["leaf_contract"])
+    # A leaf-contract entry from a worktree that was since removed (a lane
+    # that finished and got cleaned up) is dead weight, not history: drop any
+    # entry shaped like harness["rules"]["leaf_contract"] that is not THIS
+    # repo_root's copy, so a stale one an old install run left behind does
+    # not sit in the config forever pointing at a path that no longer exists.
+    leaf_suffix = _path_key(harness["rules"]["leaf_contract"])
+    instructions = [
+        entry for entry in instructions
+        if not (isinstance(entry, str)
+                and _path_key(entry).endswith(leaf_suffix)
+                and _path_key(entry) != _path_key(leaf_contract))
+    ]
     if leaf_contract not in instructions:
         instructions.append(leaf_contract)
     doc["instructions"] = instructions
