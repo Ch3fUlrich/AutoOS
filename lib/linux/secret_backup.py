@@ -67,8 +67,15 @@ def secret_backup(path, stamp=None):
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         sys.exit("usage: secret_backup.py <path> [stamp]")
+    # The stamp is optional exactly as the usage line says - and the shell's call
+    # site passes its own argument through, so an omitted one arrives as the empty
+    # string here or, from a caller that leaves the argument off, as no third
+    # element at all. Reading it unguarded turned the documented call into an
+    # IndexError traceback and exit 1, which install.sh reads as "no backup" and
+    # then refuses the whole rc-file edit.
+    stamp = argv[2] if len(argv) > 2 else None
     try:
-        print(secret_backup(argv[1], argv[2] or None))
+        print(secret_backup(argv[1], stamp))
     except OSError as exc:
         # A failure a shell caller has to notice, and nothing else: a traceback
         # would land in the install log a user reads when something broke.

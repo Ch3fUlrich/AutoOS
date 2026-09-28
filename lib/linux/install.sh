@@ -89,15 +89,27 @@ backup_file() {
     printf '%s\n' "$dest"
 }
 
-# file_holds_omnigraph_token <path>: does this file assign OMNIGRAPH_TOKEN
-# anything at all? Bare `KEY=`, `export KEY=` and any indent all count, and so does
-# a value that is a command substitution instead of the secret itself - the line
-# still names where the token lives, and the file is edited by steps that are about
-# to lose it. LC_ALL=C because an rc file is not necessarily valid UTF-8 (the
-# retire step edits those in bytes) and a multibyte character class refuses to
-# match in exactly the file that has to be recognised.
+# file_holds_omnigraph_token <path>: does this file assign OMNIGRAPH_TOKEN a live
+# value? The rule is the one every reader of these files already applies -
+# tools/omnigraph-mcp-autoos.sh and the rc line written below strip the whitespace
+# round the value before deciding it is a token, and has_token in
+# omnigraph_env_state compares the stripped line - so the value test is "non-empty
+# after trimming", never "a non-space right after the `=`":
+# `OMNIGRAPH_TOKEN=   secret` and `export OMNIGRAPH_TOKEN= secret` are live
+# credentials to the wrapper, and a gate that read them as empty handed that file
+# to `cp -p` - a 0644 backup of a token.
+# Bare `KEY=`, a whitespace-only value and `KEY = value` (not an assignment, and
+# the readers skip it) are not a token, and keep an ordinary backup. A quoted
+# value - even `""` - stays on the private side: the gate does not strip quotes,
+# and being over-inclusive here can only ever make a copy more private.
+# Any indent and an optional `export ` count, and so does a value that is a
+# command substitution instead of the secret itself - the line still names where
+# the token lives, and the file is edited by steps that are about to lose it.
+# LC_ALL=C because an rc file is not necessarily valid UTF-8 (the retire step
+# edits those in bytes) and a multibyte character class refuses to match in
+# exactly the file that has to be recognised.
 file_holds_omnigraph_token() {
-    LC_ALL=C grep -qE '^[[:space:]]*(export[[:space:]]+)?OMNIGRAPH_TOKEN=[^[:space:]]' -- "$1" 2>/dev/null
+    LC_ALL=C grep -qE '^[[:space:]]*(export[[:space:]]+)?OMNIGRAPH_TOKEN=[[:space:]]*[^[:space:]]' -- "$1" 2>/dev/null
 }
 
 # backup_file_before_write <path> [stamp]: the copy a step takes immediately

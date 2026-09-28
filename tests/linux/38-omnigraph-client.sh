@@ -613,6 +613,92 @@ print(" ".join(loose))
     (( ok )) && pass || fail "the token-bearing rc backup is not created 0600"
 fi
 
+# ─── LOW 1 (A3 review 5): the gate must ask the readers' question ────────────
+#
+# file_holds_omnigraph_token decides whether a backup is a secret's copy or an
+# ordinary one. It required a non-space character *immediately* after the `=`,
+# while every reader of these files trims whitespace around the value before
+# deciding it is a token: tools/omnigraph-mcp-autoos.sh strips the leading and
+# trailing whitespace (and one layer of matching quotes) round what follows the
+# `=`, the rc line install.sh writes does the same, and `has_token` in
+# omnigraph_env_state compares the stripped line. So a token typed as
+# `OMNIGRAPH_TOKEN=   secret` - or with a tab after `export`, or indented - was
+# live to the wrapper and invisible to the gate, and that file took the `cp -p`
+# branch: a 0644 backup that outlives the edit which removes the line.
+#
+# The rule has one home, so the test is a comparison rather than a list: for each
+# form the SHIPPED wrapper parses the file and reports the value it resolved, and
+# the gate must agree with it - and the backup must be born 0600 exactly in the
+# cases the wrapper calls live. Running the wrapper (not a re-typed copy of its
+# loop) is what keeps the two definitions from drifting again unnoticed.
+#
+# One deliberate asymmetry: the gate does not strip quotes, so a value written as
+# `""` counts as a token to it and not to the wrapper. That direction only ever
+# makes the copy private; tightening it to match would re-open the leak.
+oh_wrapper_value() {  # the OMNIGRAPH_TOKEN the shipped wrapper resolves from <file>
+    local file="$1" home out stub_dir
+    home="$(mktemp -d)"
+    stub_dir="$home/.local/share/autoos/omnigraph-mcp/bin"
+    mkdir -p "$stub_dir"
+    # The wrapper execs the bridge at the end; the stub prints what the wrapper
+    # handed it, so this observes production's own parse path.
+    printf '#!/bin/sh\nprintf "%%s\\n" "${OMNIGRAPH_TOKEN-<unset>}"\n' >"$stub_dir/omnigraph-mcp"
+    chmod 755 "$stub_dir/omnigraph-mcp"
+    cp -- "$file" "$home/.autoos-omnigraph.env"
+    out="$(env -u OMNIGRAPH_TOKEN HOME="$home" bash tools/omnigraph-mcp-autoos.sh 2>/dev/null)"
+    rm -rf "$home"
+    printf '%s\n' "$out"
+}
+
+if it "omnigraph-client: the secret gate trims the value the way the readers do"; then
+    tmp="$(mktemp -d)"
+    ok=1
+    oh5_live=(
+        'OMNIGRAPH_TOKEN=   secret-token-1111'
+        'export OMNIGRAPH_TOKEN= secret-token-1111'
+        '  OMNIGRAPH_TOKEN=secret-token-1111'
+        $'\texport\tOMNIGRAPH_TOKEN= \tsecret-token-1111'
+        'OMNIGRAPH_TOKEN="secret-token-1111"'
+    )
+    oh5_quiet=(
+        'OMNIGRAPH_TOKEN='
+        'export OMNIGRAPH_TOKEN=   '
+        $'  OMNIGRAPH_TOKEN=\t'
+        'OMNIGRAPH_TOKEN = secret-token-1111'
+        'OMNIGRAPH_TOKENX=secret-token-1111'
+    )
+    oh5_n=0
+    for form in "${oh5_live[@]}"; do
+        oh5_n=$((oh5_n + 1))
+        oh5_f="$tmp/live-$oh5_n"
+        printf '# my shell\n%s\n' "$form" >"$oh5_f"
+        chmod 644 "$oh5_f"
+        oh5_verdict="$(file_holds_omnigraph_token "$oh5_f" && printf yes || printf no)"
+        oh5_reader="$(oh_wrapper_value "$oh5_f")"
+        oh5_backup="$( (umask 022; backup_file_before_write "$oh5_f" 2>/dev/null) || true )"
+        oh5_mode="$(stat -c '%a' "$oh5_backup" 2>/dev/null || printf none)"
+        [[ "$oh5_verdict" == yes ]] || { ok=0; echo "the gate missed a live token: [$form]" >&2; }
+        [[ "$oh5_reader" == secret-token-1111 ]] \
+            || { ok=0; echo "the wrapper itself resolved [$oh5_reader] from [$form]" >&2; }
+        [[ "$oh5_mode" == 600 ]] || { ok=0; echo "a live token's backup came out $oh5_mode: [$form]" >&2; }
+    done
+    for form in "${oh5_quiet[@]}"; do
+        oh5_n=$((oh5_n + 1))
+        oh5_f="$tmp/quiet-$oh5_n"
+        printf '# my shell\n%s\n' "$form" >"$oh5_f"
+        chmod 644 "$oh5_f"
+        oh5_verdict="$(file_holds_omnigraph_token "$oh5_f" && printf yes || printf no)"
+        oh5_reader="$(oh_wrapper_value "$oh5_f")"
+        oh5_backup="$( (umask 022; backup_file_before_write "$oh5_f" 2>/dev/null) || true )"
+        oh5_mode="$(stat -c '%a' "$oh5_backup" 2>/dev/null || printf none)"
+        [[ "$oh5_reader" == '<unset>' ]] || { ok=0; echo "the wrapper resolved a token from [$form]" >&2; }
+        [[ "$oh5_verdict" == no ]] || { ok=0; echo "the gate called [$form] a secret (it would re-mode a plain file)" >&2; }
+        [[ "$oh5_mode" == 644 ]] || { ok=0; echo "a tokenless file's backup came out $oh5_mode, not its own 644: [$form]" >&2; }
+    done
+    rm -rf "$tmp"
+    (( ok )) && pass || fail "the secret gate and the readers disagree about what a token is"
+fi
+
 # The rule belongs to the backup, not to the step that happens to notice it: on a
 # first run the rc file is opened for writing by append_line_once (the current
 # line is missing), which is BEFORE the retire step ever runs. Testing every
@@ -708,6 +794,48 @@ if it "omnigraph-client: backup_file_before_write keeps the backup_file naming a
     [[ "$strays" == 0 ]] || { ok=0; echo "a backup that could not be read was left behind ($strays partial files)" >&2; }
     [[ -n "$body" ]] || { ok=0; echo "backup_file_before_write is not defined in lib/linux/install.sh" >&2; }
     (( ok )) && pass || fail "the private backup helper does not keep the backup_file contract"
+fi
+
+# The CLI documents the stamp as optional - `usage: secret_backup.py <path>
+# [stamp]` - and install.sh's own call site passes it as a possibly-empty
+# argument, so a caller that leaves it off is the documented case, not a misuse.
+# Reading argv[2] unguarded turned it into an IndexError traceback on stderr and
+# exit 1: the shell's `|| rc=$?` then reports "could not back up" and the rc-file
+# edit refuses to run at all (A3 review 5, LOW 2).
+if it "omnigraph-client: secret_backup.py takes the stamp as the optional argument it documents"; then
+    tmp="$(mktemp -d)"
+    printf 'export OMNIGRAPH_TOKEN=inline-token-9999\n' >"$tmp/rc"
+    chmod 644 "$tmp/rc"
+    ok=1
+    # One argument: the documented optional-stamp call.
+    oh5_out="$( (umask 022; python3 lib/linux/secret_backup.py "$tmp/rc" 2>"$tmp/err1") )" && oh5_rc=0 || oh5_rc=$?
+    oh5_err="$(cat "$tmp/err1")"
+    [[ "$oh5_rc" == 0 ]] || { ok=0; echo "one-arg call exited $oh5_rc (traceback: ${oh5_err:0:120})" >&2; }
+    [[ "$oh5_err" != *Traceback* ]] || { ok=0; echo "one-arg call printed a traceback" >&2; }
+    oh5_stamp="${oh5_out#"$tmp/rc.autoos-backup-"}"
+    [[ "$oh5_out" == "$tmp/rc.autoos-backup-"* && "$oh5_stamp" =~ ^[0-9]{8}-[0-9]{6}$ ]] \
+        || { ok=0; echo "one-arg call named [$oh5_out] - not the family's shape with a real stamp" >&2; }
+    oh5_mode="$(stat -c '%a' "$oh5_out" 2>/dev/null || printf none)"
+    [[ "$oh5_mode" == 600 ]] || { ok=0; echo "the one-arg backup came out $oh5_mode, not 600" >&2; }
+    cmp -s "$tmp/rc" "$oh5_out" || { ok=0; echo "the one-arg backup is not the source's bytes" >&2; }
+    # The empty stamp install.sh passes when its own caller omitted it.
+    oh5_out2="$( (umask 022; python3 lib/linux/secret_backup.py "$tmp/rc" "" 2>/dev/null) )" && oh5_rc2=0 || oh5_rc2=$?
+    [[ "$oh5_rc2" == 0 ]] || { ok=0; echo "empty-stamp call exited $oh5_rc2" >&2; }
+    [[ -f "$oh5_out2" ]] || { ok=0; echo "empty-stamp call created nothing" >&2; }
+    oh5_mode2="$(stat -c '%a' "$oh5_out2" 2>/dev/null || printf none)"
+    [[ "$oh5_mode2" == 600 ]] || { ok=0; echo "the empty-stamp backup came out $oh5_mode2" >&2; }
+    # And the same contract through the shell helper, whose stamp is optional too.
+    oh5_out3="$( (umask 022; backup_file_before_write "$tmp/rc" 2>/dev/null) || true )"
+    oh5_mode3="$(stat -c '%a' "$oh5_out3" 2>/dev/null || printf none)"
+    [[ -f "$oh5_out3" && "$oh5_mode3" == 600 ]] \
+        || { ok=0; echo "backup_file_before_write with no stamp gave [$oh5_out3] ($oh5_mode3)" >&2; }
+    # Too many arguments is still the usage error it was.
+    python3 lib/linux/secret_backup.py "$tmp/rc" 20200101-000000 extra >/dev/null 2>&1 \
+        && { ok=0; echo "a three-argument call was accepted" >&2; }
+    oh5_count="$(ls -1 "$tmp"/rc.autoos-backup-* 2>/dev/null | wc -l)"
+    (( oh5_count >= 3 )) || { ok=0; echo "only $oh5_count backup(s) exist - one call created nothing" >&2; }
+    rm -rf "$tmp"
+    (( ok )) && pass || fail "secret_backup.py does not handle the omitted stamp"
 fi
 
 # ─── S2: the env rewrite writes through a temp nobody else can name ─────────

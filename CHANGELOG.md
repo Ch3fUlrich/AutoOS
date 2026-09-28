@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides
+  whether a backup goes through `secret_backup.py` (private, born 0600) or
+  `cp -p` (the source's own mode) matched `OMNIGRAPH_TOKEN=[^[:space:]]` — a
+  non-space *immediately* after the `=` — while every reader of these files
+  decides on the *trimmed* value (`tools/omnigraph-mcp-autoos.sh` and the rc line
+  `install.sh` writes strip the whitespace around it; `has_token` in
+  `omnigraph_env_state` compares the stripped line). So `OMNIGRAPH_TOKEN=   secret`,
+  `export OMNIGRAPH_TOKEN= secret` and a tab after `export ` were live credentials
+  to the wrapper and invisible to the gate: that file took the `cp -p` branch and
+  left a 0644 copy of the bearer token behind the edit that removed the line. The
+  gate now uses the readers' rule — non-empty after trimming — so bare `KEY=`, a
+  whitespace-only value and `KEY = value` (not an assignment, and the readers skip
+  it) still get an ordinary backup that keeps the user's own mode. A quoted value
+  counts as a token even when it is `""`: the gate does not strip quotes, and the
+  error is only ever in the direction of a more private copy.
+- **`lib/linux/secret_backup.py`** (`main`): `argv[2]` was read unguarded, so the
+  call the usage line itself documents as optional — `secret_backup.py <path>` —
+  died with an `IndexError` traceback and exit 1. `backup_file_before_write` turns
+  any non-zero from the helper into "could not back up", so the defect would have
+  made the rc-file edit refuse to run at all rather than take the copy. The stamp
+  is now read only when it is there, and defaults to the clock exactly as the
+  in-process caller does.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the gate is asserted *against the
+  shipped wrapper's own verdict* per form — one rule, two consumers, so the
+  definitions cannot drift again without a test noticing — and the CLI is called
+  with the stamp omitted, passed empty (the shell call site's shape), and with too
+  many arguments (still the usage error).
+
 ### Fixed - token-bearing files: backups and temp files (A3 review 4, S1-S2, 2026-09-28)
 
 - **`lib/linux/secret_backup.py`** (new, `lib/linux/install.sh` uses it from both
