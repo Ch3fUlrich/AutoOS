@@ -297,8 +297,10 @@ if [[ -n "$__parts_env" ]]; then
     for __n in "${__wanted[@]}"; do
         __n="${__n// /}"
         [[ -n "$__n" ]] || continue
+        # Exactly two digits: a glob such as `*` or `?3` would pass the -f check
+        # below yet match no selection, and the shard would run nothing and pass.
         __match=("$ROOT"/tests/linux/"$__n"-*.sh)
-        if [[ ! -f "${__match[0]}" ]]; then
+        if [[ ! "$__n" =~ ^[0-9]{2}$ || ! -f "${__match[0]}" ]]; then
             printf 'run-tests.sh: AUTOOS_TEST_PARTS names no part %s\n' "$__n" >&2
             SUMMARY_PRINTED=1
             exit 2

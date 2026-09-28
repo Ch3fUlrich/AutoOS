@@ -29,6 +29,7 @@ jobs:
         run: |
           python3 tests/test_ci_shards.py
           matrix="$(python3 tests/ci-shards.py)"  # its own line, so its exit code fails the step
+          test -n "$matrix"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   linux-shard:
