@@ -1372,12 +1372,26 @@ fi
 # AGENTS.md rule 4 ("A component that is already installed reports skipped, not
 # failed") and the header's own "safe to re-run" promise were both false for
 # combos: the Combos loop always tried `omni combo create`, the CLI refuses an
-# existing name (the stand-in reproduces that contract above), and the retry
-# path deleted and re-created the combo. Measured 2026-09-28: a re-run against a
-# store --drift reports in sync printed "+ <name> replaced" for every combo (14
-# of them), and each delete+create is a window where the tier does not exist.
-# The fix reads the live store once with the same call --drift uses and skips a
-# combo that already equals the file.
+# existing name, and the retry path deleted and re-created the combo. Measured
+# 2026-09-28: a re-run against a store --drift reports in sync printed
+# "+ <name> replaced" for every combo (14 of them), and each delete+create is a
+# window where the tier does not exist. The fix reads the live store once with
+# the same call --drift uses and skips a combo that already equals the file.
+# The stand-in this needs, all of it inside _prune_sandbox (line numbers as of
+# this change): the store itself is store.py (:254-318, seeded from live.json),
+# `--output json --no-color combo list` answers it verbatim (:329-338), `combo
+# create` refuses a name the store holds with 'Error: Combo "x" already exists'
+# (:339-360, the refusal at :354 — the real CLI's observable contract, and the
+# exact fact that drove apply.sh into delete+create), and `combo delete` fails on
+# an absent name (:361-366, store.py's "not found" at :315). Every one of them
+# logs its argv to calls.log, which is how "zero combo create/delete calls" is
+# asserted rather than inferred.
+# The default document carries a "strategy" per combo because _drift_json renders
+# it from combos.json (:1207-1228, the field at :1219) — that is RICHER than the
+# live 3.8.51 document recorded at 59aa3a9 apply.sh:252-253, which names no
+# strategy field. The "no strategy field" case below is therefore the one that
+# matches the measured gateway, and it must reach the same verdict; a fake that
+# only ever answered the rich shape would hide the bug it is meant to prevent.
 # _combo_live_json <dir> [swap] [split] - seed the stand-in store from
 # combos.json itself: the same document _drift_json renders for --drift, so the
 # two paths cannot drift apart.
@@ -1423,6 +1437,20 @@ if it "apply combos: an in-sync store is left alone and every combo reports unch
         || { ok=0; echo "second run: $out2" >&2; }
     [[ "$out2" == *"Probe (one tiny request per combo)"* ]] \
         || { ok=0; echo "probe skipped although the run manages combos: $out2" >&2; }
+    # Run it twice and the section is identical — AGENTS.md §4's acceptance bar.
+    # out3 is compared against out2 (same key file, so the same catalog-filtered
+    # legs); only --probe differs, and that is outside the Combos section. The
+    # section alone is compared because the rest of the output carries the
+    # stand-in gateway's port, which is a different number every run.
+    : >"$d/calls.log"
+    out3="$(_prune_apply "$d")"
+    if ! diff -q <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out2") \
+                  <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3") >/dev/null; then
+        ok=0
+        echo "second run differs: [$(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3")]" >&2
+    fi
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the second run wrote the store: [$(grep '^combo' "$d/calls.log")]" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "apply re-created combos the store already had"; fi
 fi

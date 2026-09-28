@@ -269,12 +269,14 @@ omni_json() {
 # combos.json uses, because the CLI splits the leading provider/ segment off a
 # plain "provider/model" token on create.
 # That measurement names no "strategy" field, although the plain `combo list`
-# table shows one per row ([priority], tests/linux/34-ai-services.sh:418) and
-# the --drift stand-in renders it (:1205). So this prints the field when the
-# document carries it and an empty column when it does not, and every caller
-# treats an empty column as "the store does not report a strategy" — refs alone
-# decide. A caller that assumed the field is present would report every combo as
-# changed on the shape we actually measured.
+# table prints one per row (the "<name> [<strategy>] <status>" shape recorded at
+# apply.ps1:447, which the test stand-in renders the same way in _prune_list) and
+# the --drift stand-in renders it in the JSON document too (_drift_json). So this
+# prints the field when the document carries it and an empty column when it does
+# not, and every caller treats an empty column as "the store does not report a
+# strategy" — refs alone decide. A caller that assumed the field is present would
+# report every combo as changed on the shape we actually measured.
+# (Cited by function name, not line number: the test file grows at the bottom.)
 # $1 is on fd 3 because a herestring and the program heredoc cannot share stdin
 # (the heredoc wins, and python would then parse its own text as JSON).
 # Prints one line per live combo: "<name>\x1f<strategy>\x1f<ref,ref,...>", in
@@ -840,8 +842,17 @@ fi
 # A missing CLI is not read at all — the create attempts report it. A CLI that
 # is there but cannot answer the list is the unreadable case: today's behaviour
 # for every combo, announced once.
+# --dry-run reads too. It is the same read-only call, and a plan that cannot say
+# which combos it would leave alone would have to claim it plans to rewrite every
+# one of them — which is the lie this section exists to stop. Nothing here writes.
 declare -A LIVE_COMBO_REFS=()
 declare -A LIVE_COMBO_STRATEGY=()
+# Held is the set of names the store reports, kept in its own map so the test is
+# a plain string compare rather than `[[ -v arr[key] ]]`, which needs bash 4.3
+# while this repository's stated floor is bash 4+ — a 4.0 host would otherwise
+# fail inside the Combos section, mid-run, instead of at the `declare -A` that
+# already stops it at startup.
+declare -A LIVE_COMBO_HELD=()
 live_combo_readable=0
 live_combo_reason=""
 if command -v omniroute >/dev/null; then
@@ -858,6 +869,7 @@ if command -v omniroute >/dev/null; then
                 [[ -z "$live_name" ]] && continue
                 LIVE_COMBO_REFS["$live_name"]="$live_refs"
                 LIVE_COMBO_STRATEGY["$live_name"]="$live_strategy"
+                LIVE_COMBO_HELD["$live_name"]=1
             done <<<"$live_combo_rows"
         else
             # The function's stdout on that path is its one-line reason; the
@@ -875,7 +887,7 @@ fi
 # field, so refs alone decide.
 combo_is_current() {
     local name="$1" strategy="$2" keep="$3" live_refs live_strategy
-    [[ -v LIVE_COMBO_REFS["$name"] ]] || return 1
+    [[ "${LIVE_COMBO_HELD[$name]-}" == 1 ]] || return 1
     live_refs="${LIVE_COMBO_REFS[$name]}"
     live_strategy="${LIVE_COMBO_STRATEGY[$name]-}"
     [[ "$live_refs" == "$keep" ]] || return 1
@@ -918,7 +930,7 @@ while IFS=$'\t' read -r name strategy models; do
         if [[ $live_combo_readable -eq 1 ]] && combo_is_current "$name" "$strategy" "$keep"; then
             echo "  - $name: would keep unchanged [$strategy]"
             combo_unchanged=$((combo_unchanged + 1))
-        elif [[ $live_combo_readable -eq 1 ]] && [[ -v LIVE_COMBO_REFS["$name"] ]]; then
+        elif [[ $live_combo_readable -eq 1 ]] && [[ "${LIVE_COMBO_HELD[$name]-}" == 1 ]]; then
             echo "  - $name: would replace [$strategy] with $keep"
             combo_replaced=$((combo_replaced + 1))
         else
