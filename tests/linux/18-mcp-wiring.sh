@@ -378,8 +378,14 @@ omni_client_spec() {
     local tmp="$1" url="${2:-https://graph.example.invalid}"
     (
         SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-        OMNIGRAPH_TOKEN="dummy-token-1234"
-        unset OMNIGRAPH_GRAPH_ID
+        # State and EXPORT every input this fixture needs: the spec is built by a
+        # python3 child that reads os.environ (install.sh:4698), so a bare
+        # assignment reaches that child only on a host that already exports
+        # OMNIGRAPH_TOKEN itself. CI 36391119133 exports nothing, and the entry
+        # came out token-less. FORCE_COLOR is the same class of leak — the host's
+        # colour choice must never decide what the captured text looks like.
+        export OMNIGRAPH_TOKEN="dummy-token-1234"
+        unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_BASE_URL FORCE_COLOR
         AUTOOS_ANSWERS=([omnigraph_url]="$url")
         mkdir -p "$AUTOOS_ROOT"
         write_omnigraph_env() { :; }

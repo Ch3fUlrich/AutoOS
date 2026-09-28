@@ -52,13 +52,31 @@ if it "the ai-coding plan carries the agent-skill-links and omnigraph-client hom
     # way the plan must never send anyone to fetch it, and the two components
     # that inherited agent-skills' work must both be in the profile that used to
     # carry agent-skills alone.
-    out="$(bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"; rc=$?
+    #
+    # The plan is taken from a scratch home (HOME plus a SUDO_USER with no passwd
+    # entry, so SYS_HOME falls back to HOME — lib/linux/detect.sh:200; the same
+    # device as tests/linux/22-herdr-sessions.sh:1049). Against the developer's
+    # own home the run answers for that machine instead of for the plan: here
+    # ~/.local/bin/graphify-mcp is uv's link, the graphify post-install refuses to
+    # move it, and the dry run exits 1 for a reason this check has nothing to do with.
+    e2e_home="$(mktemp -d)"
+    out="$(SUDO_USER='autoos-no-such-user-e2e' HOME="$e2e_home" \
+        bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"; rc=$?
+    rm -rf "$e2e_home"
     problems=""
     (( rc == 0 )) || problems+="[exit $rc] "
     for want in 'agent-skill-links' 'omnigraph-client'; do
         grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$out" || problems+="[$want is not in the ai-coding plan] "
     done
-    grep -qiE 'git clone' <<<"$out" && problems+="[a clone step is planned] "
+    # Only the RETIRED repo may never be fetched. A machine that has not been set
+    # up yet plans clones of its own and legitimately so — measured on a scratch
+    # home: the two oh-my-zsh plugins and powerlevel10k
+    # (lib/linux/install.sh:638-647), plus the LazyVim starter. Grepping the whole
+    # output for `git clone` failed CI 36391119133 for exactly that reason. Both
+    # fetch shapes count: the clone's URL or destination names the retired repo, and
+    # so does the target of a `git -C <dir> pull` on a clone that is already there.
+    grep -qiE '\bgit (clone|pull|-C)[[:space:]].*agent-skills' <<<"$out" \
+        && problems+="[the plan fetches the retired agent-skills repo] "
     # The retired clone is never a skills source any more: the checkout is.
     grep -qE 'link skills from .*(Documents|\.autoos)/.*agent-skills' <<<"$out" \
         && problems+="[the retired clone is still named as the skills source] "
