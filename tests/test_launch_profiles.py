@@ -394,6 +394,44 @@ BRANCH_L2_FENCE_DENY_COMMANDS = (
     "git push origin L2-example-1 --tags",
 )
 
+# L2 refspec tricks onto NON-main destinations (round 4): the round-3 allow
+# `Bash(git push origin L2-*)` is a whole-line glob, so `*` spans the `:`
+# and the destination - an L2 session could overwrite ANY non-main branch
+# (`L2-x:some-shared-branch`, `L2-x:refs/heads/...`). Every colon refspec
+# and every refs/ path must deny on l2, leaving only the same-name push
+# (`git push [-u] origin L2-<name>`, destination = source). The first three
+# match an L2 allow glob (deny-beats-allow, like the round-3 table); the
+# refs/-spelled sources match no allow entry and deny outright.
+BRANCH_L2_REFSPEC_DENY_COMMANDS = (
+    "git push origin L2-x:refs/heads/L1-foo",
+    "git push origin L2-x:some-shared-branch",
+    "git push origin L2-x:refs/heads/l1-coordinator-lane",
+    "git push -u origin L2-x:other",
+    "git push origin L2-general/wt-x:other-branch",
+    "git push origin refs/heads/L2-x",
+    "git push origin refs/heads/L2-x:refs/heads/L1-foo",
+)
+
+# L2 branch-delete forms (round 4): deleting branches is not in the grant.
+# The trailing-flag forms match the L2 allow glob (deny-beats-allow); the
+# empty-source `:L2-x` form and the leading-flag forms match no allow entry
+# and deny outright (fail-closed unlisted is not enough - deletion must be
+# an explicit deny).
+BRANCH_L2_DELETE_DENY_COMMANDS = (
+    "git push origin L2-x --delete",
+    "git push origin L2-x -d",
+    "git push origin --delete L2-x",
+    "git push origin -d L2-x",
+    "git push origin :L2-x",
+)
+
+# The only pushes l2-orchestrator may make (round 4 restatement): the plain
+# and -u same-name pushes. Every other push shape above denies.
+BRANCH_L2_PLAIN_ALLOW_COMMANDS = (
+    "git push origin L2-x",
+    "git push -u origin L2-x",
+)
+
 # L2 workflow dispatch (round 3, D-138): only --ref on the own prefix is
 # pre-granted, in both --ref spellings. A bare run and any non-own ref stay
 # unlisted; --ref main denies via the same fence as L1.
@@ -598,6 +636,95 @@ class L2ScopeTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertTrue(decide_deny(profile, "Bash", command))
+
+    def test_l2_refspec_to_non_main_branch_is_denied(self):
+        # Round 4 (F1): the allow glob spans the `:` and the destination,
+        # so the colon forms below overwrote any non-main branch before the
+        # fix. Each colon form with an L2- source matches an L2 allow entry
+        # (checked - deny beats allow); the refs/-spelled sources match no
+        # allow entry and still deny.
+        profile = load_profile("l2-orchestrator")
+        allow = perms_of(profile)["allow"]
+        allow_matching = tuple(
+            command
+            for command in BRANCH_L2_REFSPEC_DENY_COMMANDS
+            if command.split(":")[0].rstrip().split()[-1].startswith("L2-")
+        )
+        self.assertTrue(allow_matching)  # the check below is not vacuous
+        for command in allow_matching:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    any(
+                        split_rule(rule)[0] == "Bash"
+                        and bash_matches(split_rule(rule)[1], command)
+                        for rule in allow
+                    ),
+                    "%s matches no L2 allow entry" % command,
+                )
+        for command in BRANCH_L2_REFSPEC_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_delete_forms_are_denied(self):
+        # Round 4 (F2): deleting branches is not in the grant - explicit
+        # deny, not merely unlisted.
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_DELETE_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_plain_same_name_push_is_allowed(self):
+        # Round 4 restatement: only `git push [-u] origin L2-<name>`
+        # (destination = source) allows on l2.
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_PLAIN_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l1_l0_leaf_results_unchanged_for_l2_fence_commands(self):
+        # Round 4: the new colon/refs/delete denies render ONLY into the
+        # l2-orchestrator profile, so every other role decides these
+        # commands exactly as before this round: L1 allows (the full
+        # lane-push grant, no new deny), l0-router stays unlisted
+        # (fail closed), leaves stay denied (the leaf push fence).
+        commands = (
+            BRANCH_L2_REFSPEC_DENY_COMMANDS
+            + BRANCH_L2_DELETE_DENY_COMMANDS
+        )
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "allow",
+                        "%s is not allowed by %s" % (command, role),
+                    )
+        for role in UNGRANTED_ROLES:
+            profile = load_profile(role)
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "none",
+                        "%s is not unlisted on %s" % (command, role),
+                    )
+        for role in LEAF_ROLES:
+            profile = load_profile(role)
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "deny",
+                        "%s is not denied by %s" % (command, role),
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -926,6 +1053,13 @@ CONTRADICTION_TARGETS = {
     "Bash(git -c * push*)": "git -c foo.bar=baz push origin wt-example-1",
     "Bash(gh workflow run *--ref *main*)": "gh workflow run ci.yml --ref main",
     "Bash(gh workflow run *--ref=*main*)": "gh workflow run ci.yml --ref=main",
+    # L2-only same-name-push fences (round 4, F1/F2): each target matches
+    # its deny entry, so the contradiction test proves the entry fires.
+    "Bash(*git push * *:*)": "git push origin L2-x:other",
+    "Bash(*git push *refs/*)": "git push origin refs/heads/L2-x",
+    "Bash(*git push *--delete*)": "git push origin L2-x --delete",
+    "Bash(*git push * -d *)": "git push origin -d L2-x",
+    "Bash(*git push * -d)": "git push origin L2-x -d",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that

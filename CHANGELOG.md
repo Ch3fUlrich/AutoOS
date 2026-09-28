@@ -12,9 +12,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §2–§3).
   The L1 roles (`l1-coordinator`, `l1-routing`) pre-grant lane-branch push
   and `gh workflow run`; `l1-routing` alone adds the gateway `apply.sh` run
-  grant; `l2-orchestrator` (round 3, D-138) pre-grants only push to `L2-*`
-  lane branches and `gh workflow run --ref L2-*`, under the same always-deny
-  fences (deny wins); `l0-router` and the leaves carry no pre-grant.
+  grant; `l2-orchestrator` (round 3, D-138, tightened round 4) pre-grants
+  only push to `L2-*` lane branches and `gh workflow run --ref L2-*`,
+  under the same always-deny fences (deny wins). The L2 grant is per
+  role, not per session: any `l2-orchestrator` session may push/dispatch
+  on any `L2-*` lane branch (per-session scoping is not expressible in a
+  per-role profile). Round 4 renders L2-only deny fences into that one
+  profile so the `L2-*` allow glob cannot span a refspec colon, a `refs/`
+  path or a delete flag — only `git push [-u] origin L2-<name>`
+  (same-name push, destination = source) is allowed there, and branch
+  deletion is an explicit deny; the L1 grants are unchanged.
+  `l0-router` and the leaves carry no pre-grant.
   Every profile denies push-to-`main` (fence set, not one string: ref
   spellings plus `--all`/`--mirror`/`HEAD`/bare, `-C`/`--git-dir`/`-c`
   wrappers, compound and prefixed spellings), secret access and
