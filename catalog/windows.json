@@ -729,7 +729,7 @@
             "ai-coding"
           ],
           "notes": "Codebase dependency knowledge graph queries for coding agents.",
-          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
+          "homepage": "https://github.com/Graphify-Labs/graphify"
         },
         {
           "id": "mcp-playwright",

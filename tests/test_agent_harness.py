@@ -184,6 +184,59 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
             self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
 
+    def test_a_symlink_is_refused_not_written_through(self):
+        # Writing through a link edits whatever it points at, which the user did
+        # not ask AutoOS to touch. antigravity_desktop_entry refuses a symlinked
+        # .desktop for the same reason; this helper must refuse too, and say so.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            link = Path(tmp) / "linked.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            wrote = module._backup_and_write(str(link), "changed", stamp=self.STAMP)
+            self.assertFalse(wrote, "a symlink must be refused, not written through")
+            self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(
+                os.path.lexists("%s.autoos-backup-%s" % (link, self.STAMP)),
+                "a refused write must not leave a backup either",
+            )
+
+    def test_a_symlink_that_appears_after_the_check_leaves_no_backup(self):
+        # The islink() check above is best-effort; O_NOFOLLOW is what actually
+        # refuses the write. When the link appears in between, copy2 has already
+        # run, so the refusal path used to leave a backup of the target's bytes
+        # behind — a file AutoOS created for a config it never touched, which
+        # contradicts the docstring's "not a backup ... is changed".
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            link = Path(tmp) / "linked.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            real_islink = os.path.islink
+            # Race simulated by making the pre-check blind, not by reordering the
+            # helper: the open below really does hit ELOOP on a real symlink.
+            with mock.patch("os.path.islink", return_value=False):
+                self.assertTrue(real_islink(link), "fixture must be a symlink")
+                self.assertFalse(
+                    module._backup_and_write(str(link), "changed", stamp=self.STAMP),
+                    "the open must still refuse it",
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(
+                list(Path(tmp).glob("*.autoos-backup-*")),
+                [],
+                "a refused write must leave no backup residue",
+            )
+
     @unittest.skipIf(os.name == "nt", "POSIX mode bits do not exist on Windows")
     def test_the_backup_keeps_the_mode_of_the_file_it_copies(self):
         # A 0600 config may hold a key: shutil.copyfile makes the backup with
@@ -417,6 +470,26 @@ class OpencodeMergeTests(unittest.TestCase):
         user = {"permission": {"bash": "allow"}}
         doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
         self.assertEqual(doc["permission"]["bash"]["*"], "allow")
+
+    @unittest.skipUnless(os.name == "posix", "creating symlinks needs POSIX")
+    def test_a_symlinked_config_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real.json"
+            real.write_text("{}", encoding="utf-8")
+            link = Path(tmp) / "opencode.json"
+            link.symlink_to(real)
+            before = real.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(link),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone", result.stdout)
+            self.assertEqual(real.read_bytes(), before)
+            self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
 
     def test_an_unexpected_instructions_type_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,6 +804,61 @@ class OpenhandsTests(unittest.TestCase):
                 self.assertIn("skipped", line, line)
             after = {p.name: p.read_bytes() for p in openhands_dir.rglob("*") if p.is_file()}
             self.assertEqual(before, after)
+
+    def symlink_fixture(self, openhands_dir, rel, target_rel):
+        """A symlink at `rel` pointing at `target_rel`; skipTest if links are unavailable."""
+        target = openhands_dir / target_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"keep": "ORIGINAL"}', encoding="utf-8")
+        link = openhands_dir / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot create symlinks here: %s" % exc)
+        return target
+
+    def test_a_symlinked_settings_json_exits_nonzero(self):
+        # `cmd_opencode` returns 1 for exactly this refusal so its caller can
+        # record the failure; `cmd_openhands` printed "left alone (symlink)" and
+        # still exited 0, so the install reported a component as installed whose
+        # config was never touched.
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            target = self.symlink_fixture(
+                openhands_dir, "settings.json", "private-settings.json"
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone (symlink)", result.stdout)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), '{"keep": "ORIGINAL"}'
+            )
+
+    def test_a_symlinked_agent_profile_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            self.assertEqual(
+                self.run_openhands(openhands_dir).returncode, 0, "fixture must install first"
+            )
+            victim = next(
+                p for p in sorted((openhands_dir / "agent-profiles").glob("*.json"))
+            )
+            victim.unlink()
+            target = self.symlink_fixture(
+                openhands_dir,
+                str(Path("agent-profiles") / victim.name),
+                "private-profile.json",
+            )
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")), {"keep": "ORIGINAL"}
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone (symlink)", result.stdout)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), '{"keep": "ORIGINAL"}'
+            )
 
     def test_dry_run_on_an_empty_dir_creates_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:

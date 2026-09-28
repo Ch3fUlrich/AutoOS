@@ -74,7 +74,8 @@ gets the rules its task touches inlined (source: briefs/common.md "Skill rules b
 agent", operator 2026-09-26T13:45Z).
 
 Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
-context cap), `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
+context cap), `python3 tools/autoos-agent.py ready` (review gate + pushed sha + inbox line),
+`python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
 full list of code-enforced rules.
 
@@ -89,8 +90,8 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 ### coord (L1)
 
-- R-coord-01: Cut lanes from main; merge two-stage (lane→orch→main), no-ff, under mutex, one merger. (why: serial merges need no hand reconciling; source: HandoffCore.Tests.ps1)
-- R-coord-02: Verify cheap done, judge findings yourself: tests, diff vs brief, files-read; Opus picks critical. (why: cheap done is unproven until you verify; source: review-a8.out, inbox 17:52:55Z)
+- R-coord-01: Cut lanes from main; merge lane→orch→main, no-ff, mutex, one merger; freeze the parent while its child runs. (why: serial merges self-reconcile; source: HandoffCore tests, inbox 19:55Z)
+- R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
 - R-coord-03: Claude orchestrates and final-checks, never implements; pick writers by complexity from `route --explain`. (why: Claude rate limit stops the whole run; source: common.md Claude budget)
 - R-coord-04: Hold host headroom: run `autoos-agent.py heartbeat`; <=3 lanes + 3 readers, MemAvailable >= 3 GB. (why: headroom keeps tests and builds alive; source: briefs/common.md "Host limits")
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
@@ -102,19 +103,19 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-01: Write fixed BRIEF/REPORT fields; terse one line per fact, evidence by pointer; one writer per file. (why: fixed fields parse and stay short; source: common.md Talking to other agents)
 - R-orch-02: Brief cheap workers with one file, exact spec, file:line anchors. (why: several files invite fabricated completion; source: L1-HANDOFF.md Known traps)
 - R-orch-04: Feed isolated workers inline or by absolute read-only path. (why: clone cannot read outside itself; source: work/L1-routing/Q1doc.out)
-- R-orch-06: Relaunch, never resume, a no-change or >25-min-quiet child; verify worktree and WIP scope first. (why: resumed session works in wrong tree; source: inbox 2026-09-26, common.md 15:3xZ)
+- R-orch-06: Relaunch, never resume, a no-change child; verify worktree/WIP scope; run the old suite before new tests. (why: wrong tree; unrun WIP adds defects; source: common.md, REDACTFIX2.out)
 - R-orch-08: Commit lanes under lane identity; record classifier refusals verbatim and stop. (why: refusals are signals, never obstacles; source: refusals measured 2026-09-24/25)
 - R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
-- R-orch-11: A lane that retires or re-legs a route greps its id as a DEFAULT in tests/, configuration/, lib/, start-stack.*. (why: stale ids break CI silently; source: CI 36320592493, inbox 17:09:02Z)
+- R-orch-11: A lane that changes a route id or return code greps every consumer (lanes.md list), catalog postInstall too. (why: stale ids and bare postInstall abort CI; source: CI 36320592493, 765f189)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 - R-orch-13: Plan, spec, decision or bigger change: a pinned cross-family review before execute or merge, then Sonnet. (why: same family repeats writer blind spots; source: common.md Second opinion)
-- R-orch-14: Never skip a slow free reviewer; Haiku stays an extra pass; record writer, reviewer, verdict. (why: a small reviewer's no-issues is not evidence; source: HAIKU-EVAL.md, inbox 17:52:55Z)
+- R-orch-14: Never skip a slow free reviewer; Haiku stays an extra pass; record writer, reviewer, verdict. (why: a small reviewer's no-issues is no proof; source: HAIKU-EVAL.md, review-spawnredact.md)
 
 ### worker (L3)
 
-- R-worker-01: Derive every render cell from registry fields; `--check` only, minimal edits. (why: --out erased 461 hand-kept lines; source: 6a61052 rejected, d1763a8)
-- R-worker-02: Author portable failing-first tests: seed bug state, assert the reason, guard platform. (why: passes here, fails there without guards; source: main CI 36227152085)
-- R-worker-03: Keep runs cheap: filter to the touched area, full suite once per phase, snippet-lint, real --no-cache builds. (why: broad runs OOM or measure nothing; source: CI 108372206183, 1345e9b)
+- R-worker-01: Derive every render cell and test expectation from the registry render; pin only approved order; `--check` only, minimal edits. (why: --out erased 461 lines; source: 6a61052, f5d4e00)
+- R-worker-02: Author portable failing-first tests: seed bug state, assert the reason, guard platform; a dry run plans an absent tool. (why: the CI host lacks uv; source: CI 36227152085, 36360904338)
+- R-worker-03: Keep runs cheap: `affected-tests.py`'s filter, full suite once per phase, snippet-lint, real --no-cache builds. (why: broad runs OOM or measure nothing; source: CI 108372206183, 1345e9b)
 - R-worker-04: Test fakes reproduce the real tool's observable contract; read the real tool first, cite its lines. (why: fake drift hides real bugs; source: L1-backlog lstby 99742a1)
 - R-worker-05: Gate on `set -o pipefail` and the 'N passed' line, never `tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out)
 - R-worker-06: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: supervisor wanting to code mis-decomposed; source: tests/test_agent_harness.py)

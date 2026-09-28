@@ -42,8 +42,11 @@ logs/
 *.autoos-backup-*
 .autoos-state.json
 autoos.config.json
-autoos.config.json.tmp
-!autoos.config.example.json
+# A config save writes through an unpredictable temp name (mkstemp on Linux, a
+# GUID on Windows) so nobody can pre-plant a symlink at a fixed one; these are
+# the shapes a failed save could leave behind, never to be committed.
+.autoos.config.*.tmp
+autoos.config.json.*.tmp
 
 # ─── Agent tooling ──────────────────────────────────────────────────────────
 .serena/

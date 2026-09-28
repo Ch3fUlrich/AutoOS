@@ -25,6 +25,16 @@ answer() {  # answer <key> [default]
     else printf '%s' "$default"; fi
 }
 
+# omnigraph_url_answer: the raw omnigraph_url answer with its trailing slashes
+# stripped, "" when this machine never answered the prompt. ONE strip rule, shared
+# with omnigraph_base_url below.
+omnigraph_url_answer() {
+    local omni
+    omni="$(answer omnigraph_url '')"
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    printf '%s\n' "$omni"
+}
+
 # omnigraph_base_url: the omnigraph server the clients' bridges point at - the
 # omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
 # side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
@@ -32,8 +42,7 @@ answer() {  # answer <key> [default]
 # writer once hardcoded the default and ignored the answer).
 omnigraph_base_url() {
     local omni
-    omni="$(answer omnigraph_url '')"
-    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    omni="$(omnigraph_url_answer)"
     if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
 }
 
@@ -78,6 +87,56 @@ backup_file() {
         return 1
     fi
     printf '%s\n' "$dest"
+}
+
+# file_holds_omnigraph_token <path>: does this file assign OMNIGRAPH_TOKEN a live
+# value? The rule is the one every reader of these files already applies -
+# tools/omnigraph-mcp-autoos.sh and the rc line written below strip the whitespace
+# round the value before deciding it is a token, and has_token in
+# omnigraph_env_state compares the stripped line - so the value test is "non-empty
+# after trimming", never "a non-space right after the `=`":
+# `OMNIGRAPH_TOKEN=   secret` and `export OMNIGRAPH_TOKEN= secret` are live
+# credentials to the wrapper, and a gate that read them as empty handed that file
+# to `cp -p` - a 0644 backup of a token.
+# Bare `KEY=`, a whitespace-only value and `KEY = value` (not an assignment, and
+# the readers skip it) are not a token, and keep an ordinary backup. A quoted
+# value - even `""` - stays on the private side: the gate does not strip quotes,
+# and being over-inclusive here can only ever make a copy more private.
+# Any indent and an optional `export ` count, and so does a value that is a
+# command substitution instead of the secret itself - the line still names where
+# the token lives, and the file is edited by steps that are about to lose it.
+# LC_ALL=C because an rc file is not necessarily valid UTF-8 (the retire step
+# edits those in bytes) and a multibyte character class refuses to match in
+# exactly the file that has to be recognised.
+file_holds_omnigraph_token() {
+    LC_ALL=C grep -qE '^[[:space:]]*(export[[:space:]]+)?OMNIGRAPH_TOKEN=[[:space:]]*[^[:space:]]' -- "$1" 2>/dev/null
+}
+
+# backup_file_before_write <path> [stamp]: the copy a step takes immediately
+# before it modifies one of the user's files. The contract is backup_file's - print
+# the name, return non-zero and leave nothing behind when the copy could not be
+# made - with one rule added: a file that still carries a bearer token gets its copy
+# created 0600, by the same syscall that creates it (A3 review 4, S1). `cp -p` hands
+# a 0644 dotfile a 0644 backup, and that backup outlives the token the edit removes,
+# so the copy becomes the place the secret stays readable to every local user. A
+# file with no token in it keeps backup_file's behaviour exactly, its own mode
+# included: silently re-modelling every dotfile backup is a different decision, and
+# backup_file stays untouched for its other callers.
+backup_file_before_write() {
+    local path="$1" stamp="${2:-}" dest rc=0
+    if file_holds_omnigraph_token "$path"; then
+        # The same python the env writer imports, run as a CLI: one implementation
+        # of "back up a file that holds a live credential", found next to this file
+        # the way run() finds process.py.
+        dest="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/secret_backup.py" \
+            "$path" "$stamp")" || rc=$?
+        if (( rc != 0 )); then
+            return 1
+        fi
+        printf '%s\n' "$dest"
+        return 0
+    fi
+    backup_file "$path" "$stamp"
 }
 
 # backup_name_key <path> <backup>: a string that sorts the backups of <path> in
@@ -132,12 +191,65 @@ append_line_once() {
     fi
     mkdir -p "$(dirname "$file")"
     # Never modify a user's file without a copy of the original: no copy, no write.
-    if [[ -f "$file" ]] && ! backup_file "$file" >/dev/null; then
+    if [[ -f "$file" ]] && ! backup_file_before_write "$file" >/dev/null; then
         ui_warn "could not back up ${file} - nothing was changed"
         return 1
     fi
     printf '\n# added by AutoOS\n%s\n' "$content" >>"$file"
     ui_ok "updated ${file}"
+}
+
+# autoos_rc_edit_lines <file> <mode> <needle> <second>
+# The one editor of a user's rc file. Modes:
+#   drop_with     a line holding <needle> AND <second> is removed
+#   drop_without  a line holding <needle> but NOT <second> is removed
+#   replace       the FIRST line holding <needle> becomes <second>, keeping that
+#                 line's own newline so a CRLF file stays a CRLF file, and any
+#                 further match goes — one marker, one line, the same invariant
+#                 append_line_once keeps
+# Bytes, not decoded text: a dotfile is not necessarily UTF-8, and a text-mode
+# read either fails on one or re-encodes the whole file to edit one line of it.
+# Contained like every other step — setup.sh runs under `set -euo pipefail`, so a
+# python that dies must hand its status back, not take the run down. Exit 0 means
+# the file is as asked (nothing matched is a success), 1 that it could not be read
+# or written, 2 that the caller asked for a mode that does not exist. The path
+# belongs in the caller's message; the file's contents never reach the log.
+autoos_rc_edit_lines() {
+    local rc=0
+    AUTOOS_RC_MODE="$2" AUTOOS_RC_A="$3" AUTOOS_RC_B="$4" python3 - "$1" <<'PY' || rc=$?
+import os, sys
+path = sys.argv[1]
+mode = os.environ["AUTOOS_RC_MODE"]
+a = os.environ["AUTOOS_RC_A"].encode()
+b = os.environ["AUTOOS_RC_B"].encode()
+try:
+    with open(path, "rb") as f:
+        parts = f.read().split(b"\n")
+    if mode == "drop_with":
+        kept = [p for p in parts if not (a in p and b in p)]
+    elif mode == "drop_without":
+        kept = [p for p in parts if not (a in p and b not in p)]
+    elif mode == "replace":
+        kept, placed = [], False
+        for p in parts:
+            if a in p:
+                if placed:
+                    continue
+                placed = True
+                p = b + (b"\r" if p.endswith(b"\r") else b"")
+            kept.append(p)
+    else:
+        sys.exit(2)
+    if kept == parts:
+        sys.exit(0)
+    with open(path, "wb") as f:
+        f.write(b"\n".join(kept))
+except OSError:
+    # The caller announces this: it names the file, and a traceback in a
+    # provisioning log reads like a crash. Anything else stays loud.
+    sys.exit(1)
+PY
+    return "$rc"
 }
 
 apt_update_once() {
@@ -204,6 +316,23 @@ custom_is_installed() {
             ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
+            ;;
+        omnigraph-client)
+            # "Installed" here means there is nothing left to write: this
+            # machine has a URL answer, the env file carries that URL and the
+            # token this run resolves, the private prefix holds the pinned
+            # bridge, the wrapper is a copy of the tracked one, and the rc files
+            # hold the line and none of the retired ones. The token is part of
+            # the question — install_component asks BEFORE the postInstall runs,
+            # so a gate that only checked "a token is in the file" would skip a
+            # rotation forever (A3 review, HIGH). AGENTS.md 4: the second run
+            # must report skipped, not installed.
+            local omni_base omni_token
+            omni_base="$(omnigraph_url_answer)"
+            [[ -n "$omni_base" ]] || return 1
+            omni_token="$(omnigraph_client_token)"
+            [[ -n "$omni_token" ]] || return 1
+            omnigraph_client_is_current "$omni_base" "$omni_token"
             ;;
         mcp-graphify)
             mcp_has_server graphify || antigravity_has_server graphify
@@ -305,6 +434,84 @@ INSTALL_STATE=""
 # current) sets this to "skipped": install_component then reports skipped, not
 # installed. Reset on every call.
 INSTALL_SCRIPT_STATE=""
+# A post-install step can refuse to touch a user's file (a backup that could not
+# be made means no write) without the package install failing. Such a step calls
+# `autoos_record_failure <id>`, and setup.sh folds the ids into the result
+# buckets with autoos_fold_extra_failures, so neither the summary nor the exit
+# code can read "done" over a change that never happened. The id is a catalog
+# component id — that is what lets the fold find the component it belongs to —
+# and it is recorded once, so two call paths in one run cannot double-count.
+AUTOOS_EXTRA_FAILURES=()
+# autoos_list_has <value> <value>...: whether the first argument is one of the
+# rest. Every membership test in this section is the same loop, and "recorded
+# once" / "failed once" / "is this component a refusal" must not drift apart.
+autoos_list_has() {
+    local want="$1" seen
+    shift
+    for seen in "$@"; do
+        [[ "$seen" == "$want" ]] && return 0
+    done
+    return 1
+}
+autoos_record_failure() {
+    local id="$1"
+    autoos_list_has "$id" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}" && return 0
+    AUTOOS_EXTRA_FAILURES+=("$id")
+    return 0
+}
+
+# The three result buckets setup.sh fills while it executes, one component id per
+# element. Ids and not display names: a name with spaces shatters when the list is
+# joined for the state file, and "counted as installed *and* failed" is only
+# detectable by id. The counts are their lengths (autoos_fold_extra_failures).
+AUTOOS_RESULT_INSTALLED=()
+AUTOOS_RESULT_SKIPPED=()
+AUTOOS_RESULT_FAILED=()
+
+# autoos_is_recorded_failure <id>: whether a post-install step refused a change
+# to <id>'s own file. The recorder's list is the one place that knows.
+autoos_is_recorded_failure() {
+    autoos_list_has "$1" "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"
+}
+
+# autoos_fold_extra_failures: merge AUTOOS_EXTRA_FAILURES into the buckets.
+# A refusal is a component's ONLY result: leaving the id in the installed (or
+# skipped) bucket as well counted one component in two numbers and wrote it into
+# both buckets of the state file, so "3 installed, 1 failed" described 4 things
+# that happened to 3 components. Called after the execute loop, when the list of
+# refusals is complete — including a refusal recorded under another component.
+autoos_fold_extra_failures() {
+    local extra entry keep
+    for extra in "${AUTOOS_EXTRA_FAILURES[@]+"${AUTOOS_EXTRA_FAILURES[@]}"}"; do
+        keep=()
+        for entry in "${AUTOOS_RESULT_INSTALLED[@]+"${AUTOOS_RESULT_INSTALLED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_INSTALLED=("${keep[@]+"${keep[@]}"}")
+        keep=()
+        for entry in "${AUTOOS_RESULT_SKIPPED[@]+"${AUTOOS_RESULT_SKIPPED[@]}"}"; do
+            [[ "$entry" == "$extra" ]] || keep+=("$entry")
+        done
+        AUTOOS_RESULT_SKIPPED=("${keep[@]+"${keep[@]}"}")
+        # Failed once, even when the install itself failed too.
+        autoos_list_has "$extra" "${AUTOOS_RESULT_FAILED[@]+"${AUTOOS_RESULT_FAILED[@]}"}" \
+            || AUTOOS_RESULT_FAILED+=("$extra")
+    done
+}
+
+# autoos_result_label <id>: one line of the failure report. The catalog name
+# where there is one, the token itself otherwise (a step may record an id of its
+# own); a post-install refusal says so, because "<name> failed" alone reads like
+# a broken package run rather than a step that refused to touch a user's file.
+autoos_result_label() {
+    local id="$1" i name
+    if i="$(catalog_index_of "$id")"; then name="${CAT_NAME[i]}"; else name="$id"; fi
+    if autoos_is_recorded_failure "$id"; then
+        printf '%s (post-install)' "$name"
+    else
+        printf '%s' "$name"
+    fi
+}
 install_component() {
     local provider="$1" package="$2" CASK_FLAG="${3:-0}"
     INSTALL_STATE="failed"; INSTALL_SCRIPT_STATE=""
@@ -1837,8 +2044,16 @@ install_herdr_sessions() {
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would run: bash $driver --profile $profile --dry-run"
-        local dry_out; dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)"
+        # The driver's own dry run can fail; discarding that status (as a plain
+        # `$(...)` did) reported success over a plan the driver refused to
+        # produce. Capture and report it like the real path below.
+        local dry_out dry_rc=0
+        dry_out="$(bash "$driver" --profile "$profile" --dry-run 2>&1)" || dry_rc=$?
         [[ -n "$dry_out" ]] && ui_muted "$dry_out"
+        if (( dry_rc != 0 )); then
+            ui_err "herdr-sessions: driver dry run failed (rc=$dry_rc) for profile $profile"
+            return 1
+        fi
         return 0
     fi
 
@@ -2543,7 +2758,10 @@ route_detected_clis_to_gateway() {
         unset _file_key
     fi
     if has_cmd claude; then
-        route_claude_to_gateway
+        # route_claude_to_gateway is `claude-code`'s own postInstall, called
+        # directly from `omniroute`'s step: bare here it would abort the run under
+        # setup.sh's `set -euo pipefail`, so it records the component instead.
+        route_claude_to_gateway || autoos_record_failure claude-code
     else
         ui_muted "Claude Code not installed - skipping gateway routing"
     fi
@@ -3291,17 +3509,170 @@ PY
 
 install_mcp_graphify() {
     ui_info "Setting up Graphify MCP server (Claude Code + Antigravity)"
-    local graphify_pkg
-    graphify_pkg="$(mcp_package graphify)"
-    register_mcp_server graphify user "$SYS_HOME" \
-        uv --quiet run --with "$graphify_pkg" python -m graphify.serve graphify-out/graph.json
+    local pkg rc=0
+    pkg="$(mcp_package graphify)"
 
-    local spec
-    spec="$(python3 -c '
-import json, sys
-print(json.dumps({"command": "uv", "args": ["--quiet", "run", "--with", sys.argv[1], "python", "-m", "graphify.serve", "${workspaceFolder}/graphify-out/graph.json"]}))
-' "$graphify_pkg")"
-    register_antigravity_mcp_server graphify "$spec"
+    # The tool first, the clients only over what it actually put on disk. Registering
+    # whatever install_graphify_tool answered is the defect this closes: a client
+    # config entry is a promise the client holds at every session start, and with no
+    # uv, an outage during `uv tool install`, or the user's own file in uv's tool bin
+    # dir the entry named a command that does not exist — and because
+    # register_mcp_server leaves a name it already sees alone, every later run read
+    # "already registered" over the broken entry instead of repairing it.
+    if ! install_graphify_tool; then
+        ui_warn "graphify MCP servers were not registered - the pinned tool is not installed. Fix the reason above, then run this step again."
+        return 1
+    fi
+    # A successful `uv tool install` is the one that wrote its executable here. When
+    # it did not (a tool bin dir pointed somewhere else by the environment), registering
+    # would re-open exactly the hole above, so the path is checked, not assumed.
+    if (( ! AUTOOS_DRY_RUN )) && ! graphify_mcp_resolves; then
+        ui_warn "graphify MCP servers were not registered - $(graphify_mcp_bin_path) is not there after the install, so uv's tool bin dir differs; the clients would only get a command they cannot start."
+        return 1
+    fi
+
+    replace_stale_graphify_mcp_entry "$pkg" || rc=1
+
+    # Which command to register: the installed `graphify-mcp`, not a `uv run --with`
+    # line. `uv tool install` drops its executables in uv's own bin dir, which on
+    # Linux is the directory `uv` itself lives in (measured here: a non-interactive
+    # `bash -c` resolves both ~/.local/bin/uv and ~/.local/bin/graphify-mcp, out of
+    # the one dir). So the installed tool is exactly as reachable in the shell a
+    # client spawns as the on-demand form ever was, and it needs no resolver, no
+    # network and no cache at launch — the same reason D9 refuses a lazy npx bridge
+    # in favour of a pre-installed, pinned one. The argument is the module's own
+    # default path, kept explicit and cwd-relative so one user-scope entry serves
+    # every repository its own graph.
+    register_mcp_server graphify user "$SYS_HOME" \
+        graphify-mcp graphify-out/graph.json
+
+    # Antigravity expands ${workspaceFolder} itself; a single-quoted string keeps it
+    # out of this shell's way. Its writer overwrites a differing spec, so this side
+    # repairs its own stale entry without help.
+    register_antigravity_mcp_server graphify \
+        '{"command": "graphify-mcp", "args": ["${workspaceFolder}/graphify-out/graph.json"]}'
+    return $rc
+}
+
+# graphify_user_entry <config file> <package> <resolves|missing>: classifies the user-scope
+# 'graphify' entry of a Claude Code user config - none | tool | stale-tool | uv-run |
+# wrapper | other. tool is the entry this installer writes now and the tool resolves;
+# stale-tool is that same bare `graphify-mcp` command with nothing behind it (the
+# entry a run before this fix wrote when the install failed); uv-run is the on-demand
+# `uv --quiet run --with <package> python -m graphify.serve …` line AutoOS wrote
+# before the pinned tool existed (any version or extras of the catalog's distribution
+# name); wrapper is a path ending in the retired docker wrapper's component shape,
+# matched as components the way every other AutoOS-leftover recognition matches, so a
+# sibling directory with that name in it is not mistaken for it. Anything else - a
+# different shape, an env block, another argument list - is `other`: the user's own
+# server, never touched. The third argument is graphify_mcp_resolves' verdict, passed
+# in rather than re-derived here, so one rule decides what "the tool is there" means.
+# The file is read, never written, and nothing from it is echoed: an entry's args can
+# carry a token.
+graphify_user_entry() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, posixpath, sys
+
+GRAPH = "graphify-out/graph.json"
+UV_RUN = ["--quiet", "run", "--with", None, "python", "-m", "graphify.serve", GRAPH]
+path, package, resolves = sys.argv[1], sys.argv[2], sys.argv[3]
+name = package.split("[", 1)[0].split("=", 1)[0]
+
+try:
+    with open(path, encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("graphify")
+except (OSError, ValueError, AttributeError):
+    entry = None
+
+kind = "other"
+if entry is None:
+    kind = "none"
+elif (isinstance(entry, dict) and set(entry) <= {"type", "command", "args", "env"}
+        and entry.get("type", "stdio") == "stdio" and not entry.get("env")
+        and isinstance(entry.get("command"), str)
+        and isinstance(entry.get("args", []), list)
+        and all(isinstance(a, str) for a in entry.get("args", []))):
+    command, args = entry["command"], entry["args"]
+    if command == "graphify-mcp" and args == [GRAPH]:
+        kind = "tool" if resolves == "resolves" else "stale-tool"
+    elif (command == "uv" and len(args) == len(UV_RUN)
+            and args[:3] == UV_RUN[:3] and args[4:] == UV_RUN[4:]
+            and args[3].split("[", 1)[0].split("=", 1)[0] == name):
+        kind = "uv-run"
+    elif posixpath.basename(command) == "graphify-mcp" and args == [GRAPH]:
+        parts = posixpath.normpath(command).split("/")
+        if parts[-4:] == ["infra", "mcp-servers", "bin", "graphify-mcp"]:
+            kind = "wrapper"
+print(kind)
+PY
+}
+
+# replace_stale_graphify_mcp_entry <package>: hand Claude Code's user-scope 'graphify'
+# entry back to the shape the pinned tool needs, but only an entry this installer can
+# recognise as its own previous form (uv-run, wrapper) or one it broke (stale-tool).
+# A config the user wrote under that name is left exactly as it is - deleting a working
+# server they installed by hand is not a migration. Removal goes through `claude mcp
+# remove`, never a hand-edited JSON: the CLI owns the file's format and everything else
+# in it, so the config keeps its shape and its session data. No copy, no write, so the
+# file is backed up first and a failed backup means no change. The re-add is
+# register_mcp_server's own job right after this, which is what makes the repair
+# idempotent: the name is free, the add lands, and a second run finds `tool`.
+replace_stale_graphify_mcp_entry() {
+    local package="$1" cfg kind backup resolved
+    cfg="$(claude_user_config_file)"
+    if graphify_mcp_resolves; then resolved=resolves; else resolved=missing; fi
+
+    # The claude CLI reads $HOME; the home this run configures is $SYS_HOME. When the
+    # resolver names a file outside it, the run is not pointed at that config — the
+    # same rule remove_stale_homelab_mcp_entry applies. A CLAUDE_CONFIG_DIR the user
+    # set is explicit intent and honoured.
+    if [[ -z "${CLAUDE_CONFIG_DIR:-}" && "$cfg" != "${SYS_HOME%/}/.claude.json" &&
+          "$cfg" != "${SYS_HOME%/}/.claude/.config.json" ]]; then
+        ui_muted "the user-scope claude config (${cfg}) is not in this run's home (${SYS_HOME}) - nothing repaired (skipped)"
+        return 0
+    fi
+
+    kind="$(graphify_user_entry "$cfg" "$package" "$resolved" 2>/dev/null)" || kind="none"
+
+    # Fail closed on any verdict the classifier did not name: only the three shapes
+    # below are AutoOS's own, and an unreadable config is no licence to rewrite it.
+    case "$kind" in
+        none)
+            return 0
+            ;;
+        tool)
+            ui_muted "MCP server 'graphify' already points at the pinned tool - skipped."
+            return 0
+            ;;
+        stale-tool | uv-run | wrapper) ;;
+        *)
+            ui_warn "MCP server 'graphify' has a custom user-scope entry - left alone. To let AutoOS wire the pinned tool, remove it first: claude mcp remove graphify --scope user"
+            return 0
+            ;;
+    esac
+
+    if ! has_cmd claude; then
+        ui_warn "the stale '${kind//-/ }' 'graphify' entry was left in ${cfg} - claude is not on PATH to replace it (claude mcp remove graphify --scope user)"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would back up ${cfg} and run: claude mcp remove graphify --scope user, then claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json (replacing the ${kind//-/ } entry)"
+        return 0
+    fi
+
+    backup=""
+    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
+        ui_warn "could not back up ${cfg} - the '${kind//-/ }' 'graphify' entry was left unchanged"
+        return 1
+    fi
+
+    ui_muted "run: claude mcp remove graphify --scope user"
+    if ! claude mcp remove graphify --scope user; then
+        ui_warn "could not remove the '${kind//-/ }' 'graphify' entry - left unchanged${backup:+ (config backup: ${backup})}"
+        return 1
+    fi
+    ui_ok "removed the '${kind//-/ }' user-scope 'graphify' entry that predates the pinned tool - re-registered below${backup:+ (config backup: ${backup})}"
+    return 0
 }
 
 # ─── Playwright MCP: the lazy proxy ─────────────────────────────────────────
@@ -3329,6 +3700,118 @@ claude_user_config_file() {
     fi
 }
 
+# homelab_user_entry <config file>: classifies the user-scope 'homelab' entry of a
+# Claude Code user config - none | agent-skills | other. agent-skills means the entry
+# is a leftover this installer's retired upstream wrote: its env PYTHONPATH, or one of
+# its args, names the agent-skills tree as a path component (a '/'-split match, so a
+# sibling directory merely containing that string in its name is not mistaken for it).
+# Only the top-level mcpServers block is looked at: the per-project blocks belong to
+# each repository's own .mcp.json approval, never to a user-scope cleanup. The file is
+# read, never written, and nothing from it is echoed - an entry's args can carry a
+# token, and a removal message must not print one.
+homelab_user_entry() {
+    python3 - "$1" <<'PY'
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = (json.load(fh).get("mcpServers") or {}).get("homelab")
+except (OSError, ValueError, AttributeError):
+    entry = None
+
+if entry is None:
+    print("none")
+    sys.exit(0)
+if not isinstance(entry, dict):
+    print("other")
+    sys.exit(0)
+
+values = []
+env = entry.get("env")
+if isinstance(env, dict) and isinstance(env.get("PYTHONPATH"), str):
+    values.append(env["PYTHONPATH"])
+args = entry.get("args")
+if isinstance(args, list):
+    values.extend(a for a in args if isinstance(a, str))
+
+recognised = any(
+    "agent-skills" in part.split(os.sep)
+    for value in values
+    for part in value.split(os.pathsep)
+)
+print("agent-skills" if recognised else "other")
+PY
+}
+
+# remove_stale_homelab_mcp_entry: drop the user-scope 'homelab' MCP entry, but only
+# the one this installer can recognise as its upstream's leftover (spec §C; D14 makes
+# homelab not-an-AutoOS-component, so nothing else about it is ever touched). Read,
+# back up once, remove, report. Removal goes through `claude mcp remove --scope user`
+# rather than a hand-edited JSON: that CLI owns the file's format and everything else
+# in it, so the config keeps its shape and its session data. An entry that does not
+# point into the retired clone is the user's and stays exactly as it is; a second run
+# finds nothing and reports skipped.
+remove_stale_homelab_mcp_entry() {
+    local cfg kind backup
+    cfg="$(claude_user_config_file)"
+
+    # The claude CLI reads $HOME, the home this run configures is $SYS_HOME. When
+    # the resolver names a file outside it, the run is not pointed at that config:
+    # setup under sudo edits root's, and the test harness fakes SYS_HOME while HOME
+    # stays the operator's real home. Refusing is the same rule install_antigravity
+    # applies to a home it does not own. A CLAUDE_CONFIG_DIR the user set is explicit
+    # intent and honoured - that file is the one claude reads either way.
+    if [[ -z "${CLAUDE_CONFIG_DIR:-}" && "$cfg" != "${SYS_HOME%/}/.claude.json" &&
+          "$cfg" != "${SYS_HOME%/}/.claude/.config.json" ]]; then
+        ui_muted "the user-scope claude config (${cfg}) is not in this run's home (${SYS_HOME}) - nothing removed (skipped)"
+        return 0
+    fi
+
+    kind="$(homelab_user_entry "$cfg" 2>/dev/null)" || kind="none"
+
+    case "$kind" in
+        none)
+            ui_muted "no user-scope 'homelab' MCP entry in ${cfg} (skipped)"
+            return 0
+            ;;
+        agent-skills) ;;
+        *)
+            ui_warn "MCP server 'homelab' does not point into the retired agent-skills clone - left alone. If it is yours to remove: claude mcp remove homelab --scope user"
+            return 0
+            ;;
+    esac
+
+    if ! has_cmd claude; then
+        ui_warn "the stale 'homelab' entry was left in ${cfg} - claude is not on PATH to remove it (claude mcp remove homelab --scope user)"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would back up ${cfg}, run: claude mcp remove homelab --scope user (the entry's path is in the retired agent-skills clone)"
+        return 0
+    fi
+
+    # No copy, no write: the file is the user's, and it holds more than this entry.
+    backup=""
+    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
+        ui_warn "could not back up ${cfg} - the 'homelab' entry was left unchanged"
+        return 0
+    fi
+
+    ui_muted "run: claude mcp remove homelab --scope user"
+    if ! claude mcp remove homelab --scope user; then
+        ui_warn "could not remove the 'homelab' entry - left unchanged${backup:+ (config backup: ${backup})}"
+        return 0
+    fi
+    if [[ "$(homelab_user_entry "$cfg" 2>/dev/null)" == agent-skills ]]; then
+        ui_warn "claude reported the entry gone but it is still in ${cfg} - left as claude wrote it${backup:+ (config backup: ${backup})}"
+        return 0
+    fi
+    ui_ok "removed the stale user-scope 'homelab' MCP entry${backup:+ (config backup: ${backup})}"
+    return 0
+}
+
 # playwright_user_entry <config file> <proxy path> <package>: classifies the
 # user-scope 'playwright' entry - none | proxy | stale-proxy | docker | npx | custom.
 # docker and npx are only the two forms this installer used to write, EXACTLY (no
@@ -3342,7 +3825,7 @@ claude_user_config_file() {
 # token. The file is read, never written.
 playwright_user_entry() {
     python3 - "$1" "$2" "$3" <<'PY'
-import json, posixpath, sys
+import json, os, posixpath, sys
 
 DOCKER = ["run", "-i", "--rm", "--init", "--network", "host", "mcr.microsoft.com/playwright/mcp:latest"]
 path, proxy, package = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -3446,7 +3929,7 @@ register_playwright_lazy_proxy() {
         else
             ui_warn "could not back up ${cfg} - the ${kind/-/ } 'playwright' entry was left unchanged"
         fi
-        return 0
+        return 1
     fi
 
     if [[ "$kind" != none ]]; then
@@ -3469,11 +3952,14 @@ register_playwright_lazy_proxy() {
         fi
     elif [[ "$kind" == none ]]; then
         ui_warn "could not register 'playwright'"
+        return 1
     elif ( cd "$SYS_HOME" 2>/dev/null; claude mcp add --scope user playwright -- "${old[@]}" ); then
         ui_warn "could not add the lazy proxy - put back the previous ${kind/-/ } entry (config backup: ${backup})"
+        return 1
     else
         printf -v restore '%q ' "${old[@]}"      # quoted: a checkout path may hold a space
         ui_err "could not add the lazy proxy and could not put back the previous ${kind/-/ } entry - restore it with: claude mcp add --scope user playwright -- ${restore}(config backup: ${backup})"
+        return 1
     fi
     return 0
 }
@@ -3486,7 +3972,13 @@ install_mcp_playwright() {
     # Linux behaviour (mcp-servers-setup says so); macOS keeps its npx entry until
     # that is measured there.
     if [[ "${SYS_OS:-linux}" != macos ]] && has_cmd docker; then
-        register_playwright_lazy_proxy "$playwright_pkg"
+        # run_post_install contains the step's exit code; this record is here
+        # because the step carries on to the Antigravity entry either way, so its
+        # own return says nothing about the proxy. The id is the one the fold
+        # looks for, and it matches the id install_agent_skills' guarded call
+        # records — `autoos_record_failure` keeps it to one entry.
+        register_playwright_lazy_proxy "$playwright_pkg" \
+            || autoos_record_failure mcp-playwright
     else
         # No docker (or macOS), so no backend for the proxy: today's npx entry.
         register_mcp_server playwright user "$SYS_HOME" \
@@ -3653,7 +4145,7 @@ enable_project_mcp_server() {
     mkdir -p "$repo/.claude"
     if [[ -f "$path" ]] && ! backup_file "$path" >/dev/null; then
         ui_warn "could not back up ${path} - left unchanged"
-        return 0
+        return 1
     fi
     if ! python3 - "$path" "$name" <<'PY'; then
 import json, pathlib, sys
@@ -3714,7 +4206,113 @@ omnigraph_readiness() {
     (( ready ))
 }
 
-# write_omnigraph_env <base-url>
+# omnigraph_env_state <file> <base-url> <token> [write|check]
+# Prints "written" or "unchanged": whether the env file holds exactly what a
+# write would put in it. mode=write applies it (backup, atomic replace, mode 600);
+# mode=check touches nothing. ONE implementation for both, because the skip gate
+# and the writer must never disagree about what "current" means — a gate that
+# asks a weaker question than the writer answers skips the write forever, which
+# is how a rotated token stayed stale (A3 review, HIGH). The values reach python
+# in the environment and are never printed: the bearer token must not end up in
+# a log line or a shell word.
+omnigraph_env_state() {
+    local path="$1" base="$2" token="$3" mode="${4:-write}"
+    local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    OMNI_BASE="$base" OMNI_TOKEN="$token" OMNI_MODE="$mode" OMNI_LIBDIR="$here" python3 - "$path" <<'PY'
+import os, sys, tempfile
+# The one implementation of "back up a file that holds a live credential", shared
+# with the shell side (backup_file_before_write). Imported rather than re-typed,
+# and inside THIS process rather than a second run, because the copy of the old
+# token has to land before the replace that destroys it.
+sys.dont_write_bytecode = True   # an install run leaves no __pycache__ in the user's checkout
+sys.path.insert(0, os.environ["OMNI_LIBDIR"])
+from secret_backup import secret_backup
+path = sys.argv[1]
+mode = os.environ.get("OMNI_MODE", "write")
+want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
+if os.environ.get("OMNI_TOKEN"):
+    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
+
+def key_of(line):
+    # The forms this file is written in: `KEY=value`, and `export KEY=value`
+    # with any indent — what a person editing it by hand types. Recognising both
+    # here is what lets the writer normalise a hand line into one canonical row
+    # instead of leaving a second value that a reader could take first (the
+    # wrapper reads the file line by line, first value wins).
+    text = line.strip()
+    if text.startswith("export ") or text.startswith("export\t"):
+        text = text[len("export"):].lstrip()
+    return text.split("=", 1)[0].strip()
+
+old = ""
+if os.path.exists(path):
+    # surrogateescape, not a strict decode: a hand-edited file carrying one
+    # non-UTF-8 byte (a pasted curly quote is the ordinary case) must still be
+    # repairable — a strict read fails the write, and the token would never
+    # land. Odd bytes round-trip untouched, the way they came in.
+    with open(path, encoding="utf-8", newline="", errors="surrogateescape") as f:
+        old = f.read()
+lines, seen = [], set()
+for line in old.splitlines():
+    key = key_of(line)
+    if key in want:
+        if key in seen:
+            continue
+        line = "%s=%s" % (key, want[key])
+        seen.add(key)
+    lines.append(line)
+lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
+new = "\n".join(lines) + "\n"
+has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
+try:
+    mode_ok = (os.stat(path).st_mode & 0o777) == 0o600
+except OSError:
+    mode_ok = False
+if new == old and (mode != "check" or mode_ok):
+    if mode == "write" and not mode_ok:
+        os.chmod(path, 0o600)
+    print("unchanged", "token" if has_token else "no-token")
+    sys.exit(0)
+if mode == "check":
+    # What a write would do, reported without doing it — and without printing
+    # the value that differs.
+    print("written", "token" if has_token else "no-token")
+    sys.exit(0)
+if old:
+    # The file being replaced holds the PREVIOUS token, which is still a live
+    # bearer credential until the server expires it: the copy is created 0600 by
+    # the same syscall that creates it, with O_EXCL so a same-second backup is
+    # never clobbered, and only the source's times are carried across - copystat
+    # would copy the mode as well and this must never widen it. The helper is
+    # secret_backup.py, the one the shell's backup_file_before_write runs too
+    # (A3 review 4, S1).
+    secret_backup(path)
+folder = os.path.dirname(path) or "."
+# An unpredictable name in the file's own directory, so os.replace stays atomic.
+# This step used to open the fixed, guessable name `<path>.tmp` with O_CREAT|O_TRUNC:
+# anyone who could write in the home (another user on a shared or NFS box, a
+# component that ran earlier) could plant a symlink there and turn "update my
+# token" into "truncate and rename over the file I chose" - token bytes and all,
+# and two runs in the same second shared the one name. mkstemp creates it 0600
+# with O_EXCL in the same step (A3 review 4, S2).
+fd, tmp = tempfile.mkstemp(dir=folder, prefix=os.path.basename(path) + ".autoos-tmp-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n", errors="surrogateescape") as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+print("written", "token" if has_token else "no-token")
+PY
+}
+
+# write_omnigraph_env <base-url> [token]
 # The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
 # place the bearer token lives on this machine. Tracked configs name the token
 # (${OMNIGRAPH_TOKEN} in .mcp.json; opencode, Zed and OpenHands inherit it), so
@@ -3727,70 +4325,37 @@ omnigraph_readiness() {
 #   * linked as ~/.config/environment.d/60-autoos-omnigraph.conf, which the
 #     systemd user manager and desktop sessions load at login, and
 #   * sourced from ~/.bashrc / ~/.zshrc when OMNIGRAPH_TOKEN is not set yet.
-# The token comes from $OMNIGRAPH_TOKEN, else from the local omnigraph-server
-# container, else stays whatever the file already had. Never invented, never
-# printed. Read-modify-write: other keys in the file are kept.
+# The token is the [token] argument, else $OMNIGRAPH_TOKEN, else the local
+# omnigraph-server container, else whatever the file already had. Never invented,
+# never printed. Read-modify-write: other keys in the file are kept.
+# OMNIGRAPH_ENV_STATE is "written" or "unchanged" when it returns, so a caller
+# that reports its own idempotency (omnigraph-client) can say the same thing.
 write_omnigraph_env() {
     local base="$1" file="$SYS_HOME/.autoos-omnigraph.env"
     local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    OMNIGRAPH_ENV_STATE="unchanged"
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would write ${file} (mode 600) and link it into ${link%/*}"
         return 0
     fi
-    local token="${OMNIGRAPH_TOKEN:-}"
+    local token="${2:-${OMNIGRAPH_TOKEN:-}}"
     if [[ -z "$token" ]] && has_cmd docker; then
         token="$(docker inspect omnigraph-server --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
             | sed -n 's/^OMNIGRAPH_SERVER_BEARER_TOKEN=//p' | head -n 1)" || token=""
     fi
 
     local status rc=0
-    status="$(OMNI_BASE="$base" OMNI_TOKEN="$token" python3 - "$file" <<'PY'
-import os, shutil, sys, time
-path = sys.argv[1]
-want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
-if os.environ.get("OMNI_TOKEN"):
-    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
-old = ""
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f:
-        old = f.read()
-lines, seen = [], set()
-for line in old.splitlines():
-    key = line.split("=", 1)[0].strip()
-    if key in want:
-        if key in seen:
-            continue
-        line = "%s=%s" % (key, want[key])
-        seen.add(key)
-    lines.append(line)
-lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
-new = "\n".join(lines) + "\n"
-has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
-if new == old:
-    os.chmod(path, 0o600)
-    print("unchanged", "token" if has_token else "no-token")
-    sys.exit(0)
-if old:
-    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
-    shutil.copy2(path, backup)
-    os.chmod(backup, 0o600)
-tmp = path + ".tmp"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    f.write(new)
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-print("written", "token" if has_token else "no-token")
-PY
-)" || rc=$?
+    status="$(omnigraph_env_state "$file" "$base" "$token" write)" || rc=$?
     if (( rc != 0 )); then
         ui_warn "could not write ${file} (exit ${rc})"
         return 0
     fi
     if [[ "$status" == unchanged* ]]; then
         ui_muted "omnigraph env file unchanged (${file})"
+        OMNIGRAPH_ENV_STATE="unchanged"
     else
         ui_ok "omnigraph env written to ${file} (mode 600)"
+        OMNIGRAPH_ENV_STATE="written"
     fi
     if [[ "$status" == *no-token ]]; then
         ui_warn "OMNIGRAPH_TOKEN is not set and no local omnigraph-server holds one."
@@ -3804,6 +4369,7 @@ PY
         ui_warn "${link} exists and is not AutoOS's link — left alone."
     else
         ln -s "$file" "$link"
+        OMNIGRAPH_ENV_STATE="written"
         ui_ok "linked ${link} (systemd user services and desktop apps)"
     fi
 
@@ -3816,25 +4382,357 @@ PY
     # shellcheck disable=SC2016
     local rc_line
     rc_line="$(omnigraph_rc_line)"
-    local shell_rc
+    local shell_rc marker
+    marker="$(omnigraph_rc_marker)"
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
-        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
+        # The rc line still has to land (or a stale one still has to go) -> this
+        # call changed the user's shell startup, whatever the file said before.
+        if ! grep -qF -- "$marker" "$shell_rc" \
+            || grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "$marker"; then
+            OMNIGRAPH_ENV_STATE="written"
+        fi
+        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "$marker" "$rc_line"
     done
 }
+
+# omnigraph_rc_marker: the tag that marks an rc line as AutoOS's, versioned.
+# Bump the version whenever the line below changes shape: the writer recognises a
+# line by this tag alone, so an unchanged tag would leave every machine already
+# carrying the old line sitting on it forever (and the gate, which compares the
+# whole line, would never read current again). "AutoOS:omnigraph-env" — the tag
+# without its -vN tail — is the older-line marker the writer purges, so one bump
+# covers every version at once.
+omnigraph_rc_marker() { printf '%s\n' 'AutoOS:omnigraph-env-v3'; }
 
 omnigraph_rc_line() {
     # The rc-file line write_omnigraph_env installs (one place, so the suite
     # tests the exact text). Literal $HOME/${...}: it expands in the rc file at
     # shell start-up, not here.
     # shellcheck disable=SC2016
-    printf '%s\n' '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
+    printf '%s  # %s\n' \
+        '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) _ag_k=${_ag_l%%=*}; _ag_v=${_ag_l#*=}; _ag_v=${_ag_v#"${_ag_v%%[![:space:]]*}"}; _ag_v=${_ag_v%"${_ag_v##*[![:space:]]}"}; for _ag_q in $'"'"'\042'"'"' $'"'"'\047'"'"'; do if [ "${_ag_v#$_ag_q}" != "$_ag_v" ] && [ "${_ag_v%$_ag_q}" != "$_ag_v" ]; then _ag_v=${_ag_v#$_ag_q}; _ag_v=${_ag_v%$_ag_q}; fi; done; export "$_ag_k=$_ag_v" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l _ag_k _ag_v _ag_q' \
+        "$(omnigraph_rc_marker)"
+}
+
+# ─── omnigraph-client (spec 2026-09-27 §A/§C, plan A3) ──────────────────────
+#
+# The client-side component for a machine that talks to a shared Omnigraph
+# server. Four steps, each one idempotent on its own:
+#   1. ~/.autoos-omnigraph.env with the URL answer and the bearer token;
+#   2. the pinned bridge PRE-INSTALLED into a private npm prefix — npx start-up
+#      measured 6.7-9.3 s median over 16 parallel bridges, which is decision D9's
+#      "otherwise" branch (docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md);
+#   3. the omnigraph-mcp-autoos wrapper, which reads the env file itself so a
+#      non-interactive `bash -c` client gets the token with no rc-file line;
+#   4. the retirement of the old rc-file token line, recognised-only (§C).
+# The private prefix keeps the bridge out of the user's global npm install and
+# out of their PATH; only the wrapper knows where it lives.
+OMNIGRAPH_CLIENT_CHANGED=0
+# "written" | "unchanged" after the next write_omnigraph_env call.
+OMNIGRAPH_ENV_STATE="unchanged"
+
+omnigraph_client_prefix() { printf '%s\n' "$SYS_HOME/.local/share/autoos/omnigraph-mcp"; }
+
+omnigraph_client_repo_root() {
+    printf '%s\n' "${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+}
+
+omnigraph_bridge_pkg_name() {
+    # The npm package name, without its pin: the catalog holds one string that
+    # carries both (mcp_package omnigraph), and this is the only place that
+    # splits it.
+    local spec; spec="$(mcp_package omnigraph)"
+    printf '%s\n' "${spec%@*}"
+}
+
+omnigraph_bridge_pin() {
+    local spec; spec="$(mcp_package omnigraph)"
+    printf '%s\n' "${spec##*@}"
+}
+
+omnigraph_bridge_bin() {
+    # The executable npm links into the prefix's bin dir for that package — the
+    # path the wrapper execs. One derivation, used by both.
+    local name; name="$(omnigraph_bridge_pkg_name)"
+    printf '%s/bin/%s\n' "$(omnigraph_client_prefix)" "${name##*/}"
+}
+
+omnigraph_bridge_version() {
+    # What the private prefix actually holds (not what the catalog wants), or
+    # nothing when it holds no bridge.
+    local prefix name pkg_json version=""
+    prefix="$(omnigraph_client_prefix)"
+    name="$(omnigraph_bridge_pkg_name)"
+    pkg_json="${prefix}/lib/node_modules/${name}/package.json"
+    [[ -f "$pkg_json" ]] || return 0
+    if version="$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("version", ""))
+' "$pkg_json" 2>/dev/null)"; then
+        printf '%s\n' "$version"
+    fi
+    return 0
+}
+
+omnigraph_client_token() {
+    # The bearer token: $OMNIGRAPH_TOKEN wins (the operator exported it for this
+    # run), else the git-ignored api-keys.yml key omnigraph_token through the one
+    # keys parser. Prints nothing when the machine has neither, and never logs a
+    # value — the resolved token reaches write_omnigraph_env as an argument.
+    if [[ -n "${OMNIGRAPH_TOKEN:-}" ]]; then
+        printf '%s\n' "$OMNIGRAPH_TOKEN"
+        return 0
+    fi
+    local keys_file value=""
+    if keys_file="$(autoos_api_keys_conf)"; then
+        if value="$(python3 "$(omnigraph_client_repo_root)/tools/keys_file.py" \
+            "$keys_file" omnigraph_token 2>/dev/null)"; then
+            printf '%s\n' "$value"
+        fi
+    fi
+    return 0
+}
+
+omnigraph_client_is_current() {
+    # omnigraph_client_is_current <base-url> <token>: every artifact the
+    # component owns already holds exactly what this run would write — the
+    # RESOLVED values, not merely "a line that contains them". custom_is_installed
+    # asks, so the second run reports skipped and not installed (AGENTS.md §4)
+    # while a rotated token, a deleted rc line or a lost environment.d link still
+    # reaches the writer. The comparison happens inside omnigraph_env_state with
+    # the values in the environment: printing them to grep them would put the
+    # bearer token in the log (AGENTS.md §1).
+    local base="$1" token="$2"
+    local env_file="$SYS_HOME/.autoos-omnigraph.env"
+    local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    local wrapper="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    local src rc_line shell_rc status rc=0 marker
+    src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
+    [[ -n "$base" && -n "$token" ]] || return 1
+    status="$(omnigraph_env_state "$env_file" "$base" "$token" check)" || rc=$?
+    (( rc == 0 )) || return 1
+    [[ "$status" == unchanged* ]] || return 1
+    [[ -L "$link" && "$(readlink "$link")" == "$env_file" ]] || return 1
+    [[ -x "$(omnigraph_bridge_bin)" ]] || return 1
+    [[ -n "$(omnigraph_bridge_pin)" ]] || return 1
+    [[ "$(omnigraph_bridge_version)" == "$(omnigraph_bridge_pin)" ]] || return 1
+    # Copied, not linked: a link here would run whatever the checkout rewrites,
+    # and `cmp` cannot tell the two apart.
+    [[ -f "$wrapper" && ! -L "$wrapper" ]] || return 1
+    cmp -s "$src" "$wrapper" || return 1
+    # Every rc file this machine has must carry the line this run would write,
+    # and carry neither an older AutoOS line nor the retired agent-skills token
+    # line this component removes.
+    rc_line="$(omnigraph_rc_line)"
+    marker="$(omnigraph_rc_marker)"
+    for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$shell_rc" ]] || continue
+        grep -qF -- "$rc_line" "$shell_rc" || return 1
+        if grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "$marker"; then
+            return 1
+        fi
+        if grep -F -- '/agent-skills/' "$shell_rc" | grep -qF -- 'OMNIGRAPH_TOKEN'; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+omnigraph_install_bridge() {
+    # The pinned bridge into the private prefix: install once, reinstall only
+    # when the catalog pin moves. Returns non-zero when npm failed.
+    local prefix bin spec name pin have rc=0
+    prefix="$(omnigraph_client_prefix)"
+    bin="$(omnigraph_bridge_bin)"
+    spec="$(mcp_package omnigraph)"
+    name="$(omnigraph_bridge_pkg_name)"
+    pin="$(omnigraph_bridge_pin)"
+    if [[ -z "$name" || "$name" == "$spec" || -z "$pin" ]]; then
+        # `name@` is the shape that slips past `name != spec`: the pin is empty,
+        # and an empty pin equals the version string of a prefix that holds no
+        # bridge at all — which would make every machine look current.
+        ui_err "the omnigraph pin in catalog/agent-harness.json ('${spec}') carries no @version"
+        return 1
+    fi
+    have="$(omnigraph_bridge_version)"
+    if [[ "$have" == "$pin" && -x "$bin" ]]; then
+        ui_muted "omnigraph bridge ${pin} already installed in ${prefix} - skipped"
+        return 0
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install ${spec} into ${prefix}${have:+, replacing the installed ${have}}"
+        return 0
+    fi
+    if [[ -n "$have" ]]; then
+        ui_info "the installed bridge is ${have} and the catalog pins ${pin} - reinstalling"
+    fi
+    npm install -g --prefix "$prefix" "$spec" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "npm install -g --prefix ${prefix} ${spec} failed (exit ${rc}) - the bridge is not installed"
+        return 1
+    fi
+    if [[ ! -x "$bin" ]]; then
+        # The wrapper execs this exact path; a bridge whose bin is named
+        # something else would install cleanly and fail at every client start.
+        ui_warn "${spec} installed but ${bin} is not there - the package's bin is named differently than the wrapper expects"
+        return 1
+    fi
+    OMNIGRAPH_CLIENT_CHANGED=1
+    ui_ok "omnigraph bridge ${pin} installed in ${prefix}"
+    return 0
+}
+
+omnigraph_install_wrapper() {
+    # The tracked wrapper is COPIED, not linked: the component works after the
+    # checkout moves, and an MCP client must never execute a file the repository
+    # can rewrite underneath it.
+    local src dest marker
+    src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
+    dest="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    marker='# AutoOS:omnigraph-mcp-autoos'
+    if [[ ! -f "$src" ]]; then
+        ui_err "the tracked wrapper is missing at ${src} - nothing was installed"
+        return 1
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would copy ${src} to ${dest} (mode 755)"
+        return 0
+    fi
+    if [[ -L "$dest" ]]; then
+        # A link is not the copy this component promises, and `cp` to a linked
+        # path writes into whatever it points at — including the tracked file in
+        # this very checkout. Refuse, and touch neither the link nor its target.
+        ui_warn "${dest} is a link, not AutoOS's copy - left alone. Remove it to let AutoOS install its wrapper there."
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        return 0
+    fi
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        ui_muted "wrapper unchanged (${dest})"
+        return 0
+    fi
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        # Something else is there: either the user's own file, or an older AutoOS
+        # copy (marked, and replaced after a backup).
+        if [[ ! -f "$dest" ]] || ! grep -qF -- "$marker" "$dest"; then
+            ui_warn "${dest} is your own file, not one AutoOS wrote - left alone. Remove it to let AutoOS install its wrapper there."
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            return 0
+        fi
+        if ! backup_file "$dest" >/dev/null; then
+            ui_warn "could not back up ${dest} - left unchanged"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            return 0
+        fi
+        ui_ok "updated the wrapper at ${dest} (the previous AutoOS copy is backed up)"
+    fi
+    mkdir -p "${dest%/*}"
+    if ! cp "$src" "$dest" || ! chmod 755 "$dest"; then
+        ui_warn "could not install ${dest}"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        return 0
+    fi
+    OMNIGRAPH_CLIENT_CHANGED=1
+    return 0
+}
+
+omnigraph_retire_rc_token_lines() {
+    # Spec §C: AutoOS removes the rc-file line it recognises as its own retired
+    # form — the one that read the token out of the agent-skills tree. A line has
+    # to carry BOTH halves to go; anything else in the file stays, whoever wrote
+    # it. Backed up first, and a file that cannot be backed up is not touched.
+    # The copy is taken by backup_file_before_write: this is the step that deletes
+    # a token line, so the file it copies is the one that still holds it, and the
+    # copy has to be 0600 or the removal would only move the secret somewhere more
+    # permanent (A3 review 4, S1).
+    local file hits
+    for file in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$file" ]] || continue
+        hits="$( { grep -F -- '/agent-skills/' "$file" | grep -cF -- 'OMNIGRAPH_TOKEN'; } 2>/dev/null || true)"
+        [[ "$hits" != 0 && -n "$hits" ]] || continue
+        if (( AUTOOS_DRY_RUN )); then
+            ui_muted "would remove the retired agent-skills OMNIGRAPH_TOKEN line from ${file}"
+            continue
+        fi
+        if ! backup_file_before_write "$file" >/dev/null; then
+            ui_warn "could not back up ${file} - left unchanged"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            continue
+        fi
+        # Contained like every other step — a file this cannot write is a warning
+        # and a recorded failure, never a repair this claims to have made. The
+        # bytes-not-text editing itself lives in autoos_rc_edit_lines.
+        local rc=0
+        autoos_rc_edit_lines "$file" drop_with '/agent-skills/' 'OMNIGRAPH_TOKEN' || rc=$?
+        if (( rc != 0 )); then
+            ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            continue
+        fi
+        OMNIGRAPH_CLIENT_CHANGED=1
+        ui_ok "removed ${hits} retired agent-skills token line(s) from ${file}"
+    done
+    return 0
+}
+
+install_omnigraph_client() {
+    # postInstall for the omnigraph-client catalog entry (Linux and macOS).
+    # Called with no arguments by run_post_install.
+    OMNIGRAPH_CLIENT_CHANGED=0
+    INSTALL_SCRIPT_STATE=""
+
+    local base token
+    base="$(omnigraph_url_answer)"
+    if [[ -z "$base" ]]; then
+        # Never point a bridge at a guessed server: an invented host is both a
+        # wrong answer and, in a public repository, a site leak.
+        ui_warn "omnigraph-client: no Omnigraph server is configured on this machine. Answer the 'omnigraph_url' prompt (the browser UI and interactive setup both ask for it) and run again."
+        ui_info "omnigraph-client: skipped: no omnigraph URL"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    token="$(omnigraph_client_token)"
+    if [[ -z "$token" ]]; then
+        ui_warn "omnigraph-client: no bearer token for ${base}. The token is issued by the graph server, not by AutoOS: export OMNIGRAPH_TOKEN, or set the omnigraph_token key in configuration/api-keys.yml, and run again."
+        ui_info "omnigraph-client: skipped: no omnigraph token"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+    if ! has_cmd npm; then
+        ui_warn "omnigraph-client: npm is not on PATH - install the nodejs component first."
+        ui_info "omnigraph-client: skipped: no npm"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+
+    write_omnigraph_env "$base" "$token"
+    [[ "$OMNIGRAPH_ENV_STATE" == written ]] && OMNIGRAPH_CLIENT_CHANGED=1
+
+    omnigraph_install_bridge || return 1
+    omnigraph_install_wrapper || return 1
+    omnigraph_retire_rc_token_lines
+
+    if (( AUTOOS_DRY_RUN )); then
+        # A dry run only announces: it never sets the changed flags, so claiming
+        # "already installed and current" would report a comparison that did not
+        # happen. Say what the mode means instead.
+        ui_info "omnigraph-client: dry run: nothing was written"
+        INSTALL_SCRIPT_STATE=skipped
+    elif (( ! OMNIGRAPH_CLIENT_CHANGED )); then
+        ui_info "omnigraph-client: skipped: already installed and current"
+        INSTALL_SCRIPT_STATE=skipped
+    fi
+    return 0
 }
 
 replace_or_append_marked_line() {
     # replace_or_append_marked_line <file> <old marker> <new marker> <line>
-    # Current line present -> nothing. A line with the OLD marker (and not the
-    # new one) -> replaced in place, after a backup. Otherwise appended once.
+    # Current line present -> nothing, except that a stale old line next to it
+    # still runs first and is purged. A line with the OLD marker and not the new
+    # one -> replaced in place. Neither -> appended once. Every write is preceded
+    # by a backup, and a file that cannot be backed up or written is a warning and
+    # a recorded failure — never a repair this announces as made (A3 review 2,
+    # the same containment the retire step above has).
     local file="$1" old_marker="$2" new_marker="$3" line="$4"
     if grep -qF -- "$new_marker" "$file" 2>/dev/null; then
         # A stale old line next to the current one still runs first: purge it.
@@ -3843,20 +4741,18 @@ replace_or_append_marked_line() {
                 ui_muted "would remove the stale '${old_marker}' line from ${file}"
                 return 0
             fi
-            if ! backup_file "$file" >/dev/null; then
+            if ! backup_file_before_write "$file" >/dev/null; then
                 ui_warn "could not back up ${file} - left unchanged"
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
                 return 0
             fi
-            AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
-import os, sys
-path = sys.argv[1]
-old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_NEW"]
-with open(path, encoding="utf-8") as f:
-    lines = f.read().split("\n")
-lines = [l for l in lines if not (old in l and new not in l)]
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
-PY
+            local rc=0
+            autoos_rc_edit_lines "$file" drop_without "$old_marker" "$new_marker" || rc=$?
+            if (( rc != 0 )); then
+                ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+                return 0
+            fi
             ui_ok "removed the stale '${old_marker}' line from ${file}"
             return 0
         fi
@@ -3871,20 +4767,18 @@ PY
         ui_muted "would replace the '${old_marker}' line in ${file}"
         return 0
     fi
-    if ! backup_file "$file" >/dev/null; then
+    if ! backup_file_before_write "$file" >/dev/null; then
         ui_warn "could not back up ${file} - left unchanged"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
         return 0
     fi
-    AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
-import os, sys
-path = sys.argv[1]
-old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_LINE"]
-with open(path, encoding="utf-8") as f:
-    lines = f.read().split("\n")
-lines = [new if (old in l) else l for l in lines]
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
-PY
+    local rc=0
+    autoos_rc_edit_lines "$file" replace "$old_marker" "$line" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        return 0
+    fi
     ui_ok "replaced the '${old_marker}' line in ${file}"
 }
 
@@ -3897,11 +4791,16 @@ install_agent_skills() {
 
     write_omnigraph_env "$base"
 
-    # Wire user-scope MCP servers across Claude Code and Antigravity
-    install_mcp_graphify
-    install_mcp_serena
-    install_mcp_playwright
-    install_mcp_context7
+    # Wire user-scope MCP servers across Claude Code and Antigravity. These are
+    # catalog postInstalls in their own right, called directly here — so they get
+    # the same containment run_post_install gives them (a bare call under
+    # setup.sh's `set -euo pipefail` would abort the whole run). Each records its
+    # own component id, the id install_mcp_playwright already records internally,
+    # so one broken wiring is counted once.
+    install_mcp_graphify   || autoos_record_failure mcp-graphify
+    install_mcp_serena     || autoos_record_failure mcp-serena
+    install_mcp_playwright || autoos_record_failure mcp-playwright
+    install_mcp_context7   || autoos_record_failure mcp-context7
 
     # omnigraph is the opposite: project scope only, pinned per repo by
     # OMNIGRAPH_GRAPH_ID. A user-scope entry silently WINS over the project one
@@ -3913,8 +4812,8 @@ install_agent_skills() {
     fi
     # Enable project MCP servers from this repo's .mcp.json (omnigraph + autoos-agent)
     if [[ -f "$repo_root/.mcp.json" ]]; then
-        enable_project_mcp_server "$repo_root" omnigraph
-        enable_project_mcp_server "$repo_root" autoos-agent
+        enable_project_mcp_server "$repo_root" omnigraph || autoos_record_failure agent-skills
+        enable_project_mcp_server "$repo_root" autoos-agent || autoos_record_failure agent-skills
     else
         ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
@@ -4011,8 +4910,11 @@ print(json.dumps({
         ui_muted "Note: external agent-skills clone at $old_clone is retired; AutoOS now uses the vendored .agents/skills in this checkout."
     fi
 
-    # Ensure graphify-mcp symlink points to this repo's infra
-    graphify_mcp_symlink
+    # Two recognised leftovers from the retired clone and the docker era, each with
+    # its own "not mine, not touched" rule. The graphify-mcp link in ~/.local/bin is
+    # cleared by install_mcp_graphify above — it is the path `uv tool install` wants
+    # to write, so it is decided there, next to the install it unblocks.
+    remove_stale_homelab_mcp_entry
 
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would check the omnigraph image, network and token"
@@ -4109,71 +5011,188 @@ autoos_api_keys_conf() {
     return 1
 }
 
-# graphify_mcp_symlink: point ~/.local/bin/graphify-mcp at this checkout's
-# infra/mcp-servers/bin/graphify-mcp.
+# graphify_mcp_link_prepare: decide what may sit at ~/.local/bin/graphify-mcp, and
+# clear the path for `uv tool install` — which writes its executable there and refuses
+# (or, with --force, overwrites) whatever is in the way.
 #
-# Three shapes mean "AutoOS or the retired agent-skills clone put this here" and
-# are acted on: no link (create one), a link that already lands on the target
-# (skip), and a link into an agent-skills path (repoint it — including one left
-# dangling when the user deleted the clone, which is the common migration
-# case). Anything else is the user's own file or link: reported as left alone and
-# never replaced. The dry run decides from the same verdict, so it can never
-# announce something the real run will not do.
-graphify_mcp_symlink() {
+# The rule is the same one every removal in spec §C uses: act only on what AutoOS can
+# recognise as its own leftover. Two targets are recognised — a link into the retired
+# agent-skills tree, and a link to this checkout's docker wrapper, which D18 retires
+# along with the container behind it — and both are deleted (a symlink carries nothing
+# of the user's, so it needs no backup) and reported. A link that points into uv's own
+# tools directory is uv's, from a previous install here: usable, and the only other
+# thing --force may ever replace. Everything else at that path is the user's own file
+# or link: left exactly as it is, with the install refused on top of it.
+#
+# The verdict is published in GRAPHIFY_LINK_STATE (free | removed | uv | blocked) for
+# install_graphify_tool to decide on, because this reports its work through the UI
+# layer — a $(...) capture would swallow that output into the status string. The dry
+# run reaches the same verdict and touches nothing, so it can never announce
+# something the real run will not do.
+GRAPHIFY_LINK_STATE="free"
+
+# graphify_mcp_bin_path: the one place that names the path `uv tool install` writes
+# its graphify executable to (uv's tool bin dir, the directory uv itself lives in —
+# measured, see install_mcp_graphify). Both the check that clears the path and the
+# gate that registers the clients ask about this same file, so they cannot drift.
+graphify_mcp_bin_path() {
+    printf '%s/.local/bin/graphify-mcp\n' "$SYS_HOME"
+}
+
+# graphify_mcp_resolves: is there an executable behind that path? The answer a client
+# gets at session start, checked on disk instead of through PATH: a non-interactive
+# shell here may not carry ~/.local/bin even when the client's does, and vice versa,
+# so only the file itself is evidence.
+graphify_mcp_resolves() {
+    local bin
+    bin="$(graphify_mcp_bin_path)"
+    [[ -x "$bin" && ! -d "$bin" ]]
+}
+
+graphify_mcp_link_prepare() {
     local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    local target="$repo_root/infra/mcp-servers/bin/graphify-mcp"
-    local link="$SYS_HOME/.local/bin/graphify-mcp"
+    local wrapper="$repo_root/infra/mcp-servers/bin/graphify-mcp"
+    local link
+    link="$(graphify_mcp_bin_path)"
+    local current="" state="free" reason=""
 
-    if [[ ! -x "$target" ]]; then
-        ui_muted "graphify-mcp is not in this checkout ($target) - nothing to link"
-        return 0
-    fi
-
-    local current="" verdict="create"
     if [[ -L "$link" ]]; then
         current="$(readlink "$link")" || current=""
-        # A relative link resolves against its own directory. The clone test
-        # below is a substring match, so making the path absolute is enough —
+        # A relative link resolves against its own directory. Every comparison
+        # below is a prefix match, so making the path absolute is enough —
         # resolving it through `cd` would fail on a dangling link and hand the
-        # clone's link to the "the user manages this" branch.
+        # clone's link to the "this is the user's own" branch.
         [[ -z "$current" || "$current" == /* ]] || current="$(dirname "$link")/$current"
-        if [[ "$current" == "$target" ]]; then
-            verdict="already"
-        elif [[ "$current" == */agent-skills/* ]]; then
-            verdict="repoint"
+        local uv_tools=""
+        if has_cmd uv; then uv_tools="$(uv tool dir 2>/dev/null)" || uv_tools=""; fi
+        if [[ "$current" == */agent-skills/* ]]; then
+            state="removed"; reason="the retired agent-skills clone"
+        elif [[ "$current" == "$wrapper" ]]; then
+            state="removed"; reason="this checkout's docker wrapper"
+        elif [[ -n "$uv_tools" && "$current" == "$uv_tools"/* ]]; then
+            state="uv"
         else
-            verdict="alone"
+            state="blocked"
         fi
     elif [[ -e "$link" ]]; then
-        verdict="alone"
+        state="blocked"
     fi
 
+    GRAPHIFY_LINK_STATE="$state"
+
     if (( AUTOOS_DRY_RUN )); then
-        case "$verdict" in
-            create)  ui_muted "would link graphify-mcp: $link -> $target" ;;
-            repoint) ui_muted "would repoint graphify-mcp from the clone ($current) to $target" ;;
-            already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
-            alone)   ui_muted "would leave graphify-mcp alone (yours: $link)" ;;
+        case "$state" in
+            removed) ui_muted "would remove the graphify-mcp link left by $reason: $link -> $current" ;;
+            uv)      ui_muted "graphify-mcp is uv's own tool link: $link -> $current" ;;
+            blocked) ui_muted "would leave graphify-mcp alone (yours: $link -> $current)" ;;
         esac
         return 0
     fi
 
-    case "$verdict" in
-        create|repoint)
+    case "$state" in
+        removed)
             mkdir -p "$(dirname "$link")"
-            if ln -sfn "$target" "$link"; then
-                if [[ "$verdict" == "create" ]]; then
-                    ui_ok "linked graphify-mcp: $link -> $target"
-                else
-                    ui_ok "repointed graphify-mcp from the clone: $link -> $target"
-                fi
+            if rm -f -- "$link"; then
+                ui_ok "removed the graphify-mcp link left by $reason: $link"
             else
-                ui_warn "could not link graphify-mcp - $link left as it is"
+                ui_warn "could not remove the graphify-mcp link ($link) - the pinned install was not attempted"
+                GRAPHIFY_LINK_STATE="blocked"
             fi
             ;;
-        already) ui_muted "graphify-mcp already points at $target (skipped)" ;;
-        alone)   ui_muted "left graphify-mcp alone (yours: $link)" ;;
+        uv)      ui_muted "graphify-mcp is uv's own tool link (kept): $link -> $current" ;;
+        blocked) ui_warn "left graphify-mcp alone (yours: $link) - AutoOS never replaces it, and the pinned tool was not touched" ;;
     esac
+    return 0
+}
+
+# graphify_installed_version <distribution>: the version `uv tool list` reports for
+# that tool, nothing when it is not installed. uv's own shape (measured on uv 0.12.18)
+# is "<name> v<version>" then "  - <executable>" per command, and the flat line "No
+# tools installed" when there is none. The name is the distribution as the catalog
+# spells it — graphify's is already lowercase, so no normalisation is needed here.
+graphify_installed_version() {
+    local want="$1" line ver=""
+    while IFS= read -r line; do
+        [[ "$line" == "$want v"* ]] && { ver="${line#"$want v"}"; break; }
+    done < <(uv tool list 2>/dev/null || true)
+    printf '%s\n' "$ver"
+}
+
+# install_graphify_tool: the pinned graphify tool, from the ONE pin in the catalog
+# (mcp_package graphify). Spec D13 moves graphify off `uv run --with`, which resolved
+# an environment on every client launch and left no executable on PATH for anything
+# else to call; a pinned tool install answers at once and puts graphify-mcp where the
+# clients, the wrapper and a shell all find it.
+#
+# Idempotent by version, and every verdict is decided before anything runs:
+#   skipped   `uv tool list` already names the pinned version — uv is never called
+#   updated   another version is installed — `uv tool install --force` replaces it
+#   installed nothing is — `uv tool install`, and --force only when the link the
+#             path holds is uv's own (a deleted receipt must not stall the install)
+# --force is never used over a file the user owns, so the link verdict comes first
+# and can stop this whole step. The dry run decides from the same two verdicts.
+install_graphify_tool() {
+    local pkg name pin="" have="" force=0 rc=0
+    pkg="$(mcp_package graphify)"
+    # The distribution `uv tool list` reports is the package without its extras or
+    # its pin: whatever the catalog's spec says, uv lists it under the bare name.
+    name="${pkg%%\[*}"; name="${name%%=*}"
+    [[ "$pkg" == *"=="* ]] && pin="${pkg##*==}"
+
+    graphify_mcp_link_prepare
+    if [[ "$GRAPHIFY_LINK_STATE" == blocked ]]; then
+        # Non-zero, not a silent pass: there is no installed graphify-mcp for the
+        # clients to start, so install_mcp_graphify must not register one anyway.
+        ui_warn "the pinned graphify tool was not attempted: $SYS_HOME/.local/bin/graphify-mcp is yours to move"
+        return 1
+    fi
+    if ! has_cmd uv; then
+        if (( AUTOOS_DRY_RUN )); then
+            # In a plan, uv is only *planned* — its own component runs earlier in this
+            # same pass and installs nothing yet, so refusing here would fail a dry run
+            # the real run goes on to satisfy (CI 36360904338).
+            ui_muted "would install the pinned graphify tool once the uv component puts uv on PATH: uv tool install ${pkg}"
+            return 0
+        fi
+        ui_warn "uv is not on PATH - cannot install the pinned graphify tool. Install the uv component first, then re-run."
+        return 1
+    fi
+
+    have="$(graphify_installed_version "$name")"
+    if [[ -n "$have" ]] && { [[ -z "$pin" ]] || [[ "$have" == "$pin" ]]; }; then
+        ui_muted "the pinned graphify tool is already there: $name $have (skipped)"
+        return 0
+    fi
+    [[ -n "$have" ]] && force=1
+    [[ "$GRAPHIFY_LINK_STATE" == uv ]] && force=1
+
+    # Named, not `cmd`: verify_component below uses a scalar of that name, and
+    # the linter reads a file's variables in one scope (SC2178: an array and a
+    # string cannot share a name here).
+    local -a gfy_cmd=(uv tool install)
+    (( force )) && gfy_cmd+=(--force)
+    gfy_cmd+=("$pkg")
+
+    if (( AUTOOS_DRY_RUN )); then
+        if (( force )); then
+            ui_muted "would update the pinned graphify tool: ${gfy_cmd[*]}"
+        else
+            ui_muted "would install the pinned graphify tool: ${gfy_cmd[*]}"
+        fi
+        return 0
+    fi
+
+    ui_muted "run: ${gfy_cmd[*]}"
+    "${gfy_cmd[@]}" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not install the pinned graphify tool ($name) - uv exited $rc"
+        return 1
+    fi
+    if (( force )); then
+        ui_ok "updated the pinned graphify tool: $name $have -> $pin"
+    else
+        ui_ok "installed the pinned graphify tool: $name $pin (graphify-mcp is on uv's tool bin dir)"
+    fi
     return 0
 }
 
@@ -4251,6 +5270,9 @@ setup_opencode_config() {
             harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
                 ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
+                # Warned is not reported: the component's own harness never
+                # landed, so it is not installed either (setup.sh folds this id).
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
             else
                 while IFS= read -r _harness_line; do
                     [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -4258,6 +5280,7 @@ setup_opencode_config() {
             fi
         else
             ui_warn "agent harness not applied: python3 not found"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-opencode}"
         fi
 
         [[ "$config_file" == */config.json ]] && merged_first=1
@@ -4424,25 +5447,47 @@ providers['ollama'] = {
 
 # Direct meta entry (muse-spark contributor) so the model the user asked to
 # keep is selectable in opencode; the key stays out of the file.
+#
+# REVROUTE (S2) item 4, measured on L1-backlog: that entry is written into the
+# USER config, so opencode parses it in EVERY cwd — and a {env:META_API_KEY}
+# placeholder with no such variable in the environment does not resolve to a
+# string, which fails the whole file (opencode reports Expected string at
+# [META_API_KEY]) and breaks every bare opencode start on the machine. So the
+# placeholder is rendered only when the variable it names actually exists. A key
+# that lives in api-keys.yml or in MUSE_API_KEY does not qualify: this provider
+# reads the process environment, nothing else. Without it the Muse contributor is
+# still selectable as omniroute/spark-1.3-contributor — the gateway route the
+# same config declares below, which is how the reviewer routing in
+# policy.reviewers reaches it — and a placeholder an earlier, keyed run left
+# behind is taken out (an already-broken machine has to be repaired, not just
+# avoided). A meta provider of the user's own shape is theirs and stays
+# (AGENTS.md §4/§5).
 _muse = REPO_BY_ID['muse-spark']['direct']
 _muse_model_id = _muse['model'].split('/', 1)[1]
-providers['meta'] = {
-    'npm': _muse['npm'],
-    'name': 'Meta',
-    'options': {
-        'baseURL': _muse['base_url'],
-        'apiKey': '{env:META_API_KEY}'
-    },
-    'models': {
-        _muse_model_id: {
-            'name': REPO_BY_ID['muse-spark']['name'],
-            'reasoning': True,
-            'limit': {'context': REPO_BY_ID['muse-spark']['context'],
-                      'output': REPO_BY_ID['muse-spark']['output']},
-            'options': {'reasoningEffort': _muse['reasoning_effort']}
+if os.environ.get('META_API_KEY'):
+    providers['meta'] = {
+        'npm': _muse['npm'],
+        'name': 'Meta',
+        'options': {
+            'baseURL': _muse['base_url'],
+            'apiKey': '{env:META_API_KEY}'
+        },
+        'models': {
+            _muse_model_id: {
+                'name': REPO_BY_ID['muse-spark']['name'],
+                'reasoning': True,
+                'limit': {'context': REPO_BY_ID['muse-spark']['context'],
+                          'output': REPO_BY_ID['muse-spark']['output']},
+                'options': {'reasoningEffort': _muse['reasoning_effort']}
+            }
         }
     }
-}
+else:
+    _stale = providers.get('meta')
+    if isinstance(_stale, dict) and (
+            (_stale.get('options') or {}).get('apiKey') == '{env:META_API_KEY}'
+            or _stale.get('npm') == _muse['npm']):
+        del providers['meta']
 
 muse_key = os.environ.get('META_API_KEY') or os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')
@@ -5203,6 +6248,7 @@ PY
         # the OpenCode writer; setup runs postInstall under set -e.
         ui_warn "OpenHands configuration not written to $openhands_dir/settings.json (settings script exit $oh_rc)"
         ui_muted "    The profiles under $openhands_dir may be incomplete and the agent harness was skipped; fix the error above and re-run."
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
         return 0
     fi
 
@@ -5216,6 +6262,9 @@ PY
     harness_out="$(python3 "$harness_root/lib/agent_harness.py" openhands --openhands-dir "$openhands_dir" --repo-root "$harness_root" 2>&1)" || harness_rc=$?
     if (( harness_rc != 0 )); then
         ui_warn "agent harness not applied to OpenHands (exit $harness_rc)"
+        # Warned is not reported: the role profiles never landed, so the
+        # component is not applied either (setup.sh folds this id).
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-openhands}"
     else
         while IFS= read -r _harness_line; do
             [[ -n "$_harness_line" ]] && ui_muted "$_harness_line"
@@ -5257,7 +6306,11 @@ setup_wsl_agent_home() {
     # locks) onto ext4, keep a timestamped backup, leave an empty dir behind
     # so the legacy path never dangles.
     if [[ -d "$cao_legacy" && ! -L "$cao_legacy" ]]; then
-        if ! python3 -c "import os; os.mkfifo('$cao_legacy/.autoos-fifo-probe')" 2>/dev/null; then
+        # The path goes in as argv, never spliced into the Python source: a CAO
+        # home containing a single quote would otherwise turn the probe itself
+        # into a SyntaxError, read as "no FIFO support", and falsely relocate a
+        # working ext4 home.
+        if ! python3 -c 'import os,sys; os.mkfifo(sys.argv[1])' "$cao_legacy/.autoos-fifo-probe" 2>/dev/null; then
             local ts backup backup_base n=0
             ts="$(date +%Y%m%d-%H%M%S)"
             backup_base="${cao_legacy}.backup-${ts}"
@@ -5290,15 +6343,34 @@ setup_wsl_agent_home() {
     ui_ok "CAO home on native ext4: $cao_home (CAO_HOME_DIR exported)"
 }
 
+# AUTOOS_POST_COMPONENT: the id of the component being installed, published to the
+# step running under it. A recorded failure has to name the plan's id for
+# autoos_fold_extra_failures to find the right bucket, and one step serves several
+# ids (setup_opencode_config is the postInstall of both `opencode` and
+# `opencode-cli`), so the step cannot pick one out of its own head.
+AUTOOS_POST_COMPONENT=""
 run_post_install() {
-    local fn="$1"
+    local fn="$1" id="${2:-}" rc=0
+    AUTOOS_POST_COMPONENT="$id"
     [[ -z "$fn" ]] && return 0
     if ! declare -F "$fn" >/dev/null; then
         ui_warn "post-install '${fn}' not found"
         return 0
     fi
     ui_step "post-install: ${fn}"
-    "$fn"
+    # Contained here, in the one place that runs a step, not in every step:
+    # setup.sh calls this bare under `set -euo pipefail`, so a step returning
+    # non-zero used to abort the whole run — no summary, no state file, and
+    # every later component silently never installed. A failed step is still a
+    # result, so it is recorded for the fold instead: the component reads as
+    # failed (post-install) and setup.sh still exits non-zero.
+    "$fn" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "post-install '${fn}' failed (exit ${rc}) - the run continues"
+        autoos_record_failure "${id:-$fn}"
+    fi
+    AUTOOS_POST_COMPONENT=""
+    return 0
 }
 
 # ─── Post-install verification ──────────────────────────────────────────────

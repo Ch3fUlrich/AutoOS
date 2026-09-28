@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Public scrub scanner: report pattern hits without echoing content."""
+"""Public scrub scanner: report pattern hits without echoing content.
+
+Reads scan-exclude.txt next to itself unless --exclude-file says otherwise, so
+the scrubber's own rules, private literals and planted fixtures are never
+reported as hits.
+"""
 import argparse
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+DEFAULT_EXCLUDE = Path(__file__).resolve().parent / "scan-exclude.txt"
 
 
 def load_patterns(path):
@@ -77,7 +84,9 @@ def main(argv=None):
         default=str(Path(__file__).parent / "patterns.txt"),
     )
     ap.add_argument("--git-tree", default=None)
-    ap.add_argument("--exclude-file", default=None)
+    ap.add_argument("--exclude-file", default=None,
+                    help="repo-relative prefixes to skip (default: scan-exclude.txt "
+                         "beside this script, when it exists)")
     ap.add_argument("paths", nargs="*", default=["."])
     args = ap.parse_args(argv)
     # Paths are reported as UTF-8 whatever the console code page is.
@@ -86,7 +95,10 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     rules = load_all_patterns(args.patterns)
-    prefixes = load_excludes(args.exclude_file) if args.exclude_file else []
+    exclude_file = args.exclude_file
+    if exclude_file is None and DEFAULT_EXCLUDE.exists():
+        exclude_file = str(DEFAULT_EXCLUDE)
+    prefixes = load_excludes(exclude_file) if exclude_file else []
     cwd = os.getcwd()
     out_lines = []
     any_hit = False

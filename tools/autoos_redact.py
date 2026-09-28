@@ -32,6 +32,7 @@ this must never fail.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Iterable, Sequence
 
@@ -248,7 +249,21 @@ class Redactor:
 
 # ─── argv (hostexec's stored form) ─────────────────────────────────────────
 
-def redact_argv(argv: Sequence[str], values: Sequence[str] = ()) -> list[str]:
+def _argv_text(tok: object) -> str:
+    """One argv element as text. Elements are usually str; MCP JSON can also
+    carry a number/bool/null, which policy refuses as argv-caps but which
+    the audit must still render -- a refused call is always recorded, so
+    redaction may never raise on one. json.dumps gives a stable,
+    JSON-faithful spelling (`123`, `true`, `null`)."""
+    if isinstance(tok, str):
+        return tok
+    try:
+        return json.dumps(tok, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return repr(tok)
+
+
+def redact_argv(argv: Sequence[object], values: Sequence[str] = ()) -> list[str]:
     """Best-effort credential redaction for the STORED/rendered argv:
     `KEY=value`-shaped names that look secret (*TOKEN*|*SECRET*|*PASSWORD*|
     *KEY*), `Bearer <token>` separate or inside one token
@@ -256,14 +271,14 @@ def redact_argv(argv: Sequence[str], values: Sequence[str] = ()) -> list[str]:
     with a separate value, mysql-style `-pSECRET` and `-uUSER:PASS`
     attached, `x-api-key: <v>`, `user:pass@` in URLs, known secret
     prefixes (sk-, ghp_, gho_, github_pat_, AIza, xox, glpat-) and the exact
-    values of the injected keys in `values`. argv hashing (hostexec's
-    `argv_sha256`) is computed over the RAW form separately, so two identical
-    raw calls can still be correlated without a secret ever being stored in
-    clear."""
+    values of the injected keys in `values`. hostexec's `argv_sha256`
+    (``audit.hash_argv``) hashes THIS redacted form -- deliberately not the
+    raw one, because a digest of a raw secret is offline-guessable -- so a
+    secret's value never reaches, or influences, the stored record."""
     out: list[str] = []
     mask_next = False
-    for tok in argv:
-        tok = sanitize_text(tok)
+    for tok_raw in argv:
+        tok = sanitize_text(_argv_text(tok_raw))
         if mask_next:
             out.append(MASK)
             mask_next = False

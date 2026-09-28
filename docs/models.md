@@ -54,12 +54,12 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
-| `t1-orchestrator` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → gemini `gemini-3.8-flash` |
+| `t1-orchestrator` | cheap | 128k | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → gemini `gemini-3.8-flash` |
 | `t1-orchestrator-clean` | cheap | 1M | ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
-| `t1-orchestrator-free-only` | free | 1M | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` |
+| `t1-orchestrator-free-only` | free | 128k | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` |
 | `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` |
 | `t2-worker-clean` | mid | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
@@ -75,8 +75,11 @@ from `opencode.jsonc`, not a curation rule: cost and quality decide what enters
 `t2-worker`, so a `gemini-3.8-flash`-class model is welcome whatever its window.
 The 1M gate applies to `t1-orchestrator` only, because long-horizon orchestration is the
 one role where window size is the requirement. `combos.json` carries
-`"context": "128k"` on t2-worker/t3-driver purely to keep the picker's compaction
-threshold conservative — do not read it as "models above 128k are excluded".
+`"context": "128k"` on t1-orchestrator/t2-worker/t3-driver purely to keep the picker's
+compaction threshold conservative — do not read it as "models above 128k are excluded".
+On `t1-orchestrator` it is more than conservative since PROVFIX3: the render clamps a
+route's declared window to the smallest leg it can actually fall to, and T1FREE put a
+131072-token `gemini-3.8-flash` fallback in that route (see the context rule below).
 
 ### Notes per route
 
@@ -96,8 +99,9 @@ generated table above already shows it):
   the contributor-only block (2026-09-21).
 - **`t1-orchestrator-free-only`**: answers 429/402 when the promo is exhausted —
   step up to `t1-orchestrator` instead; it never degrades to paid by design. The
-  agy Opus leg stays out on purpose: a 200k model in a 1M-declared route would 400
-  instead of degrading.
+  agy Opus leg stays out on purpose: an effort/context mismatch is answered with a
+  400, not a degradation, and this route declares 128k on its free gemini leg
+  (PROVFIX3 clamped the 1M it used to promise — see the context rule below).
 - **`t2-worker`**: the `antigravity/gemini-3.7-flash-high` leg is a separate OAuth
   pool with its own quota (ack 3.6s), not the throttled native 3.7 free tier.
 - **`t2-worker-free-only`**: same OAuth pool as `t2-worker`, but the `-medium`
@@ -120,7 +124,11 @@ generated table above already shows it):
   — version mixing is a defect here.
 - **`deepseek-v4.1-flash`**: FAILS CLOSED since 2026-09-27T16:4xZ
   (`providers.deepseek` 402 Insufficient Balance, `available: false`) — the
-  combo is omitted until the balance is topped up, like `t1`/spark. History:
+  combo is omitted until the balance is topped up. (`t1`/spark failed closed
+  the same way on 2026-09-27 and came back the same day: MUSEAPI gave
+  `meta_api` a paid contributor leg, which is a servable head again. DeepSeek
+  has no such second leg, so it is the only pinned route still omitted.)
+  History:
   the direct `deepseek/deepseek-flash` head was the operator-restored lead
   (L0 2026-09-27T12:55:16Z; measured 200 through the gateway
   2026-09-27T14:5xZ), withdrawing the 2026-09-22 "400 / unknown to the live
@@ -130,8 +138,9 @@ generated table above already shows it):
   credit). While it lasted, this route carried the native
   `#low`/`#high`/`#max` effort aliases (from `deepseek-flash`'s ladder) as
   `legs[0]`; the aliases return with the leg.
-- **`opus-4-6`**: pinned on purpose — `t1-orchestrator` stays spark-only, Opus is
-  addressable directly rather than smuggled into the orchestrator chain.
+- **`opus-4-6`**: pinned on purpose — `t1-orchestrator` never carries Opus, it is
+  the meta_api contributor head with a free gemini fallback; Opus is addressable
+  directly rather than smuggled into the orchestrator chain.
   `antigravity/claude-opus-4-6-thinking` acks in 3.4s (OAuth free);
   `cc/claude-opus-4-6` is the subscription overflow leg (429-quota-1h at probe
   time).
@@ -256,7 +265,7 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 | Tier id | Role label | Capability requirement |
 |---|---|---|
-| `t1-orchestrator` | **orchestrator-1M** | Long-horizon orchestration: plans, delegates, holds whole-repo context. 1M context required — anything smaller belongs in `t2-worker`. |
+| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` head answers big requests, but T1FREE added a 131072 free `gemini` fallback, and a route may only promise what its fallback keeps — so the declared window is 128k. When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
 | `t2-worker` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `t1-orchestrator`. |
 | `t3-driver` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
 | `t4-rag` | **rag-grounded-128k** | Retrieval-grounded QA over supplied documents (quotes/citations, not reasoning or codegen). |
@@ -310,12 +319,18 @@ round, that is the separate `qoder` oauth provider (`omniroute providers
 available --search qoder`: free, alias `if`) — it needs an interactive
 `omniroute oauth` login and is not registered by `apply.*`.
 
-**Context rule (why the user-visible limit is honest):** `t1-orchestrator` is curated to
-1M-context models only — anything smaller belongs in `t2-worker`. `t2-worker` has **no
+**Context rule (why the user-visible limit is honest):** a route's declared window is a
+promise every leg it can fall to has to keep, so the render clamps it to the smallest
+advertised window among the route's servable legs (`clamp_route_context()` in
+`tools/registry.py` — PROVFIX3). `t1-orchestrator` was curated to 1M-context models only,
+which is why it declared 1M; T1FREE added a free `gemini-3.8-flash` leg (131072) to keep
+the default tier answering while credit is out, so its honest promise is 128k now. Pick
+`spark-1.3-contributor` or `t1-orchestrator-paid` (1M, meta_api direct) when the window
+itself is the requirement. `t2-worker` has **no
 context gate**: 128k is a conservative display/compaction default, not a
 curation rule, so cost and quality decide which models sit there and
 `gemini-3.8-flash`-class models are welcome regardless of window.
-`catalog/ide-models.json` declares the matching context (`1000000` for the 1M tier,
+`catalog/ide-models.json` declares the clamped window (`131072` for `t1-orchestrator`,
 `131072` for t2-worker/t3-driver as the conservative minimum across each chain) and
 every client surface projects it — `opencode.jsonc` `limit.context`, Zed
 `max_tokens`, OpenHands `max_input_tokens` — so compaction and the picker's context
@@ -549,11 +564,13 @@ flowchart TB
         AUTO["auto/smart · auto · auto/cheap\nzero-setup bootstrap, live 16-factor scoring"]
     end
 
-    subgraph t1["t1-orchestrator · orchestrator-1M · spark-only contributor-only, 1M ctx — unservable since 2026-09-27, omitted"]
+    subgraph t1["t1-orchestrator · orchestrator-128k · meta_api contributor head, free gemini fallback — SERVICABLE (T1FREE + MUSEAPI 2026-09-27)"]
         direction TB
-        T1A["1 · zen muse-spark-1.3-contributor-free\nFREE promo · 1M · trains by contract · UNAVAILABLE (client-bound)"]
-        T1B["2 · openrouter meta/muse-spark-1.3-contributor\nPAID $0.10/$0.20 per 1M · 1M · trains · UNAVAILABLE (DSMAX)"]
-        T1A --> T1B
+        T1Z["1 · meta_api muse-spark-1.3-contributor\nPAID Meta Model API direct · 1M · trains by contract"]
+        T1A["2 · zen muse-spark-1.3-contributor-free\nFREE promo · 1M · trains by contract · UNAVAILABLE (client-bound)"]
+        T1B["3 · openrouter meta/muse-spark-1.3-contributor\nPAID $0.10/$0.20 per 1M · 1M · trains · UNAVAILABLE (DSMAX)"]
+        T1G["4 · gemini gemini-3.8-flash\nFREE AI Studio · 131072 · the leg that caps the route's promise at 128k"]
+        T1Z --> T1A --> T1B --> T1G
     end
 
     subgraph t1c["t1-orchestrator-clean · 1M · paid legs only (trains: contributor-only block) — unservable since 2026-09-27, omitted"]
@@ -606,7 +623,7 @@ flowchart TB
 
     subgraph freeonly["*-free-only · zero spend, never degrade to paid"]
         direction TB
-        F1["t1-orchestrator-free-only:\nzen spark-free (UNAVAILABLE, client-bound) → agy opus-4-6-thinking"]
+        F1["t1-orchestrator-free-only:\nzen spark-free (UNAVAILABLE, client-bound) → gemini gemini-3.8-flash (131072)"]
         F2["t2-worker-free-only:\ngemini → agy gemini → groq (UNAVAILABLE) → cerebras (UNAVAILABLE) → sambanova → free-ai qwen7b"]
         F3["t3-driver-free-only:\ngroq qwen (UNAVAILABLE) → cerebras qwen (UNAVAILABLE) → free-ai qwen7b"]
     end
@@ -625,8 +642,8 @@ flowchart TB
     end
 
     subgraph single["Pinned single-model routes"]
-        SP["spark-1.3-contributor:\nzen → openrouter paid · #low/#medium/#high · UNAVAILABLE (DSMAX, omitted)"]
-        OP["opus-4-6 (200k):\nagy opus-4-6-thinking → cc opus-4-6\nt1 stays spark-only"]
+        SP["spark-1.3-contributor:\nmeta_api paid direct → zen (client-bound)\n→ openrouter paid · SERVED since MUSEAPI"]
+        OP["opus-4-6 (200k):\nagy opus-4-6-thinking → cc opus-4-6\nt1 is a separate route"]
     end
 
     subgraph fb["Fallback client path — user picks litellm/*"]
@@ -658,9 +675,9 @@ The routes still name every funded provider's legs, but several are gated
 | sambanova ($10 credit) | `t2-worker` gpt-oss-120b (UNAVAILABLE — policy) |
 | deepseek ($13 bulk) | `t2-worker`/`t3-driver`/`t3-driver-clean`/`t2-worker-clean` `deepseek-flash` direct — UNAVAILABLE (402 Insufficient Balance 2026-09-27T16:4xZ, `providers.deepseek.available: false`); the pinned `deepseek-v4.1-flash` combo is omitted until topped up |
 | cheap-inference ($15 partner pool) | allows only `kimi-k3`, `glm-5.2`, `minimax-m2.7`: `t2-worker` kimi-k3 · `t3-driver` glm-5.2/minimax-m2.7. `deepseek-v4-flash`/`glm-4.5-air` are DENIED by `deny-cheaperinference` |
-| meta ($10) | via openrouter contributor at `t1-orchestrator`/`t1-orchestrator-clean`/`spark-1.3-contributor` — those routes are UNAVAILABLE/omitted since DSMAX (openrouter off, 2026-09-27); direct Meta API via the opencode `meta` provider only |
+| meta ($10) | `meta_api` direct (OpenAI-compatible, `providers.meta_api`) at the `t1-orchestrator` / `t1-orchestrator-paid` / `spark-1.3-contributor` heads and the `t2-worker` / `t3-driver` tails (MUSEAPI 2026-09-27) · the openrouter contributor leg at `t1-orchestrator-clean` is UNAVAILABLE (openrouter off, DSMAX 2026-09-27) · also reachable outside the gateway, via the opencode `meta` provider |
 | openrouter ($1, last resort) | OFF entirely (DSMAX 2026-09-27: 401 even for BYOK); every openrouter leg is gated by `providers.openrouter.available: false` |
-| zen (promo + paid) | free contributor leg at the (omitted) `t1-orchestrator` head · paid `deepseek-v4.1-flash` at every tier tail — UNAVAILABLE (client-bound / 402) |
+| zen (promo + paid) | free contributor leg at the `t1-orchestrator` / `t1-orchestrator-free-only` heads — UNAVAILABLE *through the gateway* (client-bound: it answers the opencode client only) · paid `deepseek-v4.1-flash` at every tier tail — UNAVAILABLE (402) |
 
 `providers test-all` 2026-09-22: 12/13 OK (muse-code SKIP inactive by
 design at the time — unregistered since 2026-09-23, openrouter-first;

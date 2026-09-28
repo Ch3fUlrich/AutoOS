@@ -168,6 +168,12 @@ Available standalone MCP components in the catalog:
 - `mcp-graphify`: Codebase knowledge graph queries via `graphify.serve`.
 - `mcp-playwright`: Headless browser automation via `@playwright/mcp`.
 - `mcp-context7`: Real-time documentation lookups via `@upstash/context7-mcp`.
+- `omnigraph-client`: the machine half of `omnigraph` on Linux and macOS — the
+  env file (`~/.autoos-omnigraph.env`, mode 600) holding the server URL and the
+  bearer token, the pinned bridge pre-installed into a private npm prefix, and
+  the `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with
+  a hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing.
+  See `docs/omnigraph.md` ("The `omnigraph-client` component").
 
 The `agent-skills` component wires the complete MCP stack above, along with
 `omnigraph` project-scoped memory.

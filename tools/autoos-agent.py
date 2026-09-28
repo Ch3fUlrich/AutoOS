@@ -90,7 +90,9 @@ Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headle
 exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit authored or
 committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
 branch reflog (commit-then-reset) or moved side refs - or a tracked file outside logs/ left dirtier than
-before - the shas and paths are printed, nothing is reverted, the track record carries
+before - the one exemption being a ref that is another lane's own worktree branch at both ends of the run, and an
+orchestrator that merged or fast-forwarded this parent mid-run is expected to see it: freeze the parent (skill
+R-coord-01). The shas and paths are printed, nothing is reverted, the track record carries
 failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
 output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
@@ -128,6 +130,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -161,6 +164,11 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # run's gate contradicts the recorded status of its route's legs.
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
 MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+# REVROUTE (S2) item 3: the spawner's own transient note about which provider
+# just told it a reset time. Git-ignored beside measured.json - the registry is
+# the operator's file, this one is the machine's observation, and a record whose
+# window has passed stops mattering on its own (registry.unavailable_now).
+PROVIDER_STATE_PATH = os.path.join(ROOT, "logs", "routing", "provider-state.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
 # `route`'s default orchestrator model (spec 6.1): a registry model id billed
 # for verification cost when the caller does not pin one.
@@ -864,6 +872,408 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def resolve_review_plan(card: dict, now=None) -> dict | None:
+    """The ``policy.reviewers`` decision for an authored review card.
+
+    None unless the card both asks for a review and names who wrote the diff --
+    the different-family rule needs an author, and an unauthored review is the
+    orchestrator's own business (the spec 5.7 reviewer *routes* still apply).
+    Both card shapes count: v2 says ``kind=review``, v1 says ``role=review``,
+    and ``author`` is shared (autoos_routing.CARD_SHARED). Reads the same
+    registry, client probes and clock the route plan reads, so `route` and `run`
+    cannot disagree about who reviews.
+    """
+    if not _card_asks_review(card) or not card.get("author"):
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return resolver.reviewer_for(
+        card["author"], load_live_registry(),
+        measure_mod.client_state(clients), now,
+        risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
+
+
+def _card_asks_review(card: dict) -> bool:
+    """True when a normalized card asks for a review, v1 or v2 spelling."""
+    return card.get("kind") == "review" or card.get("role") == "review"
+
+
+def review_run_refusal(review: dict | None):
+    """Why an authored review run must not start yet, or None when it may.
+
+    ``queued`` reuses SPAWNFREE's exit 9: every reviewer that could take this
+    card is down with a known reset, so the right answer is to wait and re-spawn
+    (the same rc the caller's queue loop already understands), not to run the
+    review on a same-family model and call it independent. ``unresolved`` is the
+    opposite -- nobody is eligible and no wait changes that (a signed-out client
+    needs a human) -- so it is a plain exit-2 refusal, never a retry the caller
+    would have to bound.
+
+    Either way the skipped reviewers are printed first, one line each: "who is
+    blocked and why" is the question a refusal gets asked, and the answer is
+    already in the walk.
+    """
+    if not review:
+        return None
+    if review["state"] not in ("queued", "unresolved"):
+        return None
+    for line in resolver.reviewer_explain_lines(review):
+        print(line, file=sys.stderr)
+    if review["state"] == "queued":
+        return refuse("reviewer %s" % review["reason"], EXIT_FREE_QUEUE_TIMEOUT)
+    return refuse("reviewer unavailable: %s" % review["reason"])
+
+
+# REVROUTE (S2) item 5: what a lane record must SAY before the lane is ready.
+# A line, not a section: the record is free-form markdown a person writes, so
+# the gate looks for one machine-readable line per review and ignores the prose
+# around it. `review-status` prints the same hint it parses, and `run` prints a
+# paste-ready one, so the format is never something you have to go looking for.
+REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
+READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm"))
+# The final check is the operator's unchanged decision (Q-003 2026-09-27): a
+# cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
+# registry route -- it is the orchestrator's own interactive model -- so this one
+# matches the NAME, while the cross-family half is decided by registry families.
+FINAL_REVIEWER = "sonnet"
+# REVGATE2: the final checker is recognized by its NAME, never as a substring of
+# one -- "notsonnet" contains "sonnet" and is not a sign-off. The vendor's full
+# model id (claude-sonnet-5, claude-sonnet-4-6) is the same checker spelled by
+# the client, so it counts too; anything else does not.
+FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
+REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
+                     "reviewer=<model> verdict=<ready|pass|lgtm|...>")
+
+
+def reviewer_family(spelling, registry):
+    """The model FAMILY of a reviewer named in a lane record, or None.
+
+    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
+    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
+    keeps its ``family`` honest against ``models``. Then the registry's own model
+    ids, whole and after a client/provider prefix. The answer is in
+    ``resolver.family_key`` form, so a record's "Meta" and the registry's "meta"
+    are one family wherever it is compared (REVFIX S2).
+
+    Unknown returns None rather than a guess. An invented *reviewer* name would
+    differ from every author family and read as an independent review that never
+    happened -- which is also why ``author_family`` no longer guesses at an
+    unknown *author* (REVFIX S2: both halves must be known before they may
+    disagree).
+    """
+    if not isinstance(spelling, str) or not spelling.strip():
+        return None
+    name = spelling.strip()
+    key = resolver.family_key(name)
+    for entry in ((registry.get("policy") or {}).get("reviewers") or []):
+        if isinstance(entry, dict) and resolver.family_key(entry.get("model")) == key:
+            return resolver.family_key(entry.get("family"))
+    models = registry.get("models") or {}
+    for candidate in (key, key.rpartition("/")[2]):
+        entry = resolver.ci_value(models, candidate)
+        if isinstance(entry, dict):
+            return resolver.family_key(entry.get("family"))
+    return None
+
+
+def is_final_reviewer(spelling):
+    """True when ``spelling`` NAMES the final checker, stripped and lower-cased.
+
+    One helper owns the answer so the gate and any future caller agree on what
+    "Sonnet signed this off" means. A substring is not a name: matching
+    ``FINAL_REVIEWER in reviewer`` let ``notsonnet`` pass (REVGATE2, HIGH)."""
+    name = (spelling or "").strip().lower()
+    return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
+
+
+def _review_entry_verdict(entry):
+    """``(ok, reason)`` for one entry's verdict field."""
+    verdict = (entry.get("verdict") or "").strip()
+    if verdict.lower() in READY_VERDICTS:
+        return True, None
+    return False, "verdict %s" % (verdict or "missing")
+
+
+def _cross_family_review(entries, registry):
+    """The record's independent review: a reviewer from a DIFFERENT family."""
+    wanted = [e for e in entries if e.get("kind") == "cross-family"]
+    if not wanted:
+        return {"ok": False, "family": None,
+                "detail": "no AutoOS-Review: kind=cross-family entry"}
+    reasons = []
+    for entry in wanted:
+        reviewer = entry["reviewer"]
+        family = reviewer_family(reviewer, registry)
+        if family is None:
+            reasons.append("%s is not a known reviewer (policy.reviewers or models)"
+                           % reviewer)
+            continue
+        author, why = resolver.author_family(entry.get("author") or "", registry)
+        if author is None:
+            # REVFIX S2: an author the registry cannot place is NOT treated as a
+            # family of its own. "Who wrote this" unanswered is not evidence that
+            # the reviewer is someone else, so the check fails and says so.
+            reasons.append("author: %s" % why)
+            continue
+        if author == resolver.family_key(family):
+            reasons.append("%s is the same family as the author (%s)" % (reviewer, family))
+            continue
+        ok, reason = _review_entry_verdict(entry)
+        if not ok:
+            reasons.append("%s %s" % (reviewer, reason))
+            continue
+        return {"ok": True, "family": family,
+                "detail": "%s reviewed by %s (%s)" % (entry.get("author"), reviewer, family)}
+    return {"ok": False, "family": None, "detail": "; ".join(reasons)}
+
+
+def _final_review(entries):
+    """The record's sign-off: a kind=final entry naming the final checker."""
+    wanted = [e for e in entries if e.get("kind") == "final"]
+    if not wanted:
+        return {"ok": False,
+                "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
+    named = [e for e in wanted if is_final_reviewer(e["reviewer"])]
+    if not named:
+        return {"ok": False,
+                "detail": "the final entries name %s, not %s"
+                          % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
+    reasons = []
+    for entry in named:
+        ok, reason = _review_entry_verdict(entry)
+        if ok:
+            return {"ok": True,
+                    "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
+        reasons.append("%s %s" % (entry["reviewer"], reason))
+    return {"ok": False, "detail": "; ".join(reasons)}
+
+
+def review_status(text, registry):
+    """Which of the two reviews a lane record carries, read off the record itself.
+
+    An item 2 spawn has already proved a reviewer EXISTS for this card; this is
+    the other half -- proof it RAN and said something, in the file that gets
+    merged. A same-family reviewer, an unknown reviewer spelling and a verdict
+    that says FIX-FIRST all fail, and each says which, because "missing" would
+    send someone to book a review that already happened and did not pass.
+    """
+    entries, malformed = [], []
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        fields = {}
+        for token in match.group("body").split():
+            key, _sep, value = token.partition("=")
+            if value and key.lower() in REVIEW_ENTRY_FIELDS:
+                fields[key.lower()] = value
+        if fields.get("kind") and fields.get("reviewer"):
+            entries.append(fields)
+        else:
+            malformed.append(match.group("body").strip())
+    cross = _cross_family_review(entries, registry)
+    final = _final_review(entries)
+    return {"entries": len(entries), "malformed": malformed,
+            "cross_family": cross, "final": final,
+            "ready": cross["ok"] and final["ok"],
+            "hint": REVIEW_ENTRY_HINT}
+
+
+def read_lane_record(path):
+    """A lane record's text and the label to name it with; `-` is stdin.
+
+    OSError (a typo'd path) is the caller's to report: rc 2, not rc 1 -- "the
+    gate could not run" is a different next action from "not ready yet".
+    """
+    if path == "-":
+        return sys.stdin.read(), "<stdin>"
+    with io.open(path, encoding="utf-8") as fh:
+        return fh.read(), path
+
+
+def print_review_report(label, report):
+    """The review-status report, shared by `review-status` and `ready`.
+
+    One owner on purpose: the line an orchestrator reads to decide what to do
+    next must not drift between the gate that tells it to go and the gate that
+    refuses to write the claim down.
+    """
+    print("review-status: %s -- %d review entr%s"
+          % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
+    for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
+        item = report[key]
+        print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+    for line in report["malformed"]:
+        print("  note: entry without a kind= or reviewer= ignored: %s" % line)
+    if not report["entries"]:
+        print("  note: write one line per review, e.g.: %s" % report["hint"])
+    print("ready: %s" % ("yes" if report["ready"] else "no"))
+
+
+def cmd_review_status(args) -> int:
+    """Report whether a lane record carries both reviews a ready lane needs.
+
+    Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
+    read -- a typo'd path is not a lane that needs reviewing, and a caller that
+    waits on 1 would wait forever on that mistake.
+    """
+    try:
+        text, label = read_lane_record(args.record)
+    except OSError as exc:
+        print("review-status: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print_review_report(label, report)
+    return 0 if report["ready"] else 1
+
+
+def remote_branch_tip(repo, branch):
+    """``(sha, error)`` -- what ``origin`` says ``refs/heads/<branch>`` points at.
+
+    ``(None, None)`` means the remote ANSWERED and the branch simply is not there:
+    the work lives only in someone's checkout, which is exactly what a `ready`
+    line must not claim. A non-None ``error`` is git failing to answer at all (no
+    ``origin`` remote, not a checkout, an unreachable host) -- "the gate could not
+    run", which is a different next action and a different exit code.
+
+    The timeout is not decoration: the real origin is a network remote, and a
+    gate that hangs takes the lane's session with it.
+    """
+    ref = "refs/heads/%s" % branch
+    try:
+        proc = subprocess.run(["git", "-C", repo, "ls-remote", "origin", ref],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, "%s" % exc
+    if proc.returncode != 0:
+        return None, ((proc.stderr or proc.stdout or "").strip()
+                      or "git ls-remote exited %d" % proc.returncode)
+    for line in proc.stdout.splitlines():
+        sha, _sep, name = line.partition("\t")
+        if name.strip() == ref and sha.strip():
+            return sha.strip(), None
+    return None, None
+
+
+def append_inbox_line(path, line):
+    """Append exactly one line to a controller's inbox, creating it if missing.
+
+    Append-only because the inbox is a log: it holds orders other agents already
+    acted on, and rewriting it to add a line deletes that history. A file whose
+    last byte is not a newline is terminated first, so the new line is never
+    glued to the old one.
+    """
+    needs_newline = False
+    if os.path.isfile(path) and os.path.getsize(path):
+        with io.open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            needs_newline = fh.read(1) not in (b"\n", b"\r")
+    with io.open(path, "a", encoding="utf-8", newline="\n") as fh:
+        if needs_newline:
+            fh.write("\n")
+        fh.write(line + "\n")
+
+
+def cmd_ready(args) -> int:
+    """Write the `ready` line an orchestrator used to type by hand.
+
+    Three gates, in this order, each naming itself when it fails: the record
+    carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
+    for ``--branch``, and only then is the line appended to the inbox. The rule
+    moved into code because the hand-written claim was wrong once -- L1-main
+    refused a `ready` line whose record had no reviews (inbox 00:31:52Z).
+
+    Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
+    met, 2 a gate could not be read (unreadable record, git failure, unwritable
+    inbox)."""
+    try:
+        text, label = read_lane_record(args.record)
+    except OSError as exc:
+        print("ready: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print_review_report(label, report)
+    if not report["ready"]:
+        print("ready: not appended -- the record does not carry both reviews")
+        return 1
+    tip, git_error = remote_branch_tip(args.repo or os.getcwd(), args.branch)
+    if git_error:
+        print("ready: cannot read origin/%s: %s" % (args.branch, git_error), file=sys.stderr)
+        return 2
+    if tip is None:
+        print("ready: not pushed -- origin has no refs/heads/%s; push the lane "
+              "before declaring it ready" % args.branch)
+        return 1
+    if tip != args.sha:
+        print("ready: not pushed -- %s is at %s on origin, not %s"
+              % (args.branch, tip, args.sha))
+        return 1
+    line = "%s ready %s %s reviews: %s | %s" % (
+        _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
+        args.branch, args.sha,
+        report["cross_family"]["detail"], report["final"]["detail"])
+    if args.dry_run:
+        print("ready: --dry-run, nothing appended to %s" % args.inbox)
+        print("  %s" % line)
+        return 0
+    try:
+        append_inbox_line(args.inbox, line)
+    except OSError as exc:
+        print("ready: cannot write %s: %s" % (args.inbox, exc), file=sys.stderr)
+        return 2
+    print("ready: appended to %s" % args.inbox)
+    print("  %s" % line)
+    return 0
+
+
+def reviewer_run_override(review, client, cfg, tier, model, override, free):
+    """``(model, combo, note)`` -- the run this reviewer resolution implies.
+
+    A review card that names its author is a *reviewer* request, so when the
+    reviewer the list picked runs on the client this run is already using, the
+    run carries that reviewer's model spelling rather than the resolver's
+    generic route (REVROUTE (S2) item 2; item 4 is what makes the paid Muse
+    reviewer's spelling resolvable at all).
+
+    Anything that is not that clean case leaves the run alone and says so in
+    ``note`` -- the operator's explicit ``--model``, a ``--free`` promo run, a
+    reviewer that lives on another client, and a non-gateway client (which takes
+    its own ``--model`` and has no gateway combo to name) all keep what they had.
+    Silence here would be the bug: the review would run on a model nobody chose.
+    """
+    if not review or review.get("state") != "resolved":
+        return model, None, None
+    entry = review["reviewer"]
+    asked = "%s %s" % (entry.get("client"), entry.get("model"))
+    if override:
+        return model, None, "note: an explicit --model wins over policy.reviewers (%s)" % asked
+    if free:
+        return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
+    if entry.get("client") != client.name:
+        return (model, None,
+                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
+                "so it is NOT the review that list picked"
+                % (entry.get("client"), entry.get("model"), client.name))
+    if not client.gateway:
+        return (model, None,
+                "note: %s is not a gateway client, so --model stays the caller's; "
+                "policy.reviewers picked %s" % (client.name, asked))
+    # The gateway only serves a route the client config declares, so a combo
+    # spelling is checked -- an undeclared heading is exactly the failure the
+    # operator must see, not a silent fallback (item 4).
+    # A model spelled on the client's OWN provider (opencode's zen free models,
+    # the same shape a --free run passes today) is the client's to resolve:
+    # there is no gateway route behind it to declare, and refusing it here would
+    # bench a reviewer that runs fine.
+    if not entry["model"].partition("#")[0].startswith("omniroute/"):
+        return entry["model"], None, "reviewer-model: %s" % asked
+    return (resolve_model(cfg, tier, False, entry["model"]),
+            entry["model"].partition("#")[0].replace("omniroute/", "", 1),
+            "reviewer-model: %s" % asked)
+
+
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                       exclude_routes: set | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
@@ -890,7 +1300,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     own; it only turns whatever route plan() already picked into a combo/tier.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
-    registry = load_registry(REGISTRY_PATH)
+    registry = load_live_registry()
     if exclude_routes:
         # A copy, so the shared load_registry() cache (and the caller's own
         # reference) never loses the routes a previous attempt needs recorded.
@@ -919,6 +1329,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
+    # An authored review card runs its reviewer, not just any survivable route
+    # (REVROUTE item 2); a reviewer on another client is announced, never faked.
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        result.get("review"), clients.CLIENTS[args.client], cfg, tier, model,
+        override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
@@ -929,7 +1346,11 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
             "bucket": result["bucket"], "class": route_class, "resolver": True,
-            "effort": result.get("effort")}
+            "effort": result.get("effort"),
+            # who reviews this card (REVROUTE item 2); plan() already walked
+            # policy.reviewers with the same registry/probes/clock it used to
+            # pick the route, so the spawner never re-derives it.
+            "review_plan": result.get("review"), "reviewer_note": reviewer_note}
 
 
 class PrivacyRefused(ValueError):
@@ -993,7 +1414,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
-                "review": args.tier == 3}
+                "review": args.tier == 3, "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
@@ -1003,8 +1424,16 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+    review = resolve_review_plan(card)
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
-            "privacy": card["privacy"], "review": card["role"] == "review"}
+            "privacy": card["privacy"], "review": card["role"] == "review",
+            # a v1 card asks for a review with role=review; author is the shared
+            # field, so the same reviewer walk applies (REVROUTE item 2).
+            "review_plan": review, "reviewer_note": reviewer_note}
 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
@@ -1360,7 +1789,7 @@ def cmd_route(args) -> int:
         return refuse(str(exc))
     repo = args.repo or ROOT
     try:
-        registry = load_registry(REGISTRY_PATH)
+        registry = load_live_registry()
         overlay = load_overlay(MEASURED_OVERLAY_PATH)
     except (OSError, ValueError) as exc:
         return refuse("cannot load routing data: %s" % exc)
@@ -1471,6 +1900,12 @@ PROVIDER_STOP_MARKERS = (
     # FUP form of the qoder credits stop above; other clients word it without
     # "your personal".
     "credits exhausted",
+    # R6STOP (measured 2026-09-27T19:0x-19:1xZ, work/L1-routing/R6RES.out): the
+    # gateway's per-credential cooldown - "Error: [429] All credentials for
+    # model gemini-3.8-flash are cooling down (reset after 37s)". It carries no
+    # " 429" (the digits sit inside brackets) and no rate-limit wording, so a
+    # cooled leg was not a stop at all and its stated window was never read.
+    "are cooling down",
 )
 
 # SPAWNCAP (S2): how many times a provider-stopped resolver-routed --isolate
@@ -1529,6 +1964,350 @@ def provider_stop(tail: str) -> str | None:
                 marker in low for marker in PROVIDER_STOP_MARKERS):
             return clean
     return None
+
+
+# --- REVROUTE (S2) item 3: a stop that states its own reset time -------------
+#
+# A 429 that says "resets in ~83h" is worth more than a track record: the client
+# is the only witness to the window, and handing the same provider the next task
+# for three days wastes every one of them. So the spawner records the window in
+# its own state file and every ROUTING read (route, run, the reviewer walk)
+# merges it into the registry as the provider's `unavailable_until` -- which
+# `registry.unavailable_now` already knows how to skip and how to let expire.
+# Renders and `registry.py validate` never read it: they stay clock-free.
+
+# A client printing "resets in ~400d" must not bench a provider for a year on
+# the spawner's authority; a window this long is an operator edit to the
+# registry, with the evidence quoted next to it.
+MAX_AUTO_RESET_SECONDS = 7 * 86400
+
+# R6STOP: Google counts its own cooldown down in fractional seconds
+# ("Please retry in 59.250991496s."), and words it "retry in" as well as
+# "retry after". The number group is the whole part and the fraction is
+# skipped, so 59.25... reads as 59 -- the window the run was told, to the
+# second it stated it.
+_RESET_RE = re.compile(
+    r"(?:resets? in|reset after|try again in|retry (?:after|in))"
+    r"\s*~?\s*(\d+)(?:\.\d+)?\s*([a-z]+)")
+_RESET_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+                "m": 60, "min": 60, "minute": 60, "minutes": 60,
+                "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "d": 86400, "day": 86400, "days": 86400}
+
+# "provider: sambanova. ..." - the gateway names the connection it tried. The
+# class stops at a comma or period so the sentence's own punctuation is not part
+# of the id.
+_STOP_PROVIDER_RE = re.compile(r"provider:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def parse_reset(text: str) -> int | None:
+    """The seconds a stop line counts itself out for, or None if it names none.
+
+    Reads the reset the client states ("resets in ~83h", "reset after 51s",
+    "try again in 15 minutes"), not a guess: a plain "Rate limit exceeded"
+    without a window returns None and records nothing. An unknown unit reads as
+    no window rather than as seconds.
+    """
+    m = _RESET_RE.search((text or "").lower())
+    if not m:
+        return None
+    unit = _RESET_UNITS.get(m.group(2))
+    return int(m.group(1)) * unit if unit else None
+
+
+def _leg_provider_model(leg, registry):
+    """A route leg as ``(provider_id, model_id)``, or None if it does not resolve.
+
+    `registry.resolve_leg` is the one place that knows a leg's prefix may be
+    spelled either as the provider's key or as its ``omniroute_id`` (25 such
+    legs in the real registry, ``gemini/gemini-3.8-flash`` among them); a leg
+    that names no provider or no model is None here and reported by
+    `registry.py check`, not by a routing read.
+    """
+    try:
+        return resolve_leg(leg, registry)
+    except ValueError:
+        return None
+
+
+def _line_names_model(line, model_id) -> bool:
+    """True when the stop line quotes `model_id` as a word of its own.
+
+    The gateway says "All credentials for model gemini-3.8-flash ...", so the
+    model it had already chosen is in the text. Whole-word so a model id that
+    is a fragment of another one's spelling cannot drag in the wrong provider.
+    """
+    if not model_id:
+        return False
+    return re.search(r"\b%s\b" % re.escape(str(model_id).lower()), line) is not None
+
+
+def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
+    """Which provider took the stop, as the registry's own id, or None.
+
+    A line that names its provider wins -- including the gateway's spelling of
+    it (providers.<id>.omniroute_id), which is the same connection, not a new
+    one. Next a line that names the MODEL it tried (R6STOP: "All credentials
+    for model gemini-3.8-flash are cooling down"): the gateway is telling us
+    who served it, and the provider of the leg heading that model is benched
+    whatever else the route happens to hold. Only an unnamed line falls back
+    to the gateway working down the route's legs in order, so the one that took
+    the traffic is the first leg whose provider is up right now. Both read legs
+    through `resolve_leg`, so a leg spelled with a gateway alias attributes to
+    its provider rather than being skipped (measured: a t2-worker gemini
+    cooldown benched antigravity). A line that names nothing and has no live leg
+    to choose from is attributed to no provider (recording a guess would bench
+    the wrong one).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    providers = registry.get("providers") or {}
+    line = line or ""
+    m = _STOP_PROVIDER_RE.search(line)
+    if m:
+        named = m.group(1)
+        for pid, provider in providers.items():
+            if pid == named or (isinstance(provider, dict)
+                                and provider.get("omniroute_id") == named):
+                return pid
+        return None
+    low = line.lower()
+    served = None
+    for leg in legs or []:
+        resolved = _leg_provider_model(leg, registry)
+        if resolved is None:
+            continue
+        pid, model_id = resolved
+        if _line_names_model(low, model_id) and (
+                served is None or len(model_id) > len(served[1])):
+            served = (pid, model_id)
+    if served:
+        return served[0]
+    for leg in legs or []:
+        pid, _model_id = _leg_provider_model(leg, registry) or (None, None)
+        provider = providers.get(pid)
+        if isinstance(provider, dict) and not unavailable_now(provider, now):
+            return pid
+    return None
+
+
+def load_provider_state(path: str) -> dict:
+    """The spawner's provider-stop state; a missing or broken file reads as empty.
+
+    A record of a transient outage is never worth failing a run over, so this
+    cannot raise: an unreadable file is an empty state (silently -- there is
+    nothing to have said), and unparseable JSON is named on stderr and reads as
+    empty too, because the shape that follows cannot be trusted. What the file
+    SAYS once it parses is checked by `_validated_provider_entries`.
+    """
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    try:
+        state = json.loads(text)
+    except ValueError as exc:
+        _provider_state_warning("it is not JSON (%s)" % exc)
+        return {}
+    if not isinstance(state, dict):
+        _provider_state_warning("the file is a %s, not an object"
+                                % type(state).__name__)
+        return {}
+    return state
+
+
+def _provider_state_warning(why: str) -> None:
+    """One line on stderr about the provider-state file. Never an exception.
+
+    One per call, however many rows were bad: the caller is a routing read that
+    has already decided to ignore the file, and a page per row would bury the
+    rest of the run's output.
+    """
+    print("autoos-agent: ignoring the provider-state file: %s" % why,
+          file=sys.stderr)
+
+
+def _iso_utc(text):
+    """An ISO instant as an aware UTC datetime, or None.
+
+    `_parse_iso` accepts a naive value; a naive instant in a state file is
+    someone's local wall clock, and comparing it to an aware `now` would raise
+    TypeError. It is read as UTC -- the shape the writer emits (`_iso_zulu`) and
+    registry check rule 7 enforce.
+    """
+    parsed = _parse_iso(text)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _validated_provider_entries(state, now=None):
+    """``(rows, reasons_ignored)`` for a loaded provider-state file.
+
+    REVFIX S1/S3. The file is this tool's own, but it lives in logs/ where a
+    person fixes things by hand and where an older build may already have
+    written it, so no part of its shape is trusted: ``providers`` must be an
+    object, every row an object, and every row's ``unavailable_until`` a
+    parseable ISO instant no more than MAX_AUTO_RESET_SECONDS ahead -- the cap
+    the WRITER already applies, enforced on the way in as well or a single row
+    ("2099-01-01") benches a provider forever on the spawner's authority.
+
+    Every failure is a reason in the second half of the tuple, never an
+    exception: a routing read must go on with the registry as it is.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, reasons = {}, []
+    raw = state.get("providers") if isinstance(state, dict) else None
+    if raw is None:
+        return rows, reasons
+    if not isinstance(raw, dict):
+        return rows, ['its "providers" section is a %s, not an object of '
+                      "provider rows" % type(raw).__name__]
+    cap = now + datetime.timedelta(seconds=MAX_AUTO_RESET_SECONDS)
+    for pid, entry in raw.items():
+        if not isinstance(entry, dict):
+            reasons.append("%s is a %s, not an object" % (pid, type(entry).__name__))
+            continue
+        until = entry.get("unavailable_until")
+        parsed = _iso_utc(until)
+        if parsed is None:
+            reasons.append("%s carries no parseable ISO unavailable_until (%r)"
+                           % (pid, until))
+            continue
+        if parsed > cap:
+            reasons.append("%s claims a reset %s, past the %d-day window a machine "
+                           "observation may assert (an operator's own registry edit "
+                           "is how a longer outage is declared)"
+                           % (pid, until, MAX_AUTO_RESET_SECONDS // 86400))
+            continue
+        rows[pid] = entry
+    return rows, reasons
+
+
+def _iso_zulu(moment) -> str:
+    return moment.astimezone(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+
+
+def _until_is_expired(entry, now) -> bool:
+    """True when `entry`'s window already passed (so it says nothing anymore)."""
+    until = (entry or {}).get("unavailable_until")
+    parsed = _iso_utc(until)
+    return parsed is not None and now >= parsed
+
+
+def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
+                      path: str | None = None):
+    """Record a stopped provider's own reset window; returns (provider, until) or None.
+
+    Nothing is recorded when the line states no window, when the window is
+    implausible (MAX_AUTO_RESET_SECONDS), or when no provider can be named for
+    it. A second stop for the same provider keeps the LATER window, and entries
+    whose window already passed are dropped on the way in, so the file cannot
+    grow into a list of historical outages. Writes atomically (mkstemp in the
+    target directory, then os.replace) - a reader mid-run must never see a
+    half-written state.
+    """
+    seconds = parse_reset(stop_line)
+    if seconds is None or seconds > MAX_AUTO_RESET_SECONDS:
+        return None
+    legs = ((registry.get("routes") or {}).get(combo) or {}).get("legs") or []
+    provider_id = stop_provider_id(stop_line or "", registry, legs, now)
+    if provider_id is None:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    path = path or PROVIDER_STATE_PATH
+    until = _iso_zulu(now + datetime.timedelta(seconds=seconds))
+    state = load_provider_state(path)
+    kept, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        # REVFIX S1: the writer is not poisoned by what it is reading. The bad
+        # rows are named and dropped, and the file that comes back is the shape
+        # the reader expects.
+        _provider_state_warning("; ".join(ignored))
+    providers = {pid: entry for pid, entry in kept.items()
+                 if not _until_is_expired(entry, now)}
+    previous = providers.get(provider_id) or {}
+    previous_until = _iso_utc(previous.get("unavailable_until"))
+    if previous_until is not None and _iso_utc(until) < previous_until:
+        until = previous["unavailable_until"]
+    providers[provider_id] = {"unavailable_until": until, "combo": combo,
+                              "reason": stop_line, "recorded_at": _iso_zulu(now)}
+    directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".provider-state-")
+        try:
+            with io.open(fd, "w", encoding="utf-8") as fh:
+                json.dump({"$comment": "providers a real run reported as stopped, "
+                                       "with the reset that run was told; transient "
+                                       "state, not the operator's registry",
+                           "providers": providers}, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except OSError as exc:
+        print("autoos-agent: could not record the provider stop: %s" % exc,
+              file=sys.stderr)
+        return None
+    return provider_id, until
+
+
+def apply_provider_state(registry: dict, state: dict, now=None) -> dict:
+    """`registry` with the recorded windows applied as providers' `unavailable_until`.
+
+    Returns a copy - the shared `load_registry()` object is never mutated. The
+    state is validated first (`_validated_provider_entries`): a row that is
+    missing, mis-shaped or beyond the cap is ignored with one warning and the
+    registry stands as it is, because this runs on the routing path of every
+    `route`/`run` and a broken outage record must not take the router down with
+    it (REVFIX S1/S3). An entry for a provider the registry does not know is
+    ignored (the state file follows the registry, not the other way round), and a
+    provider the operator already benched for LONGER keeps the operator's date: a
+    machine observation must never shorten an outage someone wrote on purpose, and
+    the cap is on the machine's word, not the operator's. A window that has passed
+    is applied as it is and self-heals in `unavailable_now`.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        _provider_state_warning("; ".join(ignored))
+    merged = dict(registry)
+    providers = dict(registry.get("providers") or {})
+    merged["providers"] = providers
+    for pid, entry in rows.items():
+        provider = providers.get(pid)
+        if not isinstance(provider, dict):
+            continue
+        parsed = _iso_utc(entry.get("unavailable_until"))
+        current = _iso_utc(provider.get("unavailable_until"))
+        if current is not None and current >= parsed:
+            continue
+        provider = dict(provider)
+        provider["available"] = False
+        provider["unavailable_until"] = entry["unavailable_until"]
+        providers[pid] = provider
+    return merged
+
+
+def load_live_registry(reg_path: str | None = None, state_path: str | None = None,
+                       now=None) -> dict:
+    """The registry as it stands for the routing decisions RIGHT NOW.
+
+    The catalog plus the spawner's recorded provider stops. Use this wherever
+    `route`/`run`/the reviewer walk ask "who is up"; keep plain
+    `load_registry()` for the privacy and capability reads (which a provider
+    outage does not change) and in the renders (which must not move with the
+    date). With no state recorded this is the cached registry, unchanged.
+    """
+    registry = load_registry(reg_path or REGISTRY_PATH)
+    state = load_provider_state(state_path or PROVIDER_STATE_PATH)
+    if not (state.get("providers") or {}):
+        return registry
+    return apply_provider_state(registry, state, now)
 
 
 def _porcelain_path_is_logs(p: str) -> bool:
@@ -1605,9 +2384,11 @@ def _branch_reflog_entries(root: str, branch: str, count: int) -> list:
 
 
 def parent_snapshot(root=None):
-    """(HEAD, branch, reflog count, ref tips, filtered porcelain) of the
-    parent checkout. `branch` is None on a detached HEAD (the commit-then-
-    reset check is skipped then)."""
+    """(HEAD, branch, reflog count, ref tips, filtered porcelain, worktree
+    branches) of the parent checkout. `branch` is None on a detached HEAD (the
+    commit-then-reset check is skipped then); the reflog count is the checked-out
+    branch's own log, and the worktree map bounds the single exemption the leak
+    check grants - another lane's own checked-out branch."""
     if root is None:
         root = ROOT
     head = None
@@ -1620,12 +2401,7 @@ def parent_snapshot(root=None):
                        capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.strip():
         branch = r.stdout.strip()
-    reflog_count = 0
-    if branch:
-        r = subprocess.run(["git", "-C", root, "reflog", "show",
-                            "refs/heads/" + branch], capture_output=True, text=True)
-        if r.returncode == 0:
-            reflog_count = len([ln for ln in r.stdout.splitlines() if ln.strip()])
+    reflog_count = _reflog_len(root, branch) if branch else 0
     refs = {}
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                         "--format=%(refname)%00%(objectname)"],
@@ -1635,31 +2411,58 @@ def parent_snapshot(root=None):
             name, _, sha = line.partition("\x00")
             if name and sha:
                 refs[name] = sha
-    return head, branch, reflog_count, refs, _filtered_parent_status(root)
+    return (head, branch, reflog_count, refs, _filtered_parent_status(root),
+            _worktree_branches(root))
 
 
-def _sibling_worktree_branches(root):
-    """Branch refs checked out in OTHER worktrees of root's repository.
+def _worktree_branches(root):
+    """{ref: worktree path} for the branches checked out in this repository.
 
-    Every lane is a worktree of one .git, so a parallel lane's worker commit
-    on its own checked-out branch moves an existing ref without touching this
-    run's parent checkout. Those refs are not scanned as side branches.
+    All lanes are worktrees of one .git, so a parallel lane's worker commit
+    moves its OWN checked-out branch without touching this run's parent
+    checkout. An empty dict when `git worktree list` fails, which exempts
+    nothing - the strict reading of every moved ref.
     """
     r = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        return set()
-    here = os.path.realpath(root)
-    out, path = set(), None
+        return {}
+    out, path = {}, None
     for line in r.stdout.splitlines():
         if line.startswith("worktree "):
             path = os.path.realpath(line[len("worktree "):])
-        elif line.startswith("branch ") and path and path != here:
-            out.add(line[len("branch "):])
+        elif line.startswith("branch ") and path:
+            out[line[len("branch "):].strip()] = path
     return out
 
 
-def parent_leak(snapshot, root=None):
+def _lane_worktree_moved(name, snap_wt, end_wt, root, sandbox):
+    """True when `name` is ANOTHER worktree's own branch, before and after.
+
+    The one exemption a moved ref gets (false positive B, LEAKFP2). Every leg
+    is required, because dropping any one of them is a leak shape:
+
+    - the same worktree holds the branch at the snapshot AND at the check - a
+      branch, or a worktree, that only appeared during the run is not excused;
+      that is exactly what a worker's `git switch -c` plus a fast-forward back
+      looks like;
+    - it is not this worktree - the parent's own branch moving IS the leak;
+    - it is not the run's sandbox - a worktree added inside the sandbox
+      directory belongs to this run, not to another lane.
+    """
+    at_snap = snap_wt.get(name)
+    if not at_snap or at_snap != end_wt.get(name):
+        return False
+    if at_snap == os.path.realpath(root):
+        return False
+    if sandbox:
+        sb = os.path.realpath(sandbox)
+        if at_snap == sb or at_snap.startswith(sb + os.sep):
+            return False
+    return True
+
+
+def parent_leak(snapshot, root=None, sandbox=None):
     """(leak lines) since a parent_snapshot; empty list = no leak.
 
     A LEAK is, since the snapshot:
@@ -1670,23 +2473,38 @@ def parent_leak(snapshot, root=None):
     - the same scan on every branch ref that EXISTED at the snapshot and
       moved (a worker committing on a side branch). NEW refs are never
       scanned: the orchestrator fetches or merges worker lanes into new refs
-      during a run - never a leak. A ref checked out in ANOTHER worktree of
-      the same repository is skipped too: that is a parallel lane's own
-      branch, not this parent; The --first-parent exemption assumes
-      lanes merge with --no-ff (repo convention); a fast-forward would land
-      worker commits on the first-parent chain and false-flag;
+      during a run - never a leak. A moved ref is exempted in exactly one
+      case, another lane's own worktree (_lane_worktree_moved): all lanes are
+      worktrees of one .git, so a parallel lane commits on the branch checked
+      out in ITS worktree and this worktree never visited it (false positive
+      B, MUSEAPI2.out). Nothing else is exempt - no run window, no
+      "contained in a new branch", no identity beyond the worker's own email;
+      75f2866 had all three and each was bypassable by a decoy `git branch`, a
+      backdated GIT_COMMITTER_DATE, or a `switch -c` plus a fast-forward back
+      (LEAKFP2 review). The --first-parent scan keeps an orchestrator's
+      --no-ff lane merge out; a mid-run merge or fast-forward of THIS parent
+      onto another lane is reported and only the frozen-parent rule (skill
+      R-coord-01) tells the operator it was their own move - the exit-7
+      message says so;
     - any tracked path outside logs/ whose porcelain state is DIRTY after
       and differs from before (new dirt is the worker-shaped signal; a path
       that became clean - the orchestrator committing its own WIP - is not a
       leak).
 
+    KNOWN HOLES, both inherited from 75f2866~1 and accepted with the strict
+    rule: a worker that commits on a branch CREATED during the run and then
+    moves HEAD back off it is missed, because new refs are never scanned (the
+    orchestrator fetches lanes into them); and plumbing that writes a commit
+    without moving a pre-existing ref or dirtying the tree is missed. A stale
+    worktree left behind by an earlier run can also carry the one exemption,
+    which is another reason the parent is frozen (skill R-coord-01).
+
     Git-ignored parent files (configuration/api-keys.yml, inventory.yml) are
-    NOT covered: porcelain cannot see them. Nothing here is reverted, and the
-    parent must stay untouched by anyone else during a run.
+    NOT covered: porcelain cannot see them. Nothing here is reverted.
     """
     if root is None:
         root = ROOT
-    before_head, branch, reflog_count, before_refs, before_status = snapshot
+    before_head, branch, reflog_count, before_refs, before_status, snap_wt = snapshot
     leaks = []
     after_head = None
     r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
@@ -1697,7 +2515,8 @@ def parent_leak(snapshot, root=None):
     if not shas and branch and after_head == before_head:
         # commit-then-reset: HEAD is back at the start; scan the reflog
         # entries appended during the run.
-        shas = _branch_reflog_entries(root, branch, max(0, _reflog_len(root, branch) - reflog_count))
+        shas = _branch_reflog_entries(
+            root, branch, max(0, _reflog_len(root, branch) - reflog_count))
     if shas:
         leaks.append("worker commits in the parent checkout: %s" % ", ".join(shas))
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
@@ -1709,10 +2528,10 @@ def parent_leak(snapshot, root=None):
             name, _, sha = line.partition("\x00")
             if name and sha and name in before_refs and before_refs[name] != sha:
                 moved[name] = (before_refs[name], sha)
-    siblings = _sibling_worktree_branches(root)
+    end_wt = _worktree_branches(root)
     side = []
     for name, (old, new) in sorted(moved.items()):
-        if name in siblings:
+        if _lane_worktree_moved(name, snap_wt, end_wt, root, sandbox):
             continue  # another lane's own worktree branch: not this run's parent
         # New refs are skipped: only refs that existed at the snapshot count.
         for sha in _scan_first_parent_range(root, old, new):
@@ -2563,6 +3382,13 @@ def cmd_run(args, cfg: dict) -> int:
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
+    # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
+    # before anything is started -- a review by the author's own model family is
+    # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
+    # the same code SPAWNFREE's queue loop already handles), not a silent pass.
+    refusal = review_run_refusal(route.get("review_plan"))
+    if refusal is not None:
+        return refusal
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
     # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
@@ -2576,6 +3402,22 @@ def cmd_run(args, cfg: dict) -> int:
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
+    if route.get("review_plan"):
+        # who reviews, and who was passed over -- an operator reading a spawn
+        # should not have to re-run `route --explain` to see the family rule work.
+        reviewer = route["review_plan"]["reviewer"]
+        print("reviewer: %s %s (family %s, author %s)" % (
+            reviewer["client"], reviewer["model"], reviewer["family"],
+            route["review_plan"]["author_family"]))
+        # Item 5: the line that has to end up in the lane record for the lane to
+        # read as reviewed. Filling in the verdict is the reviewer's job at the
+        # end of the run, not the spawner's guess at the start of it.
+        print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
+              "verdict=<fill in>" % (route["card"].get("author"), reviewer["model"]))
+        for line in resolver.reviewer_explain_lines(route["review_plan"]):
+            print(line)
+    if route.get("reviewer_note"):
+        print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
@@ -2756,6 +3598,14 @@ def cmd_run(args, cfg: dict) -> int:
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
         # a promo client whose tail is a provider stop does not get a false probe.
         stop = provider_stop(check_tail)
+        if stop is not None:
+            # REVROUTE (S2) item 3: when the stop line states its own reset,
+            # that window becomes the provider's unavailable_until for every
+            # later routing read - the next task goes elsewhere until then.
+            recorded = record_reset_stop(stop, plan["route"].get("combo"),
+                                         load_live_registry())
+            if recorded:
+                print("provider %s unavailable until %s" % recorded)
         if stop is not None and rc in (0, 3, 6):
             print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
@@ -2862,7 +3712,7 @@ def cmd_run(args, cfg: dict) -> int:
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         override, message = sandbox_verdict(plan["route"], changed, ahead)
-        leak = parent_leak(parent_snap)
+        leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
@@ -2870,6 +3720,13 @@ def cmd_run(args, cfg: dict) -> int:
             print("LEAK: the --isolate run wrote outside its sandbox "
                   "(containment failure, exit 7): %s" % redact_output("; ".join(leak)),
                   file=sys.stderr)
+            if any(ln.startswith("worker commits in the parent checkout") for ln in leak):
+                # LEAKFP2: no code can tell the orchestrator's own mid-run merge
+                # of this parent from the worker's write, so the message names
+                # the procedural rule instead of exempting the case.
+                print("LEAK: if you moved this branch yourself during the run "
+                      "(merge/ff), this is expected - do not move a parent while "
+                      "its child runs (skill R-coord-01)", file=sys.stderr)
             rc = 7
         elif override is not None and rc == 0:
             print(message)
@@ -2962,6 +3819,34 @@ def main(argv=None) -> int:
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+    review_status_p = sub.add_parser(
+        "review-status", help="read a lane record and report whether it carries both "
+                              "reviews a ready lane needs: a cross-family review and the "
+                              "final check (REVROUTE)")
+    review_status_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
+    review_status_p.add_argument("--registry",
+                                 help="registry to resolve model families against "
+                                      "(default: catalog/ai-registry.json)")
+    ready_p = sub.add_parser(
+        "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
+                      "hand: gate on review-status and on --sha being the tip of "
+                      "origin/--branch, then append one line to the controller's "
+                      "inbox (REVGATE)")
+    ready_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
+    ready_p.add_argument("--branch", required=True,
+                         help="the lane branch, checked as refs/heads/<branch> on origin")
+    ready_p.add_argument("--sha", required=True,
+                         help="the commit the lane is ready at; must equal origin's tip for --branch")
+    ready_p.add_argument("--inbox", required=True,
+                         help="the controller's inbox file to append the ready line to "
+                              "(created if missing, never rewritten)")
+    ready_p.add_argument("--registry",
+                         help="registry to resolve model families against "
+                              "(default: catalog/ai-registry.json)")
+    ready_p.add_argument("--repo",
+                         help="git checkout to ask origin about (default: the cwd)")
+    ready_p.add_argument("--dry-run", action="store_true",
+                         help="print the line, append nothing")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
@@ -2969,6 +3854,10 @@ def main(argv=None) -> int:
         return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
+    if args.cmd == "review-status":
+        return cmd_review_status(args)
+    if args.cmd == "ready":
+        return cmd_ready(args)
     if args.cmd == "ps":
         return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))

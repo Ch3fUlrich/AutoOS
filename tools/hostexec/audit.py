@@ -53,10 +53,12 @@ redact_argv = _redact.redact_argv
 
 
 def hash_argv(argv: Sequence[str]) -> str:
-    """sha256 of the RAW (unredacted) argv, joined with a byte that cannot
-    appear in a single argv element (unit separator), so distinct argv
-    arrays never collide via naive concatenation."""
-    canonical = "\x1f".join(argv).encode("utf-8", "surrogateescape")
+    """sha256 of the REDACTED argv (item 5), joined with a byte that cannot
+    appear in a single redacted element (unit separator -- redaction strips
+    it), so distinct argv arrays never collide via naive concatenation. The
+    raw form is deliberately NOT hashed: a digest of a raw secret is
+    offline-guessable, so a secret's value must not influence the digest."""
+    canonical = "\x1f".join(redact_argv(argv)).encode("utf-8", "surrogateescape")
     return hashlib.sha256(canonical).hexdigest()
 
 

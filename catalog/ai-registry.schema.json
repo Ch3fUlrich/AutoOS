@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://autoos.internal/schemas/ai-registry.schema.json",
+  "$id": "https://autoos.example/schemas/ai-registry.schema.json",
   "title": "AutoOS AI model registry",
   "description": "Single hand-edited model file (docs/plans/2026-09-25-routing-v2-spec.md section 3, D11). The old catalog/config files and the one-shot converter tools/registry-convert.py were deleted in task A5e; this file is the only hand-edited source. Sections: providers, models, routes, clients, policy - exactly section 3.1's list. Measured values (probes, recalibrate) never write this file; they live in the git-ignored overlay logs/routing/measured.json.",
   "type": "object",
@@ -535,6 +535,25 @@
               "match": { "type": "string" },
               "allow": { "type": "boolean" },
               "reason": { "type": "string" },
+              "source": { "$ref": "#/$defs/source_tag" }
+            }
+          }
+        },
+        "reviewers": {
+          "type": "array",
+          "minItems": 1,
+          "description": "REVROUTE (S2) item 1, operator 2026-09-27T20:3xZ: the ordered preference list a review card walks -- WHO may review, as data rather than as a constant in the resolver. First usable entry wins: an entry is skipped when its `family` equals the author's (a review must come from a different model family), when the gateway/provider says it is unavailable, or when the card is privacy=sensitive and the model trains on prompts. `model` is the client's own model spelling (a gateway combo like 'omniroute/spark-1.3-contributor', or Haiku's client-side alias) -- like policy.free_client_models it is NOT checked against providers/models, because a reviewer is picked per client, not per route leg. `leg` (optional) names the registry leg that reviewer actually bills through, and is checked by rule 11: availability (providers.<id>.unavailable_until, which the spawner writes from a quota reset) and the privacy/training test are both read off it. A client-native reviewer with no gateway path (qoder, claude) carries no leg and is checked against `clients.<id>` alone -- which is also why it fails closed on sensitive work, since nothing says it does not train. `paid` is the operator's cost preference made visible: the paid Meta Muse contributor leads. `first_pass_only` true marks a reviewer that may take a normal-risk first pass but never closes (Claude Haiku); the high-risk Sonnet close is the resolver's own closer and is not on this list.",
+          "items": {
+            "type": "object",
+            "required": ["client", "model", "family", "paid", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "client": { "type": "string" },
+              "model": { "type": "string" },
+              "family": { "type": "string" },
+              "leg": { "type": "string" },
+              "paid": { "type": "boolean" },
+              "first_pass_only": { "type": "boolean" },
               "source": { "$ref": "#/$defs/source_tag" }
             }
           }

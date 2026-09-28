@@ -5,6 +5,405 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
+- **`tests/test_autoos_spawner.py`**: **`LeakStrictnessTests`** (new, 8 cases) drives the real `parent_snapshot`/`parent_leak` against real temp repositories across the exemption boundary — a sibling worktree's own branch moving is exempt; a worktree added mid-run is not; a worktree inside the sandbox is not; a commit on a branch created during the run is a leak either way HEAD then goes. `IsolateContainmentTests` gains four fake-worker modes for the evasions (decoy branch, backdated committer date, `switch -c` + ff back, commit on a new branch) and the three flipped expectations above. 13 red before the fix, 417 green after on the file; `python3 -m pytest -q tests/` 1831 passed, 4 skipped.
+### Changed - `omnigraph-client` joins the Linux `server` profile (Q-001, 2026-09-28)
+
+- **`catalog/linux.json`**: the operator lifted the Q-001 hold at 04:50Z, so a
+  headless server pre-ticks the Omnigraph bridge like every other profile. The
+  component still skips with a hint when the `omnigraph_url` answer or the
+  `omnigraph_token` key is missing, so a server with no graph configured gains a
+  `skipped` line and nothing else — no failure, no file written. `catalog/macos.json`
+  is untouched: the macOS catalog has no `server` profile.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the catalog case asserted the
+  opposite ("the server profile is on hold") and now asserts the exact profile
+  list per catalog, so the Linux/macOS difference is stated rather than implied;
+  one new end-to-end case runs `--profile server --dry-run --yes` with no URL
+  configured and requires the plan to carry the component, the skip-with-hint line
+  to appear, and exit 0.
+- Docs: `docs/omnigraph.md` names the four Linux profiles and says why macOS has
+  three; the open question in `docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md`
+  is marked resolved with its reasoning.
+
+### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides
+  whether a backup goes through `secret_backup.py` (private, born 0600) or
+  `cp -p` (the source's own mode) matched `OMNIGRAPH_TOKEN=[^[:space:]]` — a
+  non-space *immediately* after the `=` — while every reader of these files
+  decides on the *trimmed* value (`tools/omnigraph-mcp-autoos.sh` and the rc line
+  `install.sh` writes strip the whitespace around it; `has_token` in
+  `omnigraph_env_state` compares the stripped line). So `OMNIGRAPH_TOKEN=   secret`,
+  `export OMNIGRAPH_TOKEN= secret` and a tab after `export ` were live credentials
+  to the wrapper and invisible to the gate: that file took the `cp -p` branch and
+  left a 0644 copy of the bearer token behind the edit that removed the line. The
+  gate now uses the readers' rule — non-empty after trimming — so bare `KEY=`, a
+  whitespace-only value and `KEY = value` (not an assignment, and the readers skip
+  it) still get an ordinary backup that keeps the user's own mode. A quoted value
+  counts as a token even when it is `""`: the gate does not strip quotes, and the
+  error is only ever in the direction of a more private copy.
+- **`lib/linux/secret_backup.py`** (`main`): `argv[2]` was read unguarded, so the
+  call the usage line itself documents as optional — `secret_backup.py <path>` —
+  died with an `IndexError` traceback and exit 1. `backup_file_before_write` turns
+  any non-zero from the helper into "could not back up", so the defect would have
+  made the rc-file edit refuse to run at all rather than take the copy. The stamp
+  is now read only when it is there, and defaults to the clock exactly as the
+  in-process caller does.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the gate is asserted *against the
+  shipped wrapper's own verdict* per form — one rule, two consumers, so the
+  definitions cannot drift again without a test noticing — and the CLI is called
+  with the stamp omitted, passed empty (the shell call site's shape), and with too
+  many arguments (still the usage error).
+
+### Fixed - token-bearing files: backups and temp files (A3 review 4, S1-S2, 2026-09-28)
+
+- **`lib/linux/secret_backup.py`** (new, `lib/linux/install.sh` uses it from both
+  sides): the one implementation of "back up a file that holds a live credential".
+  It creates the copy `O_CREAT | O_EXCL` at `0600` - mode and exclusivity in the
+  same syscall - copies the bytes in, carries only the source's *times* across
+  (`copystat` would copy the mode too and so would widen it), keeps the
+  repository's `<path>.autoos-backup-<stamp>[-N]` name shape, and leaves nothing
+  behind when the copy fails. The shell reaches it through
+  `backup_file_before_write`; `omnigraph_env_state` imports it inside the very
+  process that renames the new bytes into place, because the copy of the old token
+  has to land before the replace that destroys it, not in a second run that could
+  disagree with the first about whether anything changed.
+- **`lib/linux/install.sh`** (`backup_file_before_write`,
+  `file_holds_omnigraph_token`, `append_line_once`,
+  `omnigraph_retire_rc_token_lines`, `replace_or_append_marked_line`): the rc-file
+  edits backed the user's dotfile up with `backup_file`, i.e. `cp -p`, which
+  creates the destination with the *source's* mode - so a 0644 `.bashrc` got a 0644
+  backup holding `OMNIGRAPH_TOKEN=...`, and that copy outlives the line the step
+  deletes: the backup becomes the place the bearer token stays readable to every
+  local user (and survives the rotation, and the checkout, and the machine). Every
+  edit a token-bearing file can reach now takes its copy through
+  `backup_file_before_write`, which hands that case to `secret_backup.py` and keeps
+  `backup_file` - mode and times included - for every other file, unchanged for all
+  its other callers. That is four sites, not the one the finding named: on a first
+  run the rc file is opened by `append_line_once` (the current line is missing)
+  *before* the retire step ever runs, so fixing only the retire step would have
+  left the same leak on the path production takes first.
+  This corrects the claim in the entry below that `cp -p` was clean: it is clean as
+  to the *window* (coreutils creates the destination with the source's mode, so no
+  group-readable instant exists), which is not the same question as whether the
+  finished copy may be read - and a 0644 copy of a token is the leak either way.
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the rewrite staged the new
+  bytes at the fixed, guessable name `<path>.tmp`, opened `O_CREAT | O_TRUNC`.
+  Anyone able to write in the home - another user on a shared or NFS box, a
+  component that ran earlier - could plant a symlink there, and the step then
+  truncated and overwrote the target they chose with the token's bytes before
+  renaming that link onto `~/.autoos-omnigraph.env` itself (the new test reproduces
+  exactly that: the env file came out a link and mode 777). Two AutoOS runs in one
+  second shared the one name too. The temp is now `tempfile.mkstemp(dir=<dirname>,
+  prefix=<basename>.autoos-tmp-)`: unpredictable, exclusive, `0600` from the birth,
+  fsynced, renamed, and unlinked if anything in between fails - the same shape
+  `lib/linux/serve.py`'s `write_secret` and the Claude Code settings writer already
+  use.
+- **`tests/linux/38-omnigraph-client.sh`**: four cases - the retire step under
+  `umask 022` (a `sitecustomize` probe records the mode each backup is *born* with,
+  so a `cp -p` followed by a `chmod 600` cannot pass), a sweep that reads every
+  `.autoos-backup-*` the component run left behind and refuses any that holds a
+  token line and is group- or world-readable, each of the three rc-writing branches
+  (append, purge, replace), and the planted-symlink temp case. The existing
+  env-backup case now asserts the exclusive `0600` creation across the writer *and*
+  the shared helper, and that the writer imports it rather than re-typing it.
+- Not changed here, and the same defect: `setup_opencode_config` stages
+  `opencode.json.tmp` at a fixed name (`lib/linux/install.sh`, the writer that
+  merges the api-key file) - a separate component, so a separate brief.
+
+### Fixed - a token-bearing backup is created 0600 and never widened (A3 final review S1, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the backup taken before the
+  env file is rewritten holds the **previous token**, still a live bearer
+  credential until the server expires it, and `shutil.copy2` creates the
+  destination with `open(dst, "wb")` — mode `0666 & ~umask`, i.e. **0644 on any
+  normal machine** — and only tightens it *after* the bytes landed. On a shared or
+  NFS home another local user could read the token inside that window (measured:
+  the probe saw the backup born 0644). The writer now creates it with
+  `os.open(path, O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — the restrictive mode
+  and the exclusive create in one syscall, so a same-second backup is never
+  clobbered — copies the bytes in, and carries the times across itself
+  (`os.utime`) rather than with `copystat`, which would have copied the mode too.
+  `backup_file` (`cp -p`) was probed the same way and is clean: coreutils creates
+  the destination with the source's mode, so no rc-file backup ever opens.
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): the replace branch
+  assigned `rc=0` with no `local`, unlike the purge branch a few lines above it, so
+  the step's exit status overwrote the *caller's* `rc` — the variable every step
+  here uses to report a failed write.
+- **`tests/linux/38-omnigraph-client.sh`**: a `sitecustomize` shadow hooks
+  `builtins.open` and `os.open` (the idiom `32-answer-file-templates.sh` already
+  uses) and asserts the mode every backup is created with under `umask 022`, that
+  the backup holds the pre-edit bytes and the source's times, and — so a future
+  rewrite that dodges both hooks cannot pass by accident — that the writer holds no
+  `copy2` call and does create with `O_EXCL`. The `rc` leak is asserted
+  behaviourally: a caller whose `rc` is a sentinel still holds it after the step.
+
+### Fixed — the rc-line writer is contained and byte-safe; one value rule for all three readers (A3 review 2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): both of its
+  heredocs read and wrote the rc file as strict UTF-8 *text*, unguarded. On an
+  undecodable `.bashrc`/`.zshrc` the python died — aborting the run outright
+  where errexit was live (measured: under `set -euo pipefail` the step never
+  returned), and where `run_post_install` contained it, printing a traceback into
+  the log, **announcing "replaced the … line" for a file it had not touched**,
+  and recording nothing. A refused write was the same story. Editing one line of
+  a dotfile also re-encoded the whole thing, converting every CRLF neighbour to
+  LF. Both edits now go through one helper, `autoos_rc_edit_lines` — the
+  byte-safe, contained form the retire step had already learned, and which gave
+  up its private copy of that python. A file that cannot be written is a warning
+  plus `autoos_record_failure`, the run continues, and a replacement line keeps
+  the newline of the line it replaced.
+- The same helper's `replace` mode now leaves **one** line. With two stale
+  AutoOS lines in one file it wrote two copies of the new one — reachable for
+  the first time through the version bump below.
+- **The rc tag went `AutoOS:omnigraph-env-v2` → `-v3`**, with the tag held in one
+  function (`omnigraph_rc_marker`). A bump is *required* whenever the rc line's
+  shape changes: the writer recognises a line by the tag alone, so a changed body
+  under an unchanged tag leaves every machine already carrying the old line
+  sitting on it, while the gate — which compares the whole line — never reads
+  current again. The tag without its `-vN` tail is still the older-line marker,
+  so this one bump replaces v1 and v2 alike.
+- **One value rule, three readers.** `KEY= value` produced a token with a leading
+  space in `tools/omnigraph-mcp-autoos.sh` and a trimmed one in the `.ps1` twin,
+  so one env file yielded different tokens per platform; a quoted value that was
+  quoted *after* a space was never unquoted at all. The rule is *whitespace round
+  a value is not part of it, then one layer of matching quotes goes*, applied
+  identically by the shell wrapper, its PowerShell twin (which already had it)
+  and the rc line install.sh writes — verified for all three under bash, zsh and
+  `pwsh` in one test. Whitespace a quoted value keeps *inside* its quotes
+  survives, as it must.
+
+### Fixed — the `omnigraph-client` gate compares the values it would write; the retire step is contained and byte-safe (A3 review S2, 2026-09-28)
+
+- **`lib/linux/install.sh`**: `omnigraph_client_is_current` (the skip gate
+  `install_component` asks *before* any postInstall runs) compared "a token is in
+  the file" and an unanchored `grep -F` of the URL — so a **rotated token stayed
+  stale forever**, and a commented `# OMNIGRAPH_BASE_URL=…` or a
+  `…invalid.evil` suffix URL read as current. It now compares the resolved URL
+  *and* token, as whole `KEY=value` lines, plus the `environment.d` link, the rc
+  line this run would write, and no retired line left; the env-file half is asked
+  of `omnigraph_env_state … check`, the writer's own code path in a new mode, so
+  the gate and the write cannot disagree, and the values reach python in the
+  environment — never printed. A bridge pin with an empty `@version` (`name@`)
+  no longer equals an empty installed version, and a **symlink** at the wrapper
+  path is refused instead of counting as the copy it promises (a `cp` through
+  such a link writes into the tracked checkout).
+- **`lib/linux/install.sh`** (`omnigraph_retire_rc_token_lines`): the heredoc ran
+  unguarded under the runner's `set -euo pipefail` and in text mode, so an
+  undecodable dotfile printed a python traceback into the log, *claimed the line
+  was removed* and left it there, and a read-only file aborted the step; the
+  whole file was also re-encoded (CRLF neighbours converted to LF). It now edits
+  bytes, is contained like every other step (warn +
+  `autoos_record_failure omnigraph-client`, the run continues), and leaves every
+  other line untouched.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: hand-edited env lines —
+  `export KEY=value`, an indent, `"…"`/`'…'` round a value — were kept literally
+  or skipped, so the bridge started with no or wrong token; both twins now strip
+  those forms (one layer of matching quotes, nothing else), ignore every key but
+  the three, are CRLF-safe and still never evaluate a value. The env-file writer
+  recognises the same forms, so a stale hand line is normalised rather than left
+  to shadow the resolved value.
+- **Disproved, not fixed**: `exec "$bridge" "$@"` with no arguments under
+  `set -u` on bash 3.2 (stock macOS) — measured on real `bash:3.2.57` (the
+  `bash:3.2` image): the wrapper starts the bridge with `argc=0`, token exported,
+  exit 0, and `set -u; printf %s "$@"` with no positional parameters exits 0.
+  The bash-4.4 nounset entry that is usually cited here covers `${a[@]}` on an
+  *empty array* (which does fail on 3.2, verified), not `$@`; the portable
+  `${1+"$@"}` form would be noise. A zero-arg case is now tested as a guard.
+- **`tests/linux/38-omnigraph-client.sh`**: 11 cases added, each written against
+  the bug first — env rotation via `$OMNIGRAPH_TOKEN` and via `api-keys.yml`,
+  commented/suffix URL, deleted rc line, reappeared retired line, lost
+  environment.d link, CRLF and non-UTF-8 rc files, unwritable rc file through
+  `run_post_install` (the production shape), decorated env rows normalised,
+  empty-pin refusal, symlinked wrapper refusal, export/quoted/CRLF/injection
+  parsing and the zero-arg start.
+
+### Added — `omnigraph-client`: a pinned bridge, the env file, and the wrapper that reads it (A3, 2026-09-27)
+
+- **`catalog/linux.json`**, **`catalog/macos.json`**: new `custom` component
+  `omnigraph-client` (profiles `workstation`, `ai-coding`, `light`; **not**
+  `server`, which the spec leaves open), `requires: nodejs`, prompt
+  `omnigraph_url`, postInstall `install_omnigraph_client`.
+- **`lib/linux/install.sh`**: `install_omnigraph_client` resolves the base URL
+  from the `omnigraph_url` answer (`omnigraph_url_answer` is now the one strip
+  rule, with `omnigraph_base_url` keeping the localhost default for its existing
+  callers) and the token from `$OMNIGRAPH_TOKEN` else the git-ignored
+  `configuration/api-keys.yml` key `omnigraph_token`, through the one parser
+  `tools/keys_file.py`. With either missing it warns with the exact thing to set
+  and returns 0 as `skipped: no omnigraph URL` / `skipped: no omnigraph token` —
+  not a failure, and nothing written. Then four idempotent steps: the env file
+  (via `write_omnigraph_env`, which now takes the token as an optional second
+  argument so a resolved secret never has to be exported into setup's shell, and
+  publishes `OMNIGRAPH_ENV_STATE`); the pinned bridge
+  (`catalog/agent-harness.json`, `mcp_package omnigraph`) installed with
+  `npm install -g --prefix ~/.local/share/autoos/omnigraph-mcp` — pre-installed
+  because npx start-up measured 6.7–9.3 s median over 16 parallel bridges
+  (decision D9), skipped when the prefix's own `package.json` already holds the
+  pin and reinstalled when the pin moves; the wrapper copy to
+  `~/.local/bin/omnigraph-mcp-autoos` (mode 755, copied not linked, replaced only
+  on a content difference *and* only when the file carries AutoOS's marker — the
+  user's own file there is left alone with a warning and a recorded refusal, as
+  is a file that cannot be backed up); and spec §C's recognised-only removal: an
+  rc-file line that both reads from the retired `agent-skills` tree and names
+  `OMNIGRAPH_TOKEN` is removed after a backup, anything else in the file stays.
+  `custom_is_installed` learns the component, so a second run reports `skipped`
+  at the package level too and every step says `unchanged`. A `--dry-run`
+  announces each step and ends `dry run: nothing was written` — it never claims
+  the machine is already current, because a dry run compares nothing.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: the bridge launcher an MCP
+  client calls. It reads `~/.autoos-omnigraph.env` itself — only the three
+  `OMNIGRAPH_*` keys, values assigned and never evaluated, a value already in the
+  env winning — then `exec`s the pre-installed bridge; no bridge is one stderr
+  line naming the component and exit `127`. The token is never printed. Windows
+  *wiring* is a later lane; the twin is tracked now so the two cannot drift.
+- **`configuration/api-keys.example.yml`**: the commented `omnigraph_token`
+  placeholder, with the line saying the token is issued by the graph server.
+- **`docs/omnigraph.md`** ("The `omnigraph-client` component", "Token rotation")
+  and **`docs/catalog.md`**: the inputs, the output file, the wrapper, the skip
+  hint, and the fact that the env file is the token's only home on the machine.
+- **`tests/linux/38-omnigraph-client.sh`**: 15 cases with `SYS_HOME` in a temp
+  dir and npm stubbed to land the tree `npm install -g --prefix` lands — both
+  skip paths (no failure recorded, nothing on disk), the keys-file token path
+  with no printed value, a full run's modes and contents, the second run all
+  skipped, a moved pin reinstalled, the user's own wrapper kept and AutoOS's
+  replaced with a backup, the retired rc line removed and its neighbours kept,
+  the wrapper's env precedence and its 127, and a dry run that writes nothing.
+### Fixed — flock's post-lockfile shell stop is still a stop behind a leading `--` (hx3 review LOWs, S1, 2026-09-28)
+
+Fast-follow on the hx3 Sonnet FINAL review: one LOW in the policy, one in a test message. Failing tests written first (8 red assertions).
+
+- **`tools/hostexec/policy.py`** (`_walk_wrapper_options`): the post-`--` catch-up loop filled the wrapper's positional slots and then handed the next token to the caller as the head without consulting `spec.post_positional_stops`, so `flock -- /tmp/l -c id` and `flock -- /tmp/l --command id` — nested one wrapper deep, `nice flock -- /tmp/l -c id`, likewise — denied as `path-hijack` on a literal `-c` that no program will ever exec, instead of as the shell form flock really runs there. Measured on util-linux 2.39.3: `flock -- ./l -c '/bin/echo FIVE'` prints `FIVE` via `sh -c`, while `flock -- ./l --comm x` and `flock -- ./l -cX` report `failed to execute` (rc 69) and `flock -- ./l ls` runs `ls`. `--` now ends option parsing without leaving the loop: a `scanning` flag replaces the separate catch-up, so the positional slots still take the following tokens verbatim (the `flock -- -c rm -rf /` reading, where `-c` is a file name, is unchanged) and what lands past them is judged by the one rule that already knows about `post_positional_stops`. The decision stays deny in both spellings — only the reason was wrong, and it is the reason an audit record is made of.
+- **`tests/test_check_omnigraph_bridge.py`**: `test_a_bridge_leads_its_own_process_group` asserted `getpgid(pid) == pid` behind the message *"the bridge shares the benchmark's process group"* — that is the safe state, not the failure, so a red run printed a sentence describing the opposite of what it detected. The message now names the failure it means: the bridge sits in somebody else's group, so `close()`'s `killpg` would signal that group, the benchmark's own processes included.
+- **`tests/test_hostexec_policy.py`**: the two `--`-before-the-lockfile shell forms joined `_FLOCK_COMMAND_FORMS` (flat and nested under `nice`) and `_NON_PERMUTING_HEADS` (no head, plus the unhonoured `--comm` as the verbatim head), and `NonPermutingGetoptTests.test_flock_shell_stop_survives_a_leading_dashdash` pins the walker's option list, the denial reason and the nested head. `flock -- /tmp/l ls` stays allowed and still yields `["ls"]`.
+
+Measured here: `python3 -m pytest -q tests/test_hostexec_policy.py tests/test_hostexec_runner.py tests/test_hostexec_server.py tests/test_check_omnigraph_bridge.py` 99 passed / 3 skipped / 4402 subtests; `python3 -m pytest -q tests/` 1847 passed / 4 skipped / 4571 subtests.
+
+### Fixed — affected-tests re-reads a file plainly when its scan ends unbalanced (AFFFIX3, 2026-09-28)
+
+Fast-follow on `review-afffix.md` (Sonnet round 3: one CRITICAL, one HIGH; the recorded decision is *stop chasing bash grammar*), failing tests written first.
+
+- **`tools/affected-tests.py`** (`masked_lines`, `regions`): an unfinished scan is not an answer. A stray opener used to park the reader inside a heredoc until the end of the file — `((x<<=1))` opened one named `=1`, because `=` sits in the delimiter charset — and every real case below it went missing with nothing printed. `masked_lines` now returns `(masked, balanced)`; when a file reaches EOF with a heredoc delimiter, a here-string quote, a quote or a substitution still open, `regions()` discards *that file's* masking, matches its headers plain, and writes `affected-tests: <file>: unbalanced scan at EOF, masking disabled for this file` to stderr. Worst case becomes over-inclusion — one phantom run, which is what this tool is allowed to emit — instead of whole-file blindness, and the fallback is per-file, so the balanced files keep hiding their phantoms.
+- **`tools/affected-tests.py`** (`_code_view`, `SHELL_OPENER`): the root cause of that report. `<<` is bash's shift operator inside `(( … ))` and `$(( … ))`, and a `<<` immediately followed by `=` is `<<=`, never a heredoc opener. `_code_view` carries an `("arith", paren_depth)` frame (`((`, `$((`, nested grouping parens, including `$(( ))` inside a double-quoted string) and blanks a `<` seen inside it, and `SHELL_OPENER` gained `(?!=)` so the shift-assignment is excluded even where no arithmetic frame was tracked.
+- **Known boundary — documented and pinned, not fixed**: a `case` pattern's `)` inside a `$( … )` is at paren depth 1, so it closes the substitution frame early and everything after it is read outside (the HIGH of the same review). Repairing it means real bash grammar tracking, which this round deliberately does not attempt, so the module docstring's new limits list names it — with `<<$var`, whose delimiter is only known at run time, and the deprecated `$[expr]` arithmetic form — and `test_a_case_pattern_inside_a_substitution_closes_the_substitution_early` pins what it costs today (a phantom case, with the outer case's own mention credited to that phantom). A future fix flips the pin on purpose.
+- **`tests/test_affected_tests.py`**: eight cases — the three arithmetic shapes, `<<=` at the opener-regex level, a shell file and a here-string file left open at EOF, the pinned boundary, and a tool-level trio asserting the stderr line, that stdout stays nothing but the filter, that the real case below the stray heredoc is selected, and that masking survives in the files that did balance. The real-repo heredoc test now checks every suite file ends balanced, because a file that does not has its masking thrown away.
+
+Measured here: the real suites contain no arithmetic shift and every one of them ends balanced, so masking is unchanged line-for-line (`tests/run-tests.ps1` 188 masked lines), `t1-orchestrator muse-spark opus-4-6` hits the same 127 cases in the same blocks against HEAD's own copy of the tool, and no format emits a warning. `python3 -m pytest -q tests/test_affected_tests.py` 37 → 45 passed; live `systemd-run --user --scope -p MemoryMax=2G bash tests/run-tests.sh --filter "$(… t1-orchestrator --format filter)"` 77 passed / 0 failed.
+
+### Fixed — affected-tests finds a heredoc opened inside a quoted command substitution (AFFFIX2, 2026-09-28)
+
+Fast-follow on `review-afffix.md` (HIGH), failing test written first.
+
+- **`tools/affected-tests.py`** (`_code_view`, `masked_lines`): the quote state reset on every line, so the suites' dominant idiom — `out="$(python3 - 2>&1 <<'PY'` … `PY` … `)"` — never registered as a heredoc: the opening `"` blanked the rest of the line, `<<'PY'` included, and the body was read as code. A header-shaped line in one would then start a case that does not exist and cut the case holding it, hiding its mentions. `_code_view` now takes and returns the open contexts (quoted string, `$( … )`, backticks, with a paren depth so a `( … )` group inside a substitution does not close it) and `masked_lines` carries them across lines the way `masked_lines` already carries a pending heredoc. bash parses a substitution's contents as code even while an outer `"` is open, and it is the *body* that is data, so the state is frozen while a body is being read. Measured here: 64 such openers in `tests/linux/*.sh`, 0 registered before, 64 after, and the same 3,012 cases with the same bodies — every file's context stack ends empty, so the phantom that was latent under AFFFIX is now latent under a shape the suites actually use.
+- **`tests/test_affected_tests.py`**: the repro (a `if it "phantom"` line inside a substitution heredoc whose body precedes a real id mention) at fixture, `regions()` and real-repo level, plus the 64-opener count as a measurement test (`>= 60`, so a small edit to the suites does not break it) and a nested-`( … )` guard.
+
+### Fixed — affected-tests reads a heredoc body as data and stops an id at its own edge (AFFFIX, 2026-09-28)
+
+Fast-follow on the AFFTESTS review (`logs/handoff-sessions/20260925/work/L1-routing/review-afftests.md`): findings F1 (HIGH, latent) and F2 (two LOW precision items), each with the failing test written first.
+
+- **`tools/affected-tests.py`** (F1): `regions()` matched `if it "…"` / `Test-Case '…'` and `describe` against raw lines, so a header-shaped line *inside* a heredoc (`cat >"$f" <<'EOS'` … `EOS`, `<<-EOS`, `<<"X"`) or a PowerShell here-string (`@'` … `'@`) ended the real case above it — the id mention after the closing delimiter was credited to a case that does not exist, and the emitted filter could not select it. `masked_lines()` now walks the file the way its parser does (quoted content and trailing `#` comments blanked first, `<<<` is not an opener, `<<-` strips leading tabs from its terminator, a here-string's closing delimiter must sit at column 0) and ignores a header or group heading that lands inside a body; the body's own text still counts toward the case containing it. Measured here: the same 2,918 blocks with the same bodies, so the shape is latent in this repository today — which is why it is a fast-follow and not a hotfix.
+- **`tools/affected-tests.py`** (`id_pattern`, F2): `\b` reads `-` as a word break, so querying `t1-orchestrator` also selected blocks naming `t1-orchestrator-clean` — a different route. What follows a mention is now checked against the characters that continue an id (`-`, `_`, letters, digits). Two edges deliberately stay loose, and they are the reason the fix is asymmetric: a `.` is not an id character (`omniroute-t1-orchestrator.json` and a sentence-ending `t1-orchestrator.` name the route), and the *left* neighbour keeps the plain word boundary, because rejecting `-` there too hides 24 blocks of this repository — among them every `tests/linux/34-ai-services.sh` case naming the `omniroute-t1-orchestrator` profile that route generates, and every cap case naming `claude-opus-4-6`, the model it serves — while what the looseness lets back in (`chip-auto`, `AUTOOS_WIPE_TARGET`) only ever runs one extra case. A hidden case is the exact failure this tool exists to prevent: over-inclusion allowed, misses not. Audited over `t1-orchestrator muse-spark auto opus-4-6` (162 affected cases → 115, none added): all 47 blocks the tightened right edge drops are mentions followed by `-`, i.e. a longer id (`muse-spark-1.3-contributor`, `t1-orchestrator-paid`, `claude-opus-4-6-thinking`) or plain English (`auto-added`, `AUTOOS_DRY_RUN`, `automatically`).
+- **`tools/affected-tests.py`** (`choose_terms`, F2): a test name with no word character in it (`✓ ✗ ✗`) got no token to build a term from and vanished from the filter in silence; it now falls back to the whole name, and when even that is impossible — a comma in the name, which would split the term in `--filter` — the case is named on stderr as unfilterable and the exit status stays 0.
+### Fixed — flock stops option parsing at its lockfile too, except a bare -c/--command (hx3 review, S1-S2 security, 2026-09-28)
+
+- **`tools/hostexec/policy.py`**: the entry below left **flock** as the one launcher modelled with permuting GNU getopt, so the walker kept reading options after its lockfile. util-linux 2.39.3 flock(1) does not permute either — measured on this host with `/bin/echo`: `flock ./l -- /bin/echo A` → `flock: failed to execute --` (rc 69) and `flock ./l -s /bin/echo B` → `failed to execute -s` (rc 69), while `flock -- ./l /bin/echo C` prints `C` and `flock -s ./l /bin/echo F` prints `F`, and `flock -n -w 5 ./l /bin/echo J` prints `J`: options *before* the lockfile keep full getopt parsing (abbreviations, clusters, `--`). Past the lockfile the next token is the exec target verbatim, with one exception the program special-cases itself — a **bare `-c` / `--command`** there runs its argument via `sh -c` (`flock ./l -c 'echo D'` prints `D`, and `flock ./l -c echo D` reports `-c requires exactly one command argument`, rc 64, proving it was read as an option and not as a file name). Nothing else is honoured in that position: `flock ./l --comm x` → `failed to execute --comm` and `flock ./l -cX` → `failed to execute -cX`, so the abbreviation and the attached form *are* the command, and `flock ./l /bin/echo H -c echo I` prints `H -c echo I` — only the token *right after* the lockfile is special. `_WrapperSpec.permute` is gone (no launcher takes a positional and permutes, so its **True** branch was unreachable); `post_positional_stops` replaces it — the literal argv tokens still read in the command region, matched exactly, recorded in the walker's option list under the same `c`/`command` name the option region uses so `_flock_runs_shell` denies either spelling. flock now reaches `_non_permuting_child_heads()` with chrt and taskset, and `_idx_after_flock()`, its only caller, is deleted. Behaviour, old → new: `flock /tmp/l -- ls` and `flock /tmp/l -s ls` claimed the head `["ls"]` and **allowed** calls that exec `--`/`-s`, `flock /tmp/l --comm x` and `flock /tmp/l -cX` were refused as the shell form (`no-inline-shell`) for a program that execs those literal tokens, and `flock /tmp/l -- rm -rf /` denied as `destructive` for an `rm` that never runs; they now yield the verbatim head (`["--","ls"]`, `["-s","ls"]`, `["--comm","x"]`, `["-cX"]`, `["--","rm","-rf","/"]`) and deny as an unresolvable `argv[0]` (`path-hijack`), while `-c`/`--command` right after the lockfile stays a stop with no head and the `--`-*before*-the-lockfile reading (`flock -- -c rm -rf /` locks on the file `-c` and runs `rm`) is unchanged. Not exploitable in the sandbox — no `--`, `-s` or `--comm` resolves on the policy's fixed PATH, and every one of these calls was denied or allowed only under a false head — but an audit that records `ls` for a call that execs `--` is wrong on its face, and it is the reading that decided whether an option-looking token was flock's own. Cross-checked against the binary (15 argv shapes, `/bin/echo` as the command): every call the policy now **allows** execs exactly the head it records (rc 0) — `flock -s ./l`, `flock -n -w 5 ./l`, `flock -- ./l`, `./l /bin/echo H -c echo I` — and each refused dash-token is the exec target (`failed to execute --`/`-s`/`-w`/`-E`/`--comm`/`-cX`, rc 69), which includes `flock /tmp/l -w 5 /bin/echo x` and `flock /tmp/l -E 1 /bin/echo x`: the permuting model swallowed those option values and allowed the call against an `["/bin/echo","x"]` head. Note that 2.39.3's getopt refuses `-c`/`--command` *before* the lockfile too (`flock -c x ./l` → `invalid option -- 'c'`, rc 64), so the option-region `stops` entry stays as the fail-closed deny of a call the program rejects itself — `stops` and `post_positional_stops` coexist rather than replace each other.
+- **`tests/test_hostexec_policy.py`**: the flock rows moved onto the non-permuting reading and the false ones went. `_HARMLESS_ALLOWED` dropped `flock /tmp/l -- ls` and gained `flock -s /tmp/l ls` + `flock -n -w 5 /tmp/l ls`; `_THREE_LAUNCHER_HEADS` and `_THREE_LAUNCHER_DENIED_BY_CHILD_RULE` lost their `flock /tmp/l -- …` rows (the `--`-before-the-lockfile row, still true, stays). `_NON_PERMUTING_HEADS` now asserts the execed-verbatim heads (`["--","ls"]`, `["-s","ls"]`, `["--comm","x"]`, `["-cX"]`), `[]` for `-c`/`--command`, and `["ls"]` for the pre-lockfile forms, and `_NON_PERMUTING_DENIED` denies each execed-verbatim form as `path-hijack`. The guard became `test_every_positional_wrapper_stops_at_its_positional`: exactly flock, chrt and taskset take a positional before their command, and exactly flock declares `post_positional_stops == ("-c", "--command")`. 10 assertions were red before the fix (4 head rows, 5 decide() denials, the guard); after — 40 tests / 4394 subtests pass, with `tests/test_hostexec_runner.py` and `tests/test_hostexec_server.py` (77 passed, 3 skipped) and the whole `tests/` suite green.
+
+### Fixed — chrt and taskset stop option parsing at their positional, and the policy models that (hx3, S1-S2 security, 2026-09-28)
+
+- **`tools/hostexec/policy.py`**: the shared launcher walker modelled **flock's** permuting GNU getopt on every wrapper that sets `positionals_before_command`, so after chrt's priority and taskset's mask it kept reading tokens as options. util-linux 2.39.3 calls `getopt(3)` for those two with a `+`-prefixed optstring, whose scan stops at the first non-option — nothing past the positional is an option, and the very next token is what reaches `execvp` verbatim. Measured on this host with `/bin/echo`: `chrt -i 0 -- /bin/echo x` → `chrt: failed to execute --: No such file or directory` (rc 127), likewise `taskset 0x1 -- /bin/echo x`, `taskset 9 -- /bin/echo x` and `taskset 0x1 -c /bin/echo x` (which execs `-c`), and `chrt -i 0 -p 123` → `failed to execute -p` — it never enters pid mode. Only `--` *before* the priority/mask terminates the options: `chrt -i -- 0 /bin/echo x` and `taskset -- 0x1 /bin/echo x` both print `x`, and `chrt -- -i 0 /bin/echo x` reports `invalid priority argument: '-i'`, proving the positional region survives the separator. Behaviour, old → new: `chrt 9 -- ls` claimed the head `["ls"]` and allowed the call as `ls`, `chrt 5 -p 123` was refused as pid mode (`no-inline-shell`) for a command that would have exec'd `-p`, `taskset 0x1 -- ls` claimed `["ls"]`; both now yield the verbatim head (`["--","ls"]`, `["-p","123"]`, `["--","ls"]`) and decide() denies them as an unresolvable `argv[0]` (`path-hijack`), while `chrt -f -- 5 ls` still yields `["ls"]`. Not exploitable — no `--` or `-p` resolves on the policy's fixed PATH, and the stub test proved the token is the exec target rather than a later error: with an executable literally named `--` / `-p` handed to the call in a temp PATH, `chrt -i 0 -p 123` printed `RAN-STUB-p 123` and `taskset 0x1 -- y` printed the `--` stub's output — but an audit that records `ls` for a call that execs `--` is wrong on its face and drops everything past the separator out of the audit. `_WrapperSpec` gains `permute` (default **True**: flock is explicit, watch and the rest unset), chrt and taskset set **False**, and `_non_permuting_child_heads()` is the one place that reports a dash-prefixed head — a permuting launcher's `-` still means "no head", because there getopt really did consume the option. Every flock, watch and permuting case is unchanged.
+- **`tests/test_hostexec_policy.py`**: `NonPermutingGetoptTests` — a head table for the execed-verbatim forms (including a `rm -rf /` parked behind the `--`), the decide() verdicts, a pid-mode contrast (`chrt -p 123` denies `no-inline-shell`, `chrt 5 -p 123` denies `path-hijack` and the walker reports no `p` option for it), and a guard that exactly chrt and taskset are non-permuting while flock stays permuting. The two fictitious rows went: `chrt 9 -- ls` / `taskset 9 -- ls` were in `_HARMLESS_ALLOWED` and `_THREE_LAUNCHER_HEADS` asserted `[["ls"]]` for them; the honest `--`-before-the-positional forms stay allowed, and `chrt -f -- 5 ls` was added. All 15 new assertions were red before the fix; 40 tests / 4383 subtests pass after, and `tests/test_hostexec_runner.py` and `tests/test_hostexec_server.py` with them.
+
+### Added — affected-tests.py derives the filter a registry change needs (AFFTESTS, 2026-09-27)
+
+- **`tools/affected-tests.py`** (new), **`tests/test_affected_tests.py`** (new), **`tests/linux/33-documentation.sh`**, **`docs/testing.md`**: a route or provider flip was followed by a hand-picked `--filter` list, the shell and Pester cases naming the changed id never ran, and CI went red twice (lessons PROVPIN, MUSEPIN). The list is derivable, so it is derived now: given ids — on the command line, or read out of `catalog/ai-registry.json`'s routes / providers / models entries changed since a rev with `--from-diff` — the tool scans `tests/linux/*.sh` (`if it "…"` blocks), `tests/run-tests.ps1` (`Test-Case '…'`) and `tests/test_*.py` (functions located with `ast`), word-boundary matches each block's text, and emits `--format filter` (one comma-separated list for both runners, terms always whitespace- and comma-free so `$( )` cannot truncate it), `--format pytest` (node ids) or the default table showing which term selects which case and why. Over-inclusion is intended and misses are not: a term is always a substring of an affected test's own name.
+### Fixed — a dry run on a host that has no uv plans the graphify tool instead of failing (A4 CI S1, 2026-09-28)
+
+- **`lib/linux/install.sh`**: `install_graphify_tool` returned 1 when `has_cmd uv` was false, *before* the `AUTOOS_DRY_RUN` branch below it. A plan runs uv's own component earlier in the same pass and installs nothing, so on a machine that does not have uv yet — every CI runner, every fresh host — `install_mcp_graphify` took the refusal as its own and recorded `mcp-graphify` failed: CI 36360904338 turned `a dry run executes no commands at all` and `dry run with herdr-sessions installed still exits 0` red (rc=1) while the run those plans describe would have succeeded, because by the time execution reaches the step uv is on PATH. A dry run now announces `would install the pinned graphify tool once the uv component puts uv on PATH: uv tool install <pin>` and returns 0; the clients go on to hear their own `would run: claude mcp add …` / `would merge 'graphify' into Antigravity` plan as before. A live run with no uv is unchanged — it still refuses, names uv, registers neither client and exits non-zero.
+- **`tests/linux/18-mcp-wiring.sh`**: two cases driving `install_mcp_graphify` with uv stubbed out of `has_cmd` (a PATH trim would pass on a runner that happens to ship uv and fail on one that does not): the dry run exits 0, plans the tool, names where uv comes from, plans both clients and writes nothing — no claude call, no user config, no Antigravity config, no `graphify-mcp` at the bin path; the live run on the same stub exits 1, names the missing uv and registers nothing. Both were red before the fix (the dry run read `RC=1` with the refusal in place of a plan). Reproduced and verified without uv: `PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -e '\.local/bin' -e cargo | paste -sd:) bash tests/run-tests.sh --filter='a dry run executes no commands,herdr-sessions installed still exits 0'` — 2 failed before, 2 passed after; `--filter='graphify,homelab,mcp,agent-skills,idempotency,end-to-end'` passes 70 with and without uv on PATH.
+
+### Fixed — a wedged bridge takes its process tree with it, and Ctrl-C stops the wave (A5 review, 2026-09-28)
+
+- **`tools/check_omnigraph_bridge.py`**: `McpStdioClient.close()` killed only the direct child it spawned — and that child is `npx`. The `npm`-started `node` of a hung or timed-out bridge survived, reparented to init, one per abandoned bridge per run. Every bridge now starts in a group of its own (`start_new_session=True`, `CREATE_NEW_PROCESS_GROUP` on Windows) so the whole tree can be stopped at once, and close() escalates over that group: SIGTERM, wait, SIGKILL, wait. A group is signalled only when the child *leads* it (`os.getpgid(pid) == pid`) — aimed at any other pgid it would be this process's own group. After a SIGKILL the child is waited for, so it is reaped rather than left a zombie holding its pid (an unreaped one still answers `kill(pid, 0)`). Windows has no group-SIGTERM, so the force stage is `taskkill /T /F /PID <pid>`, each branch guarded by `os.name`.
+- **`tools/check_omnigraph_bridge.py`**: the wave ran on `ThreadPoolExecutor.map`, which blocks until every bridge is finished, so Ctrl-C stopped nothing: the run sat out the full `--timeout` for each in-flight bridge and then exited on a traceback as though nothing had happened. It polls the futures in short slices instead, and SIGINT in the main thread sets a shared `threading.Event` that every worker's read loop checks between queue polls — an in-flight bridge is abandoned and closed (which kills its group), a bridge still queued is cancelled before it starts. An interrupted run prints one "interrupted" line to stderr and exits **130** (128+SIGINT) with no report: nothing was scored, and a half wave rendered as a D9 verdict is the worse failure. A run that finishes is unchanged in behaviour and output — a wedged bridge still reads as `no answer before the timeout`.
+- **`tools/check_omnigraph_bridge.py`**: a run a shell put in the background — a wrapper, a headless lane — inherits SIGINT as *ignored*, and CPython then never arms its KeyboardInterrupt handler, so Ctrl-C on such a benchmark did nothing at all and the tool ran the whole wave out (the gotcha is in AGENTS.md §6). `arm_interrupt_handler()` re-arms the default handler on entry, and only when the inherited disposition is SIG_IGN — a handler someone installed deliberately is left alone.
+- **`tests/fixtures/omnigraph_bridge_stub.py`**: `FAKE_BRIDGE_MODE=hang` reproduces the shape the real bug needs — a descendant *process* (not a thread) that outlives the bridge, a bridge ignoring SIGTERM and never answering, and its pid plus the grandchild's appended as one line to `$FAKE_BRIDGE_PID_FILE`, so a test can watch every bridge a wave started after the tool has returned.
+- **`tests/test_check_omnigraph_bridge.py`**: 6 cases, all red before the fix — both bridges' grandchildren are gone once the benchmark returns; close() leaves no zombie; a bridge leads its own process group; SIGINT during the wave, SIGINT during `--warm` priming, and SIGINT on a run that inherited SIGINT ignored each exit 130 in under 20 s (pre-fix all three were still waiting at 30 s) with no traceback and no surviving process. The signal and process-group cases carry an `os.name` guard, so what is covered here is the POSIX path; the Windows `taskkill` branch is untested by this host.
+
+### Added — Omnigraph bridge benchmark with a fake-server mode (SPEC-OMNI A5, 2026-09-27)
+
+- **`tools/check_omnigraph_bridge.py`**: starts N bridges in parallel (default 16, `--parallel`) and speaks MCP JSON-RPC to each over stdio — `initialize` → `notifications/initialized` → `tools/call health` → `tools/call query` with the `whoami` Project read — then reports spawn → `health` latency (min/median/max), `healthy N/M`, `whoami ok N/M`, and every npm lock/cache error seen on stderr (`EEXIST`, `ENOTEMPTY`, `lock`, with the matched lines kept so a false positive is judgeable). `--cold` gives the wave one fresh `npm_config_cache` (the contention case D9 is actually about); `--warm` primes the default cache with one sequential bridge and measures the wave. Exit 0 = every bridge healthy, every slug right and D9 met; 1 = a died bridge, a slow health, a wrong graph, or a lock error; 2 = unusable input. `--json` for the machine-readable report.
+- **The paths are recorded from the package source, not guessed** (`npm pack` into a temp dir): `@modernrelay/omnigraph-mcp@0.8.0` `dist/bin.js:8,13,20` requires `OMNIGRAPH_BASE_URL`/`OMNIGRAPH_GRAPH_ID` and takes the token as optional; its dependency `@modernrelay/omnigraph@0.8.0` `dist/index.js:477,485` calls `GET /healthz` and `POST /query`, and `dist/index.js:159,253` prefixes every non-flat path with `/graphs/<urlencoded graphId>` — so `health` is flat and `query` is graph-scoped. `dist/index.js:203` sets `Authorization: Bearer`, and `dist/index.js:373,443` keeps `rows`/`columns` opaque, which is why `p.slug` survives the camelCase mapping. Line numbers are in the module header.
+- **D9 measured on this host** (6 cores, Node 24, against the stub so npm resolution is timed with network excluded): cold 4-parallel 9.1–14.2 s, warm 16-parallel 5.8–7.3 s, **0 lock errors, 16/16 healthy, 16/16 correct slug**. Contention is not the problem — per-bridge npm resolution is, at 3–7× the 2 s limit, so this host fails D9 and points at the pre-installed pinned bridge. Recorded in `docs/omnigraph.md`; the live run against `<omnigraph-url>` is still owed before D9 closes.
+- **`--fake-server`**: a stdlib stub on 127.0.0.1:<free port> answering exactly those two paths (`health` 200, the query returning a `Project` row whose `p.slug` is the graph id, 404 for anything else), with `--fake-slug` to aim it at the wrong graph. Paired with **`tests/fixtures/omnigraph_bridge_stub.py`** (a fake stdio bridge that hits the same two paths and bends its own contract on `FAKE_BRIDGE_MODE` — the modes are listed in that fixture's own header, their one home) the whole benchmark runs with no npm, no network and no token — so CI can gate the logic.
+- **`tools/check-omnigraph-bridge.sh` / `.ps1`**: thin wrappers, every argument forwarded, no logic (BOM + CRLF on the PowerShell side per AGENTS.md §3, and its native call is wrapped in a local `Continue` because 5.1 turns the tool's stderr `ERROR:` lines into a terminating error).
+- **Tests**: `tests/test_check_omnigraph_bridge.py` — 15 cases: all healthy exits 0; a bridge that exits early is counted and exits 1; a wrong slug fails while health still passes; lock noise on stderr is counted and fails D9; the token never appears in stdout, stderr or `--json` even when the bridge leaks it on stderr; health slower than `--limit-ms` fails; `--cold` creates its cache dir; five usage shapes exit 2; the fake server's path contract (flat `/healthz`, graph-scoped `/query`, 404 otherwise); and the command/graph-id/base-url defaults come from `.mcp.json`. Wired into `tests/linux/18-mcp-wiring.sh` (unit tests plus a wrapper end-to-end run), which `tests/test_suite_wiring.py` requires.
+- One home for the pin: the bridge command, `OMNIGRAPH_GRAPH_ID` and the base-url default are read from `.mcp.json` (`--bridge-cmd` overrides it, and an override given but blank is a usage error rather than a silent fall back to real npx). Nothing is hard-coded twice.
+### Fixed — graphify registers only over a tool it installed, and repairs its own stale entry (A4 review S2, 2026-09-27)
+
+- **`lib/linux/install.sh`**: `install_mcp_graphify` ran `register_mcp_server` and `register_antigravity_mcp_server` whatever `install_graphify_tool` answered — its `rc=1` was collected and returned, never acted on. So on a host with no uv, an outage during `uv tool install`, or the user's own file at `~/.local/bin/graphify-mcp`, Claude Code and Antigravity were handed a `graphify-mcp` server that cannot start, and because `register_mcp_server` leaves a name it already sees alone, every later run reported *already registered* over the broken entry instead of repairing it. Registration is now gated: `install_graphify_tool` returning non-zero (including the blocked link, which now reports non-zero instead of a silent pass) or an installed `graphify-mcp` that does not resolve at uv's tool bin dir means neither client config is touched and the step returns 1 — a refusal that names itself, not a promise the client holds at every session start. A dry run cannot install anything, so it announces the same plan it would have. (This supersedes the registration half of the A4/A4b entry below; the install verdicts are unchanged.)
+- **`lib/linux/install.sh`**: `graphify_user_entry` + `replace_stale_graphify_mcp_entry` close the other half of the same hole — an entry that predates the pinned tool is never repaired by `register_mcp_server`, so every machine an older AutoOS wired kept `uv --quiet run --with <pkg> python -m graphify.serve …` (resolved at launch, no executable on PATH) or a `graphify-mcp` path from a checkout that has moved. The classifier recognises exactly AutoOS's own previous forms, by shape and by path components rather than by a hardcoded location, and a bare `graphify-mcp` entry additionally by whether the installed tool actually resolves behind it; the re-add is `register_mcp_server`'s own call right after, so the repair is idempotent and one run cannot leave the name free. Anything else under that name — another command, an `env` block of the user's, a config that does not parse — is reported as left alone and never removed, an unreadable verdict fails closed, the config outside `$SYS_HOME` is refused as it is for `homelab`, the file is backed up through `backup_file` before `claude mcp remove` touches it (no copy, no write), the entry's args are never printed because they may hold a token, and `register_mcp_server` itself is not broadened: this recognises graphify's own history and nothing else.
+- **`lib/linux/install.sh`**: `graphify_mcp_bin_path` is the one home for the path uv writes its tool executable to; `graphify_mcp_link_prepare` (which clears it) and the registration gate (which trusts it) both ask it, so the two cannot drift apart.
+- **`tests/linux/18-mcp-wiring.sh`**: eight cases driving `install_mcp_graphify` itself, not the install helper — failed install registers neither client and returns non-zero; a blocked bin path registers nothing and leaves the user's file untouched; a resolving install registers both; the old `uv run --with` entry is backed up, removed *before* the add, and replaced while `serena` and `firstTimeRun` survive; a dead absolute `graphify-mcp` path is replaced; a custom entry stays byte-identical with no `claude` call, no backup and no token in the output; the second run writes no client config again and keeps the graphify entry *skipped*; the dry run announces without installing or writing. The `claude` fake now owns a real JSON config and refuses an `add` over an existing name — otherwise the repair could pass by re-adding on top of the stale entry. Two registration stubs were corrected to the real `uv` contract (a successful install leaves an executable `graphify-mcp` in its bin dir and its link at `~/.local/bin/graphify-mcp`); they had been answering `tool install` with nothing written, which is the state the old code registered anyway.
+
+### Changed — graphify is the pinned `uv tool`, and recognised agent-skills leftovers go (A4, A4b, 2026-09-27)
+
+- **`lib/linux/install.sh`**: `install_mcp_graphify` installs the catalog pin with `uv tool install` (spec D13) instead of leaving every client launch to resolve `uv run --with` on its own. The package string comes only from `mcp_package graphify` — neither the extras nor the version appear under `lib/`, so `tests/linux/07-mcp-pins.sh` still holds the pin in one place. Verdicts are decided before anything runs and are the same in a dry run: `uv tool list` already names the pinned version → *skipped* and uv is never called; another version → `uv tool install --force` → *updated*; nothing installed → *installed*. Claude Code and Antigravity now register the installed `graphify-mcp` command, measured to be exactly as reachable in a non-interactive `bash -c` as `uv` itself (uv's tool bin dir is `~/.local/bin`, the same directory `uv` resolves from), which is what D9 asks for: a pre-installed bridge started directly, not a resolver.
+- **`lib/linux/install.sh`**: `graphify_mcp_link_prepare` replaces `graphify_mcp_symlink`. Repointing the link was the pre-D13 job; the path is now uv's to write, so a link into the retired `*/agent-skills/*` tree or to this checkout's docker wrapper is removed (a symlink holds nothing of the user's, so there is nothing to back up) and reported, uv's own link is kept and lets the update force past a deleted receipt, and anything else at `~/.local/bin/graphify-mcp` is the user's: left exactly as it is and the install is refused on top of it — `--force` never runs over a file that was not ours. A dangling link is judged by the target it names, so the realistic migration case (the clone already deleted) is still recognised.
+- **`lib/linux/install.sh`**: `remove_stale_homelab_mcp_entry` (spec §C, D14) drops the user-scope `homelab` MCP entry from the Claude config only when its `env.PYTHONPATH` or its args name the retired clone; the config is read, backed up once, and changed through `claude mcp remove --scope user` rather than hand-edited JSON, because that CLI owns the file's format and the rest of its contents. Any other `homelab` entry is reported as left alone with the command the user can run themselves; a second run finds nothing and reports *skipped*. It refuses outright when the config it resolves to is not in the home this run configures (`$SYS_HOME`): under sudo, or in the test harness with a faked `SYS_HOME`, that file belongs to another session and AutoOS was never pointed at it. Called from `install_agent_skills`, where the graphify link cleanup used to sit.
+- **`catalog/{linux,macos,windows}.json`**: `mcp-graphify`'s homepage points at the upstream project (`https://github.com/Graphify-Labs/graphify`, from the pinned release's own PyPI metadata) instead of at this repository.
+- **`tests/linux/18-mcp-wiring.sh`**: stateful `uv` and `claude` fakes cover the eight link shapes (free, clone's link, wrapper link, user's file, user's link, uv's link, dangling clone, and dry-run/live verdict parity for all of them) and the five install cases (fresh, pinned → skipped with no uv call, other version → `--force`, double run → one install then skipped, never over the user's file), plus the registration argv, and the homelab cases: recognised PYTHONPATH and args shapes removed with exactly one backup, unrecognised entry byte-identical with no backup and no `claude` call, absent entry skipped, project-scope entry untouched, dry run announcing without writing, a config outside the run's home untouched, and the call-site guard so the cleanup cannot become an orphan function.
+### Fixed — a route's declared context is a promise its legs must keep (PROVFIX3, 2026-09-27)
+
+Follow-up findings on the PROV review (`logs/handoff-sessions/20260925/work/L1-routing/review-prov2.out`), re-judged against the MUSEAPI base where `meta_api/muse-spark-1.3-contributor` heads `t1`.
+
+- **`tools/registry.py`** (findings 1, 8): `clamp_route_context()` — a route's declared context may not exceed the smallest advertised window among the legs it actually *serves*, because the resolver can fall through to a leg that small at any time and a bigger request then simply fails. `t1-orchestrator` promised 1M while its gemini fallback takes 131,072, so the combo, the picker entry, the OpenHands profile and `docs/models.md` all advertised a window no leg could serve; all four now render `128k` (the `CONTEXT_LADDER` rung at or below 131,072, so the decimal-spelling and binary-spelling floors agree). Gates (`unavailable_legs`, `client_bound`, provider-off, `policy.leg_rules`) do not lower the promise — only servable legs do — and a leg with no recorded window cannot clamp anything. The same served-head rule now drives `effort_ladder` and `reasoning_effort` in `catalog/ide-models.json`: the ladder came from `legs[0]` even when that leg was gated, so a route gated down to gemini advertised `xhigh` (which `muse-spark` alone carries) and the picker would send an effort the answering leg rejects. Gated-out ladders are dropped entirely (`t2-worker-clean`, `t3-driver-clean`).
+- **`configuration/litellm/config.yaml`** (findings 4, 5): `fallbacks:` emptied to `[]`. Every chain ended in a `*-paid` group whose only leg is `deepseek/deepseek-flash`, and `providers.deepseek.available: false` (402, 2026-09-27T16:4xZ) — the escalation path was a guaranteed second failure after the real one, with an honest-looking comment pointing at it. Nothing is invented in its place: the header says the hand chains are inert and that `meta_api` is the paid leg that answers today. Finding 3's other half: `tools/sync-router-tiers.py`'s docstring still listed `t1-orchestrator-paid` among "the true hand groups left byte-for-byte untouched"; it names only `t2-worker-paid`/`t3-driver-paid` now, because MUSEAPI gave the tier a leg and it is managed like the others — which also makes the picker entry the review feared (an `opencode.jsonc` litellm model with no group) legal again.
+- **`configuration/openhands/config.toml`** (finding 6): `[llm.t1-orchestrator-clean]` removed. The combo is *omitted* — a route with no servable leg, pruned from the gateway store by `apply` — so the profile pointed at a 404. `tests/linux/17-ai-routing.sh` asserts its absence instead of its presence.
+- **`tests/test_registry_render.py`** (finding 7): `test_openhands_drops_a_tier_that_declares_legs_but_serves_none` had been gutted to a `pass` — it no longer proved anything. It now synthesizes the dead route out of the real registry (every `t1-orchestrator` leg `available: false`), asserts `gateway_legs` is empty, both t1 tiers vanish, and exactly two tiers are gone. The context clamp gained `RouteContextCapTests` (synthetic + real-render sweep: no committed combo overshoots a leg it serves) and `IdeContextAndEffortFollowServedLegsTests`; the fallback rule gained `LitellmFallbackServabilityTests` (no chain may end in an all-dead group; the committed file explains the dropped ones).
+- **`configuration/omniroute/apply.sh`**, **`apply.ps1`** (L0 2026-09-27T19:07:39Z): order is now register → **refresh the gateway's model catalog** (`omniroute models <provider>`, for exactly the providers this run added) → read `/v1/models` → write combos. Registering a connection does not enumerate it, so a fresh machine's `free-ai/qwen7b` failed the catalog check on the first run and appeared only on the second. Both scripts also carry the same duplicate-`key_name` rule now: `apply.sh` exits 1 where `apply.ps1` threw, and a dry run plans the refresh it would have performed. Stubbed-CLI tests on both sides (`apply: one run registers a provider, refreshes the catalog…`, `apply.ps1: …`, the POSIX stand-in's `models` branch rebuilds the served `/v1/models`; plus a platform-independent text assertion of the step order, because a `.cmd` cannot emulate the rebuild).
+- **`tests/test_autoos_resolver.py`**: the measured-overlay variant of the sensitive-implement regression asserted `route is not None` — a claim about the day `measured.json` was probed, not about the rule. It now asserts the rule: no unsafe leg may be picked, and `input_required` with a reason is the *correct* answer when no private-safe route survives the filters. (Verified against a synthetic all-legs-failed overlay: `route=None`, `state=input_required`; the old assertion failed there.)
+- **`docs/models.md`** (finding 2): the hand-written sections re-pinned to the clamped, meta_api-headed t1 — the managed table already carried `128k`, the prose around it still said 1M.
+- **`tests/`**: the pins that measured the old promise are re-pinned, not relaxed — `combos.json is valid…` (both suites: `128k` for the two t1 tiers, `1M` only where every served leg has it), `zed routing merges one provider…` and the Windows Zed settings case (131,072), `test_the_1m_tier_is_1000000_everywhere` → `test_the_wide_tiers_carry_the_window_their_smallest_servable_leg_takes`, the opencode variants pin (`t1-orchestrator-free-only` carries `low/medium/high`; `t2-worker-clean` lost its deepseek-inherited ladder and with it its `variants`), and `test_non_string_rung…` now matches the error text instead of an incidental route id. Found and fixed on the way: the Linux `opencode repo config pins omniroute…` list was left behind by MUSEAPI (it still lacked `spark-1.3-contributor`/`t1-orchestrator-paid`, so the suite failed at the branch point), and the Windows `openhands template` case still required the pruned `[llm.t1-orchestrator-clean]` section. Four more pins were red at `6ed98c7` for the same reason (MUSEAPI re-serviced t1 and spark and nobody came back for them): `tier profiles come from the spec, installer and tool agree` in both suites (the two spark tiers are in the spec again, so the id pin and the gateway-model regex list them), `opencode tiers declare matching context limits` in both suites (spark is a client model now and t1 is pinned at the clamped 131,072 — with the Windows "absent" check rewritten as `PSObject.Properties.Name -contains`, because strict mode turns `$null -eq $models.<missing>` into an error), and the `apply prune` examples (the orphan on show moved from `t1-orchestrator-free-only` to `deepseek-v4.1-flash`).
+- S1 (the `t1-orchestrator-paid` picker leg) is moot after MUSEAPI and was only verified: it renders a managed LiteLLM block and a combo.
+- Hand prose outside every managed marker, checked by no render: `docs/models.md` still said the pinned `deepseek-v4.1-flash` combo is omitted "like `t1`/spark" (t1 and spark came back with MUSEAPI — DeepSeek is now the *only* omitted pinned route), called `t1-orchestrator` "spark-only" twice (it is a `meta_api` head with a free gemini fallback and a 128k promise), and its pinned-routes diagram still marked `spark-1.3-contributor` omitted; `docs/openhands-runbook.md` described t1 as "spark-only + xhigh" with no window; `tools/autoos_agent_mcp.py`'s `spawn` description told every caller that `privacy=sensitive + ctx=1m` is refused "unless `allow_training`", which `routing.select_combo` states flatly is inert — the flag only waives the privacy check on an explicit `--model`. All four corrected to what the registry serves today.
+- Lesson: a rendered number is a promise made by every leg it can fall through to, so the renderer — not the catalog's prose and not the operator's memory — is the only place the invariant can be enforced; and a test that asserts *a* route exists instead of the rule that keeps a route safe will be "fixed" by whatever route happens to be alive.
+
+### Fixed — a failing postInstall is recorded, never aborts the run (rv5, 2026-09-27)
+
+- **`lib/linux/install.sh`**, **`setup.sh`**: `run_post_install` called the step bare, and setup.sh calls it bare on both the installed and the skipped path under `set -euo pipefail` — so any postInstall returning non-zero killed the run where it stood: no summary, no state file, and every later component silently never installed. One real trigger was `install_ai_stack` (its own checks return 1 when the docker CLI is missing or `docker info` fails right after `add_user_to_docker_group` ran in the same session), then `install_litellm_proxy` and `route_zed_to_proxy`. The containment goes in this one place, not in each step: `run_post_install <fn> [<component id>]` captures the step's exit code, warns with the step name and that code, records the component (or the step name when called with no id) through `autoos_record_failure`, and always returns 0. The existing fold then lists the component once, as *failed (post-install)*, drops it from the installed/skipped buckets, and setup.sh still exits 1. Steps keep their own return codes — nothing about them changed but who contains them.
+- **`lib/linux/install.sh`**: the five places that call a catalog postInstall directly, outside `run_post_install`, were the same abort through a different door — `install_agent_skills` calling `install_mcp_graphify`/`install_mcp_serena`/`install_mcp_playwright`/`install_mcp_context7`, and `route_detected_clis_to_gateway` calling `route_claude_to_gateway` (Claude Code's own postInstall) from inside the OmniRoute step. Each is guarded with `|| autoos_record_failure <its own component id>`; `install_mcp_playwright`'s internal record (rv3) is the same id, so the dedup in `autoos_record_failure` keeps one failure line, not two.
+- **`setup.sh`**: the installed-path line read "post-install refused to change a file" for every recorded failure. A step that exited non-zero is now recorded too, and it did not refuse anything, so the line says what is always true: "post-install step failed" (the summary line still carries the `(post-install)` marker).
+- **`tests/linux/14-state-verify-and-undo.sh`**: end-to-end through the real entry point — a scratch tree (setup.sh and lib linked, the catalog copied and given two test-only `custom` components that install nothing) run under setup.sh with a postInstall that returns 1: the next component still gets its step, the summary names the failed component once with `(post-install)`, the state file puts it in `failed` and the other one in `installed`, and the exit code is 1. Failed before the fix: the run stopped at the step, no state file was written. Two in-process cases cover `run_post_install` itself (the step's code is in the warning, the id is recorded, the fallback records the step name with no id given).
+
+### Fixed — review follow-ups: one result per component, herdr path escaping, refusal residue (rv4, 2026-09-27)
+
+- **`setup.sh`**, **`lib/linux/install.sh`**: a component whose post-install step refused to change a user file was counted twice — once as installed (or skipped) and once as failed, and the state file named it in both buckets, so "3 installed, 1 failed" described four things that happened to three components. The three result buckets are now arrays of component **ids** in `lib/linux/install.sh` (`AUTOOS_RESULT_INSTALLED/SKIPPED/FAILED`), `autoos_fold_extra_failures` moves a recorded id into the failed bucket and out of the success ones, and the printed counts are the bucket lengths, so a number cannot disagree with the list it summarises. The failure report prints one line per component through `autoos_result_label` (catalog name, `… (post-install)` for a refusal, the raw token for an id that is not a component) — the old `for f in $failed_names` split a multi-word display name into several lines.
+- **`lib/linux/install.sh`**, **`configuration/herdr-sessions/*`**: `herdr-sessions` now passes the herdr binary to both `herdr-server` templates as a positional argument (`_ @HERDR_BIN@`, exec'd as `"$1"`) instead of splicing it into `ExecStart`/`ExecCondition`, so a path with a space, a `%`, a quote or a backslash is only a *shell* problem in one place; the rv3 `@HERDR_BIN_SH@` token and `shell_quote` are gone (supersedes the rv3 entry below, which quoted the path for the shell with `printf %q` and never escaped it for systemd).
+- **`configuration/herdr-sessions/install.sh`**, **`configuration/herdr-sessions/lib/herdr-lib.sh`**: `%h` is honoured as a *leading* specifier only, `systemd_escape_path` quotes every rendered path (a leading `%h` stays outside the quotes so systemd still expands it per user), and `hs_resolve_h_specifier` is the one rule both consumers share — the driver no longer dies on "herdr not found at %h/.local/bin/herdr" for a site that copies the unit default into its profile. The herdr binary is now a precondition for the **user** scope too, not only the system one, and `--unregister` and `--dry-run` stay exempt.
+- **`lib/agent_harness.py`**: `_backup_and_write` deletes the backup it already made when the `O_NOFOLLOW` open refuses a symlink that appeared after the pre-check (a refused write leaves nothing behind, as its docstring promised); `cmd_openhands` returns 1 when any file is `left alone (symlink)`, like `cmd_opencode`, instead of reporting success over a config it never touched.
+- **`lib/linux/install.sh`**: the OpenCode and OpenHands writers record the component (`autoos_record_failure`) when the agent harness refuses or python3 is missing, instead of only warning — a warning was invisible to the summary. The id comes from `AUTOOS_POST_COMPONENT`, published by `run_post_install`, because `setup_opencode_config` is the postInstall of both `opencode` and `opencode-cli`.
+- **`tests/test_catalog_uniqueness.py`**: the duplicate report unpacks the full 5-tuple key (a bare 2-tuple unpack raised `ValueError` on the first real duplicate, so the lint could only ever pass or crash) and `duplicate_report` names `arch`/`cask`/`source` in the message; `ReportSelfTests` covers the report path, which nothing exercised before.
+### Fixed — review follow-ups: symlink-safe backups, counted backup failures, honest dry-run, one backup stamp, catalog uniqueness, non-vacuous harness test, real mktemp, herdr unit escaping, suite wiring (rv3, 2026-09-27)
+
+- **`lib/agent_harness.py`**, **`tests/test_agent_harness.py`**: the agent-harness backup helper now refuses to write through a symlink using `os.open(O_NOFOLLOW)` (TOCTOU-safe); a symlink refusal returns non-zero and is recorded in the run summary; dry-run reports "left alone (symlink)" instead of "would update"; `cmd_opencode` and `cmd_openhands` propagate the refusal.
+- **`lib/linux/install.sh`**: `register_playwright_lazy_proxy` returns non-zero on registration failure; `install_mcp_playwright` checks the return code explicitly and propagates it (fixes `|| autoos_record_failure` swallowing the failure because `autoos_record_failure` returns 0).
+- **`configuration/herdr-sessions/install.sh`**, **`configuration/herdr-sessions/systemd/{user,system}/herdr-server.service`** (superseded by rv4): `render_unit` now systemd-quotes `HERDR_BIN` for `ExecStart` (quotes paths with spaces), shell-quotes it for `sh -c` contexts via new `@HERDR_BIN_SH@` token, and escapes `WORKDIR` for `WorkingDirectory` (spaces as `\x20`); default `%h` specifier preserved.
+- **`tests/test_catalog_uniqueness.py`**: duplicate detection key now includes `arch`, `cask`, `source` to avoid flagging legitimate platform/method splits; wired into `tests/linux/02-catalog-schema.sh` (suite wiring guard passes).
+- **`tests/linux/01-test-harness.sh`**: filtered-harness self-test asserts at-least-1 passed and 0 failed instead of exactly `passed 1`.
+- **`templates/rescue-bootstrap.sh`**: backup stamp uses canonical `%Y%m%d-%H%M%S`.
+- **`tests/run-tests.sh`**: test HTTP server reserves its port file with a real `mktemp`, never `mktemp -u`.
+- **`configuration/herdr-sessions/install.sh`**, **`configuration/herdr-sessions/systemd/{user,system}/*.service`**, **`lib/linux/install.sh`**, **`tests/linux/{18-mcp-wiring,22-herdr-sessions}.sh`** (rv2, 2026-09-27): every rendered user unit now leads `PATH` with `%h/.local/bin`, so a pane inherits the same tools an interactive shell would; `render_unit` applies hostexec's systemd quoting/escaping (`\`, `"`, `%`) to the substituted paths, so a profile directory containing a space or `%` no longer renders an unloadable unit (`WorkingDirectory` stays bare — systemd does not strip quotes there); the herdr binary in both `herdr-server` templates is rendered from the profile's `HERDR_BIN` via `@HERDR_BIN@`, with the per-scope default unchanged (`%h/.local/bin/herdr` user, `/root/.local/bin/herdr` system); and the WSL CAO FIFO probe passes its path as argv instead of splicing it into Python source, so a home path containing a single quote no longer reads as "no FIFO support" and falsely relocates a working ext4 tree.
+### Fixed — atomic ask-file create, unpredictable config-save temp names, 400 on a corrupt config (REVFIX, review routed 15:16Z, 2026-09-27)
+
+- **`tools/autoos-ask.py`**: `question.json` is created with `O_CREAT|O_EXCL` instead of an `exists()` check followed by a tmp+replace write, and every `qa-<n>.json` history slot is reserved the same way before it is written. Two askers in one run dir used to both pass the check: the loser replaced the winner's pending question, so the orchestrator answered the wrong worker, and two archivers that picked the same `n` silently dropped an exchange from the history. Sharing one `question.json.tmp` was worse still — one of the two could exit 5 on a file the other had already renamed away. A loser now takes the same exit 2 ("already pending") that a sequential duplicate already took, and a create that fails mid-write removes its own half-written file rather than leaving the run pending forever.
+- **`lib/linux/serve.py`**: `POST /api/config` writes through `tempfile.mkstemp(dir=ROOT, prefix=".autoos.config.")` and renames that fd-written file onto `autoos.config.json`, keeping the previous file's mode (mkstemp's 0600 must not quietly change who can read a config `setup.sh --config` may run as). The fixed `autoos.config.json.tmp` was a target anyone could pre-plant as a symlink: the save wrote the config bytes into their file and the rename then moved the link itself onto the config path, so the config *became* their file. A failed write unlinks its temp.
+- **`lib/linux/serve.py`**: a corrupt existing `autoos.config.json` answers `400 {"error": "existing autoos.config.json is corrupt: <parser position>"}` instead of a 500 from the catch-all. It writes nothing, backs nothing up, and echoes none of the file's content to the page.
+- **`lib/windows/AutoOS.Serve.psm1`**: `Save-AutoOSWebConfig` got the same shape — a GUID in the temp name (`$Path.<guid>.tmp`), `Move-Item -Force` onto the config, and the temp removed if either step throws. BOM and CRLF preserved.
+- **`.gitignore`**: the dead fixed-name entry is replaced by the two unpredictable shapes (`.autoos.config.*.tmp`, `autoos.config.json.*.tmp`), so a save that fails mid-write cannot leave a committable file in a public repository.
+- Tests: **`tests/test_autoos_spawner.py::AskRaceTests`** (two concurrent askers yield exactly one question; a widened check-then-create window yields exit 2 with the pending question intact; six racing archives claim six slots), **`tests/linux/14-state-verify-and-undo.sh`** (a symlink planted at the old fixed temp name is neither written through nor replaced, and a corrupt config is a 400 that echoes nothing), **`tests/run-tests.ps1`** (the Windows save leaves no stray temp, keeps the planted link and its target alone, and leaves the config a regular file; the link assertions skip on a host that refuses unprivileged symlinks).
+- Open: an existing config that parses but is not an object (a JSON array) still answers 500 on both platforms, and `tools/autoos_agent_mcp.py` still writes `answer.json` through a fixed `<path>.tmp` in the run dir — neither was in the routed batch.
 ### Added — Meta Model API: Muse Spark 1.3 contributor as the main writer (MUSEAPI, 2026-09-27)
 
 - **`catalog/ai-registry.json`**: `providers.meta_api` — Meta's OpenAI-compatible endpoint `https://api.meta.ai/v1` (Bearer), registered as a custom provider with `litellm_prefix: openai` + its own `api_base`, the `free_ai` shape, so LiteLLM never falls back to `api.openai.com`. `models.muse-spark-1.3-contributor` carries the vendor's published terms: $0.10 in / $0.20 out per 1M, 100 rpm, 3M tpm, 1,048,576 in / 131,072 out, `reasoning_effort minimal|low|medium|high|xhigh` (no `none` — 400; no `max`), and **`trains_on_prompts: true`** (`tool_calls: "unproven"` — the vendor says "tools supported", nobody has measured an agentic run). Contributor = MAIN writer: `meta_api/muse-spark-1.3-contributor` heads `t1-orchestrator`, `t1-orchestrator-paid` (which was legless, and so unservable, until this) and `spark-1.3-contributor`, and joins `t2-worker`/`t3-driver` *after* their free legs. It is in no `*-clean` route, and the spawner refuses a `privacy: sensitive` card on any of these routes (`tools/autoos_routing.py`). Effort aliases `spark-1.3-contributor-{minimal,low,medium,high,xhigh}` render on every surface that carries a ladder (combos cannot — an OmniRoute combo is one entry per leg, no per-effort alias). `providers.meta_api.model_prefix` is `meta-api`, **not** `meta`: `meta` is another provider's registry key, and because `sync-router-tiers.py --combos` resolves a combos leg's prefix through maps keyed by name/`omniroute_id` only, borrowing it rendered the contributor leg with no `api_base` at all.
@@ -85,6 +484,55 @@ S2 fix round on SPAWNREDACT (findings S1/S2/S3 of
 
 Evidence: lesson inbox 2026-09-27T18:58:28Z — a worker's REPORT printed a secret
 it had found, verbatim, despite its brief naming the file it came from.
+### Fixed — hostexec policy/runner/audit hardening (HX, 2026-09-27)
+
+- **`tools/hostexec/policy.py`**, **`tools/hostexec/server.py`**, **`tools/hostexec/runner.py`**, **`tools/hostexec/audit.py`**, **`configuration/hostexec/install.sh`**, **`configuration/hostexec/README.md`**, **`tests/`**: deny `env -S`/`--split-string` (the shebang split-string form re-splits an argument string into argv; new `no-inline-shell` rule). `policy.decide` now refuses a non-str argv element (`argv-caps`) instead of crashing, and `server.host_run` wraps `decide()` so a raise is audited as a `policy-error` denial rather than escaping as an unhandled error. Remote `ssh` executes in the audited cwd via a `cd` prefix (the local ssh process runs in `/`, so a remote-only path no longer breaks local spawn). `audit.hash_argv` hashes the redacted argv, so a secret no longer changes the fingerprint, and non-str audit tokens are rendered via `json.dumps` instead of crashing `audit.write`. Dead `_strip_wrappers`/`_WRAPPERS` deleted; the residual check-then-exec race in `_path_hijack_problem` is documented. `install.sh` stages the unit and client configs through `mktemp` in the destination directory (unpredictable, exclusively created), not a guessable `.<name>.tmp.$$`.
+- **`tools/hostexec/policy.py`** (hx2): wrapper option parsing is now prefix- and cluster-aware, so `env` abbreviations/clusters can no longer slip a shell past the deny-list. Short clusters are scanned skipping the wrapper's own value-taking flags, any `S` before a value-taking flag (`env -vS`, `-0vS`, `-iS`) denies `no-inline-shell`, and abbreviated long options (`--s`, `--sp=`, `--split`, `--split-str=`, and value-taking forms like `env --ch /tmp sudo id`) resolve against the real option table: a unique prefix is honoured, while ambiguous or unknown `--X` on any wrapper (`nice`, `timeout`, `stdbuf`, `ionice`, `setsid`, `nohup`, `xargs`, `flock`) denies `no-inline-shell` instead of silently stopping the scan.
+- **`tools/hostexec/runner.py`** (hx2): `_pump` now drains the child's pipe to EOF even past `output_cap`, storing only up to the cap and discarding the rest while still counting `out_bytes`. A chatty child no longer blocks forever on a full 64 KiB pipe and get misreported as `timed_out`; `truncated` is set from the total produced.
+- **`configuration/hostexec/install.sh`** (hx2): `--unregister` decides unit ownership from the installed unit itself -- its own `Environment=AUTOOS_EXEC_PORT=` line and the unescaped `ExecStart` script path -- instead of re-rendering from the live `AUTOOS_EXEC_PORT`/checkout. A unit installed under another port, or from a checkout that has since moved or been renamed, is still removed; anything else is still left untouched.
+- **`tools/hostexec/policy.py`** (hx3): the per-wrapper option scan is now a single `_walk_wrapper_options` that returns the wrapped command's index *and* every option it saw, so the `env -S`/`--split-string` and `flock -c`/`--command` predicates read that list instead of re-walking the options with their own rules -- one option walker per wrapper, so a spelling the walker understands cannot be missed by a second, weaker scan. The walker learns env's bare `-` (means `-i`, not a command) and flock's leading lockfile positional (a wrapper that takes an argument before its command), and sees options the C library's getopt permutes after that positional (`flock /tmp/l -c cmd`). After `--`, flock's next token is always the lockfile, so `flock -- -c rm -rf /` locks on the file `-c` and runs `rm` (previously the head was taken from the lockfile). The bypass matrix is now generated, flat *and* nested one level (2185 cases).
+- **`tools/hostexec/policy.py`** (hx4): the same prefix-aware matching hx3 gave the wrappers now covers the command rules, which compared long options with `==`/`startswith` and so let the abbreviation of a forbidden flag execute it -- `rm --recurs /`, `rm --forc /`, `chmod --recurs /`, `tar --checkpoint-ac=exec=id`, `tar --to-com prog`, `tar --use-compress-prog=evil`, `git push --mir origin`, `git rebase --exe evil`, `git --git-di=/tmp status`, `iptables --flu`, `man --page evil`. One matcher, `_long_opt_hits(token, flagged)`, sits behind every deny gate (rm/chmod/chown, git push, git's global and rebase options, tar's exec hooks, man's pager, docker run/exec, parallel's ssh options, iptables), and it fails closed: any prefix of a flagged option counts, even one the real program would reject as ambiguous, because over-deny is safe and under-deny is the bug. Allow gates (`crontab --list`, `git config --get`, a bare `env bash --version`) deliberately stay exact -- over-matching there would over-*allow*. Each gate's flagged options moved into module-level `_FlaggedLongs` tables, and `tests/test_hostexec_policy.py` generates the matrix from them (409 cases: every prefix from 3 characters up, bare and `=value`, in the position each rule reads), so a new flagged option is covered by a table edit, not a new test. `_DOCKER_GLOBAL_VALUE_LONGS` also fixes the subcommand scan, where `docker --log-l info run -v /:/h alpine` read `info` as the subcommand. `parallel -I`/`--replace` now consume their replacement string, so the harmless `parallel -I foo echo foo ::: a` is no longer denied as a path-hijack, and `flock -- -evil ls` (lock file named `-evil`, child `ls`) is pinned as allowed.
+- **`tools/hostexec/runner.py`** (hx3): the remote command is prefixed `cd -- <cwd> && ...`. `shlex.quote` leaves a leading `-` unquoted, so a cwd like `-evil` was parsed by `cd` as options and never changed directory; `--` makes the path literal.
+- **`tools/hostexec/policy.py`** (hx2 follow-up, S2 security): `chrt`, `taskset` and `watch` were the last launchers still hand-scanned -- each skipped any token starting with `-`, so an unknown or abbreviated long option was never fail-closed and a value-taking short option left its value standing where the command is looked for (`chrt -T 1000 5 cmd`, `watch -q 5 cmd`, `taskset --zz 0x1 cmd`). They now carry `_CHRT_LONGS`/`_TASKSET_LONGS`/`_WATCH_LONGS` (util-linux 2.39.3 `chrt --help` and `taskset --help`, procps-ng 4.0.4 `watch --help`; prefix and ambiguity behaviour measured against those binaries -- `chrt --r` and `watch --e`/`--no` are reported ambiguous there, `taskset --cpu` and `watch --ex` resolve) and parse through `_walk_wrapper_options`, so `_wrapper_option_problem` denies an unparsable option region and the three `_idx_after_*` are one-line wrappers like the rest. The walker's `trailing="file"` special case is gone -- `--` ends option parsing but not the positional region, so a wrapper consumes its own remaining positional(s) after it, which also gives flock back the head it lost: `flock /tmp/l -- rm -rf /` had no head and so was never scanned by the child rules and now denies `destructive`. `chrt`/`taskset` `-p`/`--pid` in any spelling or cluster operate on an existing pid instead of a command, so they deny `no-inline-shell` the way `env -S` and `flock -c` do (this also refuses the read-only `chrt -p 123` / `taskset -p 700` query -- deliberately fail-closed, no command is auditable); and `watch` without `-x`/`--exec` joins its arguments and runs them through `sh -c` (measured: `watch -n 1 zzcmd` reports `sh: 1: zzcmd: not found`, `watch -x -n 1 zzcmd` reports `watch: unable to execute 'zzcmd'`), so it denies the same way and only the `-x` form keeps a transparent head. Tests: the three wrappers joined the generated flat *and* nested bypass matrix, and `ChrtTasksetWatchWalkerTests` pins every head shape, every pid-mode/unknown/ambiguous denial, the `--` cases, and asserts each table against the program's own option list.
+### Added — the publication scanner learns four more shapes and gates the docs (SPEC-OMNI A2, 2026-09-27)
+
+The public-scrub gate covered `infra/` and `scripts/` with four shapes, and its
+own test file was run by nobody — a rule could stop matching, or a hostname could
+land in `docs/`, without any check noticing. Both are fixed here.
+
+- **`scripts/public-scrub/patterns.txt`**: five generic shapes added — `cgnat`
+  (RFC 6598's 100.64.0.0/10, where Tailscale and Docker's pooled addresses live),
+  `link-local` (RFC 3927's 169.254.0.0/16), `ipv6-ula` (RFC 4193's fd00::/8),
+  `private-host` (a single-label name ending in `.lan`, `.local`, `home.arpa` or
+  `.internal`) and `email`. Names describe the kind, never the value.
+  Documentation and look-alike values are deliberately unmatched so the gate stays
+  green on honest prose: the RFC 5737 / RFC 3849 documentation ranges, loopback,
+  RFC 2606 reserved example domains, Anthropic's and GitHub's published no-reply
+  addresses, Docker's `host.docker.internal` alias, a dotenv `.env.local` filename
+  and a `settings.local.json` filename. Known limit: a private host one label
+  deeper than the last (`vm01.dc.internal`) is out of reach of a rule that must
+  ignore `coding.example.internal` — that is what `patterns.private.txt`
+  (gitignored) is for. (`CHANGELOG.md` is not in the gate's scope; it names the
+  shapes it describes, like this entry does.)
+- **`scripts/public-scrub/scan.py`** now loads **`scan-exclude.txt`** (new) by
+  default, so the scrubber's own rules, private literals and planted fixtures are
+  never reported as hits — previously only the `--patterns` file was skipped, and
+  a developer holding a real `patterns.private.txt` saw it listed as a leak.
+  `--exclude-file` still overrides it; one reason per entry in the file.
+- **`.github/workflows/ci.yml`** ("Public scrub scan") scans `docs/`, `catalog/`,
+  `README.md` and `AGENTS.md` beside `infra/` and `scripts/`, and runs
+  `scripts/public-scrub/test_scan.py` directly (no pytest is installed anywhere —
+  the file grew a dependency-free `__main__` runner, and pytest still collects
+  the same functions). **`tests/linux/36-static-analysis.sh`** runs the same
+  command, checks the rules and fixtures, and greps the CI step for each scope
+  token so narrowing the gate back fails the suite instead of un-gating the docs.
+- Documentation placeholders for hits the widened scope found: `docs/web-services.md`
+  named container homes that `configuration/docker/ai-stack/compose.yml` owns
+  (now `/home/<service-user>` — one home per fact), `AGENTS.md` the OpenHands
+  image's own `HOME`, `catalog/ai-registry.schema.json`'s `$id` (`.internal` is a
+  private-host shape; `autoos.example` is reserved documentation space, and no
+  code resolves the id), and `infra/mcp-servers/docs/OBSERVABILITY-MCP-SETUP.md`
+  used `sentry.local` as its example hostname.
 
 ### Changed — run rules folded into the orchestration skill, one home per fact (FOLD2, 2026-09-27)
 

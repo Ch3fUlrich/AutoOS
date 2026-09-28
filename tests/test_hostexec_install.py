@@ -104,6 +104,26 @@ class _DriverCase(unittest.TestCase):
             return []
         return self.syslog.read_text(encoding="utf-8").splitlines()
 
+    def install_mktemp_logger(self) -> Path:
+        """Put an `mktemp` stub first on PATH that records its arguments and
+        delegates to the real mktemp. Returns the log path. The stub lets a
+        test assert *where* and *how* the driver stages files (the stage name
+        must be mktemp's own in the destination directory, never a guessable
+        `$$` name)."""
+        log = Path(self.tmp.name) / "mktemp.log"
+        real = "/usr/bin/mktemp"
+        if not os.path.exists(real):
+            real = "/bin/mktemp"
+        stub = self.bindir / "mktemp"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            f'exec "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        return log
+
     def assert_no_enable_or_start(self):
         for line in self.systemctl_argv():
             words = line.split()
@@ -253,6 +273,22 @@ class UnitInstallTests(_DriverCase):
         proc = self.run_driver("--unit")
         self.assertNotEqual(proc.returncode, 0, "failed backup must fail the install")
         self.assertEqual(unit.read_text(encoding="utf-8"), "# keep me\n")
+
+    def test_unit_stages_through_mktemp_in_the_destination_dir(self):
+        # install.sh stage: the temp file that is renamed into place must be
+        # mktemp's own (an unpredictable, exclusively created name in the
+        # destination directory), never a guessable `.<unit>.tmp.$$` that a
+        # pre-existing file could occupy.
+        log = self.install_mktemp_logger()
+        self.run_driver_ok("--unit")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        destdir = str(self.home / ".config" / "systemd" / "user")
+        staged = [ln for ln in lines if ln.startswith(destdir + "/")]
+        self.assertTrue(staged, f"no mktemp stage under {destdir}: {lines!r}")
+        self.assertTrue(
+            all("XXXXXX" in ln for ln in staged),
+            f"mktemp stage is not a template: {staged!r}",
+        )
 
 
 @unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
@@ -455,6 +491,19 @@ class ClientWriterTests(_DriverCase):
         )
         self.assert_token_nowhere(proc)
 
+    def test_client_config_stages_through_mktemp_in_the_target_dir(self):
+        # install.sh publish_candidate: when a client config is replaced it
+        # must be staged through mktemp's own file in the target directory,
+        # not a guessable `.hostexec.tmp.$$`.
+        log = self.install_mktemp_logger()
+        self.write_token("claude")
+        self.run_driver_ok("--clients", "claude")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        homedir = str(self.home)
+        staged = [ln for ln in lines if ln.startswith(homedir + "/.hostexec.")]
+        self.assertTrue(staged, f"no mktemp stage under {homedir}: {lines!r}")
+        self.assertTrue(all("XXXXXX" in ln for ln in staged), staged)
+
 
 @unittest.skipIf(os.name == "nt", "bash scripts and systemd; POSIX only")
 class TokenTests(_DriverCase):
@@ -625,6 +674,67 @@ class UnregisterTests(_DriverCase):
         proc = self.run_driver_ok("--unregister")
         self.assertEqual(unit.read_text(encoding="utf-8"), "# operator-edited unit\n")
         self.assertIn("leaving untouched", (proc.stdout + proc.stderr).lower())
+
+    def test_unregister_removes_own_unit_under_a_different_port(self):
+        # install.sh:remove_unit -- ownership is decided from the installed
+        # unit's own AUTOOS_EXEC_PORT, never from the live PORT, so a unit
+        # installed under one port is still removed when the operator later
+        # unregisters with another.
+        self.run_driver_ok("--unit")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        self.assertIn(
+            f"Environment=AUTOOS_EXEC_PORT={TEST_PORT}",
+            unit.read_text(encoding="utf-8"),
+        )
+        proc = self.run_driver_ok("--unregister", env_extra={"AUTOOS_EXEC_PORT": "29999"})
+        self.assertFalse(unit.exists(), "own unit must be removed regardless of live PORT")
+        self.assertIn("removed", proc.stdout + proc.stderr)
+
+    def test_unregister_removes_own_unit_from_a_moved_checkout(self):
+        # install.sh:remove_unit -- ownership is decided from the script
+        # path recorded in the installed unit (unescaped), not from the live
+        # checkout, so moving/renaming the checkout still lets the driver
+        # remove the unit it wrote. Uses a path with a space and `%` so the
+        # quote/percent escaping is exercised in reverse too.
+        import shutil
+
+        old_repo = Path(self.tmp.name) / "old repo%name"
+        (old_repo / "configuration" / "hostexec").mkdir(parents=True)
+        (old_repo / "tools" / "hostexec").mkdir(parents=True)
+        shutil.copy(str(DRIVER), str(old_repo / "configuration" / "hostexec" / "install.sh"))
+        shutil.copy(
+            str(TEMPLATE),
+            str(old_repo / "configuration" / "hostexec" / "autoos-hostexec.service"),
+        )
+        (old_repo / "tools" / "hostexec" / "server.py").write_text(
+            "DEFAULT_PORT = 8765\n", encoding="utf-8"
+        )
+        env = dict(self.env)
+        env["AUTOOS_EXEC_PORT"] = ""  # take the default from the fake server.py
+        proc = subprocess.run(
+            ["bash", str(old_repo / "configuration" / "hostexec" / "install.sh"), "--unit"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(old_repo),
+        )
+        self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+        unit = self.home / ".config" / "systemd" / "user" / "autoos-hostexec.service"
+        self.assertTrue(unit.is_file(), "unit was not installed from the fake checkout")
+
+        new_repo = Path(self.tmp.name) / "moved repo%name2"
+        old_repo.rename(new_repo)
+        proc2 = subprocess.run(
+            ["bash", str(new_repo / "configuration" / "hostexec" / "install.sh"), "--unregister"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(new_repo),
+        )
+        self.assertEqual(proc2.returncode, 0, f"{proc2.stdout}\n{proc2.stderr}")
+        self.assertFalse(unit.exists(), "own unit must be removed after the checkout moved")
+        self.assertIn("removed", proc2.stdout + proc2.stderr)
+        self.assertNotIn("leaving untouched", proc2.stdout + proc2.stderr)
 
 
 if __name__ == "__main__":

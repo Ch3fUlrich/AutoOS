@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import shutil
@@ -943,6 +944,21 @@ class McpToolTests(unittest.TestCase):
         for name in ("job.json", "output.log", "exit.json"):
             self.assertTrue(os.path.isfile(os.path.join(out["dir"], name)), name)
 
+    def test_spawn_run_dir_is_0700_under_a_shared_umask(self):
+        """The run dir carries the task brief, the worker's output and the
+        question.json / answer.json pair autoos-ask.py uses for ask-back: a
+        local user who can enter the dir can read the brief and answer the
+        worker's question. So the dir is private like the spawner's workers
+        dir (0700), whatever the spawning process's umask says."""
+        old = os.umask(0o022)
+        try:
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+            self.assertNotIn("error", out)
+            self.wait_done(out["id"])
+            self.assertEqual(os.stat(out["dir"]).st_mode & 0o777, 0o700)
+        finally:
+            os.umask(old)
+
     def test_refusals_come_back_synchronously(self):
         self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}}))
         self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"bogus": "x"}}))
@@ -1564,6 +1580,214 @@ class AskHelperTests(unittest.TestCase):
         self.assertNotIn("Traceback", proc.stderr)
         self.assertIn("autoos-ask", proc.stderr)
         self.assertIn("unavailable", proc.stderr)
+
+
+def load_ask():
+    """tools/autoos-ask.py loaded in-process, so a test can widen the window
+    between its exists() check and its create — something a subprocess race
+    can only hit by luck."""
+    spec = importlib.util.spec_from_file_location("autoos_ask", str(TOOLS / "autoos-ask.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class AskRaceTests(unittest.TestCase):
+    """The check-then-act races in tools/autoos-ask.py: two askers sharing one
+    run dir, and two archives claiming the same qa-<n> slot."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_ask(self, question, *opts):
+        env = clean_env(AUTOOS_TASK_DIR=self.tmp)
+        return subprocess.run([sys.executable, str(TOOLS / "autoos-ask.py"), question, *opts],
+                              env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_two_concurrent_askers_produce_exactly_one_question(self):
+        """Two askers launched together: exactly one may become the asker (it
+        writes the question and times out, exit 3), the other must refuse as
+        already pending (exit 2). Two 3s is the bug - both wrote, so the loser
+        replaced the winner's pending question and the orchestrator answers the
+        wrong worker."""
+        for _round in range(3):
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.tmp = tempfile.mkdtemp()
+            results = []
+            lock = threading.Lock()
+
+            def ask(question):
+                proc = self.run_ask(question, "--poll", "0.05", "--timeout", "0.2")
+                with lock:
+                    results.append((question, proc.returncode))
+
+            threads = [threading.Thread(target=ask, args=("question %s?" % who,))
+                       for who in "ab"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(sorted(rc for _, rc in results), [2, 3], results)
+
+    def test_an_asker_that_loses_the_race_never_replaces_the_pending_question(self):
+        """The window itself, with no timing luck: question.json is on disk, but
+        the module's own exists() reports it missing - exactly what a second
+        asker sees while the first sits between its check and its write. The
+        create must still fail, and the pending question must survive."""
+        mod = load_ask()
+        qpath = os.path.join(self.tmp, "question.json")
+        with io.open(qpath, "w", encoding="utf-8") as fh:
+            json.dump({"text": "first?", "asked": "2026-09-27T00:00:00Z"}, fh)
+
+        class BlindPath:
+            def __init__(self, real):
+                self._real = real
+                self.blinded = False
+
+            def exists(self, path):
+                if path == qpath and not self.blinded:
+                    self.blinded = True  # the other asker has not written yet
+                    return False
+                return self._real.exists(path)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        class BlindOs:
+            def __init__(self, real):
+                self._real = real
+                self.path = BlindPath(real.path)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        blind = BlindOs(mod.os)
+        err = io.StringIO()
+        with mock.patch.object(mod, "os", blind), \
+                mock.patch.dict(os.environ, {"AUTOOS_TASK_DIR": self.tmp}), \
+                contextlib.redirect_stderr(err):
+            rc = mod.main(["second?", "--poll", "0.05", "--timeout", "0.2"])
+        self.assertTrue(blind.path.blinded, "the window never opened: exists() was not consulted")
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("already pending", err.getvalue())
+        with io.open(qpath, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["text"], "first?")
+
+    def test_two_racing_archives_never_share_a_qa_slot(self):
+        """qa-<n> is a history slot. Scanning for the next free number and then
+        writing lets two archivers pick the same n, and the second silently
+        overwrites the first - an exchange vanishes from the record. Each
+        archive has to claim its own number.
+
+        The race is driven through _archive_stale_answer, the entry point
+        main() uses when it files an answer, so the test covers the path a real
+        run takes (and keeps working if the private write helper is renamed).
+        """
+        mod = load_ask()
+        sentinel = os.path.join(self.tmp, "qa-1.json")
+        with io.open(sentinel, "w", encoding="utf-8") as fh:
+            json.dump({"question": None, "answer": {"text": "already filed"}, "stale": True}, fh)
+
+        writers = 6
+        barrier = threading.Barrier(writers)
+        errors = []
+
+        def archive(i):
+            # Every archiver holds one orphan answer of its own — the shape
+            # main() hands the helper — and files it into the shared history.
+            apath = os.path.join(self.tmp, "orphan-%d.json" % i)
+            with io.open(apath, "w", encoding="utf-8") as fh:
+                json.dump({"text": "a%d" % i, "answered": "2026-09-27T00:00:0%dZ" % i}, fh)
+            barrier.wait()
+            try:
+                mod._archive_stale_answer(self.tmp, apath)
+            except Exception as exc:  # noqa: BLE001 - surfaced as a failure below
+                errors.append("q%d: %r" % (i, exc))
+
+        threads = [threading.Thread(target=archive, args=(i,)) for i in range(writers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        filed = sorted(n for n in os.listdir(self.tmp) if n.startswith("qa-") and n.endswith(".json"))
+        self.assertEqual(len(filed), writers + 1, filed)
+        with io.open(sentinel, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh).get("stale"), "the existing qa-1.json was overwritten")
+        answers = set()
+        for name in filed:
+            if name == "qa-1.json":
+                continue
+            with io.open(os.path.join(self.tmp, name), encoding="utf-8") as fh:
+                answers.add(json.load(fh)["answer"]["text"])
+        self.assertEqual(answers, {"a%d" % i for i in range(writers)}, "an exchange was lost")
+        for i in range(writers):
+            orphan = os.path.join(self.tmp, "orphan-%d.json" % i)
+            self.assertFalse(os.path.exists(orphan), "%s was filed but left behind" % orphan)
+
+    def test_a_qa_slot_is_never_observed_empty_or_partial(self):
+        """Reserving the slot first (create qa-<n> empty, fill it in a second
+        step) leaves a window in which the history file exists with no bytes in
+        it. A reader polling the run dir sees an entry that is neither valid
+        JSON nor any exchange, and a run killed inside the window loses the slot
+        forever — the next archive steps over an empty qa-<n>. The slot must
+        appear on the filesystem already complete."""
+        mod = load_ask()
+        apath = os.path.join(self.tmp, "answer.json")
+        with io.open(apath, "w", encoding="utf-8") as fh:
+            json.dump({"text": "ship it", "answered": "2026-09-27T00:00:00Z"}, fh)
+
+        problems = []
+        stop = threading.Event()
+
+        def watch():
+            while not stop.is_set():
+                for name in sorted(os.listdir(self.tmp)):
+                    if not (name.startswith("qa-") and name.endswith(".json")):
+                        continue
+                    with io.open(os.path.join(self.tmp, name), "rb") as fh:
+                        raw = fh.read()
+                    if not raw.strip():
+                        problems.append("%s existed with no bytes in it" % name)
+                        continue
+                    try:
+                        json.loads(raw.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        problems.append("%s existed half-written" % name)
+                time.sleep(0.005)
+
+        real_dump = json.dump
+
+        def slow_dump(obj, fh, *args, **kwargs):
+            # Widen the window between "the slot exists" and "the slot holds
+            # its bytes" — the gap the two-step reserve used to leave open.
+            time.sleep(0.2)
+            return real_dump(obj, fh, *args, **kwargs)
+
+        observer = threading.Thread(target=watch)
+        observer.start()
+        try:
+            with mock.patch.object(mod.json, "dump", slow_dump):
+                mod._archive_stale_answer(self.tmp, apath)
+        finally:
+            stop.set()
+            observer.join()
+
+        self.assertEqual(problems, [])
+        filed = sorted(n for n in os.listdir(self.tmp)
+                       if n.startswith("qa-") and n.endswith(".json"))
+        self.assertEqual(filed, ["qa-1.json"], filed)
+        with io.open(os.path.join(self.tmp, "qa-1.json"), encoding="utf-8") as fh:
+            qa = json.load(fh)
+        self.assertTrue(qa.get("stale"))
+        self.assertEqual(qa["answer"]["text"], "ship it")
+        self.assertFalse(os.path.exists(apath))
+        leftovers = [n for n in os.listdir(self.tmp) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [], "the archive left a temp file behind")
 
 
 def uv_mcp_cmd():
@@ -2776,7 +3000,12 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
+            "author": None,
         })
+        # REVROUTE (S2) item 2: author is shared by both dialects and is not a
+        # combo input -- it decides who reviews, never what runs.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})
@@ -2929,6 +3158,54 @@ class CardV2Tests(unittest.TestCase):
         out = self.norm({"privacy": "sensitive"})
         self.assertEqual(out["privacy"], "sensitive")
         self.assertEqual(out["version"], "2")
+
+    # --- author (brief REVROUTE (S2) item 2) -------------------------------
+    # Which model wrote the diff is what decides who may review it, so the
+    # field belongs to both card dialects: role=review,author=qwen is how a
+    # lane already spells the request.
+
+    def test_author_is_shared_and_never_a_mix(self):
+        out = self.norm({"author": "qwen"})
+        self.assertEqual(out["author"], "qwen")
+        self.assertEqual(out["version"], "2")
+        v1 = self.norm({"role": "review", "author": "qwen"})
+        self.assertEqual(v1["author"], "qwen")
+        self.assertEqual(v1["version"], "1")
+        self.assertEqual(v1["kind"], "review")
+
+    def test_a_v2_card_carries_its_author(self):
+        self.assertEqual(self.norm({"kind": "review",
+                                    "author": "meta_api/muse-spark-1.3-contributor"})
+                         ["author"], "meta_api/muse-spark-1.3-contributor")
+
+    def test_an_absent_author_is_none_not_a_default_reviewer(self):
+        # No author means the orchestrator did not say who wrote it: the
+        # different-family rule cannot run, and inventing an author would let
+        # the resolver claim a cross-family review nobody asked for.
+        self.assertIsNone(self.norm({"kind": "review"})["author"])
+
+    def test_key_value_form_reads_the_author(self):
+        self.assertEqual(self.norm(routing.parse_card("role=review,author=qwen"))
+                         ["author"], "qwen")
+
+    def test_an_empty_author_is_an_error(self):
+        for card in ({"author": ""}, {"author": "   "}, {"author": None},
+                     {"author": 7}):
+            with self.assertRaises(routing.CardError):
+                self.norm(card)
+
+    def test_the_author_never_changes_the_combo(self):
+        # autoos_routing.select_combo is the one launch-time decision; a review
+        # card must route to the same combo with or without an author, or the
+        # field would be a second, undeclared routing input.
+        plain = routing.select_combo({"role": "review"})
+        with_author = routing.select_combo({"role": "review", "author": "qwen"})
+        self.assertEqual(plain, with_author)
+
+    def test_normalize_v1_keeps_the_author_for_the_spawner(self):
+        card = routing.normalize({"role": "review", "author": "qwen"})
+        self.assertEqual(card["author"], "qwen")
+        self.assertEqual(card["role"], "review")
 
     def test_absolute_path_is_an_error(self):
         with self.assertRaises(routing.CardError):
@@ -3743,6 +4020,143 @@ elif mode == "commit-sibling-worktree":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "sibling lane worker change"], check=True)
     print("fake: a sibling lane's worker committed in its own worktree")
+elif mode == "parent-ff-onto-lane":
+    # LEAKFP A (review-fold2e.out): the orchestrator fast-forwards the parent
+    # worktree's OWN branch onto another lane's worker commits while this
+    # (read-only review) run is going. HEAD's first-parent chain now carries
+    # autoos-worker commits it never wrote.
+    git("switch", "-q", "-c", "lane-ff")
+    with open(os.path.join(root, "lane-ff.txt"), "w") as fh:
+        fh.write("lane\\n")
+    git("add", "lane-ff.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "another lane's worker change")
+    git("switch", "-q", "-")
+    git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
+        "merge", "-q", "--ff-only", "lane-ff")
+    print("fake: parent branch fast-forwarded onto another lane's commits")
+elif mode == "ff-old-lane-commit":
+    # LEAKFP A, harder shape: the lane finished BEFORE this run (its commit is
+    # dated years back, made in another writer's clone so this worktree's HEAD
+    # reflog never saw it) and the orchestrator deletes the lane branch after
+    # the fast-forward, so no ref but the parent's own carries it -- only the
+    # commit's timestamp says it cannot be this worker's.
+    import shutil as _sh
+    import tempfile as _tf
+    old = dict(os.environ)
+    old["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+    old["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+    par = _tf.mkdtemp(prefix="autoos-fake-lane-")
+    other = os.path.join(par, "lane")
+    git("clone", "-q", "--local", root, other)
+
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True, env=old)
+    ogit("switch", "-q", "-c", "lane-old")
+    with open(os.path.join(other, "lane-old.txt"), "w") as fh:
+        fh.write("old lane\\n")
+    ogit("add", "lane-old.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "a finished lane's commit")
+    git("fetch", "-q", other, "lane-old:refs/heads/lane-old")
+    git("merge", "-q", "--ff-only", "lane-old")
+    git("branch", "-q", "-D", "lane-old")
+    _sh.rmtree(par, True)
+    print("fake: parent branch fast-forwarded onto a pre-run lane commit")
+elif mode == "commit-in-another-clone":
+    # LEAKFP B (MUSEAPI2.out tail): another writer's lane in the SAME
+    # repository advanced an existing branch. Every worktree and clone of one
+    # .git shares refs, and this worktree's HEAD never visited that branch, so
+    # "checked out in another worktree" cannot excuse the moved ref.
+    import shutil as _sh
+    import tempfile as _tf
+    par = _tf.mkdtemp(prefix="autoos-fake-sib-")
+    other = os.path.join(par, "lane")
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True)
+    git("clone", "-q", "--local", root, other)
+    ogit("switch", "-q", "side")
+    with open(os.path.join(other, "asm.txt"), "w") as fh:
+        fh.write("asm\\n")
+    ogit("add", "asm.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "another lane's worker change")
+    git("fetch", "-q", other, "side:side")
+    _sh.rmtree(par, True)
+    print("fake: a shared-repo branch moved under another writer")
+elif mode == "commit-worker-with-lane-present":
+    # The boundary the two fixes above must not cross: a real leak (the worker
+    # commits into the parent checkout under the worker identity) while an
+    # unrelated lane ref also exists in the repository.
+    git("branch", "lane-present")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: committed as worker with a lane ref present")
+elif mode == "decoy-branch-after-commit":
+    # LEAKFP2 evasion 1 (review of 75f2866): the worker commits in the parent
+    # and then puts a NEW branch on its own tip. 75f2866's `_lane_work` read
+    # "contained in a ref that did not exist at the snapshot" as another
+    # writer's lane work and exempted the leak.
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    git("branch", "decoy")
+    print("fake: worker commit in the parent, then a decoy branch at the tip")
+elif mode == "backdated-worker-commit":
+    # LEAKFP2 evasion 2: the same commit with GIT_COMMITTER_DATE (and the
+    # author date) backdated before the run. 75f2866's run window dropped it.
+    env = dict(os.environ)
+    env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+    env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    subprocess.run(["git", "-C", root, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=autoos-worker@users.noreply.github.com",
+                    "commit", "-q", "-m", "backdated worker change"],
+                   check=True, capture_output=True, text=True, env=env)
+    print("fake: worker commit with a backdated committer timestamp")
+elif mode == "switch-c-ff-back":
+    # LEAKFP2 evasion 3: commit on a branch created during the run, then
+    # fast-forward the parent's own branch onto it. 75f2866's made_on leg
+    # exempted the commit as "lane work on a new branch".
+    back = subprocess.run(["git", "-C", root, "branch", "--show-current"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    git("switch", "-q", "-c", "tmp-leak")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    git("switch", "-q", back)
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "merge", "-q", "--ff-only", "tmp-leak")
+    print("fake: worker commit through a branch created during the run, ff'd back")
+elif mode == "commit-on-branch-created-in-run":
+    # A branch created during the run is never exempt: the worker switches to
+    # its own new branch IN THE PARENT CHECKOUT and commits there.
+    git("switch", "-q", "-c", "lane-mine")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: worker commit on a branch created during the run")
 elif mode == "untracked-in-parent":
     # A worker with full write rights drops a NEW untracked file into the parent
     # checkout (review of 6622d29: git status ran with --untracked-files=no).
@@ -4059,6 +4473,108 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_parent_fast_forward_onto_another_lanes_commits_is_a_leak_with_the_hint(self):
+        # LEAKFP A (work/L1-routing/review-fold2e.out, exit 7) is NOT exempted
+        # in code (LEAKFP2 decision): nothing but "do not move a parent while
+        # its child runs" (skill R-coord-01) makes this case identifiable, so a
+        # moved parent stays a containment failure and the message tells the
+        # orchestrator that moving the branch itself is what it just did.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "parent-ff-onto-lane")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("worker commits in the parent checkout", out + err)
+        self.assertIn("if you moved this branch yourself during the run (merge/ff)",
+                      out + err)
+        self.assertIn("R-coord-01", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_prerun_lane_commit_fast_forwarded_in_is_a_leak_too(self):
+        # LEAKFP2: the run window is gone with the exemptions - a pre-run lane
+        # commit the orchestrator fast-forwards in cannot be told apart from a
+        # worker's write, so the run is blamed (conservative by design; the
+        # frozen-parent rule is procedural, not code).
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "ff-old-lane-commit")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_shared_repo_branch_moving_without_a_sibling_worktree_is_a_leak(self):
+        # LEAKFP B's exemption is narrow: ONLY a branch checked out in another
+        # worktree at both ends of the run is excused (the test above). A ref an
+        # outside clone fetched into the shared repository is checked out
+        # nowhere, so the strict check keeps flagging it - 75f2866 read
+        # MUSEAPI2.out too broadly and lost the side-branch leak here.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-in-another-clone")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("refs/heads/side", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_decoy_branch_at_the_tip_does_not_exempt_a_parent_commit(self):
+        # Evasion 1 of 75f2866: `git branch decoy` after the worker commit made
+        # the leak read as another lane's work.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "decoy-branch-after-commit")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_backdated_worker_commit_in_the_parent_is_a_leak(self):
+        # Evasion 2: GIT_COMMITTER_DATE in the past fell outside 75f2866's run
+        # window. The strict check reads no clock at all.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "backdated-worker-commit")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_via_switch_c_and_a_fast_forward_back_is_a_leak(self):
+        # Evasion 3: commit on a branch created during the run, ff the parent's
+        # branch onto it, delete the branch - 75f2866's made_on-leg exempted it.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "switch-c-ff-back")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_on_a_branch_created_during_the_run_is_a_leak(self):
+        # The parent checkout moved, and the branch it moved on is brand new:
+        # newness is not an excuse for a commit this worktree made.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(
+            root, stub, state, "commit-on-branch-created-in-run")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_in_the_parent_is_still_a_leak_with_a_lane_present(self):
+        # The boundary of both exemptions: a lane ref in the repository must not
+        # excuse a worker commit made on the parent's own branch.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state,
+                                         "commit-worker-with-lane-present")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
@@ -4568,7 +5084,8 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
             "defer_until": None}
 
 
-def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None):
+def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
+                     stop_tail=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -4584,6 +5101,10 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
 
     `args_over` (SPAWNFREE) overrides run-args fields (free, free_model, card,
     isolate); `policy` is the registry's policy section.
+
+    `stop_tail` (REVROUTE item 3) is what a stopped attempt prints; the
+    provider-state file is redirected into the same temp state dir and exposed
+    as `case.provider_state`.
     """
     agent = case.agent
     root = _init_git_root()
@@ -4600,6 +5121,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    case.provider_state = os.path.join(statedir, "provider-state.json")
+    old_provider_state = agent.PROVIDER_STATE_PATH
+    agent.PROVIDER_STATE_PATH = case.provider_state
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
     calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
@@ -4624,7 +5148,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                   encoding="utf-8") as fh:
             fh.write("work\n")
         if calls["n"] <= stops:
-            return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail=stop_tail or "Error: Rate limit exceeded\n")
         return agent.ClientExit(0, tail="done\n")
 
     args = argparse.Namespace(
@@ -4667,11 +5191,135 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
-        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
-            old_root, old_track, old_overlay)
+        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH,
+         agent.PROVIDER_STATE_PATH) = (
+            old_root, old_track, old_overlay, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
+
+
+class LeakStrictnessTests(unittest.TestCase):
+    """LEAKFP2: the detection itself is the pre-75f2866 strict one, with exactly
+    ONE narrow exemption - false positive B, a ref that is another worktree's
+    own checked-out branch at BOTH the snapshot and the check. These call the
+    real parent_snapshot/parent_leak against real temp repositories; the
+    matching cmd_run-level evasions are the IsolateContainmentTests above."""
+
+    WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+    WORKER_ID = ["-c", "user.name=autoos-worker", "-c", "user.email=" + WORKER_EMAIL]
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def git(self, *args, **kw):
+        return subprocess.run(
+            ["git", "-C", kw.get("cwd") or self.root, *args],
+            capture_output=True, text=True, check=True,
+            env=kw.get("env")).stdout.strip()
+
+    def sibling_worktree(self, branch, existing=False):
+        """`git worktree add` at a fresh path: `existing` checks that branch
+        out, otherwise the branch is created here."""
+        path = tempfile.mkdtemp()
+        shutil.rmtree(path)
+        self.addCleanup(shutil.rmtree, path, True)
+        if existing:
+            self.git("worktree", "add", "-q", path, branch)
+        else:
+            self.git("worktree", "add", "-q", "-b", branch, path)
+        return path
+
+    def worker_commit(self, cwd, name, env=None):
+        with open(os.path.join(cwd, name), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        self.git("add", name, cwd=cwd)
+        self.git(*self.WORKER_ID, "commit", "-q", "-m", "worker change",
+                 cwd=cwd, env=env)
+        return self.git("rev-parse", "HEAD", cwd=cwd)
+
+    def test_a_sibling_worktrees_own_checked_out_branch_moving_is_not_a_leak(self):
+        wt = self.sibling_worktree("lane-sib")
+        snap = self.agent.parent_snapshot(self.root)
+        self.worker_commit(wt, "sib.txt")
+        # The exemption must be doing real work: the ref did move, and the
+        # commit is the worker's own.
+        self.assertNotEqual(snap[3]["refs/heads/lane-sib"],
+                            self.git("rev-parse", "lane-sib"))
+        self.assertEqual([], self.agent.parent_leak(snap, self.root))
+        # and the move was the worker's own commit, not a no-op fixture
+        self.assertEqual(self.WORKER_EMAIL,
+                         self.git("log", "-1", "--format=%ae", "lane-sib"))
+
+    def test_a_worktree_added_during_the_run_does_not_exempt_its_ref(self):
+        # The exemption needs BOTH ends: `side` existed at the snapshot checked
+        # out nowhere, so another writer that adopts it mid-run is still a leak
+        # here - newness (of a ref or of a worktree) is never an excuse.
+        snap = self.agent.parent_snapshot(self.root)
+        wt = self.sibling_worktree("side", existing=True)
+        self.worker_commit(wt, "late.txt")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any("refs/heads/side" in ln for ln in leak), leak)
+
+    def test_a_worktree_inside_the_sandbox_is_not_exempt(self):
+        # "another worktree" means another LANE: a worktree of the parent
+        # repository that lives in this run's sandbox is not one.
+        sb = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, sb, True)
+        wt = os.path.join(sb, "sandboxes", "run-1")
+        os.makedirs(os.path.dirname(wt))
+        self.git("worktree", "add", "-q", "-b", "lane-sbx", wt)
+        snap = self.agent.parent_snapshot(self.root)
+        self.worker_commit(wt, "sbx.txt")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("refs/heads/lane-sbx" in ln for ln in leak), leak)
+
+    def test_a_worker_commit_on_a_branch_created_during_the_run_is_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        self.git("switch", "-q", "-c", "lane-mine")
+        sha = self.worker_commit(self.root, "mine.txt")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln and "parent checkout" in ln for ln in leak),
+                        leak)
+
+    def test_a_decoy_branch_at_the_tip_does_not_exempt_a_parent_commit(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sha = self.worker_commit(self.root, "worker.txt")
+        self.git("branch", "decoy")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_backdated_worker_commit_is_a_leak(self):
+        env = dict(os.environ)
+        env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+        snap = self.agent.parent_snapshot(self.root)
+        sha = self.worker_commit(self.root, "old.txt", env=env)
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_switch_c_and_fast_forward_back_is_a_leak(self):
+        # The branch stays alive: 75f2866's made_on-leg read the reflog entry as
+        # "made on a branch created during the run" and exempted the commit
+        # entirely (LEAKFP2 review, evasion 3). Deleting it only made the old
+        # code catch the leak by accident.
+        snap = self.agent.parent_snapshot(self.root)
+        back = self.git("branch", "--show-current")
+        self.git("switch", "-q", "-c", "tmp-leak")
+        sha = self.worker_commit(self.root, "tmp.txt")
+        self.git("switch", "-q", back)
+        self.git("merge", "-q", "--ff-only", "tmp-leak")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        with open(os.path.join(self.root, "stray.txt"), "w", encoding="utf-8") as fh:
+            fh.write("leak\n")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any("stray.txt" in ln for ln in leak), leak)
 
 
 class ProviderStopFallthroughTests(unittest.TestCase):
@@ -4697,9 +5345,11 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None):
+    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None,
+             stop_tail=None):
         return _fallthrough_run(self, route_ids, stops, clock=clock,
-                                args_over=args_over, policy=policy)
+                                args_over=args_over, policy=policy,
+                                stop_tail=stop_tail)
 
     def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
         rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
@@ -4771,6 +5421,32 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             [("r-free", "fail", "provider"),
              ("r-cheap", "fail", "provider"),
              ("r-cheap2", "fail", "provider")], out + err)
+
+    # REVROUTE (S2) item 3: the stop line often states its own reset time, and
+    # that is worth more than a track record -- it takes the provider out of the
+    # rotation until the window passes.
+    AGY_RESET_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                      "Quota resets in ~83h\n")
+
+    def test_a_provider_stop_is_offered_to_the_reset_recorder(self):
+        recorded = []
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: recorded.append(a) or None):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual([call[1] for call in recorded], ["r-free"],
+                         "one record for the stopped attempt, none for the survivor")
+        self.assertIn("resets in ~83h", recorded[0][0])
+
+    def test_a_recorded_reset_window_is_printed_as_the_providers_new_until(self):
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: ("cheap-p", "2026-10-01T17:00:00Z")):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("provider cheap-p unavailable until 2026-10-01T17:00:00Z",
+                      out + err)
 
 
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
@@ -5846,6 +6522,1412 @@ class PsTests(_WorkerRecordBase):
         self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
         out = mcp_server.ps(include_ended=True)
         self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
+
+
+def _reviewer_registry():
+    """REVROUTE (S2) item 2 fixture: _small_route_registry() plus a
+    ``policy.reviewers`` list the spawner can walk.
+
+    Four reviewers, four families, one of them client-native (no ``leg``) and one
+    ``first_pass_only``. The two legs go through providers the fixture owns:
+    ``muse_api`` trains on prompts (so a privacy=sensitive card must walk past
+    it) and ``gem_api`` does not. Far-future/past dates are deliberate: no test
+    has to patch the clock to make a provider look down or back up.
+    """
+    reg = _small_route_registry()
+    reg["providers"]["muse_api"] = {"id": "muse_api", "tier": "paid",
+                                    "trains_on_prompts": True}
+    reg["providers"]["gem_api"] = {"id": "gem_api", "tier": "paid",
+                                   "trains_on_prompts": False}
+    # A sensitive card must still have a route to run on: the fixture's own two
+    # routes are private-safe, so only the *reviewer* list can fail privacy.
+    for provider in ("free-p", "cheap-p"):
+        reg["providers"][provider].update({"tier": "paid", "trains_on_prompts": False})
+    reg["models"]["muse-contrib"] = {"id": "muse-contrib", "family": "meta"}
+    reg["models"]["gem-flash"] = {"id": "gem-flash", "family": "google"}
+    # capabilities: --isolate asks for shell+write (SPAWNCAP), and a fixture with
+    # no declared client would be refused before the reviewer gate ever ran.
+    reg["clients"] = {
+        "opencode": {"id": "opencode", "capabilities": {"shell": True, "write": True}},
+        "claude": {"id": "claude", "capabilities": {"shell": True, "write": True}},
+    }
+    reg["policy"]["reviewers"] = [
+        {"client": "opencode", "model": "omniroute/muse", "family": "meta",
+         "leg": "muse_api/muse-contrib", "paid": True, "source": "test"},
+        {"client": "gemini", "model": "gem-flash", "family": "google",
+         "leg": "gem_api/gem-flash", "paid": False, "source": "test"},
+        {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen",
+         "paid": False, "source": "test"},
+        {"client": "claude", "model": "haiku", "family": "anthropic",
+         "paid": True, "first_pass_only": True, "source": "test"},
+    ]
+    return reg
+
+
+class ReviewerGateTests(unittest.TestCase):
+    """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
+    card from ``policy.reviewers``, and refuses to start a run that has no
+    eligible reviewer -- a same-family self-review is not an independent review,
+    and waiting is better than running one.
+
+    Same harness as RunCardV2Tests (no network, no real client probes, no key):
+    the registry and the client state are fixtures, the run is a dry run unless a
+    test is specifically checking that nothing was cloned or started.
+    """
+
+    DOWN = "2099-01-01T00:00:00Z"
+    DOWN_LATER = "2099-06-01T00:00:00Z"
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.tmp = tmp
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # No recorded provider stop: this fixture decides who reviews from the
+        # registry and the probes, not from an outage some earlier run saw.
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "provider-state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.client_state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                             for name in ("opencode", "gemini", "qoder", "claude")}
+        state = mock.patch.object(self.agent.measure_mod, "client_state",
+                                  lambda *a, **k: dict(self.client_state))
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        # "muse" is the head of this fixture's policy.reviewers list spelled as a
+        # gateway model heading -- what REVROUTE item 4 makes opencode.jsonc do
+        # for the real paid reviewer.
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,author=qwen,paths=tools/registry.py",
+            allow_training=False, client="opencode", joinable=False, max_depth=None,
+            clean=False, model=None, free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, lean=False, title=None, dry_run=True, task="x",
+            no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def route(self, **overrides):
+        """The route dict cmd_run would act on (build_plan, no clone, no start)."""
+        return self.agent.build_plan(self.args(**overrides), self.cfg())["route"]
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    # --- the reviewer is picked from the registry, not from a constant ------
+
+    def test_an_authored_v2_review_card_carries_a_review_plan(self):
+        review = self.route()["review_plan"]
+        self.assertIsNotNone(review, "a kind=review card with an author must know who reviews")
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["author"], "qwen")
+        self.assertEqual(review["author_family"], "qwen")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_the_reviewer_is_cross_family_and_the_walk_stops_at_the_first_usable(self):
+        review = self.route()["review_plan"]
+        self.assertNotEqual(review["reviewer"]["family"], review["author_family"])
+        self.assertEqual(review["skipped"], [],
+                         "the head of the list was usable, nothing was passed over")
+
+    def test_a_same_family_reviewer_is_skipped_with_the_reason_exposed(self):
+        review = self.route(card="kind=review,author=meta,paths=tools/registry.py")["review_plan"]
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual([s["model"] for s in review["skipped"]], ["omniroute/muse"])
+        self.assertIn("same family as author (meta)", review["skipped"][0]["reasons"])
+
+    def test_a_v1_role_review_card_with_an_author_is_resolved_too(self):
+        def boom(*a, **k):
+            raise AssertionError("a v1 card must not be routed by the resolver")
+        with mock.patch.object(self.agent, "route_plan_for", boom):
+            review = self.route(card="role=review,author=qwen")["review_plan"]
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_a_sensitive_card_walks_past_the_training_reviewer(self):
+        route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
+                                "paths=tools/registry.py")
+        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        skipped = route["review_plan"]["skipped"]
+        self.assertEqual([s["model"] for s in skipped], ["omniroute/muse"])
+        self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
+                        "the reason must name privacy, not availability")
+
+    def test_the_author_never_changes_the_route_the_resolver_picks(self):
+        with_author = self.route()
+        without = self.route(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(with_author["reason"], without["reason"],
+                         "who reviews is decided from the same plan, so it must not "
+                         "move the route scoring")
+        self.assertEqual(with_author["bucket"], without["bucket"])
+
+    # --- the picked reviewer is the model that runs (item 2 + item 4) -------
+
+    def test_the_resolved_reviewer_is_the_model_that_runs(self):
+        route = self.route()
+        self.assertEqual(route["model"], "omniroute/muse")
+        self.assertEqual(route["combo"], "muse")
+        self.assertEqual(route["reviewer_note"], "reviewer-model: opencode omniroute/muse")
+
+    def test_the_reviewer_model_shows_up_in_the_command_the_run_would_use(self):
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--model omniroute/muse", out.replace("'", ""))
+        self.assertIn("reviewer: opencode omniroute/muse (family meta, author qwen)", out)
+
+    def test_the_run_prints_the_record_entry_the_lane_record_needs(self):
+        # REVROUTE (S2) item 5: readiness is read off the record, so the spawn
+        # that did the review has to hand over the line that goes in it --
+        # otherwise the gate asks for something nobody writes.
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("record-line: AutoOS-Review: kind=cross-family "
+                      "author=qwen reviewer=omniroute/muse", out)
+
+    def test_a_reviewer_model_that_opencode_json_does_not_declare_is_refused(self):
+        # REVROUTE (S2) item 4: the paid Muse reviewer must be DECLARED as a
+        # spawnable heading. Until it is, the run fails loudly instead of
+        # quietly reviewing on the resolver's generic route.
+        cfg = {"providers": {"omniroute": {"models": {"r-free": {}, "r-cheap": {}}}}}
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.agent.cmd_run(self.args(), cfg)
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("not declared in opencode.jsonc providers", err.getvalue())
+
+    def test_an_explicit_model_wins_over_the_reviewer_list(self):
+        route = self.route(model="omniroute/r-cheap")
+        self.assertEqual(route["model"], "omniroute/r-cheap")
+        self.assertNotEqual(route["combo"], "muse")
+        self.assertIn("an explicit --model wins", route["reviewer_note"])
+
+    def test_a_free_run_keeps_its_promo_model_and_says_the_reviewer_it_skipped(self):
+        route = self.route(free=True, free_model="opencode/muse-spark-1.3-contributor-free")
+        self.assertIsNone(route["model"], "--free carries no gateway model")
+        self.assertIn("--free keeps its promo model", route["reviewer_note"])
+        self.assertIn("opencode omniroute/muse", route["reviewer_note"])
+
+    def test_a_reviewer_on_another_client_is_announced_never_faked(self):
+        # Muse's provider is down, so the list picks Gemini -- which is not this
+        # run's client. The run must not pretend it is that review.
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        route = self.route()
+        self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
+        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
+        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
+        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+
+    def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
+        # route --explain must show the skipped reviewers, not only the run's own
+        # route scoring (brief item 2: "route --explain shows the skipped ones").
+        result = self.agent.route_plan_for(
+            "kind=review,author=meta,paths=tools/registry.py", "review this", str(ROOT),
+            "orch", datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc),
+            self.registry, {}, [], dict(self.client_state))
+        explain = "\n".join(result["explain"])
+        self.assertIn("reviewer skipped:", explain)
+        self.assertIn("same family as author (meta)", explain)
+        self.assertIsNotNone(result["review"])
+
+    # --- gated, not started --------------------------------------------------
+
+    def test_an_unauthored_review_card_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(self.route(card="kind=review,paths=tools/registry.py")["review_plan"])
+
+    def test_a_non_review_card_with_an_author_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=research,author=qwen,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(
+            self.route(card="kind=research,author=qwen,paths=tools/registry.py")["review_plan"])
+
+    def everyone_down(self):
+        """Every reviewer is unreachable *with a date* (brief item 2's "queue
+        instead of skip when all are rate-limited"): Muse and Gemini through
+        their providers, Haiku and Qwen through their own client outage."""
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        self.registry["providers"]["gem_api"].update({
+            "available": False, "unavailable_until": self.DOWN})
+        self.registry["clients"]["qoder"] = {
+            "id": "qoder", "available": False, "unavailable_until": self.DOWN_LATER}
+        self.registry["clients"]["claude"] = {
+            "id": "claude", "available": False, "unavailable_until": self.DOWN_LATER}
+
+    def test_a_queued_review_refuses_with_exit_9_and_names_the_earliest_return(self):
+        self.everyone_down()
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
+        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertEqual(out, "", "a queued run prints nothing it did not decide")
+
+    def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
+        self.everyone_down()
+        review = self.route()["review_plan"]
+        self.assertEqual(review["state"], "queued")
+        # Gemini's window is the shortest one, so the queue is over then -- even
+        # though the author's own family (qoder) is also "down": that entry can
+        # never review this card, waiting on it would be waiting forever.
+        self.assertEqual(review["retry_at"], self.DOWN)
+        self.assertIn("earliest", review["reason"])
+
+    def test_an_unresolved_review_refuses_with_exit_2_and_never_a_retry_code(self):
+        # Only a meta reviewer exists, and the author is meta: no wait fixes it.
+        self.registry["policy"]["reviewers"] = self.registry["policy"]["reviewers"][:1]
+        rc, out, err = self.run_cmd_run(card="kind=review,author=meta,paths=tools/registry.py")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no reviewer is eligible for an author from family meta", err)
+
+    def test_a_signed_out_reviewer_is_a_refusal_that_names_the_sign_in(self):
+        # A dated outage is a wait; a missing sign-in is a human action. rc 9 here
+        # would loop forever and never say what to do, so the refusal is exit 2
+        # with the skipped reviewer's own reason on stderr. (Gemini is the
+        # reviewer here, not the run's own client, so the route plan is
+        # unaffected and only the reviewer walk can fail.)
+        reviewers = self.registry["policy"]["reviewers"]
+        self.registry["policy"]["reviewers"] = reviewers[1:3]
+        self.client_state["gemini"] = {"installed": True, "signed_in": False, "reason": ""}
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("client: gemini not signed in", err)
+
+    def test_the_gate_fires_before_any_clone_or_client_start(self):
+        agent = self.agent
+        self.registry["providers"]["muse_api"].update({"available": False,
+                                                       "unavailable_until": self.DOWN})
+        self.registry["providers"]["gem_api"].update({"available": False,
+                                                      "unavailable_until": self.DOWN})
+        self.client_state["qoder"] = {"installed": False}
+        self.client_state["claude"] = {"installed": False}
+        calls = []
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_WORKERS_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
+                with mock.patch.object(agent.clients, "signin_state",
+                                       lambda client, env=None: (None, "")):
+                    with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(self.args(dry_run=False, isolate=True),
+                                                self.cfg())
+        self.assertEqual(rc, 9, out.getvalue() + err.getvalue())
+        self.assertEqual(calls, [], "the client never started")
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "sandboxes"))
+                         if os.path.isdir(os.path.join(self.tmp, "sandboxes")) else [], [],
+                         "no clone was made for a run that cannot review")
+
+
+class ProviderResetStateTests(unittest.TestCase):
+    """REVROUTE (S2) item 3: a provider stop that states its own reset time
+    ("Individual quota reached ... resets in ~83h", "cooling down (reset after
+    51s)") is recorded as an ``unavailable_until`` in the spawner's own state,
+    and the resolver reads it -- the provider is skipped until then instead of
+    being handed the next task (measured: agy RESOURCE_EXHAUSTED 429 83h,
+    L1-backlog 2026-09-27T23:22:13Z; gemini cooling 19:3xZ).
+
+    Nothing here edits ``catalog/ai-registry.json``: the registry is the
+    operator's, this file is the machine's transient observation, git-ignored
+    beside ``measured.json`` and ``track-record.jsonl``.
+    """
+
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    AGY_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                "Quota resets in ~83h")
+    COOLING_STOP = "Error: 429 cooling down (reset after 51s)"
+    NO_RESET_STOP = "Error: 429 Rate limit exceeded"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state_path = os.path.join(self.tmp, "provider-state.json")
+        self.registry = _reviewer_registry()
+
+    def state(self):
+        with io.open(self.state_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- reading the reset out of the client's own line ----------------------
+
+    def test_resets_in_hours_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.AGY_STOP), 83 * 3600)
+
+    def test_reset_after_seconds_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.COOLING_STOP), 51)
+
+    def test_a_reset_spelled_out_in_minutes_is_minutes(self):
+        self.assertEqual(
+            self.agent.parse_reset("Error: 429 quota reached, try again in 15 minutes"),
+            15 * 60)
+
+    def test_a_day_sized_reset_is_days(self):
+        self.assertEqual(self.agent.parse_reset("Error: 429 quota resets in ~2d"),
+                         2 * 86400)
+
+    def test_a_stop_that_names_no_reset_parses_to_none(self):
+        self.assertIsNone(self.agent.parse_reset(self.NO_RESET_STOP))
+        self.assertIsNone(self.agent.parse_reset(""))
+
+    # --- which provider stopped ---------------------------------------------
+
+    def test_a_provider_named_in_the_line_is_the_one_recorded(self):
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: No active credentials for provider: sambanova. Quota resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_a_provider_named_by_its_gateway_alias_is_the_same_provider(self):
+        # The gateway spells a provider its own way (providers.<id>.omniroute_id);
+        # an error line quoting that spelling is the same provider, not a new one.
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.registry["providers"]["sambanova"]["omniroute_id"] = "samba"
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: no active credentials for provider: samba, resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_an_unnamed_stop_is_attributed_to_the_first_servable_leg(self):
+        # The gateway works down a route's legs in order, so the one that took
+        # the traffic is the first that is up right now.
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "muse_api")
+        self.registry["providers"]["muse_api"] = {"id": "muse_api", "available": False}
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "free-p")
+
+    def test_a_stop_with_no_legs_to_choose_from_is_attributed_to_nothing(self):
+        self.assertIsNone(self.agent.stop_provider_id(self.AGY_STOP, self.registry, []))
+
+    # --- the state file ------------------------------------------------------
+
+    def test_a_stop_with_a_reset_records_the_provider_unavailable_until_then(self):
+        # r-cheap's only leg is cheap-p/cheap-model, and the stop line names no
+        # provider, so the leg that took the traffic is what gets the window.
+        recorded = self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "83h after 2026-09-28T12:00Z -- the window the client "
+                         "itself stated, kept to the second it was told")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
+        self.assertEqual(entry["combo"], "r-cheap")
+        self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
+        self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",
+                                                       self.registry, now=self.NOW,
+                                                       path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_an_implausible_reset_is_not_recorded(self):
+        # A client printing "resets in ~400d" must not take a provider out of
+        # rotation for a year; that is an operator edit to the registry, not a
+        # spawner observation.
+        self.assertIsNone(self.agent.record_reset_stop(
+            "Error: 429 quota resets in ~400d", "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_a_later_stop_for_the_same_provider_extends_its_window(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+
+    def test_an_expired_record_is_pruned_when_the_next_stop_is_written(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"])
+        later = self.NOW + datetime.timedelta(hours=1)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=later, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"],
+                         "the 51s window expired and went; the 83h one is there")
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-02T00:00:00Z")
+
+    def test_a_missing_or_corrupt_state_file_is_not_a_failure(self):
+        agent = self.agent
+        self.assertEqual(agent.load_provider_state(os.path.join(self.tmp, "none.json")), {})
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.load_provider_state(self.state_path), {})
+
+    # --- REVFIX S1: the file's SHAPE is not trusted -------------------------
+    #
+    # The state is written by this tool, but it lives in logs/ where a person
+    # fixes things by hand and where an older or buggier build may already have
+    # written something. A record of a transient outage is never worth failing a
+    # run over: a shape the reader did not expect is ignored with one warning,
+    # it must never raise into `route`/`run`/the reviewer walk.
+
+    def capture(self, fn, *a, **kw):
+        """fn(...)'s return value plus everything it wrote to stderr."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = fn(*a, **kw)
+        return result, err.getvalue()
+
+    def test_providers_spelled_as_a_list_is_ignored_with_a_warning(self):
+        # The exact shape REVFIX S1 reproduced: [{"providers": [...]}] used to
+        # raise AttributeError out of apply_provider_state and kill the run.
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": [{"muse_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}]})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "nothing was applied: %r" % (merged["providers"]["muse_api"],))
+        self.assertEqual(merged["providers"], self.registry["providers"],
+                         "an unreadable file changes no provider")
+        self.assertIn("provider-state", err)
+
+    def test_a_state_that_is_not_an_object_at_all_is_ignored_with_a_warning(self):
+        for bad in ({"providers": "down"}, {"providers": 7}, {"providers": [1, 2]}):
+            merged, err = self.capture(self.agent.apply_provider_state, self.registry, bad)
+            self.assertNotIn("available", merged["providers"]["muse_api"], str(bad))
+            self.assertIn("provider-state", err, str(bad))
+
+    def test_an_entry_that_is_not_an_object_is_ignored_with_a_warning(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": "down",
+                           "gem_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "a string entry is not a record")
+        self.assertIs(merged["providers"]["gem_api"]["available"], False,
+                      "the well-shaped sibling is still applied")
+        self.assertEqual(err.count("provider-state"), 1,
+                         "one warning for the whole file, not one per row: %r" % err)
+
+    def test_a_record_stop_over_a_malformed_state_file_rewrites_it_cleanly(self):
+        # The writer cannot be poisoned by what it is reading either: the bad
+        # rows go and the file that comes back is the shape the reader expects.
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            json.dump({"providers": [{"muse_api": "the old wrong shape"}]}, fh)
+        recorded, err = self.capture(
+            self.agent.record_reset_stop, self.AGY_STOP, "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path)
+        self.assertIn("provider-state", err)
+        self.assertEqual(recorded[0], "cheap-p")
+        providers = self.state()["providers"]
+        self.assertIsInstance(providers, dict)
+        self.assertEqual(list(providers), ["cheap-p"],
+                          "the malformed row was dropped, not carried forward")
+
+    # --- REVFIX S3: the read side honours the same cap the writer does ------
+
+    def test_a_window_beyond_the_cap_is_ignored_on_read(self):
+        # The write side refuses to RECORD a 400-day reset; a file that already
+        # says one (an old build, a hand edit) must not bench a provider for a
+        # year either -- 7 days is the most the spawner's word can cost.
+        far = (self.NOW + datetime.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": far}}}, now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+        self.assertIn("7", err, "the warning names the cap it applied")
+
+    def test_an_unparsable_window_is_ignored_on_read(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": "next tuesday"}}},
+            now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+
+    def test_a_window_inside_the_cap_is_still_applied(self):
+        inside = (self.NOW + datetime.timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": inside}}}, now=self.NOW)
+        self.assertIs(merged["providers"]["muse_api"]["available"], False)
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"], inside)
+        self.assertEqual(err, "", "a well-shaped record is not worth a warning")
+
+    # --- the resolver reads it ----------------------------------------------
+
+    def test_apply_marks_the_provider_down_for_the_resolver(self):
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
+        provider = merged["providers"]["muse_api"]
+        self.assertIs(provider["available"], False)
+        self.assertEqual(provider["unavailable_until"], "2026-10-01T23:00:00Z")
+        self.assertIsNot(merged["providers"]["muse_api"], self.registry["providers"]["muse_api"],
+                         "the loaded registry is copied, never mutated in place")
+
+    def test_apply_never_shortens_an_operators_outage(self):
+        self.registry["providers"]["muse_api"] = {
+            "id": "muse_api", "tier": "paid", "trains_on_prompts": True,
+            "available": False, "unavailable_until": "2099-06-01T00:00:00Z"}
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                           "2026-10-01T17:00:00Z"}}},
+            now=self.NOW)
+        # The cap is on what the STATE file may say, not on what the operator
+        # wrote: a 2099 date in the registry stays exactly as long as it reads.
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"],
+                          "2099-06-01T00:00:00Z")
+
+    def test_apply_ignores_a_provider_that_is_not_in_the_registry(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"no-such-p": {"unavailable_until": "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
+        self.assertNotIn("no-such-p", merged["providers"])
+        self.assertEqual(err, "", "a well-shaped row for an unknown provider is not "
+                                  "a malformed file")
+
+    def test_a_window_that_passed_leaves_the_provider_servable_again(self):
+        # R-gateway-12: the record comes back on its own, no hand-edit needed.
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2000-01-01T00:00:00Z"}}})
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(), self.NOW)
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_two_recorded_stops_queue_the_review_instead_of_skipping_it(self):
+        # Item 3 feeding item 2: both reviewer providers stopped with a stated
+        # reset, so the review waits for the earliest one -- it is NOT run by a
+        # same-family model and called independent. High risk, so the
+        # first-pass-only fallback is out on its own rule and the queue is what
+        # the two windows leave behind.
+        state = {"providers": {
+            "muse_api": {"unavailable_until": "2026-10-01T23:00:00Z"},
+            "gem_api": {"unavailable_until": "2026-09-28T14:00:00Z"}}}
+        merged = self.agent.apply_provider_state(self.registry, state)
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(),
+                                       self.NOW, risk="high")
+        self.assertEqual(review["state"], "queued")
+        self.assertEqual(review["retry_at"], "2026-09-28T14:00:00Z")
+        self.assertTrue([s for s in review["skipped"] if s["waiting"]], review)
+
+    def test_load_live_registry_reads_the_registry_and_the_state_together(self):
+        reg_path = os.path.join(self.tmp, "registry.json")
+        with io.open(reg_path, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        live = self.agent.load_live_registry(reg_path, state_path=self.state_path,
+                                              now=self.NOW)
+        self.assertEqual(live["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+        self.assertIs(live["providers"]["cheap-p"]["available"], False)
+
+
+class GatewayCooldownStopTests(unittest.TestCase):
+    """R6STOP (2026-09-28): the OmniRoute gateway's per-credential cooldown --
+    the stop a t2-worker run actually gets when google_ai_studio's free tier is
+    spent -- was invisible to the REVROUTE recorder, measured in
+    work/L1-routing/R6RES.out section 2:
+
+    - ``PROVIDER_STOP_MARKERS`` matched nothing in
+      ``"Error: [429] All credentials for model gemini-3.8-flash are cooling
+      down (reset after 37s)"``, so the run was not a provider stop at all and
+      the window was never read;
+    - ``_RESET_RE`` had no ``retry in`` and no fractional number, so Google's
+      own ``Please retry in 59.250991496s.`` parsed to None;
+    - ``stop_provider_id`` attributed an unnamed stop by splitting the leg at
+      ``/`` and looking that prefix up in ``providers``, which every
+      ``omniroute_id``-spelled leg (``gemini/...``, 25 such prefixes in the
+      real registry) fails -- so a recorded reset benched ``antigravity``, the
+      next live leg, instead of the provider that actually served the model the
+      line names.
+
+    These run against the real ``catalog/ai-registry.json`` -- the wrongness is
+    a property of the real leg spellings, and a fixture whose legs all used
+    provider keys would test nothing (R-worker-04).
+    """
+
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    # Verbatim from the call log R6RES section 1 quotes (t2-worker-free-only,
+    # 12 rows, 0 tokens), with the seconds R6RES section 2 tested against.
+    GEMINI_COOLDOWN = ("Error: [429] All credentials for model gemini-3.8-flash "
+                       "are cooling down (reset after 37s)")
+    # Verbatim from the same log: the upstream (Google) line behind the
+    # gateway's wrapper.
+    GOOGLE_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
+                    "exceeded for metric: generate_content_free_tier_requests, "
+                    "limit: 20, model: gemini-3.8-flash "
+                    "Please retry in 59.250991496s.")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state_path = os.path.join(self.tmp, "provider-state.json")
+        self.registry = self.agent.load_registry(self.agent.REGISTRY_PATH)
+
+    def state(self):
+        with io.open(self.state_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- 1: the cooldown line IS a provider stop -----------------------------
+
+    def test_the_gateway_cooldown_line_is_a_provider_stop(self):
+        self.assertEqual(
+            self.agent.provider_stop("working\n" + self.GEMINI_COOLDOWN + "\n"),
+            self.GEMINI_COOLDOWN,
+            "a cooled credential cut the run off; not reading it means the next "
+            "task is handed to the same provider")
+
+    def test_the_gateway_wrapper_of_the_upstream_retry_is_a_stop(self):
+        # What the client actually prints: the gateway's own cooldown line
+        # wrapping Google's window.
+        line = ("Error: [429] All credentials for model gemini-3.8-flash are "
+                "cooling down. Please retry in 59.250991496s.")
+        self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
+        self.assertEqual(self.agent.parse_reset(line), 59)
+
+    def test_a_line_that_is_not_a_stop_is_still_not_a_stop(self):
+        # The marker must not become so broad that ordinary output matches.
+        for line in ("Done. Wrote the cooldown handler.",
+                     "Error: the tests failed",
+                     'print("all credentials are cooling down")'):
+            with self.subTest(line=line):
+                self.assertIsNone(self.agent.provider_stop("working\n" + line + "\n"))
+
+    # --- 2: the window the cooldown states is the window it gets -------------
+
+    def test_a_retry_in_window_with_a_fraction_is_whole_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.GOOGLE_RETRY), 59,
+                         "'59.250991496s' is 59 seconds; the run was told 60")
+
+    def test_a_retry_in_window_in_seconds_is_seconds(self):
+        self.assertEqual(
+            self.agent.parse_reset("Error: 429 Please retry in 30s."), 30)
+
+    def test_a_rate_limit_line_with_no_window_still_parses_to_none(self):
+        self.assertIsNone(
+            self.agent.parse_reset("Error: [429]: Rate limit exceeded"))
+
+    def test_the_reset_windows_the_spawner_already_read_are_unchanged(self):
+        for text, want in (
+                ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                 "Quota resets in ~83h", 83 * 3600),
+                ("Error: 429 cooling down (reset after 51s)", 51),
+                ("Error: 429 quota reached, try again in 15 minutes", 15 * 60),
+                ("Error: 429 quota resets in ~2d", 2 * 86400),
+                ("Error: 429 retry after 45 seconds", 45),
+                (self.GEMINI_COOLDOWN, 37)):
+            with self.subTest(text=text):
+                self.assertEqual(self.agent.parse_reset(text), want)
+
+    # --- 3: the provider benched is the provider that served ------------------
+
+    def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
+        # 'gemini' is google_ai_studio's omniroute_id and how the route declares
+        # the leg; 'opencode-zen' is zen's. A raw prefix lookup finds neither.
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: 429 rate limit exceeded, resets in ~5m",
+                self.registry, ["gemini/gemini-3.8-flash"]),
+            "google_ai_studio")
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: 429 rate limit exceeded, resets in ~5m",
+                self.registry, ["opencode-zen/deepseek-v4.1-flash"]),
+            "zen")
+
+    def test_a_t2_worker_gemini_cooldown_benches_google_ai_studio(self):
+        # The measured wrong answer was antigravity (the next live leg of
+        # t2-worker); mistral is what a t2-worker-clean stop benched.
+        recorded = self.agent.record_reset_stop(
+            self.GEMINI_COOLDOWN, "t2-worker", self.registry,
+            now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("google_ai_studio", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"],
+                         "the cooldown benches the provider that served the model "
+                         "the line names, and nobody else")
+        self.assertNotIn("antigravity", self.state()["providers"])
+        self.assertNotIn("mistral", self.state()["providers"])
+
+    def test_a_t2_worker_free_only_gemini_cooldown_benches_google_ai_studio(self):
+        self.assertEqual(
+            self.agent.record_reset_stop(self.GOOGLE_RETRY, "t2-worker-free-only",
+                                         self.registry, now=self.NOW,
+                                         path=self.state_path),
+            ("google_ai_studio", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"])
+
+    def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
+        # t2-worker-clean has no gemini leg; naming a model the route does not
+        # serve falls back to the first servable leg, as an unnamed stop does.
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: [429] All credentials for model gemini-3.8-flash are "
+                "cooling down (reset after 37s)",
+                self.registry,
+                self.registry["routes"]["t2-worker-clean"]["legs"]),
+            "zen")
+
+    def test_a_cooldown_that_states_no_window_records_no_bench(self):
+        # No window, no record: a permanent-looking bench on a guess is worse
+        # than the retry the client will do itself.
+        self.assertIsNone(self.agent.record_reset_stop(
+            "Error: [429] All credentials for model gemini-3.8-flash are "
+            "cooling down", "t2-worker", self.registry,
+            now=self.NOW, path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
+        # The whole point of the recorder: the next `route`/`run` read merges
+        # this file in and skips the leg.
+        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "t2-worker",
+                                     self.registry, now=self.NOW,
+                                     path=self.state_path)
+        merged = self.agent.apply_provider_state(
+            self.registry, self.agent.load_provider_state(self.state_path),
+            now=self.NOW + datetime.timedelta(seconds=1))
+        cooled = merged["providers"]["google_ai_studio"]
+        self.assertIs(cooled["available"], False)
+        self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
+        self.assertTrue(self.agent.unavailable_now(cooled,
+                        self.NOW + datetime.timedelta(seconds=1)))
+        expired = self.agent.apply_provider_state(
+            self.registry, self.agent.load_provider_state(self.state_path),
+            now=self.NOW + datetime.timedelta(seconds=60))
+        self.assertFalse(
+            self.agent.unavailable_now(expired["providers"]["google_ai_studio"],
+                                       self.NOW + datetime.timedelta(seconds=60)),
+            "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
+
+
+class ReviewerSpawnabilityTests(unittest.TestCase):
+    """REVROUTE (S2) item 4: the reviewer a card resolves to must be a model this
+    host can actually START. A reviewer list that names an undeclared heading is
+    a review that never happens, so this reads the real files -- the registry the
+    operator edits and the opencode.jsonc `tools/sync-ide-models.py` renders --
+    instead of a fixture that could disagree with both.
+
+    Two spellings, two rules:
+    - `omniroute/<route>` is the gateway's, and the gateway only serves a route
+      the client config declares (the same check that refuses a typo'd combo).
+    - `opencode/<model>` is opencode's own provider -- the identical shape a
+      `--free` run already uses every day -- so the client resolves it and the
+      gateway-declaration check has nothing to say about it.
+    """
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def real_cfg(self):
+        return self.agent.load_jsonc(os.path.join(self.REPO, "opencode.jsonc"))
+
+    def real_reviewers(self):
+        with io.open(os.path.join(self.REPO, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            return json.load(fh)["policy"]["reviewers"]
+
+    def test_the_paid_muse_reviewer_heading_is_declared_in_the_repo_config(self):
+        # The brief's requirement, on the files a real run reads: the default
+        # reviewer is the paid Meta leg, reached as the gateway's own heading.
+        entry = self.real_reviewers()[0]
+        self.assertEqual((entry["client"], entry["model"], entry["family"],
+                          entry["paid"]),
+                         ("opencode", "omniroute/spark-1.3-contributor", "meta", True))
+        cfg = self.real_cfg()
+        self.assertIn(entry["model"], self.agent.declared_models(cfg),
+                      "run tools/sync-ide-models.py: the paid Muse reviewer must be "
+                      "declared for opencode to start it")
+        self.assertEqual(self.agent.resolve_model(cfg, 3, False, entry["model"]),
+                         "omniroute/spark-1.3-contributor")
+
+    def test_every_gateway_spelled_reviewer_is_declared(self):
+        declared = self.agent.declared_models(self.real_cfg())
+        missing = [e["model"] for e in self.real_reviewers()
+                   if e["client"] == "opencode"
+                   and e["model"].partition("#")[0].startswith("omniroute/")
+                   and e["model"] not in declared]
+        self.assertEqual(missing, [],
+                         "policy.reviewers names a gateway route opencode.jsonc does "
+                         "not declare: the run would be refused before it started")
+
+    def test_a_reviewer_on_the_clients_own_provider_is_not_gateway_validated(self):
+        # opencode-zen's free models (the same strings --free runs) reach the
+        # child as the model, not as a combo the gateway has to serve.
+        client = argparse.Namespace(name="opencode", gateway=True)
+        review = {"state": "resolved",
+                  "reviewer": {"client": "opencode", "model": "opencode/deepseek-v4.1-flash"}}
+        model, combo, note = self.agent.reviewer_run_override(
+            review, client, self.real_cfg(), 3, "omniroute/t3-driver", None, False)
+        self.assertEqual(model, "opencode/deepseek-v4.1-flash")
+        self.assertIsNone(combo, "no gateway combo to rename: the route stands")
+        self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
+
+
+CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                     "reviewer=omniroute/muse verdict=PASS")
+FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+
+
+class ReviewStatusTests(unittest.TestCase):
+    """REVROUTE (S2) item 5: a lane is not ready because the orchestrator says so.
+
+    A lane record must carry two review entries before it can be called ready --
+    one cross-family review (a reviewer whose model FAMILY differs from the
+    author's, the rule items 1-2 made data) and the Sonnet final check (the
+    operator's unchanged decision). This reads the record, not a person's
+    summary of it, and says which of the two is missing and why.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # The command reads a registry file, so the fixture has to be one: the
+        # alternative is pointing the command at the real catalog and having it
+        # fail on a fixture spelling for a reason the test is not about.
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def status(self, text):
+        return self.agent.review_status(text, self.registry)
+
+    def cmd(self, path):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_review_status(
+                argparse.Namespace(record=path, registry=self.registry_path))
+        return rc, out.getvalue(), err.getvalue()
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    # --- what counts -------------------------------------------------------
+
+    def test_a_record_with_both_entries_is_ready(self):
+        # Prose around the entries is the norm: a record is a markdown report,
+        # and an entry may sit in a bullet or under a heading.
+        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n"
+                             % (CROSS_FAMILY_LINE, FINAL_LINE))
+        self.assertTrue(report["ready"], report)
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertTrue(report["final"]["ok"])
+
+    def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
+        report = self.status(CROSS_FAMILY_LINE)
+        self.assertFalse(report["ready"])
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertFalse(report["final"]["ok"])
+        self.assertIn("sonnet", report["final"]["detail"].lower())
+
+    def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
+        # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
+        # model that is not the final checker — signed the lane off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                report = self.status("AutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY" % spelling)
+                self.assertFalse(report["ready"], report)
+                self.assertFalse(report["final"]["ok"])
+
+    def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
+        # The NAME, case-insensitive, or the vendor's full model id — not a
+        # substring of either.
+        for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                self.assertTrue(report["ready"], report)
+
+    def test_the_final_match_ignores_surrounding_space(self):
+        # A record written by hand can pad the value; padding is not a
+        # different model. Fed straight to _final_review because the line
+        # parser splits on whitespace and can never carry it.
+        for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
+            with self.subTest(reviewer=spelling):
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
+                self.assertTrue(self.agent._final_review([entry])["ok"])
+
+    def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
+        report = self.status(FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("kind=cross-family", report["cross_family"]["detail"])
+
+    def test_a_same_family_reviewer_is_not_a_cross_family_review(self):
+        # The author reviewing its own family is the exact case this gate exists
+        # for, even with a PASS on the line.
+        report = self.status("AutoOS-Review: kind=cross-family author=gem-flash "
+                             "reviewer=gem-flash verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_reviewer_is_not_guessed_into_a_family(self):
+        # A REVIEWER must be known: an invented spelling would otherwise differ
+        # from every author family and read as an independent review that never
+        # happened. (REVFIX S2: an unknown AUTHOR is refused for the same reason
+        # — see test_an_unknown_author_fails_the_cross_family_check.)
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=not-a-model-anywhere verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("not-a-model-anywhere", report["cross_family"]["detail"])
+
+    # --- REVFIX S2: the family comparison is a comparison, not a string match -
+
+    def test_an_author_spelled_with_the_vendors_capitalization_is_the_same_family(self):
+        # Meta markets its model as "Meta Muse"; a record quoting that spelling
+        # used to compare unequal to the registry's "meta" and pass as an
+        # independent review of itself.
+        report = self.status("AutoOS-Review: kind=cross-family author=Meta "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_a_family_capitalized_on_the_registry_side_is_the_same_family(self):
+        # Normalizing both sides, not just the author's: an operator who writes
+        # "Meta" in policy.reviewers means the family the models call "meta".
+        for entry in self.registry["policy"]["reviewers"]:
+            if entry["model"] == "omniroute/muse":
+                entry["family"] = "Meta"
+        report = self.status("AutoOS-Review: kind=cross-family author=muse-contrib "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_author_fails_the_cross_family_check(self):
+        # REVFIX S2: author_family used to hand back an unresolved name as if it
+        # were a family, so ANY typo ("qwen3.8-flsh", a model nobody registered)
+        # differed from every reviewer and the lane went ready. Not knowing who
+        # wrote the diff is not proof of independence.
+        report = self.status("AutoOS-Review: kind=cross-family author=who-knows "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("who-knows", report["cross_family"]["detail"])
+
+    def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
+        # The record quotes what the client was run with, not a registry id:
+        # "omniroute/spark-1.3-contributor" is the operator's reviewer spelling
+        # whose family the registry states.
+        report = self.status("AutoOS-Review: kind=cross-family "
+                             "author=omniroute/muse reviewer=gem-flash verdict=PASS\n"
+                             + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "google")
+
+    def test_a_bare_family_name_the_registry_knows_is_still_a_family(self):
+        # Fail-closed on the unknown must not break the ordinary shorthand:
+        # "qwen" is a family the fixture's reviewers declare, so it resolves.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+
+    def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
+        # "Reviewed, said FIX-FIRST" and "never reviewed" need different next
+        # actions; collapsing them to "missing" would hide an open finding.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=FIX-FIRST\n"
+                             "AutoOS-Review: kind=final reviewer=sonnet verdict=FIX-FIRST")
+        self.assertFalse(report["ready"])
+        self.assertIn("FIX-FIRST", report["cross_family"]["detail"])
+        self.assertIn("FIX-FIRST", report["final"]["detail"])
+
+    def test_an_entry_missing_a_reviewer_is_listed_as_malformed(self):
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertEqual(len(report["malformed"]), 1)
+
+    def test_a_record_with_no_entries_says_so_with_the_line_format(self):
+        report = self.status("# Lane x\n\nSTATUS: DONE. Gate green, shipped it.\n")
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["entries"], 0)
+        # The hint is the whole usability of the gate: nobody reads the source.
+        self.assertIn("AutoOS-Review: kind=", report["hint"])
+
+    # --- the command's contract -------------------------------------------
+
+    def test_the_command_exits_0_on_a_ready_record(self):
+        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 0)
+        self.assertIn("ready", out)
+
+    def test_the_command_exits_1_and_names_the_missing_review(self):
+        path = self.write_record("# Lane x", FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 1)
+        self.assertIn("cross-family", out)
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        # rc 1 is "not ready yet"; rc 2 is "the gate could not run" — a caller
+        # that treats 1 as "wait" must not wait forever on a typo'd path.
+        rc, _out, err = self.cmd(os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+
+    # --- reality, not the fixture -----------------------------------------
+
+    def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "meta")
+        # Haiku is the fallback first pass: it counts as a cross-family reviewer
+        # for a non-anthropic author, and the same anthropic family as Sonnet's
+        # final check — which is why the two entries are different requirements.
+        self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
+
+    def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
+        # REVFIX S2 measured against the real catalog, not a fixture: the
+        # operator's reviewer spelling resolves through the registry to the
+        # family it declares, and the vendor's capitalization of that family is
+        # the same family.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        self.assertEqual(self.agent.resolver.author_family(
+            "omniroute/spark-1.3-contributor", real)[0], "meta")
+        self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        # The self-review that used to pass: Meta's own model, Meta's reviewer.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+        # An author the registry cannot place is not an independent review.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=gpt-next-week "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+
+class ReadyCommandTests(unittest.TestCase):
+    """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
+
+    Until now an orchestrator appended `ready <branch> <sha>` to autoos-L1-main's
+    inbox by hand, after recalling that the record had both reviews and that the
+    sha was pushed — and L1-main refused one that lacked reviews (inbox
+    00:31:52Z). `ready` makes the claim itself, and only when the two facts that
+    justify it hold: `review_status` says the record carries both reviews, and
+    `origin/<branch>` actually points at the sha.
+
+    Real temp git repos (a bare `origin` plus a clone, as the --isolate
+    containment tests use) and the real parser / main entry: this is a CLI
+    contract, so a test that called cmd_ready directly could pass a command nobody
+    can type.
+    """
+
+    BRANCH = "lane/work"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def make_inbox(self, content=None):
+        """An inbox file (or, for content=None, a path that does not exist yet)."""
+        path = os.path.join(tempfile.mkdtemp(), "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        if content is not None:
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        return path
+
+    def read_inbox(self, path):
+        if not os.path.exists(path):
+            return None
+        with io.open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def make_repo(self, push=True):
+        """A bare `origin` plus a clone with one commit on BRANCH.
+
+        Returns (repo_dir, sha). With push=False the branch exists only locally,
+        which is exactly the state `ready` must refuse as "not pushed".
+        """
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        origin = os.path.join(base, "origin.git")
+        repo = os.path.join(base, "work")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master"]
+        subprocess.run(git + ["init", "-q", "--bare", origin], check=True)
+        subprocess.run(git + ["clone", "-q", origin, repo], check=True,
+                       stderr=subprocess.DEVNULL)
+        with open(os.path.join(repo, "tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("lane work\n")
+        subprocess.run(git + ["-C", repo, "add", "tracked.txt"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "-m", "lane work"], check=True)
+        subprocess.run(git + ["-C", repo, "switch", "-q", "-c", self.BRANCH], check=True)
+        sha = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD"],
+                             check=True, capture_output=True,
+                             text=True).stdout.strip()
+        if push:
+            subprocess.run(git + ["-C", repo, "push", "-q", "origin",
+                                  "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        return repo, sha
+
+    def ready(self, record, repo, sha, inbox, extra=()):
+        """Run the real CLI. `repo=None` means let it default to the cwd."""
+        argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha, "--inbox", inbox]
+        if repo is not None:
+            argv += ["--repo", repo]
+        argv += ["--registry", self.registry_path, *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    READY_RECORD = (CROSS_FAMILY_LINE, FINAL_LINE)
+    NOT_PUSHED_SHA = "0" * 40
+
+    # --- the review gate ----------------------------------------------------
+
+    def test_an_unreviewed_record_is_refused_and_nothing_is_appended(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(
+            self.write_record("# Lane x", "STATUS: DONE. Gate green, shipped it."),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertIn("ready: no", out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_same_family_reviewer_is_refused(self):
+        # The case the inbox refused at 00:31:52Z: a record that LOOKS reviewed.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(
+            self.write_record(
+                "AutoOS-Review: kind=cross-family author=muse-contrib "
+                "reviewer=omniroute/muse verdict=PASS", FINAL_LINE),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("same family", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_final_reviewer_that_only_contains_sonnet_is_refused(self):
+        # REVGATE2 (HIGH): the substring match let "notsonnet" carry the final
+        # sign-off, so `ready` appended the line for a lane nobody signed off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 1)
+                self.assertIn("not sonnet", out)
+                self.assertEqual(self.read_inbox(inbox),
+                                 "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_final_reviewer_naming_sonnet_appends_the_line(self):
+        for spelling in ("Sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_the_review_gate_is_checked_before_the_sha(self):
+        # A record that never got its review is not "unpushed work waiting on a
+        # push": the caller has to know WHICH gate it hit, so the review report
+        # prints and the sha is never reached.
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _err = self.ready(
+            self.write_record("STATUS: DONE."), repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertNotIn("not pushed", out)
+
+    # --- the pushed-sha gate ------------------------------------------------
+
+    def test_a_sha_that_is_not_the_tip_of_origin_is_refused(self):
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD),
+                                repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_branch_absent_from_origin_is_refused_as_not_pushed(self):
+        repo, sha = self.make_repo(push=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertIn(self.BRANCH, out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_git_failure_exits_2_not_1(self):
+        # rc 1 means "go do the work"; rc 2 means "the gate could not run". A repo
+        # with no `origin` remote is the second, and a caller that waits on 1 must
+        # not wait forever on a misconfigured checkout.
+        bad_repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bad_repo, True)
+        subprocess.run(["git", "-c", "init.defaultBranch=master", "init", "-q", bad_repo],
+                       check=True)
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                   bad_repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("origin", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    # --- the append ---------------------------------------------------------
+
+    def test_a_ready_lane_appends_exactly_one_line_to_the_inbox(self):
+        repo, sha = self.make_repo()
+        # No trailing newline on the existing line: an append must not join it to
+        # ours, and must not rewrite it either.
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 2, text)
+        self.assertEqual(lines[0], "2026-09-28T00:00:00Z handoff lane")
+        match = re.match(
+            r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) ready %s %s reviews: "
+            r"(.+) \| (.+)$" % (re.escape(self.BRANCH), sha), lines[1])
+        self.assertIsNotNone(match, lines[1])
+        self.assertEqual(match.group(2), "qwen3.8-flash reviewed by omniroute/muse (meta)")
+        self.assertEqual(match.group(3), "sonnet verdict READY")
+        self.assertIn(lines[1], out)
+
+    def test_a_ready_lane_creates_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        self.assertEqual(len(text.splitlines()), 1, text)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), text)
+
+    def test_the_repo_defaults_to_the_cwd(self):
+        # The orchestrator runs from its own lane checkout; --repo is the
+        # exception, not the rule.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, old_cwd)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), None, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_dry_run_prints_the_line_and_appends_nothing(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_dry_run_does_not_create_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.read_inbox(inbox))
+
+    def test_an_unwritable_inbox_exits_2_not_1(self):
+        # A typo'd inbox is not a lane awaiting its review either.
+        repo, sha = self.make_repo()
+        inbox = os.path.join(tempfile.mkdtemp(), "no-such-dir", "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(inbox), True)
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("L1.md", err)
+
+    # --- the record ---------------------------------------------------------
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(
+            os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"),
+            repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_stdin_record_is_accepted_like_review_status(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO("\n".join(self.READY_RECORD) + "\n")
+        try:
+            rc, out, _ = self.ready("-", repo, sha, inbox)
+        finally:
+            sys.stdin = old_stdin
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+
+def _reviewer_client_state():
+    return {name: {"installed": True, "signed_in": True, "reason": ""}
+            for name in ("opencode", "gemini", "qoder", "claude")}
 
 
 if __name__ == "__main__":

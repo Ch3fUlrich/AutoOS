@@ -84,8 +84,9 @@ Never from a tracked file. The installers keep **one** per-user copy:
   lines (`OMNIGRAPH_BASE_URL`, `OMNIGRAPH_TOKEN`; other keys you add are
   kept). It is linked as `~/.config/environment.d/60-autoos-omnigraph.conf`,
   which the systemd user manager and desktop sessions load at login, and
-  sourced from `~/.bashrc`/`~/.zshrc` when `OMNIGRAPH_TOKEN` is not already
-  set (marker `AutoOS:omnigraph-env`). The value comes from
+  read by a line in `~/.bashrc`/`~/.zshrc` when `OMNIGRAPH_TOKEN` is not
+  already set (marker `AutoOS:omnigraph-env-v3`; the versioned tail is what lets
+  an older line be recognised and replaced). The value comes from
   `$OMNIGRAPH_TOKEN`, else from the local `omnigraph-server` container's
   `OMNIGRAPH_SERVER_BEARER_TOKEN`, else stays what the file had.
 - **Windows:** `%USERPROFILE%\.autoos-omnigraph.env` plus the
@@ -106,6 +107,112 @@ is enough. The leading dash makes the file optional, so a machine without it
 still starts. The gateway units do not get it: OmniRoute listens on the LAN
 and never talks to the graph.
 
+## The `omnigraph-client` component
+
+Everything above describes how this repository is wired. `omnigraph-client`
+is the machine half: it puts a server's URL and token where every client can
+reach it, and puts a working bridge on disk. Linux carries it in the
+`workstation`, `ai-coding`, `light` and `server` profiles — a headless server
+running agents needs the bridge as much as a desktop does (operator decision
+2026-09-28). macOS carries the first three; the macOS catalog has no `server`
+profile at all.
+
+**Inputs — both are required, and neither is guessed:**
+
+| Input | Where it comes from |
+|---|---|
+| Base URL | the `omnigraph_url` answer, stored per machine (the menu, the browser UI, or a saved config). Blank means *no server was configured*, so the step has nothing to point at. |
+| Bearer token | `$OMNIGRAPH_TOKEN` for this run, else the git-ignored `configuration/api-keys.yml` key `omnigraph_token`. The token is **issued by the graph server**, never by AutoOS. |
+
+With either missing the component reports `skipped: no omnigraph URL` /
+`skipped: no omnigraph token` and the hint names exactly what to set — a skip,
+not a failure, because nothing on the machine was wrong yet.
+
+**What it writes:**
+
+1. `~/.autoos-omnigraph.env` (mode `600`) with `OMNIGRAPH_BASE_URL` and
+   `OMNIGRAPH_TOKEN`, plus the `~/.config/environment.d` link and the rc-file
+   reader described above. Other keys in the file are kept. A line a person
+   edited by hand — `export OMNIGRAPH_TOKEN="…"`, indented, quoted — is
+   recognised as that key and normalised to one canonical `KEY=value` row, so a
+   stale hand line cannot be read before the value this run resolved.
+2. The pinned bridge — `@modernrelay/omnigraph-mcp` at the version in
+   `catalog/agent-harness.json` — installed with
+   `npm install -g --prefix ~/.local/share/autoos/omnigraph-mcp`. A private
+   prefix, so nothing joins the user's global npm bin or their PATH. It is not
+   `npx`: 16 parallel npx bridges measured 6.7–9.3 s median start-up each
+   (spec decision D9), and the same package is downloaded on every client
+   launch. Reinstalling happens only when the catalog pin moves, and a pin with
+   no `@version` (an empty `name@`) is refused loudly rather than matching an
+   empty installed version.
+3. `~/.local/bin/omnigraph-mcp-autoos` — a copy of
+   `tools/omnigraph-mcp-autoos.sh` (mode `755`, copied rather than symlinked so
+   the checkout can move; a symlink is refused, because copying *through* one
+   would write into whatever it points at). It reads
+   `~/.autoos-omnigraph.env` itself — only the three `OMNIGRAPH_*` keys, an
+   optional indent, `export ` prefix, whitespace round the value or one layer of
+   matching quotes stripped,
+   CRLF endings tolerated, values assigned literally so a value shaped like
+   `$(…)` never runs, an exported value winning — and `exec`s the pre-installed
+   bridge with whatever arguments the client passed. With no bridge it exits
+   `127` and one stderr line naming the component to re-run. **A user-scope MCP
+   entry that needs omnigraph should call this wrapper**, not `npx`, so a
+   non-interactive `bash -c` client gets the token with no rc file in the path.
+   Its PowerShell twin is `tools/omnigraph-mcp-autoos.ps1`, which parses the
+   same forms.
+4. The retirement of one rc-file line: a line that both reads from the retired
+   `agent-skills` tree and names `OMNIGRAPH_TOKEN` is AutoOS's own older form, so
+   it is removed after a backup. Anything else in `.bashrc`/`.zshrc` stays —
+   edited as bytes, so a file with CRLF endings or bytes that are not UTF-8 keeps
+   every other line exactly as it was — and a file that cannot be backed up or
+   written is a warning plus a recorded failure, never a stopped run and never a
+   claim to have removed the line.
+
+A second run changes nothing and says so at every step (`unchanged`, `already
+installed`), and the wrapper file is replaced only when its content differs and
+only if it carries the `# AutoOS:omnigraph-mcp-autoos` marker — a file of the
+user's own at that path is left alone with a warning.
+
+The `already installed` answer comes from a gate that compares the **values this
+run resolves** against what it would write — the URL answer and the token, in the
+env file as whole `KEY=value` lines, the environment.d link, the rc line, no
+retired line left, the pinned bridge, and the wrapper as a real copy. So a
+rotation, a deleted rc line, a reappeared retired line or a removed link all open
+the gate and are repaired on the next run, while an unchanged machine is skipped.
+The comparison is asked of the writer's own code path, so the two can never
+disagree about what "current" means.
+
+`--dry-run` prints each of the four steps as a `would …` line and writes
+nothing. It cannot report "already current": a dry run compares nothing, so the
+last line is `dry run: nothing was written` rather than a claim about the
+machine.
+
+This repository's own `.mcp.json` still runs the bridge through `npx` at project
+scope: that entry is the repo's, not a machine default, and is unchanged here.
+
+### Token rotation
+
+The token has exactly one home per machine, which is what makes rotating it
+boring:
+
+1. Edit the `omnigraph_token` key in `configuration/api-keys.yml` (or export
+   `OMNIGRAPH_TOKEN=<new token>` for one run) — the new value is issued by the
+   graph server.
+2. `./setup.sh --only omnigraph-client --yes` — rewrites the two keys in
+   `~/.autoos-omnigraph.env`, backing the old file up, and leaves everything else
+   (other keys, the bridge, the wrapper) untouched. The component is not skipped
+   here: its `already installed` gate compares the token it resolves *now*, so a
+   rotated value is seen as a change instead of reading as "already current".
+3. Restart whatever holds a client open: the clients read the env at start-up, so
+   restart the desktop session or `systemctl --user restart autoos-opencode`,
+   and start new agent sessions. A long-running process keeps the old token until
+   it restarts.
+
+Nothing else on the machine stores the token: tracked configs reference
+`${OMNIGRAPH_TOKEN}`, and the wrapper reads the env file at every launch, so a
+rotation does not need the MCP entries edited at all. Rotating the *server's*
+signing side belongs to the operator's infrastructure repository.
+
 ### Check it
 
 ```bash
@@ -118,6 +225,57 @@ list` asks the background service, whose cwd is `~`, so it never sees this
 repo's `opencode.jsonc` and says "No MCP servers configured". Ask for this
 directory instead:
 `opencode api GET "/api/mcp?location%5Bdirectory%5D=$PWD"`.
+
+### Bridge benchmark (D9) — `tools/check-omnigraph-bridge.sh` / `.ps1`
+
+D9 in the spec: the catalog may start the bridge with `npx` only if **16 bridges
+started in parallel each answer `health` in under 2 s with zero npm cache-lock
+errors** — because N clients opening this repo spawn N `npx` processes unpacking
+into one npm cache. The benchmark measures that and nothing else: it handshakes
+each bridge over stdio (`initialize` → `notifications/initialized` →
+`tools/call health` → `tools/call query` with the `whoami` Project read), times
+spawn → health, checks the returned `p.slug` against the graph id in `.mcp.json`,
+and counts `EEXIST` / `ENOTEMPTY` / `lock` lines on stderr.
+
+```bash
+# The live decision run: cold first, then warm.
+OMNIGRAPH_BASE_URL=<omnigraph-url> OMNIGRAPH_TOKEN=... \
+    tools/check-omnigraph-bridge.sh --cold     # one fresh npm cache for the wave
+OMNIGRAPH_BASE_URL=<omnigraph-url> OMNIGRAPH_TOKEN=... \
+    tools/check-omnigraph-bridge.sh --warm     # primes the default cache, then 16
+# Windows: tools\check-omnigraph-bridge.ps1 --cold
+```
+
+Exit 0 = D9 met, 1 = a bridge died, health was slow, the slug was a different
+graph, or npm logged a lock error (each named in the report); 2 = unusable input;
+130 = interrupted by Ctrl-C — nothing is scored, every bridge it started and
+everything those bridges spawned is killed, and only an "interrupted" line goes
+to stderr.
+`--json` gives the machine-readable form. The token comes from `$OMNIGRAPH_TOKEN`
+only and is never printed; the bridge command, the graph id and the base-url
+default are read from `.mcp.json`, so the pin is never spelled twice.
+
+`--fake-server` answers the two paths the bridge really calls
+(`GET <base>/healthz`, `POST <base>/graphs/<id>/query`) from a local stub, and
+with `--bridge-cmd "python3 tests/fixtures/omnigraph_bridge_stub.py"` the whole
+run needs no npm and no network — that pair is what CI gates, in
+`tests/linux/18-mcp-wiring.sh`.
+
+Measured 2026-09-27 on the coding host (6 cores, Node 24) with `--fake-server`,
+so npm resolution is timed with **network excluded**; the operator's live run
+against `<omnigraph-url>` is still owed before D9 closes:
+
+| wave | min | median | max | healthy | whoami | lock errors |
+|---|---|---|---|---|---|---|
+| `--cold`, 4 parallel | 9130 ms | 9255 ms | 14223 ms | 4/4 | 4/4 | 0 |
+| `--warm`, 16 parallel | 5808 ms | 6700 ms | 7281 ms | 16/16 | 16/16 | 0 |
+
+Every bridge answered and every slug was correct, but the startup cost alone is
+3–7× the limit and **zero lock errors says contention is not the problem** — it
+is per-bridge npm resolution. On this host that fails D9 and points at the
+pre-installed alternative: install the pinned client once (`npm i -g
+@modernrelay/omnigraph-mcp@0.8.0`, which provides `omnigraph-mcp`) and re-run the
+same benchmark against it with `--bridge-cmd omnigraph-mcp`.
 
 ### What broke on 2026-09-24
 

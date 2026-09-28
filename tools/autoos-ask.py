@@ -9,22 +9,28 @@ worker's brief tells it to run this command whenever it is blocked:
 
     python3 tools/autoos-ask.py "ship the fix or revert it?"
 
-Files inside the run dir, all small JSON written atomically (tmp file +
-os.replace, so a reader never sees a half-written file):
+Files inside the run dir, all small JSON, none of which a reader may ever see
+half-written or empty. The two files a concurrent asker could fight over - the
+question and its history slot - are each taken in a single filesystem step (an
+exclusive create, a link), so a loser finds out from the filesystem instead of
+quietly replacing the winner's file, and a file that exists already holds its
+bytes:
 
-    question.json  {"text", "asked"}    written here; while it exists with no
-                                        answer.json the run's state is
-                                        input_required (spec section 9)
+    question.json  {"text", "asked"}    created here exclusively; while it
+                                        exists with no answer.json the run's
+                                        state is input_required (spec section 9)
     answer.json    {"text", "answered"} written by the MCP tool
                                         respond(run_id, text); until then this
                                         helper polls for it
-    qa-<n>.json    {"question", "answer"} the archived pair, n the next free
-                                        number - the history of every exchange
-                                        is kept. A stale entry (an answer that
-                                        arrived after its question timed out,
-                                        or an orphan answer with no question)
-                                        carries "stale": true and a null
-                                        question - never silently deleted.
+    qa-<n>.json    {"question", "answer"} the archived pair, n the next number
+                                        this helper can take (never one some
+                                        other archiver already holds) - the
+                                        history of every exchange is kept. A
+                                        stale entry (an answer that arrived
+                                        after its question timed out, or an
+                                        orphan answer with no question) carries
+                                        "stale": true and a null question -
+                                        never silently deleted.
 
 "Pending" means question.json exists. An answer.json with no question.json is
 stale (left by a timeout the previous run hit); it is archived at the start
@@ -45,6 +51,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import time
 
 QUESTION_FILE = "question.json"
@@ -64,11 +71,22 @@ def _fail_io(reason: str) -> int:
     return 5
 
 
-def _write_json(path: str, data: dict) -> None:
-    tmp = path + ".tmp"
-    with io.open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=1)
-    os.replace(tmp, path)
+def _create_json_exclusive(path: str, data: dict) -> None:
+    """Write data to path, failing FileExistsError if it already exists - the
+    only way two askers in one run dir cannot both end up owning it. The mode
+    0o666 lets the umask decide, exactly as a plain open(path, "w") did, so no
+    reader of these files loses access. A failure after the create removes the
+    file: a half-written question.json would read as pending forever."""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    try:
+        with io.open(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1)
+    except BaseException:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
 
 
 def _read_json(path: str):
@@ -89,11 +107,40 @@ def _positive(text: str) -> float:
     return value
 
 
-def _next_qa_path(task_dir: str) -> str:
-    n = 1
-    while os.path.exists(os.path.join(task_dir, "qa-%d.json" % n)):
-        n += 1
-    return os.path.join(task_dir, "qa-%d.json" % n)
+def _write_qa(task_dir: str, data: dict) -> None:
+    """File one exchange in history, in a slot no other archiver holds, in ONE
+    step: the bytes go to a private temp first (mkstemp, so its name is not
+    guessable and two archivers cannot share it) and os.link puts it on
+    qa-<n>. A link is atomic and fails if the target exists, so a slot is
+    either absent or complete - never the empty file that a reserve-then-fill
+    sequence leaves behind when the run is killed between its two steps. The
+    temp's 0600 is enough here because the run dir itself is private (the
+    spawner creates it 0700), unlike autoos.config.json, which another account
+    may have to read."""
+    fd, tmp = tempfile.mkstemp(dir=task_dir, prefix=".qa-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1)
+        n = 1
+        while True:
+            path = os.path.join(task_dir, "qa-%d.json" % n)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                n += 1
+                continue
+            return
+    except BaseException:
+        try:
+            os.close(fd)  # already owned (and closed) once fdopen succeeded
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _archive_stale_answer(task_dir: str, apath: str) -> None:
@@ -103,8 +150,7 @@ def _archive_stale_answer(task_dir: str, apath: str) -> None:
     if not isinstance(answer, dict):
         return
     try:
-        _write_json(_next_qa_path(task_dir),
-                    {"question": None, "answer": answer, "stale": True})
+        _write_qa(task_dir, {"question": None, "answer": answer, "stale": True})
         os.remove(apath)
     except OSError:
         pass  # best effort; the main flow will hit the same wall and exit 5
@@ -144,7 +190,11 @@ def main(argv=None) -> int:
         _archive_stale_answer(task_dir, apath)
 
     try:
-        _write_json(qpath, {"text": question, "asked": _now_iso()})
+        _create_json_exclusive(qpath, {"text": question, "asked": _now_iso()})
+    except FileExistsError:
+        # another asker won between the check above and this create
+        print("a question is already pending in %s" % task_dir, file=sys.stderr)
+        return 2
     except OSError as exc:
         return _fail_io(str(exc))
 
@@ -156,8 +206,7 @@ def main(argv=None) -> int:
         if isinstance(answer, dict):
             print(answer.get("text", ""))
             try:
-                _write_json(_next_qa_path(task_dir),
-                            {"question": _read_json(qpath), "answer": answer})
+                _write_qa(task_dir, {"question": _read_json(qpath), "answer": answer})
                 for path in (qpath, apath):
                     try:
                         os.remove(path)

@@ -51,6 +51,17 @@ Three subcommands:
     9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
        rules, first match wins, no match = allowed; leg_rule_for()); a denied
        leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
+    10. every providers.<id>.limits key resolves to one of that provider's
+        models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
+        2026-09-27);
+    11. policy.reviewers is a non-empty ordered list, each entry carrying a
+        client that exists in ``clients``, a non-empty model/family, a boolean
+        paid and -- when it names one -- a ``leg`` that resolves and whose
+        model's ``family`` agrees with the entry's. This is the list the
+        resolver walks to answer "who reviews this" (REVROUTE (S2) item 1,
+        2026-09-27). ``model`` is the client's own spelling and is deliberately
+        not resolved against providers/models; ``leg`` is the gateway path and
+        is resolved with the same rule 1 predicate everything else uses.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -888,6 +899,10 @@ def render_omniroute(registry: dict) -> dict:
     available: false), a leg policy.leg_rules denies, and a client_bound leg the
     gateway 403s are all dropped from the combo's `models`.
 
+    The combo's "context" is the route's declared promise CLAMPED to the smallest
+    window among those servable legs (clamp_route_context): a priority combo that
+    can fall to a 128k leg must not promise 1M.
+
     "omitted" names the ORPHANED routes, and only those: a route whose `legs`
     is non-empty but whose every leg was dropped by gateway_legs(), so it once
     promised a gateway leg and can serve none now. It is the routes that render
@@ -922,7 +937,8 @@ def render_omniroute(registry: dict) -> dict:
         combos.append({
             "name": route_id,
             "strategy": route.get("strategy"),
-            "context": omniroute_surface["context_declared"],
+            "context": clamp_route_context(
+                route, registry, omniroute_surface["context_declared"], legs),
             "models": [gateway_ref(leg, registry) for leg in legs],
         })
 
@@ -1256,9 +1272,12 @@ def render_ide(registry: dict) -> dict:
     standalone surfaces.openhands entry, which is not this render's concern);
     `surfaces` is rebuilt as {gateway: clients} for every such gateway present.
 
-    Each entry's `effort_ladder` is derived from the first leg's model-registry
-    entry (via resolve_leg), filtered to omit "none". Routes with empty legs or a
-    leg whose model has no effort_ladder get no effort_ladder field.
+    Each entry's `effort_ladder` is derived from the first GATEWAY-SERVABLE leg's
+    model-registry entry (via resolve_leg), filtered to omit "none" - never the
+    first declared leg, which may be gated (see clamp_route_context's note).
+    `reasoning_effort` is carried only when that served head's ladder contains it.
+    Routes with no servable leg or a leg whose model has no effort_ladder get no
+    effort_ladder field.
 
     Raises ValueError, naming every offending id at once, when `registry["routes"]`
     and IDE_MODEL_ORDER disagree on which ids exist (a route added/removed without
@@ -1301,25 +1320,23 @@ def render_ide(registry: dict) -> dict:
                 "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
         canonical = gateways[next(gw for gw in IDE_GATEWAYS if gw in gateways)]
 
-        model = {
-            "id": route_id,
-            "name": canonical.get("display_name"),
-            "context": canonical.get("context"),
-            "output": canonical.get("output"),
-        }
-        effort = canonical.get("effort_default")
-        if effort is not None:
-            model["reasoning_effort"] = effort
-        # effort_ladder from the first leg's model definition:
-        legs = route.get("legs") or []
-        if legs:
+        # The ladder and the default effort describe the leg that will ANSWER.
+        # routes.<id>.legs[0] may be client-bound, gated or provider-off, so the
+        # head is the first entry of the servable list, not the declared one
+        # (finding 8: t1's picker offered spark's "minimal..xhigh" ladder while
+        # only gemini - "low/medium/high" - could serve it).
+        servable_legs = gateway_legs(route, registry)
+        head_legs = servable_legs or (route.get("legs") or [])
+
+        head_ladder = None
+        if head_legs:
             try:
-                _pid, mid = resolve_leg(legs[0], registry)
+                _pid, head_model_id = resolve_leg(head_legs[0], registry)
             except ValueError:
                 raise ValueError(
-                    "routes.%s: first leg %r cannot be resolved"
-                    % (route_id, legs[0]))
-            model_entry = _section(registry, "models").get(mid)
+                    "routes.%s: served head leg %r cannot be resolved"
+                    % (route_id, head_legs[0]))
+            model_entry = _section(registry, "models").get(head_model_id)
             if isinstance(model_entry, dict):
                 ladder = model_entry.get("effort_ladder")
                 if isinstance(ladder, list):
@@ -1328,11 +1345,26 @@ def render_ide(registry: dict) -> dict:
                         if not isinstance(rung, str):
                             raise ValueError(
                                 "routes.%s: non-string rung %r in model %s effort_ladder"
-                                % (route_id, rung, mid))
+                                % (route_id, rung, head_model_id))
                     # Omit "none" so opencode gets only meaningful levels
                     filtered = [e for e in ladder if e != "none"]
                     if filtered:
-                        model["effort_ladder"] = filtered
+                        head_ladder = filtered
+
+        effort = canonical.get("effort_default")
+        model = {
+            "id": route_id,
+            "name": canonical.get("display_name"),
+            "context": clamp_route_context(
+                route, registry, canonical.get("context"), servable_legs),
+            "output": canonical.get("output"),
+        }
+        if effort is not None and (not head_ladder or effort in head_ladder):
+            # An effort the served head does not carry is dropped, never
+            # forwarded - the picker would send a level the leg rejects.
+            model["reasoning_effort"] = effort
+        if head_ladder:
+            model["effort_ladder"] = head_ladder
         model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
         models.append(model)
 
@@ -1552,7 +1584,8 @@ def render_openhands(registry: dict) -> dict:
                 tier["model"] = profile["model"]
             if "base_url" in profile:
                 tier["base_url"] = profile["base_url"]
-            tier["max_input_tokens"] = profile.get("max_input_tokens")
+            tier["max_input_tokens"] = clamp_route_context(
+                routes[route_id], registry, profile.get("max_input_tokens"))
             tier["max_output_tokens"] = profile.get("max_output_tokens")
             tier["reasoning"] = bool(profile.get("reasoning"))
             tiers.append(tier)
@@ -1568,7 +1601,8 @@ def render_openhands(registry: dict) -> dict:
         if gw == "litellm":
             tier["gateway"] = "litellm"
         tier["model"] = profile.get("model", "openai/%s" % route_id)
-        tier["max_input_tokens"] = profile.get("max_input_tokens")
+        tier["max_input_tokens"] = clamp_route_context(
+            routes[route_id], registry, profile.get("max_input_tokens"))
         tier["max_output_tokens"] = profile.get("max_output_tokens")
         tier["reasoning"] = bool(profile.get("reasoning"))
         tiers.append(tier)
@@ -1687,12 +1721,13 @@ def _route_context_promise(route: dict, registry: dict) -> str:
     for gw in MODELS_DOC_CONTEXT_SURFACES:
         surface = surfaces.get(gw)
         if isinstance(surface, dict) and surface.get("context_declared") is not None:
-            return str(surface["context_declared"])
+            return str(clamp_route_context(route, registry, surface["context_declared"]))
 
     for gw in MODELS_DOC_CONTEXT_SURFACES:
         surface = surfaces.get(gw)
         if isinstance(surface, dict) and surface.get("context") is not None:
-            return "{:,}".format(surface["context"])
+            return "{:,}".format(
+                clamp_route_context(route, registry, surface["context"]))
 
     for leg in route.get("legs") or []:
         try:
@@ -1778,6 +1813,100 @@ def gateway_legs(route: dict, registry: dict) -> list:
             continue
         out.append(leg)
     return out
+
+
+# A declared context is a PROMISE the gateway hands the client ("a request this
+# big gets answered"), and a priority combo keeps falling to its next leg while
+# that promise stands. So the promise may only be as big as the smallest window
+# among the legs it can actually be served by — PROVFIX3 finding 1: t1 promised
+# 1M while gemini-3.8-flash (131072 advertised) is a servable leg of it, so any
+# long conversation that fell to gemini would 400. docs/models.md states the same
+# rule for the human reader ("a 200k model in a 1M-declared route would 400").
+#
+# combos.json spells a window as a ladder label. The floors are decimal on
+# purpose: both spellings of a rung (131072 binary, 128000 decimal) clear the
+# "128k" floor, so a leg recorded either way keeps the label.
+CONTEXT_LADDER = [
+    ("1M", 1_000_000), ("512k", 512_000), ("256k", 256_000), ("200k", 200_000),
+    ("128k", 128_000), ("64k", 64_000), ("32k", 32_000), ("16k", 16_000),
+    ("8k", 8_000), ("4k", 4_000), ("2k", 2_000), ("1k", 1_000),
+]
+
+# A leg's effort ladder must describe the leg that will answer, so an
+# effort_default the served head does not carry is dropped, never forwarded (see
+# render_ide()).
+
+
+def context_label_to_tokens(label):
+    """The numeric floor of a combos.json context label ("128k" -> 128000), or
+    None when `label` is not a ladder string (an unknown spelling is left
+    alone by the clamps rather than guessed at)."""
+    if not isinstance(label, str):
+        return None
+    text = label.strip()
+    for rung, floor in CONTEXT_LADDER:
+        if text.lower() == rung.lower():
+            return floor
+    return None
+
+
+def context_tokens_to_label(tokens):
+    """The largest ladder label that `tokens` can actually serve (131072 ->
+    "128k"). Below the whole ladder, the honest "Nk" of the number itself."""
+    for rung, floor in CONTEXT_LADDER:
+        if tokens >= floor:
+            return rung
+    return "%dk" % max(1, int(tokens) // 1000)
+
+
+def leg_advertised_context(leg, registry: dict):
+    """A leg's model's `context_advertised` as an int, or None when the leg does
+    not resolve, has no model entry, or the entry records no window. None means
+    "no evidence", and no evidence never clamps (an unrecorded window is not a
+    small model)."""
+    if not isinstance(leg, str):
+        return None
+    try:
+        _provider_id, model_id = resolve_leg(leg, registry)
+    except ValueError:
+        return None
+    model = _section(registry, "models").get(model_id)
+    if not isinstance(model, dict):
+        return None
+    value = model.get("context_advertised")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value > 0 else None
+
+
+def route_context_cap(route: dict, registry: dict, legs=None):
+    """The smallest advertised window among `route`'s gateway-servable legs, or
+    None when none of them records one. `legs` may be a precomputed
+    gateway_legs() list (the renders all have one)."""
+    legs = gateway_legs(route, registry) if legs is None else legs
+    caps = [cap for cap in (leg_advertised_context(leg, registry) for leg in legs)
+            if cap is not None]
+    return min(caps) if caps else None
+
+
+def clamp_route_context(route: dict, registry: dict, value, legs=None):
+    """Clamp a declared context promise to what the route's servable legs can
+    all take. Accepts and returns the shape it was given: a combos.json label
+    string in, a label string out ("1M" -> "128k"); a numeric surface context in,
+    a number out (1000000 -> 131072). Anything it cannot reason about
+    (None, an unknown label, a route with no recorded leg window) is returned
+    unchanged — this narrows promises, it does not invent them."""
+    cap = route_context_cap(route, registry, legs)
+    if cap is None or value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        tokens = context_label_to_tokens(value)
+        if tokens is None or tokens <= cap:
+            return value
+        return context_tokens_to_label(cap)
+    if isinstance(value, (int, float)):
+        return value if value <= cap else cap
+    return value
 
 
 def servable_route_ids(registry: dict) -> set:
@@ -2128,6 +2257,88 @@ def _check_provider_limits(registry) -> list:
     return problems
 
 
+# The fields of one policy.reviewers entry whose TYPE this check owns; presence
+# is rule 6's job (the schema marks all five required), so a missing field is
+# reported once, by the rule that can name it as "missing: ... (required key)".
+_REVIEWER_STR_FIELDS = ("client", "model", "family")
+
+
+def _check_reviewers(registry) -> list:
+    """rule 11 - policy.reviewers is a non-empty ordered list of reviewers the
+    resolver can actually walk (brief REVROUTE (S2) item 1, 2026-09-27).
+
+    The list is the one home for "who may review": the resolver reads it instead
+    of a family table of its own, so an entry that names a client nobody has is
+    a reviewer that can never be spawned -- and the review silently degrades to
+    whoever else is left. That is why the client half is checked against
+    ``clients`` here.
+
+    The ``model`` half is deliberately NOT resolved against providers/models.
+    Like ``policy.free_client_models``, it is the client's own spelling (a
+    gateway combo name, or Haiku's client-side alias), not a route leg -- and a
+    reviewer is picked per client, so a leg-shaped check would reject valid
+    entries. The check stays clock-free: ``source`` is exempt from rule 5, and
+    nothing here reads ``available``/``unavailable_until`` (that is the
+    resolver's job at plan time).
+    """
+    problems = []
+    reviewers = _section(registry, "policy").get("reviewers")
+    if reviewers is None:
+        # rule 6 does not mark policy.reviewers required (the schema's policy
+        # `required` list is the spec's, and this file predates the field), so
+        # an absent list is reported here rather than reading as "clean".
+        return ["reviewers: policy.reviewers is missing - the resolver has no "
+                "reviewer preference list to walk"]
+    if not isinstance(reviewers, list) or not reviewers:
+        return ["reviewers: policy.reviewers must be a non-empty ordered list"]
+
+    known_clients = _section(registry, "clients")
+    for index, entry in enumerate(reviewers):
+        label = "policy.reviewers[%d]" % index
+        if not isinstance(entry, dict):
+            problems.append("reviewers: %s is not an object" % label)
+            continue
+        for field in _REVIEWER_STR_FIELDS:
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, str) or not value:
+                problems.append("reviewers: %s.%s must be a non-empty string "
+                                "(got %r)" % (label, field, value))
+        if "paid" in entry and not isinstance(entry["paid"], bool):
+            problems.append("reviewers: %s.paid must be a boolean (got %r)"
+                            % (label, entry["paid"]))
+        if "first_pass_only" in entry and not isinstance(entry["first_pass_only"], bool):
+            problems.append("reviewers: %s.first_pass_only must be a boolean "
+                            "(got %r)" % (label, entry["first_pass_only"]))
+        client = entry.get("client")
+        if isinstance(client, str) and client and client not in known_clients:
+            problems.append("reviewers: %s.client %r is not a registry client "
+                            "(known: %s)"
+                            % (label, client, ", ".join(sorted(known_clients))))
+
+        # A `leg` is the one link from the reviewer to a provider, and the
+        # resolver reads availability and the training test off it -- so a leg
+        # that does not resolve, or carries a family that disagrees with its own
+        # model's, would silently disable the different-family rule (the check
+        # compares the entry's spelling, the resolver compares this one).
+        leg = entry.get("leg")
+        if isinstance(leg, str) and leg:
+            try:
+                provider_id, model_id = resolve_leg(leg, registry)
+            except ValueError as exc:
+                problems.append("reviewers: %s.leg %s does not resolve: %s"
+                                % (label, leg, exc))
+                continue
+            model_family = (_section(registry, "models").get(model_id) or {}).get("family")
+            entry_family = entry.get("family")
+            if model_family and entry_family and model_family != entry_family:
+                problems.append(
+                    "reviewers: %s.family %r disagrees with models.%s.family %r "
+                    "(leg %s)" % (label, entry_family, model_id, model_family, leg))
+    return problems
+
+
 # ===========================================================================
 # check / validate
 # ===========================================================================
@@ -2146,6 +2357,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_unavailable_until_pairs_available(registry))
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
+    problems.extend(_check_reviewers(registry))
     return problems
 
 

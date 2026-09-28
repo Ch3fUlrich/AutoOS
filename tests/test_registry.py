@@ -1352,6 +1352,19 @@ class FreeAiProviderTests(unittest.TestCase):
             legs = self.reg["routes"][route_id]["legs"]
             self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
 
+    def test_t2_worker_ends_with_the_free_ai_stopgap_leg(self):
+        """BRIEF T2FREE (S1, urgent stopgap 2026-09-28): the routing-00 smoke
+        run got 503 ALL_TARGETS_SKIPPED from t2-worker — every leg ahead of
+        this one was down at the time (gemini 429 cooldown, agy out of quota,
+        meta-api not registered) — so the leg measured answering 200 is the
+        route's last resort. The free-only routes already carried it last."""
+        route = self.reg["routes"]["t2-worker"]
+        self.assertEqual(route["legs"][-1], "free_ai/qwen7b")
+        comment = route.get("$comment")
+        self.assertIsInstance(comment, str, "$comment provenance is missing")
+        self.assertIn("stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)",
+                      comment)
+
     def test_no_clean_route_carries_free_ai(self):
         # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
         # and its rendered omniroute_id (free-ai/) - so a regression that emits
@@ -1388,7 +1401,8 @@ class MetaApiProviderTests(unittest.TestCase):
     t1-orchestrator-paid and spark-1.3-contributor. It trains on prompts by
     contributor contract, so it is never private-safe and never enters a
     -clean route; on t2-worker/t3-driver it is a paid escalation placed AFTER
-    that route's free legs."""
+    that route's free legs (the trailing T2FREE stopgap free leg on t2-worker
+    excepted — it is last on purpose, see FreeAiProviderTests)."""
 
     LEG = "meta_api/muse-spark-1.3-contributor"
 
@@ -1473,11 +1487,16 @@ class MetaApiProviderTests(unittest.TestCase):
             provider_id = registry.resolve_leg(leg, self.reg)[0]
             return providers[provider_id]["tier"]
 
+        # T2FREE (2026-09-28) appended the free stopgap leg LAST on t2-worker,
+        # i.e. behind this paid escalation; every other free leg still comes
+        # first, which is what this pins.
+        stopgap = "free_ai/qwen7b"
         for route_id in ("t2-worker", "t3-driver"):
             legs = self.reg["routes"][route_id]["legs"]
             self.assertIn(self.LEG, legs, route_id)
             last_free = max(i for i, leg in enumerate(legs)
-                            if leg != self.LEG and tier_of(leg) == "free")
+                            if leg not in (self.LEG, stopgap)
+                            and tier_of(leg) == "free")
             self.assertGreater(legs.index(self.LEG), last_free, route_id)
 
     def test_no_clean_route_carries_the_leg(self):
@@ -1507,6 +1526,142 @@ class MetaApiProviderTests(unittest.TestCase):
         self.assertEqual(kept[0], self.LEG)
 
     def test_real_registry_passes_check_with_meta_api(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class ReviewerPolicyTests(unittest.TestCase):
+    """Brief REVROUTE (S2) item 1 (2026-09-27): who may review is data, not
+    code. ``policy.reviewers`` is the ordered preference list the resolver walks
+    for a review card, and every entry names the model's ``family`` so the
+    different-family rule (an author is never reviewed by its own family) is
+    checkable without a vendor table in the resolver.
+
+    The operator's fixed order: the PAID Meta Muse contributor first (a
+    different family from every free author, and it is what the paid API was
+    bought for), the other free families next, Claude Haiku last and only as a
+    first-pass fallback. Sonnet stays the high-risk closer and is deliberately
+    absent -- it is not on a preference list, it closes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.reviewers = cls.reg["policy"]["reviewers"]
+
+    def test_the_list_is_ordered_and_non_empty(self):
+        self.assertIsInstance(self.reviewers, list)
+        self.assertTrue(self.reviewers, "policy.reviewers is empty")
+
+    def test_every_entry_carries_the_four_fields(self):
+        for index, entry in enumerate(self.reviewers):
+            for key in ("client", "model", "family", "paid"):
+                self.assertIn(key, entry, "reviewers[%d] has no %s" % (index, key))
+            self.assertIsInstance(entry["client"], str)
+            self.assertIsInstance(entry["model"], str)
+            self.assertIsInstance(entry["family"], str)
+            self.assertTrue(entry["family"], "reviewers[%d].family is empty" % index)
+            self.assertIsInstance(entry["paid"], bool)
+
+    def test_every_entry_names_a_real_client(self):
+        for index, entry in enumerate(self.reviewers):
+            self.assertIn(entry["client"], self.reg["clients"],
+                          "reviewers[%d] client %r is not a registry client"
+                          % (index, entry["client"]))
+
+    def test_the_paid_muse_reviewer_leads(self):
+        first = self.reviewers[0]
+        self.assertEqual(first["family"], "meta")
+        self.assertIs(first["paid"], True)
+        self.assertEqual(first["client"], "opencode")
+        self.assertIn("spark-1.3-contributor", first["model"])
+
+    def test_haiku_is_a_first_pass_only_fallback(self):
+        haiku = [e for e in self.reviewers if e["family"] == "anthropic"]
+        self.assertTrue(haiku, "Claude Haiku is missing from the fallback list")
+        for entry in haiku:
+            self.assertIs(entry["first_pass_only"], True, entry["model"])
+
+    def test_sonnet_is_not_a_preference(self):
+        # The closer is the resolver's, not the list's: pinning that here so a
+        # later "add Sonnet to the reviewers list" edit has to say why.
+        for entry in self.reviewers:
+            self.assertNotIn("sonnet", entry["model"].lower())
+
+    def test_the_list_spans_several_families(self):
+        # A one-family reviewer list cannot satisfy the different-family rule
+        # for most authors.
+        self.assertGreater(len({e["family"] for e in self.reviewers}), 2)
+
+    def test_the_missing_family_on_a_model_is_still_a_check_failure(self):
+        # REVROUTE's premise: family is what the reviewer rule reads, so it is
+        # schema-required on every model (rule 6). Guards the field the brief
+        # asked for against a later "make it optional" edit.
+        reg = mutated()
+        model_id = sorted(reg["models"])[0]
+        del reg["models"][model_id]["family"]
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "family" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_without_a_family(self):
+        reg = mutated()
+        del reg["policy"]["reviewers"][0]["family"]
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_with_an_unknown_client(self):
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["client"] = "not-a-client"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_non_boolean_paid(self):
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["paid"] = "yes"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_rejects_an_empty_or_missing_list(self):
+        for mutate in (lambda r: r["policy"].__setitem__("reviewers", []),
+                       lambda r: r["policy"].pop("reviewers")):
+            reg = mutated()
+            mutate(reg)
+            problems = registry.check_registry(reg)
+            self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_leg_that_does_not_resolve(self):
+        # A leg is the only link from a reviewer to a provider, and the
+        # resolver reads availability and the training test off it.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["leg"] = "no-such-provider/no-such-model"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "does not resolve" in p],
+                        problems)
+
+    def test_check_rule_flags_a_family_disagreeing_with_its_leg(self):
+        # The different-family rule compares the entry's spelling; a leg whose
+        # own model says something else means the rule silently mis-fires.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["family"] = "qwen"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "disagrees" in p], problems)
+
+    def test_every_leg_on_the_reviewer_list_resolves(self):
+        legs = [e["leg"] for e in self.reviewers if "leg" in e]
+        self.assertTrue(legs, "no reviewer names a leg, so nothing is checked")
+        for leg in legs:
+            provider_id, model_id = registry.resolve_leg(leg, self.reg)
+            self.assertIn(model_id, self.reg["models"], leg)
+            self.assertIn(provider_id, self.reg["providers"], leg)
+
+    def test_the_list_is_ordered_paid_first_then_free(self):
+        # The operator's cost preference made visible: pay for the different
+        # family, fall back to free, and never let Haiku close.
+        self.assertIs(self.reviewers[0]["paid"], True)
+        self.assertEqual(self.reviewers[-1]["family"], "anthropic")
+
+    def test_real_registry_passes_the_reviewers_check(self):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
