@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — affected-tests.py derives the filter a registry change needs (AFFTESTS, 2026-09-27)
+
+- **`tools/affected-tests.py`** (new), **`tests/test_affected_tests.py`** (new), **`tests/linux/33-documentation.sh`**, **`docs/testing.md`**: a route or provider flip was followed by a hand-picked `--filter` list, the shell and Pester cases naming the changed id never ran, and CI went red twice (lessons PROVPIN, MUSEPIN). The list is derivable, so it is derived now: given ids — on the command line, or read out of `catalog/ai-registry.json`'s routes / providers / models entries changed since a rev with `--from-diff` — the tool scans `tests/linux/*.sh` (`if it "…"` blocks), `tests/run-tests.ps1` (`Test-Case '…'`) and `tests/test_*.py` (functions located with `ast`), word-boundary matches each block's text, and emits `--format filter` (one comma-separated list for both runners, terms always whitespace- and comma-free so `$( )` cannot truncate it), `--format pytest` (node ids) or the default table showing which term selects which case and why. Over-inclusion is intended and misses are not: a term is always a substring of an affected test's own name.
 ### Fixed — a route's declared context is a promise its legs must keep (PROVFIX3, 2026-09-27)
 
 Follow-up findings on the PROV review (`logs/handoff-sessions/20260925/work/L1-routing/review-prov2.out`), re-judged against the MUSEAPI base where `meta_api/muse-spark-1.3-contributor` heads `t1`.

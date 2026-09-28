@@ -42,6 +42,8 @@ Policy: run only the filters covering touched files per change; full suites
 run in a FINAL guardsOnly lane, never per change. `sh` matching is
 case-sensitive, `ps1` `-like` is case-insensitive.
 
+Derive that list instead of guessing it: `python3 tools/affected-tests.py --from-diff <rev> --format filter` prints the terms for both runners that select every case naming a `catalog/ai-registry.json` route, provider or model id changed since `<rev>` (`--format pytest` gives the node ids, the default gives the table with the reason) — a hand-picked list once missed the cases naming a flipped id and CI went red twice.
+
 ```powershell
 powershell -File tests\run-tests.ps1
 powershell -File tests\run-tests.ps1 -Filter catalog

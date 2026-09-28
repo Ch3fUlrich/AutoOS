@@ -30,7 +30,9 @@ flowchart LR
 
 Per session: create worktree → start background session with its brief → poll until the turn
 ends → classify → recover or continue → run guards → merge. A red guard or a merge conflict
-stops **that lane only**; other lanes keep running.
+stops **that lane only**; other lanes keep running. A verify line for a session that changed
+registry entries carries `tools/affected-tests.py --from-diff <rev> --format filter` as its
+filter rather than one the session guessed (the fact itself lives in *Testing*, `docs/testing.md`).
 
 **Exclusion across lanes is `resources`.** Ordering is not exclusion: a read-only session can
 starve a writer on a single-holder store while the lanes say nothing is wrong. Each session lists
