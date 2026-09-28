@@ -4904,6 +4904,15 @@ class LeakStrictnessTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
             env=kw.get("env")).stdout.strip()
 
+    def test_the_known_holes_note_covers_a_worktree_the_worker_can_reach(self):
+        # SPAWNFIX3 (S3) item 5 review (Sonnet, LEAKFP2 MEDIUM): the docstring
+        # said a STALE worktree can carry the moved-ref exemption, which reads
+        # like a bug that only old leftovers have. Any worktree of the parent's
+        # .git is inside the fence - live, stale, or one the worker adds itself.
+        doc = self.agent.parent_leak.__doc__
+        self.assertIn("ANY\n    worktree the sandboxed worker can reach", doc)
+        self.assertIn("live one it did not make and a", doc)
+
     def sibling_worktree(self, branch, existing=False):
         """`git worktree add` at a fresh path: `existing` checks that branch
         out, otherwise the branch is created here."""
@@ -6981,6 +6990,71 @@ class GatewayCooldownStopTests(unittest.TestCase):
             "cooling down", "t2-worker", self.registry,
             now=self.NOW, path=self.state_path))
         self.assertFalse(os.path.exists(self.state_path))
+
+    # --- 4 (SPAWNFIX3 item 7): a model more than one provider serves ----------
+
+    GPT_OSS_COOLDOWN = ("Error: [429] All credentials for model gpt-oss-120b are "
+                        "cooling down (reset after 37s)")
+
+    def stop(self, line, route):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pid = self.agent.stop_provider_id(line, self.registry,
+                                              self.registry["routes"][route]["legs"])
+        return pid, out.getvalue()
+
+    def test_a_model_id_does_not_match_inside_a_longer_id(self):
+        # R6STOP review (Sonnet, MEDIUM): "\b" treats '-' as a boundary, so the
+        # bare "gemini-3.7-flash" matched the gateway's line about
+        # "gemini-3.7-flash-high" and benched the wrong provider. '-', '.' and
+        # '/' are word characters here: a model id is a whole token.
+        cases = (
+            ("All credentials for model gemini-3.7-flash-high are cooling down",
+             "gemini-3.7-flash", False),
+            ("All credentials for model gemini-3.7-flash are cooling down",
+             "gemini-3.7-flash", True),
+            ("All credentials for model openai/gpt-oss-120b are cooling down",
+             "gpt-oss-120b", False),
+            ("All credentials for model openai/gpt-oss-120b are cooling down",
+             "openai/gpt-oss-120b", True),
+            ("model gpt-oss-120b.", "gpt-oss-120b", True),
+            ("model deepseek-v4.1-flash:", "deepseek-v4.1-flash", True),
+            ("model deepseek-v4.1-flash-x", "deepseek-v4.1-flash", False),
+            ("gpt-oss-120b", "gpt-oss-120b", True),
+            ("", "gpt-oss-120b", False),
+            ("no model named here", "gpt-oss-120b", False))
+        for line, model_id, want in cases:
+            with self.subTest(line=line, model_id=model_id):
+                self.assertIs(self.agent._line_names_model(line.lower(), model_id),
+                              want, line)
+
+    def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
+        # The real t2-worker route serves gpt-oss-120b from cerebras AND
+        # sambanova: the stop line names the model, not the provider, so neither
+        # may be benched on a 50/50 guess (and picking one silently starves it).
+        pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
+        self.assertIsNone(pid)
+        self.assertEqual(printed.strip(),
+                         "ambiguous stop: gpt-oss-120b served by cerebras, "
+                         "sambanova - not benched")
+
+    def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            recorded = self.agent.record_reset_stop(
+                self.GPT_OSS_COOLDOWN, "t2-worker", self.registry,
+                now=self.NOW, path=self.state_path)
+        self.assertIsNone(recorded)
+        self.assertFalse(os.path.exists(self.state_path),
+                         "an ambiguous stop must not write a provider-state file")
+
+    def test_a_model_one_provider_serves_still_benches_that_provider(self):
+        # The other half of the same line: gemini-3.7-flash-high is antigravity's
+        # alone in t2-worker, so the ambiguity rule must not swallow clean stops.
+        pid, printed = self.stop(
+            "Error: [429] All credentials for model gemini-3.7-flash-high are "
+            "cooling down (reset after 37s)", "t2-worker")
+        self.assertEqual(pid, "antigravity", printed)
+        self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges

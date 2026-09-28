@@ -2026,16 +2026,27 @@ def _leg_provider_model(leg, registry):
         return None
 
 
+# The characters that make a model id longer, not a boundary: the gateway quotes
+# the id as one token, so "gemini-3.7-flash-high" is a different model from
+# "gemini-3.7-flash" and "openai/gpt-oss-120b" from "gpt-oss-120b" (R6STOP
+# review, SPAWNFIX3 item 7). Git's own `\b` treats '-' '/' '.' as breaks, which
+# matched the shorter id inside the longer one and benched the wrong provider.
+_MODEL_ID_TOKEN = r"[0-9A-Za-z._/-]"
+
+
 def _line_names_model(line, model_id) -> bool:
     """True when the stop line quotes `model_id` as a word of its own.
 
     The gateway says "All credentials for model gemini-3.8-flash ...", so the
-    model it had already chosen is in the text. Whole-word so a model id that
+    model it had already chosen is in the text. Whole-token so a model id that
     is a fragment of another one's spelling cannot drag in the wrong provider.
     """
     if not model_id:
         return False
-    return re.search(r"\b%s\b" % re.escape(str(model_id).lower()), line) is not None
+    pattern = (r"(?<!%s)%s(?!%s)" % (_MODEL_ID_TOKEN,
+                                     re.escape(str(model_id).lower()),
+                                     _MODEL_ID_TOKEN))
+    return re.search(pattern, line) is not None
 
 
 def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
@@ -2046,7 +2057,12 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
     one. Next a line that names the MODEL it tried (R6STOP: "All credentials
     for model gemini-3.8-flash are cooling down"): the gateway is telling us
     who served it, and the provider of the leg heading that model is benched
-    whatever else the route happens to hold. Only an unnamed line falls back
+    whatever else the route happens to hold -- unless more than one provider of
+    the route serves that model, when NOTHING is benched and the line says so
+    out loud (R6STOP review, SPAWNFIX3 item 7: t2-worker's route carries
+    gpt-oss-120b on both cerebras and sambanova, and a stop line names the
+    model, never who served it; benching one of them on a 50/50 guess starves a
+    provider that may be perfectly healthy). Only an unnamed line falls back
     to the gateway working down the route's legs in order, so the one that took
     the traffic is the first leg whose provider is up right now. Both read legs
     through `resolve_leg`, so a leg spelled with a gateway alias attributes to
@@ -2067,17 +2083,25 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
                 return pid
         return None
     low = line.lower()
-    served = None
+    served = {}
     for leg in legs or []:
         resolved = _leg_provider_model(leg, registry)
         if resolved is None:
             continue
         pid, model_id = resolved
-        if _line_names_model(low, model_id) and (
-                served is None or len(model_id) > len(served[1])):
-            served = (pid, model_id)
+        if _line_names_model(low, model_id):
+            pids = served.setdefault(model_id, [])
+            if pid not in pids:
+                pids.append(pid)
     if served:
-        return served[0]
+        # The most specific id the line quoted is the model it named.
+        model_id = max(served, key=len)
+        pids = served[model_id]
+        if len(pids) > 1:
+            print("ambiguous stop: %s served by %s - not benched"
+                  % (model_id, ", ".join(pids)))
+            return None
+        return pids[0]
     for leg in legs or []:
         pid, _model_id = _leg_provider_model(leg, registry) or (None, None)
         provider = providers.get(pid)
@@ -2491,9 +2515,14 @@ def parent_leak(snapshot, root=None, sandbox=None):
     rule: a worker that commits on a branch CREATED during the run and then
     moves HEAD back off it is missed, because new refs are never scanned (the
     orchestrator fetches lanes into them); and plumbing that writes a commit
-    without moving a pre-existing ref or dirtying the tree is missed. A stale
-    worktree left behind by an earlier run can also carry the one exemption,
-    which is another reason the parent is frozen (skill R-coord-01).
+    without moving a pre-existing ref or dirtying the tree is missed. The one
+    exemption (another lane's own worktree branch) can be carried by ANY
+    worktree the sandboxed worker can reach - a live one it did not make and a
+    stale one left by an earlier run, and a worker that runs `git worktree add`
+    itself makes one: every worktree of the parent's .git is inside the fence,
+    because a worktree is a directory the parent checkout points at, not a
+    separate repository. None of the three is a containment proof; each is
+    another reason the parent is frozen (skill R-coord-01).
 
     Git-ignored parent files (configuration/api-keys.yml, inventory.yml) are
     NOT covered: porcelain cannot see them. Nothing here is reverted.
