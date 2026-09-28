@@ -634,6 +634,12 @@ if it "resolver v2: track record and Beta success estimate (unit tests)"; then
     out="$(python3 tests/test_autoos_track.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# MEMGRAPH (operator D-128): the AutoOS memory-graph sync (tools/sync_memory_graph.py).
+# Pure stdlib, temp-dir fixtures only; no live graph is contacted.
+if it "sync_memory_graph: ledger-gated NDJSON emit, hub edges, merge-only load (unit tests)"; then
+    out="$(python3 tests/test_sync_memory_graph.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/autoos_usage.py: the `usage` subcommand of autoos-agent.py reads the
 # gateway call-logs (OR4). Every test injects a fake fetch, so this never
 # calls the gateway.
