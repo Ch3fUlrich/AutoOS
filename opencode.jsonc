@@ -6,8 +6,11 @@
   // overflow legs already cover every provider with money on it: cerebras
   // + sambanova ($10 credit each) as gpt-oss/qwen overflow in t2-worker/t3-driver,
   // cheap-inference ($15 partner pool) between free and paid, deepseek
-  // ($13 bulk) as the flash legs. Meta bills
-  // only through the direct opencode `meta` provider, never the gateway.
+  // ($13 bulk) as the flash legs. Meta reaches
+  // this config through the gateway route spark-1.3-contributor (REVROUTE:
+  // policy.reviewers names it); the direct opencode `meta` provider exists only
+  // in a user config, and only while META_API_KEY is in the environment — an
+  // {env:META_API_KEY} placeholder no shell can fill fails the whole file.
   // No funded provider is missing a leg —
   // verify with `omniroute simulate --combo tierN --explain`.
   // DSMAX (operator 2026-09-27T15:05:54Z) took OpenRouter/DeepSeek off entirely
