@@ -24,6 +24,12 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      approves). NOT a git worktree: opencode resolves a worktree to the main
      checkout's root, and a relative write from inside one landed in the main
      repo (live, 2026-09-24). Nothing is merged or deleted for you.
+  5. A spawned tier (2 or 3) is refused without --isolate (KEYDENY3b/KEYDENY3g):
+     grep/glob is fenced on the search *pattern*, so a worker grepping "sk-" in a
+     working checkout walks straight through it into
+     configuration/api-keys.yml. The clone is the control that holds — an ignored
+     file is not in it. Tier 1 (role=orchestrate) is the only tier that may still
+     run in the caller's checkout.
 
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
@@ -71,22 +77,23 @@ docs/routing.md.
 
 Usage:
     python3 tools/autoos-agent.py list
-    python3 tools/autoos-agent.py run --card role=review "Review lib/linux/ui.sh"
-    python3 tools/autoos-agent.py run --client qwen --card complexity=trivial "..."
-    python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
-    python3 tools/autoos-agent.py run --tier 3 "Review lib/linux/ui.sh for quoting bugs"
+    python3 tools/autoos-agent.py run --card role=review --isolate "Review lib/linux/ui.sh"
+    python3 tools/autoos-agent.py run --client qwen --card complexity=trivial --isolate "..."
+    python3 tools/autoos-agent.py run --client claude --joinable --isolate --title d1 "..."
+    python3 tools/autoos-agent.py run --tier 3 --isolate "Review lib/linux/ui.sh for quoting bugs"
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
     python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
-    python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
-    python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
+    python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
+    python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
-    python3 tools/autoos-agent.py run --tier 3 --dry-run "..."     # print the plan only
+    python3 tools/autoos-agent.py run --tier 3 --isolate --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
+    python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
     python3 tools/autoos-agent.py ps --tree                          # runs under their parent
     python3 tools/autoos-agent.py risk --sha <sha> --base origin/main   # the diff's risk class
@@ -156,6 +163,23 @@ so a pack can embed stdout verbatim. The RUN dir is `$AUTOOS_RUN_DIR` only - an
 unset variable with no `--file` is an error, never an empty read. Exit codes: 0
 read, 1 the file holds no timestamped record (an inbox of another shape is never
 "no events"), 2 no window named, a bad position, or an unreadable file.
+
+`card check <file>` (RESTART spec §1, lane R2a) validates the one state card a
+successor resumes from — `<RUN>/status/<name>.card.md`, written only by the
+session it names. It checks the header fields (`# card <name> — <UTC> |
+gen=<id> | context <n>k/<cap>k | last-event <position>`), the fixed section
+order (goal, state, next, threads, traps, operator), each section's line cap,
+the 40-line total, the 200-char line limit, and that `last-event` parses as a
+position — through `autoos_inbox.parse_position`, because §0 keeps one position
+parser. A `threads` line whose id matches the Q-id shape (`^[Qq][-:]?\\d`:
+`Q-008`, `q-008`) needs an `asked <time>` field (§3: those lines are the pack's
+open questions). Every problem prints on stdout with its line number, sorted by
+line; the reason a file cannot be read goes to stderr. The rules are
+`tools/autoos_card.py`, not restated here, and §0's acknowledgement markers are
+`autoos_heartbeat.ACK_MARKERS` — the same list the heartbeat's pause filter (at
+the head of a record) and the future `card: stale` check read. Read-only,
+so it is safe to run twice. Exit codes: 0 valid, 1 the card breaks at least one
+rule, 2 the file is unreadable.
 """
 from __future__ import annotations
 
@@ -180,6 +204,7 @@ if os.name != "nt":
     import fcntl  # the free-leg provider lock (SPAWNFIX item 2); msvcrt on Windows
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import autoos_card as card_mod  # noqa: E402
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
@@ -253,6 +278,153 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 # reported NO-OP (exit 5) instead of a leak.
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
+
+# KEYDENY3b item 1: the spawn gate is spelled two ways in opencode v2.0.16 — its
+# rename map is {bash: "shell", task: "subagent", apply_patch: "patch"}, so the
+# canonical *action* is `subagent` (what the repo's opencode.jsonc rules assert)
+# while the `permission` object still declares the tool-name key `task`, annotated
+# "Deprecated alias for subagent". opencode.jsonc:115 is the cautionary tale: a
+# `bash` rule matches nothing in v2, so an alias is never the fence you prove —
+# hence both spellings go into the run's own overlay, which merges after the
+# checkout's config. Fence only the one the drifted checkout happens not to name
+# and the leaf still launches a child that carries none of the leaf's fences: it
+# can open configuration/api-keys.yml and put the key in its answer.
+SPAWN_GATES = ("subagent", "task")
+# Who each tier may launch: the tier contract, and nothing for a leaf.
+TIER_SPAWN_CHILD = {1: "t2-worker", 2: "t3-reviewer", 3: None}
+
+
+def spawn_gate_rules(tier: int) -> list:
+    """The overlay rules that fence this tier's spawn gate: deny all, then allow
+    its one child (last matching rule wins)."""
+    child = TIER_SPAWN_CHILD.get(tier)
+    rules = [{"action": gate, "resource": "*", "effect": "deny"} for gate in SPAWN_GATES]
+    if child:
+        rules += [{"action": gate, "resource": child, "effect": "allow"}
+                  for gate in SPAWN_GATES]
+    return rules
+
+
+# KEYDENY3b item 2: grep/glob is asserted against the *pattern* the agent
+# passes, not the files it searches, so `grep "sk-" .` inside a checkout holding
+# a git-ignored api-keys.yml is unfenceable — the pattern matches nothing. The
+# guarantee instead lives in the directory a worker runs in: an --isolate clone
+# is `git clone --local`, which materialises committed files only, so an ignored
+# secret is never present for the search to walk.
+# KEYDENY3g (L1-routing policy decision): that directory is mandatory for every
+# *spawned* tier. Tier 2 was left in place by KEYDENY3b and the hole it recorded
+# is the one that matters: a t2 running in the caller's checkout greps an ignored
+# key file, and the native t3 child it launches inherits that cwd and carries
+# none of the fences. Only tier 1 (role=orchestrate) — the operator's own session,
+# in a lane the operator is watching — may still run in place.
+ISOLATE_TIERS = (2, 3)
+# A client that cannot run in a clone would have to lose grep/glob for its leaf
+# runs instead (the fence is the only control there). None today: isolation is
+# `git clone --local` plus a cwd, and every client here is a CLI started with one.
+NO_ISOLATE_CLIENTS = frozenset()
+# The harness role each tier runs as, and the card role that overrides it. The
+# `leaf` flag itself is read from catalog/agent-harness.json — one home per fact.
+HARNESS_PATH = os.path.join(ROOT, "catalog", "agent-harness.json")
+TIER_HARNESS_ROLE = {1: "orchestrator", 2: "suborchestrator", 3: "leaf-reviewer"}
+HARNESS_LEAF_CACHE = {}
+
+
+def harness_role_is_leaf(role: str) -> bool:
+    """The catalog's `leaf` flag for a harness role (False when unknown)."""
+    if role not in HARNESS_LEAF_CACHE:
+        try:
+            roles = load_jsonc(HARNESS_PATH).get("roles") or {}
+        except (OSError, ValueError):
+            roles = {}
+        HARNESS_LEAF_CACHE[role] = bool((roles.get(role) or {}).get("leaf"))
+    return HARNESS_LEAF_CACHE[role]
+
+
+def role_for_run(tier, card) -> str:
+    """Which harness role this run wears. A review card is a leaf at any tier;
+    an implement card only becomes the leaf role when it routed down to tier 3."""
+    card_role = (card or {}).get("role")
+    if card_role == "review":
+        return "leaf-reviewer"
+    if card_role == "implement" and (tier or 2) >= 3:
+        return "leaf-implementer"
+    return TIER_HARNESS_ROLE.get(tier, "suborchestrator")
+
+
+def role_is_leaf(tier, card) -> bool:
+    return harness_role_is_leaf(role_for_run(tier, card))
+
+
+def leaf_isolation_refusal(tier, isolate: bool, client: str, leaf: bool = False) -> str | None:
+    """Why this run must not start where it stands, or None when it may.
+
+    Keyed on the role's leaf flag OR the tier being in ISOLATE_TIERS, never on
+    the tier number alone: a leaf role that somehow routed to tier 1 is still a
+    leaf.
+    """
+    if isolate or client in NO_ISOLATE_CLIENTS:
+        return None
+    if not (leaf or tier in ISOLATE_TIERS):
+        return None
+    who = "is a leaf role" if leaf else "is a spawned tier"
+    return ("tier %s %s and cannot run in the caller's checkout: pass --isolate "
+            "so it gets its own isolated clone. It greps and globs the whole "
+            "tree, and git-ignored files (configuration/api-keys.yml, .env*) "
+            "live in a working checkout — the pattern fence cannot see them, "
+            "because grep/glob is matched against the search pattern, not the "
+            "searched file. An --isolate clone holds committed files only, so "
+            "no ignored secret is present, and a child it spawns inherits the "
+            "clone, not your checkout." % (tier, who))
+
+
+def isolate_source(cwd: str | None = None) -> str:
+    """The repo an --isolate clone is forked from (KEYDENY3g item 7).
+
+    ROOT is where *this script* lives, which for the MCP server is its own
+    checkout — so cloning from ROOT silently started every MCP-isolated sandbox
+    on the wrong branch while the worker ran in a clone of an unrelated HEAD.
+    The caller's cwd is the truth: its toplevel, falling back to ROOT when the
+    cwd is not a repository at all (a temp dir a test planned in).
+    """
+    cwd = cwd or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ROOT
+    return top or ROOT
+
+
+def isolate_clone(root: str, path: str, branch: str) -> str:
+    """Create the --isolate sandbox and return its base sha.
+
+    The steps are one function because the containment claim is about the
+    directory the worker lands in: `git clone --local` copies HEAD's tracked
+    files, so nothing git-ignored and nothing untracked exists in the clone
+    (KEYDENY3b), and the push fence plus the credential-free env make a push
+    out of it an accident guard, not a boundary (FF1, D-106).
+    """
+    subprocess.run(["git", "clone", "-q", "--local", root, path], check=True)
+    # The orchestrator still fetches from the sandbox path (unchanged); every
+    # remote's push URL is disabled and a pre-push hook is installed, so an
+    # unplanned `git push` — to origin or to the parent's absolute path the
+    # containment brief names — fails. ACCIDENT GUARD, not containment: see
+    # fence_sandbox_push. The credentials it cannot use are what really
+    # keeps the parent safe (worker_env, FF1b).
+    fence_sandbox_push(path)
+    subprocess.run(["git", "-C", path, "switch", "-q", "-c", branch], check=True)
+    # FF1c: the clone gets its own identity, local to itself. The worker's
+    # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
+    # path), so the operator's `user.name` is gone — and a worker that ends
+    # its brief with `git commit` would die on "Author identity unknown",
+    # leaving the run's work uncommitted. Same author the spawner's own
+    # end-of-run commit signs with.
+    for name, value in (("user.name", "autoos-worker"),
+                        ("user.email", WORKER_EMAIL)):
+        subprocess.run(["git", "-C", path, "config", "--local", name, value],
+                       check=True)
+    return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 # FF1 (D-106): what a spawned worker inherits. The caller's environment on this
 # host carries GitHub, provider and cloud credentials plus an ssh-agent socket,
@@ -2865,6 +3037,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
+        # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
+        # that gate denied in argv; opencode's gate is the overlay below.
         # FLEETP0 review item 4: the identity headers are not opencode's alone.
         # Every gateway client that can put a header on its own requests gets the
         # same pair (clients.HEADER_CLIENTS; the carriers and the qwen dead end
@@ -2876,8 +3050,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             headers = gateway_headers(tag, run_id)
             if client.name == "gemini":
                 env[clients.GEMINI_CUSTOM_HEADERS_ENV] = clients.gemini_custom_headers(headers)
-        cmd = clients.build_command(client, args.task, route["combo"], level, model,
-                                    joinable, headers)
+        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable,
+                                    deny_spawn=role_is_leaf(route.get("tier"),
+                                                            route.get("card")),
+                                    headers=headers)
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
@@ -2893,7 +3069,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
             # its own .git, so opencode resolves it as its own project root.
             sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                       "branch": "agent/%s" % run_id}
+                       "branch": "agent/%s" % run_id,
+                       # Forked from the caller's checkout, not from wherever this
+                       # script happens to live (KEYDENY3g item 7).
+                       "source": isolate_source()}
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -2908,8 +3087,16 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # itself. Every client takes the task as its last argv
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
-        cmd[-1] = isolate_task_prefix(sandbox["path"], ROOT,
+        sandbox.setdefault("source", isolate_source())
+        cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
                                      read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
+    if client.name == "opencode":
+        # KEYDENY3b item 1: the spawn gate is re-asserted in the overlay, which
+        # opencode merges after the checkout's own rules — a leaf cannot spawn an
+        # unfenced child even in a checkout whose opencode.jsonc drifted. The
+        # rules go last so that "last matching wins" cannot re-open a path the
+        # outside fence above just closed.
+        overlay.setdefault("permissions", []).extend(spawn_gate_rules(route["tier"]))
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     # FF1b item 4: a private, empty XDG_RUNTIME_DIR of its own instead of the
@@ -3254,7 +3441,7 @@ def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
     logs = os.path.join(ROOT, "logs")
     os.makedirs(logs, exist_ok=True)
     route = plan["route"]
-    card = ",".join("%s=%s" % kv for kv in sorted((route["card"] or {}).items())) or "-"
+    card = ",".join("%s=%s" % kv for kv in sorted((route.get("card") or {}).items())) or "-"
     line = ("%s client=%s agent=%s model=%s combo=%s reason=%s routing=%s card=%s depth=%d/%d "
             "free=%d sandbox=%s rc=%d secs=%.0f\n") % (
         datetime.datetime.now().isoformat(timespec="seconds"), plan["client"], plan["agent"],
@@ -5209,6 +5396,16 @@ def cmd_run(args, cfg: dict) -> int:
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
+    # KEYDENY3b item 2 / KEYDENY3g: a spawned tier gets no option to work in the
+    # caller's checkout. Read *after* build_plan because that is where a client
+    # that always isolates (qoder writes) forces it on — the force is what keeps
+    # that run legal. The verdict is computed here and returns before any client
+    # starts; a --dry-run only announces it, because planning touches nothing and
+    # an operator previews a route before deciding to run it.
+    leaf_refusal = leaf_isolation_refusal(route.get("tier"), bool(args.isolate),
+                                          client.name,
+                                          leaf=role_is_leaf(route.get("tier"),
+                                                             route.get("card")))
     # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
     # before anything is started -- a review by the author's own model family is
     # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
@@ -5244,7 +5441,7 @@ def cmd_run(args, cfg: dict) -> int:
         # read as reviewed. Filling in the verdict is the reviewer's job at the
         # end of the run, not the spawner's guess at the start of it.
         print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
-              "verdict=<fill in>" % (route["card"].get("author"), reviewer["model"]))
+              "verdict=<fill in>" % ((route.get("card") or {}).get("author"), reviewer["model"]))
         for line in resolver.reviewer_explain_lines(route["review_plan"]):
             print(line)
     if route.get("reviewer_note"):
@@ -5280,11 +5477,19 @@ def cmd_run(args, cfg: dict) -> int:
         if last_mile_note is not None:
             print("claude-budget: %s" % last_mile_note, file=sys.stderr)
         if plan["sandbox"]:
-            print("would run: git clone --local %s %s && git switch -c %s" % (ROOT, plan["sandbox"]["path"], plan["sandbox"]["branch"]))
+            print("would run: git clone --local %s %s && git switch -c %s" % (
+                plan["sandbox"].get("source") or isolate_source(),
+                plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))
         print("cwd: %s" % plan["cwd"])
         print("env: %s" % (", ".join(env_names) or "-"))
+        if leaf_refusal is not None:
+            print("note: this run would be refused: %s" % leaf_refusal)
         return 0
+    # KEYDENY3b: the leaf fence returns here, after the preview above and before
+    # anything is cloned or started.
+    if leaf_refusal is not None:
+        return refuse(leaf_refusal)
     if not shutil.which(plan["cmd"][0]):
         return refuse("%s is not installed (catalog: ./setup.sh --only <id> -y); see: list" % plan["cmd"][0], 3)
     ok, reason = clients.signin_state(client)
@@ -5361,27 +5566,12 @@ def cmd_run(args, cfg: dict) -> int:
         sb = plan["sandbox"]
         # Snapshot the parent checkout before the run: a worker that writes
         # outside its clone (live 2026-09-26) must fail as a leak, not a NO-OP.
-        parent_snap = parent_snapshot()
+        # The parent is the repo the clone was forked from (the caller's cwd),
+        # not the checkout this script happens to live in (KEYDENY3g item 7).
+        source = sb.get("source") or isolate_source()
+        parent_snap = parent_snapshot(source)
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
-        subprocess.run(["git", "clone", "-q", "--local", ROOT, sb["path"]], check=True)
-        # The orchestrator still fetches from the sandbox path (unchanged); the
-        # push URLs are disabled and the pre-push hook is installed, so an
-        # unplanned `git push` — to origin or to the parent's absolute path the
-        # containment brief names — fails. ACCIDENT GUARD, not containment: see
-        # fence_sandbox_push. The credentials it cannot use are what really
-        # keeps the parent safe (worker_env, FF1b).
-        fence_sandbox_push(sb["path"])
-        subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
-        # FF1c: the clone gets its own identity, local to itself. The worker's
-        # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
-        # path), so the operator's `user.name` is gone — and a worker that ends
-        # its brief with `git commit` would die on "Author identity unknown",
-        # leaving the run's work uncommitted. Same author the spawner's own
-        # end-of-run commit signs with.
-        for name, value in (("user.name", "autoos-worker"),
-                            ("user.email", WORKER_EMAIL)):
-            subprocess.run(["git", "-C", sb["path"], "config", "--local", name, value],
-                           check=True)
+        isolate_clone(source, sb["path"], sb["branch"])
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
@@ -5631,7 +5821,8 @@ def cmd_run(args, cfg: dict) -> int:
             sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
             reflog=", ".join(reset_away),
             brief=plan.get("brief") or "")
-        leak = parent_leak(parent_snap, sandbox=sb["path"])
+        leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
+                           sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
@@ -5787,6 +5978,37 @@ def cmd_inbox(args) -> int:
     return 0
 
 
+def cmd_card(args) -> int:
+    """`card check <file>` — validate one state card (RESTART spec §1, lane R2a).
+
+    The rules live in tools/autoos_card.py; this is the printing and the exit
+    code. Every problem prints on stdout with its line number, because the
+    lines *are* the deliverable: a successor edits the card from them. What is
+    wrong with the file as a whole (it is not there, not readable) is a notice
+    on stderr, the way `inbox` splits content from notices, so a pack can embed
+    stdout verbatim. A `last-event` that does not parse is §0's problem, so it
+    reads §0's own parser and its own wording.
+
+    Exit 0 valid, 1 the card breaks at least one §1 rule, 2 the file is
+    unreadable (argparse itself refuses when no card is named)."""
+    try:
+        text = card_mod.read_card(args.file)
+    except card_mod.CardUnreadable as exc:
+        print("card check: %s" % exc, file=sys.stderr)
+        return 2
+    problems = card_mod.check_card(text)
+    if not problems:
+        print("card check: OK — %s (%d lines, cap %d)"
+              % (args.file, len(card_mod.split_lines(text)), card_mod.MAX_TOTAL_LINES))
+        return 0
+    for problem in problems:
+        print("card check: line %d: %s" % (problem.line, problem.text))
+    print("card check: %s is not a card (§1): %d %s"
+          % (args.file, len(problems), "problem" if len(problems) == 1 else "problems"),
+          file=sys.stderr)
+    return 1
+
+
 # ── verbs: one table builds the parsers, one table dispatches ────────────────
 # What this replaces is the old last line of main(),
 # `cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)`: every verb that
@@ -5845,7 +6067,10 @@ def _parser_run(sub):
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")
     run.add_argument("--free-model", default=DEFAULT_FREE_MODEL)
     run.add_argument("--isolate", action="store_true",
-                     help="run in a private git clone on its own branch; writes outside it are denied")
+                     help="run in a private git clone on its own branch; writes outside it are "
+                          "denied. Mandatory for every spawned tier (%s): a clone holds "
+                          "committed files only, so no git-ignored key file is in the tree it "
+                          "greps" % ", ".join(str(t) for t in ISOLATE_TIERS))
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",
@@ -5874,7 +6099,10 @@ def _parser_context(sub):
 def _parser_heartbeat(sub):
     heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
                                  "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
-    heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest PAUSE/RESUME line")
+    heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest "
+                             "stop (PAUSE anywhere, or a bare leading STOP/HALT/ABORT; "
+                             "HOLD/FREEZE are capacity notes, not stops) "
+                             "or release (RESUME)")
     heartbeat_p.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     heartbeat_p.add_argument("--repo", dest="repos", action="append",
                              help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
@@ -5980,6 +6208,19 @@ def _parser_inbox(sub):
                          help="print at most N records, cutting the oldest (default: %(default)s)")
 
 
+def _parser_card(sub):
+    card_p = sub.add_parser(
+        "card", help="the state card a successor resumes from (RESTART §1) — `card check "
+                      "<file>` prints every problem with its line number")
+    card_sub = card_p.add_subparsers(dest="card_action", metavar="ACTION",
+                                     required=True)
+    check_p = card_sub.add_parser(
+        "check", help="check one card: the header fields, the section order, each "
+                      "section's line cap, the 40-line total, the 200-char line limit "
+                      "and that `last-event` parses as a position (§0's parser)")
+    check_p.add_argument("file", help="the card file, usually <RUN>/status/<name>.card.md")
+
+
 VERB_PARSERS = {
     "usage": _parser_usage,
     "token-rate": _parser_token_rate,
@@ -5993,6 +6234,7 @@ VERB_PARSERS = {
     "review-status": _parser_review_status,
     "ready": _parser_ready,
     "inbox": _parser_inbox,
+    "card": _parser_card,
 }
 
 # Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
@@ -6002,6 +6244,7 @@ VERB_PARSERS = {
 # them belongs to that module.
 VERB_HANDLERS = {
     "context": lambda args, cfg: cmd_context(args),
+    "card": lambda args, cfg: cmd_card(args),
     "heartbeat": lambda args, cfg: cmd_heartbeat(args),
     "inbox": lambda args, cfg: cmd_inbox(args),
     "list": lambda args, cfg: cmd_list(cfg),

@@ -5,8 +5,7 @@
   "revision": 0,
   "mcp_server_refs": [
     "serena",
-    "graphify",
-    "context7"
+    "graphify"
   ],
   "agent_kind": "openhands",
   "llm_profile_ref": "deepseek-flash",
