@@ -781,8 +781,25 @@ def _claude_budget_removed(removed) -> bool:
                for reasons in removed.values() for reason in reasons)
 
 
+def credit_leg_priced(model_id, registry) -> bool:
+    """True when the registry carries a real price for `model_id`.
+
+    ``0`` is not a price (brief FREEKEYS-1b item 3 / rev-freekeys1 finding 3): a row
+    with `price_in`/`price_out` of 0 bills $0 through `autoos_usage.paid_spend`, so a
+    finite grant reads as untouched money while it drains. `prices_from_registry`
+    drops those rows from its table for the same reason, so the ledger and this
+    filter never disagree about what counts as priced.
+    """
+    model = registry["models"].get(model_id) or {}
+    try:
+        return float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
-               client="opencode", now=None, env=None, toolcalls_skips=None):
+               client="opencode", now=None, env=None, toolcalls_skips=None,
+               credit_guards=None, credit_warns=None):
     """``(legs, skipped, re_probe_notes)`` -- FT (fall-through, spec 2026-09-26
     operator decision): the serving legs of `route` that also pass every
     *per-leg* filter, and why each rejected leg did not.
@@ -834,6 +851,19 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       (``registry.leg_denied``) is skipped with reason ``leg_rules: <leg>
       denied by <rule id>`` - the same legs ``registry.gateway_legs`` drops,
       since a gateway combo never carries a denied leg.
+    - the credit grant (brief FREEKEYS-1b, items 2-3): a leg of a provider whose
+      ``tier`` is ``credit`` is a finite amount of the operator's money, so two
+      things refuse it. No price on file -- ``credit leg unpriced <model>`` --
+      because an unpriced grant bills $0 and would read as an untouched allowance
+      while it drains; this half needs no `credit_guards` at all, which is what
+      makes it fail closed rather than open. And the guard's own ``refuse`` at
+      100 % of ``providers.<id>.monthly_cap_usd`` -- ``credit exhausted <provider>
+      $x/$cap`` -- reading the state `autoos_usage.credit_guards` computes from
+      recorded usage rows, so the figure the resolver acts on is the figure the
+      usage report prints. At the warn line (``monthly_warn_fraction``, 80 % by
+      default) the leg stays: there is money left. It is named in `credit_warns`
+      so the plan's ``explain`` and the caller's report say so instead of the
+      guard being silent until it blocks.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -948,6 +978,29 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("leg_rules: %s denied by %s"
                            % (leg, rule.get("id", "(unnamed)")))
 
+        # FREEKEYS-1b (items 2-3): a `credit` provider's grant is finite, and the
+        # guard has to bite here -- a number the report prints and nothing refuses
+        # is what let a $10 grant drain invisibly (rev-freekeys1 findings 2 and 3).
+        # Both halves fail closed: no `credit_guards` from the caller means no spend
+        # data, and no spend data plus no price is a leg nobody can cost, so the
+        # unpriced check refuses it outright.
+        if registry["providers"][provider_id].get("tier") == "credit":
+            if not credit_leg_priced(model_id, registry):
+                reasons.append("credit leg unpriced %s" % model_id)
+            guard = (credit_guards or {}).get(provider_id) or {}
+            if guard.get("state") == "refuse":
+                reasons.append("credit exhausted %s $%.2f/$%.2f"
+                               % (provider_id, float(guard.get("spend_usd") or 0.0),
+                                  float(guard.get("cap_usd") or 0.0)))
+            elif guard.get("state") == "warn" and credit_warns is not None:
+                line = "credit warn %s $%.2f/$%.2f" % (
+                    provider_id, float(guard.get("spend_usd") or 0.0),
+                    float(guard.get("cap_usd") or 0.0))
+                # One line per grant per plan, however many of its legs a route
+                # carries and however many routes were filtered to get here.
+                if line not in credit_warns:
+                    credit_warns.append(line)
+
         if agentic and not proven and _rate_limited(leg, overlay):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
 
@@ -962,7 +1015,8 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
 
 def filter_routes(card, features, client_state, registry, overlay,
-                  client="opencode", now=None, env=None, toolcalls_skips=None):
+                  client="opencode", now=None, env=None, toolcalls_skips=None,
+                  credit_guards=None, credit_warns=None):
     """Split routes into ``(survivors, removed)`` per spec 5.3 step 1, as
     amended by FT (2026-09-26 operator decision): "a leg that is
     rate-limited or unproven makes the combo fall through to the next proven
@@ -1041,7 +1095,8 @@ def filter_routes(card, features, client_state, registry, overlay,
 
         usable, skipped, _ = usable_legs(route, card, features, client_state,
                                         registry, overlay, client, now, env,
-                                        toolcalls_skips)
+                                        toolcalls_skips, credit_guards,
+                                        credit_warns)
         if not usable:
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
@@ -2106,7 +2161,8 @@ def _escalation(chosen, scores, registry, card=None, env=None):
 
 
 def plan(card, features, client_state, registry, overlay, track_record,
-        orchestrator_model, now=None, client="opencode", env=None):
+        orchestrator_model, now=None, client="opencode", env=None,
+        credit_guards=None):
     """The resolver v2 entry point: compose the pure functions into a ``route_plan``.
 
     Pure -- no I/O, no clock of its own; `now` is the caller's clock reading,
@@ -2129,9 +2185,14 @@ def plan(card, features, client_state, registry, overlay, track_record,
 
     now = _now_or_default(now)
     toolcalls_skips = set()
+    # FREEKEYS-1b item 2: a credit grant that has reached its warn line is still
+    # usable, so it is not a skipped leg -- it is a line the operator reads. The
+    # leg filter fills this accumulator and the plan puts it in `explain`.
+    credit_warns = []
     survivors, removed = filter_routes(card, features, client_state, registry,
                                        overlay, client, now, env,
-                                       toolcalls_skips)
+                                       toolcalls_skips, credit_guards,
+                                       credit_warns)
     bucket_name, _ = bucket(features, card)
 
     if not survivors:
@@ -2158,7 +2219,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
                 "escalation": [],
                 "wait_until": wait_until,
                 "reason": wait_reason,
-                "explain": claude_budget_explain(registry),
+                "explain": claude_budget_explain(registry) + list(credit_warns),
             }
         result = no_route(removed)
         result["bucket"] = bucket_name
@@ -2212,7 +2273,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
     _, skipped_legs, re_probe_notes = usable_legs(
         registry["routes"][chosen["route"]], card,
         features, client_state, registry, overlay,
-        client, now, env)
+        client, now, env, None, credit_guards)
     if skipped_legs:
         reason_parts.append(
             "falls through %d skipped leg(s)" % len(skipped_legs))
@@ -2263,7 +2324,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "state": "deferred" if defer_time is not None else "ready",
         "defer_until": _format_iso_z(defer_time) if defer_time is not None else None,
         "reason": "; ".join(reason_parts),
-        "explain": ([s["reason"] for s in scores]
+        "explain": (list(credit_warns) + [s["reason"] for s in scores]
                     + reviewer_explain_lines(review)),
         "skipped_legs": skipped_legs,
         "re_probe_notes": re_probe_notes,
