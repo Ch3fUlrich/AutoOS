@@ -5149,8 +5149,11 @@ def stop_scope(unit, grace: float = 5.0) -> dict:
     out = _systemctl("show", "-p", "ActiveState", "--value", unit)
     state = out.stdout.strip() if out else ""
     if state != "active":
-        report["stopped"] = True
-        report["reason"] = "the scope is already %s" % (state or "unknown")
+        # SB-A4 item 3: `stopped` here means "there is nothing running in it",
+        # which the canceller did not do. `was_active` is what tells an honest
+        # caller that no kill was delivered by this call.
+        report.update({"stopped": True, "was_active": False,
+                       "reason": "the scope is already %s" % (state or "unknown")})
         return report
     for sig in ("SIGTERM", "SIGKILL"):
         _systemctl("kill", "--kill-whom=all", "--signal=%s" % sig, unit)
@@ -5163,6 +5166,7 @@ def stop_scope(unit, grace: float = 5.0) -> dict:
     out = _systemctl("show", "-p", "ActiveState", "--value", unit)
     state = out.stdout.strip() if out else ""
     _systemctl("stop", unit)
+    report["was_active"] = True
     report["stopped"] = state != "active"
     report["reason"] = ("the scope is %s" % (state or "gone")) if report["stopped"] \
         else "the scope is still active after SIGKILL to every process in it"

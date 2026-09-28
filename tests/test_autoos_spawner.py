@@ -1088,21 +1088,28 @@ class McpToolTests(unittest.TestCase):
     def make_run(self, run_id, **job):
         """A synthetic run dir carrying only what _state() reads, for the
         lifecycle states a real dry run cannot be parked in deterministically
-        (canceled needs a cancel to land mid-run; lost needs a dead pid)."""
+        (canceled needs a cancel to land mid-run; lost needs a dead pid).
+        `kill_record=<dict>` writes the runner-private record too — which is what
+        a cancellable run has in reality (SB-A4), and job.json names nothing
+        that gets signalled."""
         path = os.path.join(self.tmp, "agents", run_id)
         os.makedirs(path)
         job = dict({"id": run_id, "request": {}, "task": "t", "argv": [],
                     "cwd": str(ROOT), "route": {}, "started": time.time()}, **job)
+        record = job.pop("kill_record", None)
         mcp_server._write_json(os.path.join(path, "job.json"), job)
+        if record is not None:
+            mcp_server.write_kill_record(run_id, record)
         return path
 
     def test_task_states_are_the_spec_9_set(self):
-        # The exact A2A names in the spec's order; a typo here would leak into
-        # every consumer of status()/result() (D17: A2A adapter is a thin layer
-        # later only while the names match exactly).
+        # The A2A names in the spec's order; a typo here would leak into every
+        # consumer of status()/result() (D17: A2A adapter is a thin layer later
+        # only while the names match exactly), plus the one name the spec did not
+        # have to say honestly that a cancel killed nothing (SB-A4 item 3).
         self.assertEqual(mcp_server.TASK_STATES,
                          ("submitted", "working", "input_required", "completed",
-                          "failed", "canceled", "rejected"))
+                          "failed", "canceled", "cancel-failed", "rejected"))
 
     def test_a_dry_run_spawn_walks_submitted_working_completed(self):
         """A real dry-run run reports only A2A names, in the submitted ->
@@ -1167,7 +1174,9 @@ class McpToolTests(unittest.TestCase):
         """Spec §9 spells it "canceled" (one l); the old value survives in
         detail. The runner is a stub sleeper in its own session so cancel
         always lands while the run is working - a real dry run may finish
-        first, which is the no-op test above."""
+        first, which is the no-op test above. The run id is a real-shaped one
+        and the sleeper is recorded in the runner-private store, because a
+        cancel that killed nothing no longer reports canceled (SB-A4 item 3)."""
         sleeper = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1178,11 +1187,13 @@ class McpToolTests(unittest.TestCase):
                 sleeper.terminate()
             sleeper.wait()
         self.addCleanup(stop)
-        self.make_run("cancel-test", pid=sleeper.pid)
-        self.assertEqual(mcp_server.status("cancel-test")["state"], "working")
-        st = mcp_server.cancel("cancel-test")
-        self.assertEqual(st["state"], "canceled")
-        self.assertEqual(st["detail"], "cancelled")
+        self.make_run("20260928-231003-sba4-cancel", pid=sleeper.pid,
+                      kill_record={"mode": "write", "pgid": sleeper.pid,
+                                   "start": load_agent().proc_start_time(sleeper.pid)})
+        self.assertEqual(mcp_server.status("20260928-231003-sba4-cancel")["state"], "working")
+        st = mcp_server.cancel("20260928-231003-sba4-cancel")
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertEqual(st["detail"], "cancelled", st)
         self.assertIn("canceled", mcp_server.TASK_STATES)
 
     def test_a_dead_pid_without_exit_json_is_failed_lost(self):
@@ -1212,10 +1223,17 @@ class McpToolTests(unittest.TestCase):
         self.addCleanup(stop)
         return proc
 
-    def make_asking_run(self, run_id, text="ship or revert?"):
+    def make_asking_run(self, run_id, text="ship or revert?", record=False):
         """A synthetic working run whose worker has just asked a question -
-        the file tools/autoos-ask.py writes, exactly as it writes it."""
-        path = self.make_run(run_id, pid=self.make_sleeper().pid)
+        the file tools/autoos-ask.py writes, exactly as it writes it.
+        `record=True` also writes the runner-private kill record, so a cancel
+        of it has something it may actually signal."""
+        sleeper = self.make_sleeper()
+        job = {"pid": sleeper.pid}
+        if record:
+            job["kill_record"] = {"mode": "write", "pgid": sleeper.pid,
+                                  "start": load_agent().proc_start_time(sleeper.pid)}
+        path = self.make_run(run_id, **job)
         mcp_server._write_json(os.path.join(path, "question.json"),
                                {"text": text, "asked": "2026-09-27T00:00:00Z"})
         return path
@@ -1277,11 +1295,12 @@ class McpToolTests(unittest.TestCase):
     def test_cancel_of_an_input_required_run_reports_canceled(self):
         """A run parked in input_required is blocked, so an operator stop is
         the only way out: cancel must reach it, not report nothing-to-cancel."""
-        self.make_asking_run("cancel-ask-test")
-        self.assertEqual(mcp_server.status("cancel-ask-test")["state"], "input_required")
-        st = mcp_server.cancel("cancel-ask-test")
-        self.assertEqual(st["state"], "canceled")
-        self.assertEqual(st["detail"], "cancelled")
+        run_id = "20260928-231003-sba4-askcancel"
+        self.make_asking_run(run_id, record=True)
+        self.assertEqual(mcp_server.status(run_id)["state"], "input_required")
+        st = mcp_server.cancel(run_id)
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertEqual(st["detail"], "cancelled", st)
 
     def test_run_job_exports_the_task_dir_to_the_child(self):
         """run_job passes AUTOOS_TASK_DIR=<run dir> so a blocked worker's brief
@@ -13107,6 +13126,11 @@ class ReviewVerdictRecoveryTests(unittest.TestCase):
             "request": {"card": {"role": "review" if review else "implement"}},
             "task": "t", "argv": argv, "cwd": str(ROOT), "route": {},
             "started": time.time(), "pid": os.getpid()})
+        # SB-A4 item 2: the mode is what the runner decided at spawn and wrote
+        # privately — job.json's request/argv, which the worker owns, decides
+        # nothing.
+        mcp_server.write_kill_record(run_id, {"mode": "review" if review else "write",
+                                              "dry_run": dry_run})
         with io.open(os.path.join(path, "output.log"), "w", encoding="utf-8") as fh:
             fh.write(text)
         mcp_server._write_json(os.path.join(path, "exit.json"),
@@ -13433,7 +13457,8 @@ class CancelDerivesKillTargetTests(unittest.TestCase):
     def _scope_stub(stopped):
         def stop(unit, **kw):
             stopped.append(unit)
-            return {"unit": unit, "stopped": True, "reason": "stub"}
+            return {"unit": unit, "stopped": True, "was_active": True,
+                    "reason": "stub"}
         return stop
 
     def test_cancel_stops_the_scope_the_run_id_names_not_job_jsons_claim(self):
@@ -13456,20 +13481,29 @@ class CancelDerivesKillTargetTests(unittest.TestCase):
                                  "cancel stopped a unit that job.json named, not "
                                  "the one the run id derives")
 
-    def test_cancel_refuses_a_job_record_that_describes_another_run(self):
-        stopped, killed = [], []
+    def test_a_renamed_job_record_still_gets_its_own_run_cancelled(self):
+        # SB-A4 item 1 retires SB-A3's claim check. Refusing to kill because
+        # job.json claims another run is not immunity — it is a worker dodging
+        # its own cancel with one rewrite of a file it owns. Everything cancel
+        # acts on is the run_id argument (the scope name derives from it) and the
+        # runner-private record (the group), so what job.json claims about itself
+        # changes nothing at all.
+        stopped = []
+        runner = self.sleeper()
+        agent = load_agent()
         self.make_run(self.RUN_ID, {"id": self.OTHER, "run_id": self.OTHER,
                                     "scope": "autoos-worker-%s.scope" % self.OTHER},
-                      record={"pgid": self.sleeper().pid, "start": 1})
-        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)), \
-             mock.patch.object(mcp_server.agent, "kill_verified_groups",
-                               lambda groups, **kw: killed.append(list(groups)) or []):
+                      record={"pgid": runner.pid,
+                              "start": agent.proc_start_time(runner.pid)})
+        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)):
             st = mcp_server.cancel(self.RUN_ID)
-        self.assertIn("error", st, st)
-        self.assertEqual(stopped, [], "cancel stopped a scope for a run id the "
-                                      "record does not belong to")
-        self.assertEqual(killed, [], "cancel killed a group for a run id the "
-                                     "record does not belong to")
+        self.assertNotIn("error", st, st)
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertEqual(stopped, [agent.worker_scope_unit(self.RUN_ID)],
+                         "cancel stopped the unit job.json named, not the one the "
+                         "run id derives")
+        self.assertTrue(self._wait_gone(runner.pid),
+                        "a run that renamed itself in its own job.json escaped the kill")
 
     def test_a_bad_run_id_is_refused_before_anything_is_stopped(self):
         agent = load_agent()
@@ -13490,7 +13524,9 @@ class CancelDerivesKillTargetTests(unittest.TestCase):
              mock.patch.object(mcp_server.agent, "kill_verified_groups",
                                lambda groups, **kw: []):
             st = mcp_server.cancel("legacy-run-name")
-        self.assertEqual(st["state"], "canceled", st)
+        # SB-A4 item 3: with no derivable unit and no private record there is
+        # nothing this cancel could signal, so it must not report canceled.
+        self.assertEqual(st["state"], "cancel-failed", st)
         self.assertEqual(stopped, [], "cancel derived a unit from a run id that is not one")
         self.assertTrue(st["cancel"]["scope"]["refused"], st)
 
@@ -13545,11 +13581,15 @@ class CancelDerivesKillTargetTests(unittest.TestCase):
                       {"group": {"pgid": runner.pid,
                                  "start": agent.proc_start_time(runner.pid)}})
         with mock.patch.object(mcp_server.agent, "stop_scope",
-                               lambda unit, **kw: {"unit": unit, "stopped": True}):
+                               lambda unit, **kw: {"unit": unit, "stopped": True,
+                                                   "was_active": False,
+                                                   "reason": "the scope is already inactive"}):
             st = mcp_server.cancel(self.RUN_ID)
-        self.assertEqual(st["state"], "canceled", st)
         self.assertTrue(self._alive(runner.pid),
                         "cancel killed a group named in the worker-writable job.json")
+        # SB-A4 item 3: nothing was signalled at all — no private record, and the
+        # derived scope was not running — so this cancel did not cancel anything.
+        self.assertEqual(st["state"], "cancel-failed", st)
 
     def test_the_kill_store_is_outside_the_task_dir_and_unnamed_in_the_worker_env(self):
         agent = load_agent()
@@ -13670,10 +13710,12 @@ class VerifiedGroupKillTests(unittest.TestCase):
             "recycled-run", {"pgid": runner.pid,
                              "start": self.agent.proc_start_time(runner.pid) + 7})
         st = mcp_server.cancel("recycled-run")
-        self.assertEqual(st["state"], "canceled", st)
         self.assertTrue(self._alive(runner.pid),
                         "cancel killed a pgid whose leader start time did not match")
         self.assertIn("skipped", json.dumps(st), json.dumps(st))
+        # SB-A4 item 3: the refused group is the whole story of this cancel, so
+        # the state says so instead of claiming the run was canceled.
+        self.assertEqual(st["state"], "cancel-failed", st)
 
     @staticmethod
     def _restore_state(old):
@@ -13899,6 +13941,8 @@ class VerdictLineTests(unittest.TestCase):
             "request": {"card": {"role": "review"}},
             "task": "t", "argv": ["run", "--card", "role=review", "t"],
             "cwd": str(ROOT), "route": {}, "started": time.time(), "pid": 0})
+        # SB-A4 item 2: review mode comes from the runner-private record.
+        mcp_server.write_kill_record(run_id, {"mode": "review"})
         mcp_server._write_json(os.path.join(path, "exit.json"),
                                {"rc": 0, "ended": time.time()})
         st = mcp_server.status(run_id)
@@ -13917,6 +13961,256 @@ class VerdictLineTests(unittest.TestCase):
         else:
             os.environ["AUTOOS_STATE_DIR"] = self.old
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups and the runner-private record store")
+class RunnerPrivateRecordTests(unittest.TestCase):
+    """SB-A4 (D-103, the rest of item C). SB-A3 derived the SCOPE name from the
+    run id but still read the run's *identity* out of `job.json` (a record that
+    claimed another run refused the cancel) and its review/write *mode* out of
+    `job.json`'s request and argv — the same worker-writable file, in the
+    directory the runner exports as AUTOOS_TASK_DIR, owned by the same uid as the
+    worker. So a worker could rename itself to dodge a kill, or make a write run
+    read as a tier-3 reviewer and have its `VERDICT: ready` recovered into
+    `completed`.
+
+    The rule now: nothing that decides a kill target, a run identity or a run
+    MODE is read from job.json. The runner writes ONE immutable record at spawn
+    into the runner-private store (`<state>/kill/<run_id>.json`, 0700/0600):
+    run_id, mode, scope, group, created_at. job.json stays informational.
+    """
+
+    RUN_ID = "20260928-231003-sba4-aaaaaa"
+    OTHER = "20260928-231004-sba4-bbbbbb"
+    REVIEW_SPOOF = {"request": {"card": {"role": "review"}, "tier": 3},
+                    "argv": ["run", "--tier", "3", "--card", "role=review", "t"]}
+    VERDICT_OUT = "Checked the diff.\nVERDICT: ready\n"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    p.kill()
+            p.wait()
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sleeper(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        self.procs.append(proc)
+        return proc
+
+    def make_run(self, run_id, job_extra=None, record=None, text=None, exit_json=None):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path, exist_ok=True)
+        job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
+               "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+               "pid": os.getpid()}
+        job.update(job_extra or {})
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
+        if record is not None:
+            mcp_server.write_kill_record(run_id, record)
+        if text is not None:
+            with io.open(os.path.join(path, "output.log"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        if exit_json is not None:
+            mcp_server._write_json(os.path.join(path, "exit.json"), exit_json)
+        return path
+
+    @staticmethod
+    def _scope_stub(stopped):
+        def stop(unit, **kw):
+            stopped.append(unit)
+            return {"unit": unit, "stopped": True, "was_active": True, "reason": "stub"}
+        return stop
+
+    @staticmethod
+    def _alive(pid):
+        return CancelChannelTests._alive(pid)
+
+    def _wait_gone(self, pid, secs=12):
+        deadline = time.time() + secs
+        while time.time() < deadline and self._alive(pid):
+            time.sleep(0.05)
+        return not self._alive(pid)
+
+    def wait_done(self, run_id):
+        for _ in range(150):
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("working", "submitted"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
+
+    # --- the record the runner writes at spawn -------------------------------
+
+    def test_spawn_records_the_mode_the_runner_decided(self):
+        for i, (card, want) in enumerate((({"role": "review"}, "review"),
+                                          ({"role": "implement"}, "write"),
+                                          ({}, "write"))):
+            with self.subTest(card=card):
+                out = mcp_server.spawn({"task": "check the diff %d" % i, "cwd": str(ROOT),
+                                        "card": card, "dry_run": True})
+                self.assertNotIn("error", out, out)
+                self.wait_done(out["id"])
+                record = mcp_server.read_kill_record(out["id"])
+                self.assertEqual(record["mode"], want, record)
+                self.assertEqual(record["run_id"], out["id"], record)
+                self.assertTrue(record["created_at"].endswith("Z"), record)
+                self.assertTrue(record["dry_run"], record)
+                self.assertEqual(record["scope"],
+                                 mcp_server.agent.worker_scope_unit(out["id"]), record)
+                self.assertIsInstance(record["pgid"], int, record)
+                self.assertEqual(0o600, os.stat(mcp_server.kill_store_path(out["id"])).st_mode & 0o777)
+
+    def test_the_record_mode_does_not_reride_on_a_later_group_write(self):
+        # The runner re-records its own group in run_job; that is not a second
+        # chance to decide the mode, the scope or the created_at.
+        self.make_run(self.RUN_ID, record={"mode": "review", "scope": "autoos-worker-x.scope",
+                                           "pgid": 1, "start": 2})
+        first = mcp_server.read_kill_record(self.RUN_ID)["created_at"]
+        self.assertTrue(mcp_server.write_kill_record(self.RUN_ID, {"pgid": 4242, "start": 7,
+                                                                   "mode": "write",
+                                                                   "scope": "other.scope"}))
+        record = mcp_server.read_kill_record(self.RUN_ID)
+        self.assertEqual(record["mode"], "review", record)
+        self.assertEqual(record["scope"], "autoos-worker-x.scope", record)
+        self.assertEqual(record["created_at"], first, record)
+        self.assertEqual((record["pgid"], record["start"]), (4242, 7), record)
+
+    # --- HIGH 1: cancel is immune to a rewritten job.json -------------------
+
+    def test_cancel_ignores_a_job_json_that_claims_another_run(self):
+        agent = load_agent()
+        bystander = self.sleeper()
+        runner = self.sleeper()
+        self.make_run(self.RUN_ID, {
+            "id": self.OTHER, "run_id": self.OTHER,
+            "scope": agent.scope_unit_name(self.OTHER),
+            "group": {"pgid": bystander.pid, "start": agent.proc_start_time(bystander.pid)},
+        }, record={"mode": "write", "pgid": runner.pid,
+                   "start": agent.proc_start_time(runner.pid)})
+        stopped = []
+        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertNotIn("error", st, st)
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertEqual(stopped, [agent.worker_scope_unit(self.RUN_ID)],
+                         "cancel stopped the unit job.json claimed, not the one the "
+                         "run id derives")
+        self.assertTrue(self._wait_gone(runner.pid),
+                        "the run renamed in its own job.json dodged the kill")
+        self.assertTrue(self._alive(bystander.pid),
+                        "CANCELORPHAN-in-reverse: cancel killed the group a worker "
+                        "wrote into its own job.json")
+
+    # --- HIGH 2: verdict recovery reads the record, never job.json ----------
+
+    def test_a_write_run_spoofed_into_a_review_gets_no_verdict_recovery(self):
+        # The measured spoof: a writer rewrites its own job.json to read as a
+        # tier-3 reviewer and prints `VERDICT: ready`; its rc is not 0. Recovery
+        # would call that completed/verdict-recovered, and the dispatcher would
+        # treat an unreviewed writer as a finished review.
+        self.make_run(self.RUN_ID, dict(self.REVIEW_SPOOF), record={"mode": "write"},
+                      text=self.VERDICT_OUT, exit_json={"rc": 10, "ended": time.time()})
+        st = mcp_server.status(self.RUN_ID)
+        self.assertEqual(st["state"], "failed", st)
+        self.assertNotIn("verdict", st, st)
+        self.assertNotIn("verdict-recovered", st["detail"], st)
+
+    def test_a_spoofed_write_run_is_not_failed_for_lacking_a_verdict_either(self):
+        self.make_run(self.RUN_ID, dict(self.REVIEW_SPOOF), record={"mode": "write"},
+                      text="I wrote the fix.\n", exit_json={"rc": 0, "ended": time.time()})
+        st = mcp_server.status(self.RUN_ID)
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "done", st)
+
+    def test_only_the_private_record_grants_verdict_recovery(self):
+        # The mirror image: the record says review, job.json says implement, and
+        # the recovery still applies — the record decides both ways.
+        self.make_run(self.RUN_ID, {"request": {"card": {"role": "implement"}},
+                                    "argv": ["run", "--card", "role=implement", "t"]},
+                      record={"mode": "review"}, text=self.VERDICT_OUT,
+                      exit_json={"rc": 10, "ended": time.time()})
+        st = mcp_server.status(self.RUN_ID)
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "verdict-recovered", st)
+        self.assertIn("ready", st["verdict"], st)
+
+    def test_a_run_with_no_private_record_is_never_read_as_a_review(self):
+        self.make_run(self.RUN_ID, dict(self.REVIEW_SPOOF), text=self.VERDICT_OUT,
+                      exit_json={"rc": 10, "ended": time.time()})
+        st = mcp_server.status(self.RUN_ID)
+        self.assertEqual(st["state"], "failed", st)
+        self.assertNotIn("verdict", st, st)
+
+    # --- LOW 3: a cancel that killed nothing never says "canceled" ----------
+
+    def test_cancel_of_a_legacy_run_id_with_no_record_reports_cancel_failed(self):
+        runner = self.sleeper()
+        self.make_run("legacy-run-name", {"pid": runner.pid})
+        stopped = []
+        with mock.patch.object(mcp_server.agent, "stop_scope", self._scope_stub(stopped)), \
+             mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                               lambda groups, **kw: []):
+            st = mcp_server.cancel("legacy-run-name")
+        self.assertEqual(st["state"], "cancel-failed", st)
+        self.assertEqual(st["detail"], "cancel-failed", st)
+        self.assertEqual(stopped, [], "a unit was derived from a run id that is not one")
+        self.assertTrue(st["cancel"]["scope"]["refused"], st)
+        self.assertIn("error", st, st)
+        self.assertTrue(self._alive(runner.pid), st)
+
+    def test_cancel_with_a_refused_scope_and_a_skipped_group_reports_cancel_failed(self):
+        agent = load_agent()
+        runner = self.sleeper()
+        self.make_run(self.RUN_ID, record={"mode": "write", "pgid": runner.pid,
+                                           "start": agent.proc_start_time(runner.pid) + 7})
+        with mock.patch.object(mcp_server.agent, "stop_scope",
+                               lambda unit, **kw: {"unit": unit, "stopped": False,
+                                                   "was_active": False,
+                                                   "reason": "systemctl --user is not reachable"}), \
+             mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                               lambda groups, **kw: [{"pgid": groups[0]["pgid"],
+                                                      "action": "skipped",
+                                                      "reason": "recycled"}]):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertEqual(st["state"], "cancel-failed", st)
+        self.assertIn("error", st, st)
+        self.assertTrue(self._alive(runner.pid), st)
+
+    def test_an_inactive_scope_is_not_reported_as_a_delivered_kill(self):
+        # stop_scope reports stopped=True for a unit that was already gone: that
+        # is nothing this cancel killed, and the state must say so when the group
+        # kill was skipped as well.
+        agent = load_agent()
+        runner = self.sleeper()
+        self.make_run(self.RUN_ID, record={"mode": "write", "pgid": runner.pid,
+                                           "start": agent.proc_start_time(runner.pid) + 7})
+        with mock.patch.object(mcp_server.agent, "stop_scope",
+                               lambda unit, **kw: {"unit": unit, "stopped": True,
+                                                   "was_active": False,
+                                                   "reason": "the scope is already inactive"}), \
+             mock.patch.object(mcp_server.agent, "kill_verified_groups",
+                               lambda groups, **kw: [{"pgid": groups[0]["pgid"],
+                                                      "action": "skipped",
+                                                      "reason": "recycled"}]):
+            st = mcp_server.cancel(self.RUN_ID)
+        self.assertEqual(st["state"], "cancel-failed", st)
+
 
 
 if __name__ == "__main__":
