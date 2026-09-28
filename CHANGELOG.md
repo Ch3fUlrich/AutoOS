@@ -5,6 +5,472 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the stop class is PAUSE plus the imperative STOP/HALT/ABORT; HOLD and FREEZE stay capacity notes (RESTART R2a10, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a9 open #1, S1, safety): R2a9 widened
+  the pause class to stop *vocabulary* with PAUSE's wide rules, and the live corpus paid at
+  once — `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) … max 4 local units/workers`, a
+  released memory-capacity note, read as a hard stop: heartbeat exited 3 and `run`/`spawn`
+  refused on three live inboxes. A false stop that halts the fleet is not acceptable, so the
+  class is now `PAUSE_ORDER_WORDS` = PAUSE, STOP, HALT, ABORT (HOLD and FREEZE out) and
+  `_gives_stop` splits it by **shape**, symmetric with the strict release: PAUSE keeps the
+  R2a4–R2a9 wide read unchanged, the other three stop only when the bare uppercase word is
+  the first word of an unmarked payload — `→ done: STOP all lanes obeyed`,
+  `fleet note: runs were stopped at 14:00`, `no STOP needed` mid-note and
+  ``operator: `STOP` `` are mentions. The record-wide negation veto and the bare-leading
+  `RESUME` release are untouched. Re-scanned over the ten real inboxes: **0** records are a
+  bare imperative stop, and `pause_state` is back to the R2a8 baseline exactly — 3 active
+  (`L1-backlog.md`, `L1-main.md`, `L1-routing.md`) with the same winning records, the
+  `MEM HOLD LIFTED` note inactive everywhere.
+
+### Fixed — the veto is the record, the release is a bare leading RESUME, and STOP/HOLD/HALT/ABORT stop the run (RESTART R2a9, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a8, S1, safety, FIX-FIRST): R2a8
+  replaced one heuristic with another. It split the record into sentences and let both the
+  negation veto and the release ride that split — and a splitter reads an abbreviation
+  (`e.g.`) and a decimal (`3.5`) as a sentence break, which is a way for a negation to
+  escape the veto, and for a *mention* to earn a head. The decision is to stop
+  sentence-splitting and make both sides strict by construction. **(1) The veto is the
+  record.** `_sentence_span` is gone; `_record_is_negated` reads the whole **payload**
+  (everything after the speaker prefix and, in an acknowledgement, after the marker —
+  `_ack_head`/`_payload_start` stay the one home of that split), so a `NEGATION_WORDS` word
+  anywhere in it closes nothing: `→ done: PAUSE lifted e.g. not confirmed by ops`,
+  `→ done: no merges today. PAUSE lifted` and
+  `→ main: no agreement was reached; PAUSE acknowledged` all report a stop still in force.
+  No word joined `NEGATION_WORDS`; the round's point is the structure again.
+  **(2) The release is a bare leading RESUME.** `_resumes`' shape (a) no longer accepts the
+  first word of *any* sentence — the payload must open **directly** with the uppercase word,
+  with no quote, backtick or parenthesis in front of it (`operator: "RESUME all lanes"`,
+  ``operator: `RESUME` ``), no `?` anywhere in the payload (`operator: RESUME?`,
+  `RESUME tomorrow?`), no negation, and no *undoing* close within the window; shape (b)
+  stays the acknowledgement that says nothing but `RESUME acknowledged`/`acked` plus
+  punctuation or a time. So `note the fix landed. RESUME every lane`,
+  `operator: work done. RESUME all lanes` and `noting e.g. RESUME is due` order nothing,
+  while `operator: RESUME all lanes` and `→ done: RESUME acknowledged` still lift.
+  **(3) STOP, HOLD, HALT and ABORT are PAUSE-class.** `PAUSE_ORDER_WORDS` is the filter
+  `pause_state` reads (through `_gives_order(text, _PAUSE_ORDER_RE)` — the same exemption,
+  one narrower list), closing R2a8's recorded probe: `operator: STOP all lanes` reported
+  `active: False` while `_gives_order` called it an order. `FREEZE` stays out of the class
+  and `RESUME` never joins it. Both sides read `_ack_head`, `_record_is_negated` and
+  `_order_word_is_closed`; no second copy of the rule.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2238
+  records** — the corpus is live and grew during the run — 927 acknowledgements, 187
+  quoting an order word, 8 quoting `PAUSE`, 0 quoting
+  an uppercase `RESUME`): **0** records change `_resumes` (the release half moves nobody —
+  the corpus has never written an imperative `RESUME`), **1** changes `_gives_order`
+  (`→ done: combined FLEETSPEC review came back NOT READY …`, whose close R2a8's sentence
+  cut had exempted), and **30** change class as *stop* records under (3) — 25 unmarked
+  fleet notes and 5 acknowledgements. `pause_state` goes from **3 active to 4**:
+  `L2-general.md` flips inactive → active and `L1-backlog.md`/`L1-routing.md` change their
+  winning record, in all three cases to the same line —
+  `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze rule applies
+  again: max 4 local units/workers fleet-wide …`. It wins because an **unmarked** record
+  never gets its closing word read at all (R2a4's wide reading, unchanged here), so a
+  `MEM HOLD`/`CHEAP-WORKER HOLD`/`ON HOLD` capacity note now reads as a hard stop that its
+  own `LIFTED` cannot end. That is the spurious direction the asymmetry allows — one wasted
+  heartbeat and a `RESUME`, never a lost order — but it is a cost measured on live inboxes,
+  so it is recorded as an open item rather than glossed.
+- **Docs:** RESTART spec §0 holds the rule (the payload-wide veto, the bare-head release,
+  `PAUSE_ORDER_WORDS`, the measured cost); `docs/routing.md` cites §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_payload_start`/`_record_is_negated` instead of
+  restating it.
+
+### Fixed — the release is strict by construction and the negation veto spans the sentence (RESTART R2a8, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7
+  widened the negation veto to the whole *window* and gated the RESUME half like a PAUSE —
+  both were still wide enough to lose a stop. **(1) The veto outran its window.**
+  `→ done: PAUSE lifted but it was never really confirmed by ops` closed the stop because
+  the negation sat five words out, past `_CLOSING_WINDOW`. The unit is now the **sentence**:
+  `_sentence_span` splits on `.` `;` `!` `?` and newline, and `_order_word_is_negated` reads
+  it whole, so a sentence that keeps talking after its closing word cannot close the order
+  (`PAUSE lifted and the record is unconfirmed by ops`,
+  `PAUSE released, and ops never signed that off`, `PAUSE ended but that was not the
+  operator's call` all stay in force). The same rule is what makes the veto *narrower* where
+  a negation belongs to a different claim: `→ done: no merges today. PAUSE lifted` and
+  `→ main: nothing was agreed; PAUSE acknowledged` close — the negation never reaches in
+  across a sentence boundary. No word joined `NEGATION_WORDS`; the round's point is that the
+  structure, not the vocabulary, carries this.
+  **(2) A mention of RESUME lifted the stop.** R2a7's gate vetoed a *negated* and an
+  *undone* RESUME, so `→ done: we should RESUME tomorrow`, `→ done: considering RESUME
+  options`, `→ done: RESUME pending` and `→ done: discussed RESUME` each un-stopped a run
+  nobody released. `_resumes` is now strict by construction and counts exactly two shapes:
+  **(a)** a record with **no** acknowledgement marker, where `RESUME` is the first word of
+  its payload or of its sentence — the imperative the operator writes (`operator: RESUME all
+  lanes`, `from L0 (operator) RESUME now`, `work done. RESUME every lane`) — unnegated in
+  that sentence and un-undone within the window; **(b)** an acknowledgement whose sentence
+  says nothing but the landing — `RESUME` plus a `RELEASE_ACK_WORDS` word (`acknowledged`,
+  `acked`, the release half of `REPORTING_CLOSING_WORDS`, named once and asserted as a
+  subset), optionally followed by punctuation or a time (`→ done: RESUME acknowledged at
+  12:00`), and by no prose (`→ done: RESUME acknowledged but ops still holding` lifts
+  nothing). `lesson:` lifts nothing, as before. Both shapes read the shared `_ack_head`
+  (the marker *and* where the payload starts), `_sentence_span`, `_order_word_is_negated`
+  and `_order_word_is_closed` — the rule has one home, no second copy.
+- **Recorded, not redesigned (the brief's follow-up probe):** `→ main: PAUSE lifted. STOP
+  all lanes` — `_gives_order` reports the record as an active order (the closed PAUSE half
+  does not exempt the open STOP half), and `pause_state` therefore calls the inbox active
+  *through* the PAUSE word in it. `pause_state`'s filter is `_PAUSE_RE` alone, so a bare
+  `operator: STOP all lanes` — or `HOLD every merge` — reports `active: False` while
+  `_gives_order` says it is an order. Both are pinned by tests as the exact behaviour.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2220
+  records**, 921 acknowledgements, 186 quoting an order word, 8 quoting `PAUSE`, **0 quoting
+  `RESUME`**): **0** records change `_gives_order`, **0** change `_resumes`, and
+  `pause_state` is identical on all 10 files (**3 active** both ways). The corpus is again
+  no evidence for either fix — it has never written a RESUME line and its PAUSE lines are
+  short, so the release half and the far-flung negation are covered only by the unit tests.
+- **Docs:** RESTART spec §0 holds the rule (sentence-span veto, the two release shapes, the
+  derived `RELEASE_ACK_WORDS` subset); `docs/routing.md` and the docstrings cite §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_sentence_span` instead of restating it.
+
+### Fixed — a RESUME is gated the way a PAUSE is, and a negation anywhere in the closing window keeps the order open (RESTART R2a7, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a6, S1, safety): two HIGHs,
+  both in the direction that loses a stop. **(1) The ungated RESUME.** `pause_state`
+  gated its PAUSE half on the R2a5/R2a6 ack rules but took its RESUME half on a bare
+  `_RESUME_RE.search`, so
+  `→ done: applied the fix already; RESUME was never issued, still holding` written after
+  `→ done: PAUSE all lanes until further notice` reported `active: False` — a release
+  nobody gave. A RESUME now counts only where it is itself an order, through the same
+  `_ack_marker` / `_order_word_is_negated` / `_order_word_is_closed` helpers the PAUSE
+  half uses (`_resumes`), never a second copy of the rule. Two readings of that window
+  differ, each toward holding the stop: a negation vetoes a *release* in every record
+  shape (`operator: no RESUME given yet` clears nothing), where for a stop word it vetoes
+  only the close (`PAUSE NOW, no launches` stays a hard stop); and `CLOSING_WORDS` is
+  partitioned, derived rather than hand-copied, into `REPORTING_CLOSING_WORDS`
+  (`acknowledged`, `acked`, `cleared`, `resolved`), which report a release landing so
+  `→ done: RESUME acknowledged` still clears, and `UNDOING_CLOSING_WORDS` (the rest),
+  which undo one so `→ done: RESUME cancelled` holds. A `lesson:` record releases nothing.
+  **(2) The close that outran its own negation.** `_order_word_is_closed` returned at the
+  first closing word, so a negation standing *after* it closed the order anyway:
+  `PAUSE lifted but not confirmed`, `PAUSE lifted, not really` and
+  `PAUSE cleared, unconfirmed by ops` all reported a stop that ended. The veto now reads
+  the whole `_CLOSING_WINDOW` on either side of the order word before any close is
+  accepted, and `un-` is a prefix negation on any word of the window — R2a6's
+  `_NEGATED_CLOSING_RE` (which only caught `un-` on a closing word itself) is now
+  `_NEGATION_PREFIX_RE`. So `→ done: PAUSE lifted, not because the operator forgot`,
+  which R2a6 documented as closed, is deliberately an order still in force: an `un-` or
+  `no`-shaped word that is only vocabulary can veto a close and hold a lane one heartbeat
+  longer, and a spurious order remains the accepted cost while a lost one is not.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2036
+  records**, 864 of them acknowledgements, 161 quoting an order word, 7 carrying `PAUSE`,
+  **0 carrying `RESUME`**): pause-order records **7 before and 7 after**, `pause_state`
+  identical on all 10 files (**3 active** both ways), **0 records reclassified by the
+  RESUME gate**. Exactly one record changes `_gives_order` verdict at all —
+  `→ done: freeze cleared (2/4 units, 6.73GB)` — because `units` wears the `un-` prefix;
+  it names no `PAUSE`, so no inbox flips. The corpus is again no evidence for either fix:
+  it never writes a RESUME line, so the release half is covered only by the unit tests.
+- **Docs:** RESTART spec §0 is the one home for the rule (window, veto, stop/release
+  partition); `docs/routing.md` and the docstrings point at it and at
+  `_gives_order`/`_resumes` instead of restating it, and §0's "whichever of the two comes
+  first decides" sentence is replaced by the whole-window rule it describes.
+
+### Fixed — no generic closing words and no negated close, so an acknowledgement stops swallowing live orders (RESTART R2a6, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a5, S1, safety): R2a5's
+  exemption was still wide enough to lose an order two ways. **(1) Generic words.**
+  `over`, `done` and `noted` sat in `CLOSING_WORDS` and they are ordinary vocabulary
+  *inside* an order sentence, so `→ done: noted. PAUSE over the weekend`,
+  `→ done: PAUSE done by 18:00` and `→ main: PAUSE noted for all lanes` each read as
+  the report of a stop that never ended. The list now holds only words that state one
+  thing — that the order is over (`lifted`, `ended`, `cancelled`, `canceled`, `removed`,
+  `released`, `acknowledged`, `acked`, `cleared`, `resolved`). **(2) Negation.** A
+  closing word with a negation in front of it says the opposite:
+  `→ done: PAUSE was not lifted`, `→ done: PAUSE isn't cleared` and
+  `→ main: PAUSE never released` report a stop still holding, yet all three were
+  exempted. The new §0 list `NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`,
+  `without`)
+  vetoes a close when one of its words stands between the order word and the closing
+  word, `n't` matching at the end of the word it hangs on (so `won't` is caught too),
+  and `_NEGATED_CLOSING_RE` vetoes the prefix shape (`PAUSE unlifted`). `cannot` is on
+  the list because the shape was found while spot-checking the veto —
+  `→ done: PAUSE cannot be lifted` negates the close and spelled it as one word, so the
+  five words the brief named would have left that order lost.
+  `_order_word_is_closed` returns on the first word that decides either way, so a real
+  close ahead of a later negation still closes (`PAUSE lifted, not because …`).
+  Asymmetry unchanged (R2a4/R2a5): a veto past a genuine close costs a **spurious**
+  order — one wasted heartbeat and a RESUME — a lost one lets workers run against a
+  stop the operator gave.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1987 records**, 846 of them acknowledgements and 52 of those quoting an
+  order word): pause-order records **7 before and 7 after**, **0 PAUSE-bearing records
+  changed classification**, and `pause_state` identical on all 7 files (the three
+  active files' winning texts exactly 80 chars, truncated as specified). The corpus is
+  again silent on the defect — exactly one record flips verdict at all, a `→ done:` ack
+  whose *HOLD* was closed by `noted` alone, and it is not a PAUSE line, so it moves no
+  lane. The words the corpus really closes with are `lifted` (2), `cleared` (1) and
+  `noted` (1); two acks carry a negation inside the 3-word window and both were already
+  orders. Fixtures carry what the corpus has not (AGENTS.md §5).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the narrowed
+  `CLOSING_WORDS`, names `NEGATION_WORDS` as §0's fourth one-list rule and the veto in
+  one sentence; `docs/routing.md` cites the same two lists; the `CLOSING_WORDS`,
+  `_order_word_is_closed`, `_gives_order` and `pause_state` docstrings say what the
+  filter now does.
+- **Tests** (red before the code: 4 failed, 87 passed in `tests/test_autoos_heartbeat.py`
+  against `git show HEAD:` of the module — the four generic-word and negation shapes,
+  and the list-membership guard, each failing on the reproduced defect):
+  `→ done: noted. PAUSE over the weekend` / `PAUSE done by 18:00` /
+  `PAUSE noted for all lanes` / `→ ack: PAUSE over the weekend, → main held` → order;
+  `PAUSE was not lifted` / `isn't cleared` / `never released` / `unlifted` /
+  `won't be removed until I say so` / `cannot be lifted` → order; the three genuine
+  closes the brief names (`PAUSE lifted`, `PAUSE acknowledged`, `STOP cancelled`) plus
+  `PAUSE ended` → report;
+  the list guards (no generic word in `CLOSING_WORDS`, `_NEGATION_RE` built from
+  `NEGATION_WORDS`, `note`/`notebook`/`amount`/`nope`/`none`/`nevertheless` not read as
+  negations). Two
+  pre-existing fixtures that had relied on the struck words (`→ ack: PAUSE noted`,
+  `→ ack: PAUSE over`) now write a kept closing word, so each still tests the shape it
+  names. `tests/test_autoos_heartbeat.py` 86 → 91; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 215 passed.
+
+### Fixed — an acknowledgement exempts only the order word it closes, so an order after an ack is still an order (RESTART R2a5, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a4, HIGH, safety):
+  `pause_state` gated the PAUSE scan on `not _acknowledgement(text)` for the **whole
+  record**, so one acknowledgement at the head swallowed every order word that came
+  after it in the same line —
+  `2026-09-28T10:00:00Z → done: applied R2a4 fix. PAUSE all lanes until further notice`
+  reported `active: False`, a hard stop that held nothing — and `parse_inbox_line`'s
+  docstring claimed the reply was still scanned for PAUSE when it was not. An
+  acknowledgement now absorbs an order word **only where a closing word follows it
+  within 3 words**: the new `CLOSING_WORDS` list (`lifted`, `ended`, `over`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`,
+  `done`, `cleared`, `resolved`) sits beside `ACK_MARKERS` and `ORDER_WORDS` as §0's
+  third one-list rule, matched case-insensitively and as a whole word after trimming
+  the punctuation a writer sticks beside it (`PAUSE, lifted`). So `→ done: PAUSE
+  lifted` and `→ main: PAUSE acknowledged` stay reports, while `→ main: merged. STOP
+  all lanes` and `→ done: 12:00 noted; PAUSE all merges now` are fresh orders; the
+  gate is `_gives_order`, which keeps the R2a4 reading of an unmarked record (any
+  `ORDER_WORDS` word is an order). `lesson:` is the one marker that exempts a whole
+  record — a lesson reports on the code and never addresses the run, a rule that
+  predates this lane and is now pinned by a test. Same asymmetry as R2a4: an order
+  word whose closing word sits past the 3-word window is a **spurious** order (one
+  wasted heartbeat, then a RESUME), never a lost one.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1954 records**, 832 of them acknowledgements): pause-order records
+  **4 before and 4 after**, **0 records changed classification**, and `pause_state`
+  identical on all 7 files — the three active files' winning texts exactly 80 chars,
+  truncated as specified. The corpus had no ack record that both quoted a PAUSE and
+  left an order word unclosed, which is why every earlier lane shipped green over it
+  (AGENTS.md §5: the fixtures carry the case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `CLOSING_WORDS` list and the 3-word window in one sentence; `docs/routing.md` cites
+  the same window instead of the whole-record exemption; the `ACK_MARKERS`,
+  `parse_inbox_line` and `pause_state` docstrings say what the filter now does.
+- **Tests** (red before the code: 7 failed, 54 passed in `PauseStateTests` against
+  `git show HEAD:` of the module — the reproduced defect failing on the assertion,
+  `False is not true : {'active': False, …}`): the Sonnet line → order, the four
+  closed shapes → report, `→ done: 12:00 noted; PAUSE all merges now` → order,
+  `lesson: PAUSE handling was wrong` → report, `→ main: merged. STOP all lanes` →
+  order, the window itself (`PAUSE was lifted by the operator` closed, `PAUSE is still
+  holding every lane, and was not lifted` an order), and the §0 one-home guard that
+  `_CLOSING_WORD_RE` is built from `CLOSING_WORDS` and that every
+  `NEVER_ORDER_MARKERS` entry is a real marker. Six pre-existing marker fixtures that
+  had relied on the whole-record exemption (`→ done: PAUSE handled`,
+  `→ operator: PAUSE needs your call`, …) now write a closed order word, so each still
+  tests the marker it names.
+  `tests/test_autoos_heartbeat.py` 79 → 86; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 210 passed.
+
+### Fixed — a speaker prefix never names an order word, so a PAUSE clause is never the speaker (RESTART R2a4, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a3, HIGH, safety): the
+  speaker shape `(?:WORD\s+){0,2}WORD(\(<note\))?\s*:` absorbs *any* short clause that
+  ends in a colon, and an order that opens a record usually opens with its order
+  word — so `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and
+  `PAUSE: → main …` stripped `PAUSE …` as the *speaker*, found `→ main` at the head of
+  what was left, and reported `active: False`: the stop that was really given held
+  nothing. A prefix may now never name one of the new `ORDER_WORDS` (`PAUSE`,
+  `RESUME`, `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT` — case-insensitive, whole word,
+  read over the whole match including its `(<note>)`), and a rejected prefix strips
+  nothing (`_speaker_prefix` returns the split index or None, `_acknowledgement` asks
+  it instead of matching the regex directly). Two tightenings close the same door from
+  the other side: a speaker word must look like a name (letters, digits and `-`, `_`,
+  `.`, at least one letter — a bare count like `4 lanes:` is prose, and a token with
+  any other punctuation no longer poses as a name), and the whole prefix is bounded at
+  `_SPEAKER_PREFIX_MAX = 40` characters, past which a clause before a colon is a
+  sentence. The wide, case-insensitive list is the deliberate asymmetry: over-ruling a
+  prefix costs a spurious order — `hold on: → main merged` is classified as one, and
+  `UN-HOLD:` blocks its own prefix — which only holds a lane until a RESUME, one
+  wasted heartbeat; under-ruling one lets workers run against the operator's stop.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, both classifiers in memory from `git show HEAD:` so nothing was copied or
+  written; one pass over 7 files / **1913 records**, 816 acks before and after, 12 of
+  them resting on a speaker prefix over 3 shapes: `from L1-backlog:` ×10,
+  `from L1-routing:` ×1, `from L1-backlog (relaunch #3)` ×1 — the inboxes are live and
+  grew from 1896 records at the first census to 1913 at this pass, so the pair of
+  classifiers is always read in the same pass):
+  **0 records changed classification, 4 orders before and 4 after, 3 marker-headed
+  PAUSE mentions before and after, and `pause_state` identical on all 7 files** — each
+  active file's winning text exactly 80 chars, i.e. truncated as specified. The risk
+  class is counted rather than assumed: **5** records open with a colon-terminated
+  clause that names an order word (`PAUSE (operator, via L0 router): the host reboots
+  soon …`, `from L1-main HOLD Q-001 (L0 routing-00): …`, `from L0 (operator) A8
+  UN-HOLD: …`) and **0** of them have a marker after that colon — so today's writers
+  never produced the losing shape and every one of these was already an order, which is
+  why R2a3 shipped green while the bug sat in it (AGENTS.md §5: the fixtures carry the
+  case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `ORDER_WORDS` list next to `ACK_MARKERS`, the name-shaped speaker word and the
+  40-character bound; `docs/routing.md` cites the same three constraints instead of the
+  old character-exclusion clause alone.
+- **Tests** (red before the code: 8 failed, 195 passed):
+  `tests/test_autoos_heartbeat.py` 70 → 79 — the three `PAUSE …: → main …` lines →
+  order (the reproduced defect, failing on the assertion, not on a missing symbol),
+  one case per `ORDER_WORDS` word in three prefix shapes and the same words
+  lower-cased, an order word inside the `(<note>)` rejecting the prefix, the brief's
+  two named acks (`L1-main: → done: PAUSE lifted`,
+  `operator on duty: → done 12:00 PAUSE lifted`) still acks, `hold on:` documented as
+  the accepted spurious order, the name shape (`L1-routing.coordinator_x:` ack against
+  `4 lanes:`, `2026:`, `state=held:`, `L1/routing:`, `[operator]:` as orders), the
+  bound (a 55-char clause rejected, the corpus's 30-char prefix kept), and the §0
+  one-home guard that `_ORDER_WORD_RE` is built from `ORDER_WORDS` and covers PAUSE and
+  RESUME as whole words. Green: **203 passed** over `test_autoos_card.py
+  test_autoos_inbox.py test_autoos_heartbeat.py test_suite_wiring.py` (194 at the
+  branch point), 746 passed + 124 subtests over `test_autoos_report.py
+  test_autoos_spawner.py test_agent_harness.py test_autoos_track.py` (unchanged).
+
+### Fixed — an ack marker needs a boundary, a speaker may be 3 words, the body head is normalised (RESTART R2a3, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a2, 1 MEDIUM + 3 LOWs,
+  safety): the head-anchored marker still matched as a bare *prefix*, so
+  `→ mainline PAUSE all lanes`, `→ maintenance: PAUSE` (both start with `→ main`)
+  and `→ operators` / `→ doneX` were swallowed as acknowledgements of a stop that
+  was never taken. `_MARKER_AT_HEAD_RE` now requires a boundary — `:`, whitespace
+  or the end of the text (`(?=[:\s]|$)`) — while `→ main: merged` and
+  `→ done 12:00 …` stay acks. A speaker prefix of more than one word
+  (`operator on duty: → done: PAUSE lifted`, `from L1-main relay (x): → done: …`)
+  was not stripped, so a PAUSE quoted inside an ack read as a fresh order and
+  paused a running lane: `_SPEAKER_PREFIX_RE` takes up to 3 words for the colon-
+  required `<name>:` shape and any words for `from <name>` **only** when its own
+  `(<note>)` or `:` delimits it, still at most one prefix. A speaker word excludes
+  `:`, `→` and parentheses, so a prefix can never eat the marker after it and a
+  bare first word without a colon is never a speaker. `_acknowledgement` strips a
+  BOM, spaces, tabs and CR remnants at the body head (a `  → done: PAUSE lifted`
+  or a BOM-headed line read as an order), `parse_inbox_line` strips them at the
+  line head so a BOM does not silently drop the record — an *order* lost is as
+  unsafe as an ack missed — and a line with no timestamp is no record at all
+  (§0), so it is never scanned.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, 1878 records, 7 of them naming PAUSE): **4 orders before and 4 after,
+  3 marker-headed PAUSE mentions before and after, 0 records parsed or classified
+  differently**, and `pause_state` agrees on every one of the 7 files. The census
+  says why: 799 records are acknowledgements under the new rules, but **0** open
+  with a marker-as-prefix (the `→ mainline` class), **0** carry a BOM/space/CR at
+  the head and **0** files use CRLF — all three defects were latent, reachable only
+  from writers the corpus has not produced yet, which is exactly the case a fixture
+  suite has to cover (AGENTS.md §5: a fix with no test that failed before it
+  proves nothing).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 now states the
+  prefix grammar exactly as implemented — boundary rule, colon optional only for
+  the `from` form, up to 3 words for `<name>:`, the speaker-word character class,
+  the head normalisation and the no-timestamp rule; `docs/routing.md` cites the
+  same shapes instead of the old three-item list.
+- **Tests** (red before the code: 5 failed): `tests/test_autoos_heartbeat.py`
+  60 → 70 — boundary pairs per marker (`→ mainline` order vs `→ main: merged`
+  ack, `→ operators` vs `→ operator:`, `→ doneX` vs `→ done 12:00`), both
+  two-word speaker shapes as acks and the same prefixes carrying a bare PAUSE as
+  orders, `from L0 (operator): → done 12:00 PAUSE lifted` ack vs
+  `from L0 (operator): PAUSE NOW` order, a bounded `from` prefix that keeps a
+  mid-sentence marker an order, a bare word without a colon never a speaker, the
+  head normalisation (space/BOM/CR/CRLF file/BOM'd order) and the no-timestamp
+  record. Green: 194 passed over `test_autoos_card.py test_autoos_inbox.py
+  test_autoos_heartbeat.py test_suite_wiring.py` (184 at the branch point), 746
+  passed over `test_autoos_report.py test_autoos_spawner.py
+  test_agent_harness.py test_autoos_track.py`.
+
+### Fixed — a marker counts only at the head of a record, so a PAUSE naming one still stops the run (RESTART R2a2, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a, MEDIUM, safety): the
+  pause filter matched the §0 markers *anywhere* in the line, so
+  `2026-09-28T10:00:00Z operator: PAUSE all lanes; nothing merges → main until I
+  say so` — a real hard stop — read as `active: False`. A marker now counts only
+  at the head of the record body: the text after the leading ISO timestamp and,
+  at most, after one speaker prefix. `_NOT_AN_ORDER_RE` is gone; `_acknowledgement(body)`
+  combines `_MARKER_AT_HEAD_RE` and `_SPEAKER_PREFIX_RE`, both built from
+  `ACK_MARKERS` (a guard test pins them to that one list, §0). The prefix shapes
+  are read off the real inboxes (`logs/handoff-sessions/20260925/inbox`,
+  read-only: `→ done:` 579 times, `from <name>` 254 with no colon against 79
+  with, `from L0 (operator) PAUSE NOW` at L1-routing.md:126), so the `from` form
+  takes its colon optionally and a bare `<name>` needs it — otherwise an ordinary
+  first word reads as a speaker.
+- **Measured over that real corpus** (1796 timestamped records, 805 opening with
+  a marker, 7 naming PAUSE): the scan classified **4 orders before and 4 after,
+  no line changed** — today's inboxes contain no order that names a marker, which
+  is why R2a's marker tests passed while the bug shipped. Requiring the colon on
+  the `from` form gives the same 4, so the optionality costs nothing today and
+  covers the 254 no-colon lines later. The fixtures are hand-written in those
+  shapes; no inbox was copied into the repository (AGENTS.md §1).
+- **`tools/autoos_card.py`** (the Muse review of R2a, LOW): the open-question
+  rule was `thread_id.startswith("Q")` — it flagged a `QUOTE-2` lane and missed a
+  lowercase `q-008`. The shape is `^[Qq][-:]?\d` (`_Q_ID_RE`), so `Q-008`, `q-008`,
+  `Q008` and `Q:008` need an `asked <time>` field and `QUOTE-2`/`Query-1`/`Q&A`
+  do not. Wording moved with the rule (R-orch-11): `card check`'s CLI help,
+  `docs/routing.md`, spec §3.
+- **`docs/plans/2026-09-28-restart-spec.md`** (two LOWs): §1 now states the
+  counting rule the checker implements — a section's cap counts content lines
+  (headings and blank lines are not content) while the 40-line total counts every
+  line, and the total binds; §0 names `ACK_MARKERS` as the one list instead of the
+  removed `_NOT_AN_ORDER_RE` and states the head-anchored rule.
+- **Tests** (red before the code: 6 failed — 3 heartbeat, 3 card):
+  `tests/test_autoos_heartbeat.py` 50 → 60 (the reproduced line → active True, the
+  `→ main:` / `from L1-main: → done:` / `lesson:` heads → not orders, one case per
+  marker at the head and mid-sentence, one per speaker-prefix shape);
+  `tests/test_autoos_card.py` 64 → 67. Green: 184 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py
+  test_suite_wiring.py` (171 at the branch point).
+
+### Added — `card check`: the state-card checker, and the §0 marker list completed (RESTART R2a, 2026-09-28)
+
+- **`tools/autoos_card.py`** (new, stdlib, read-only): the §1 shape of
+  `<RUN>/status/<name>.card.md` as one table — `SECTIONS` (goal 3, state 6,
+  next 3, threads 12, traps 8, operator 4), `MAX_TOTAL_LINES = 40`,
+  `MAX_LINE_CHARS = 200`. `check_card(text)` returns `Problem(line, text)` for
+  every violation and `check_file(path)` reads it; nothing is written, so the
+  check is safe to run twice (AGENTS.md §4). `last-event` parses through
+  `autoos_inbox.parse_position` — §0 keeps one position parser and this module
+  deliberately does not own a second one.
+- **Two numbers §1 left open, now settled** (a successor has to write to them,
+  so they are in the module docstring, not implied): a section's cap counts its
+  **content lines** — a heading line and blank lines are not content — while
+  every line in the file counts toward the 40. The caps therefore overflow the
+  total on purpose (36 content + 6 headings + the header = 43): the total is
+  what binds a real card. And an old `references/state-file.md` heading
+  (`## Decisions + why`) is a *problem*, not a synonym — §1 says a successor
+  writes a fresh card rather than converting the status file. `## Goal (…)` and
+  `## traps: what bit us` do resolve to their sections, so a note on a heading
+  is free.
+- **§3's one card rule**: a `threads` line whose id starts with `Q` must carry
+  an `asked <time>` field, because the pack's `open questions` section prints
+  those lines and nothing else knows an id was asked about.
+- **`autoos-agent.py card check <file>`** (parser + dispatch tables, same pair
+  `inbox` uses): problems on stdout, one per line, each with its line number;
+  the reason a file cannot be read on stderr. Exit 0 valid, 1 invalid, 2
+  unreadable. **No MCP twin**: `inbox`, `ready` and `review-status` have none
+  either — only the spawning/routing surface is mirrored in
+  `tools/autoos_agent_mcp.py`, so this stays a CLI verb (open: below).
+- **`tools/autoos_heartbeat.py`**: the §0 acknowledgement-marker list was
+  `lesson:|→ done` only, so an acknowledgement that quotes the word PAUSE —
+  `→ main: merged before the PAUSE landed` — reads as a fresh order to stop. The
+  markers in use are now one named list, `ACK_MARKERS` = `lesson:`, `→ done`,
+  `→ ack`, `→ relaunched`, `→ operator`, `→ main`, and `_NOT_AN_ORDER_RE` is
+  built from it (a guard test pins the regex to the list, so §1 and §3 can cite
+  it without restating it).
+- **`tests/test_autoos_card.py`** (new, 64 tests) and marker tests in
+  `tests/test_autoos_heartbeat.py` (45 → 50). Red before the code: 5 marker
+  tests failed (`→ ack`, `→ relaunched`, `→ operator`, `→ main`; `→ done`
+  already passed) and the card suite could not import. Green: 166 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py`, and
+  `test_autoos_spawner.py test_suite_wiring.py test_agent_harness.py
+  test_skill_rules.py` 696 passed / 0 failed. Wired into both harnesses
+  (`tests/linux/33-documentation.sh`, `tests/run-tests.ps1`).
+- **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
+  in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
+  `relaunch-line` (R3+).
 ### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
 
 Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the

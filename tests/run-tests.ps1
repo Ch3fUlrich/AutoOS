@@ -4847,6 +4847,16 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'autoos_card: section order, line caps, header fields, the card check verb (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_card.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "card unit tests failed: $out"
+}
+
 Test-Case 'autoos_inbox: records, positions, late flags, the inbox verb, dispatch table (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
