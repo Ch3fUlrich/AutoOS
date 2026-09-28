@@ -97,14 +97,14 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 ### coord (L1)
 
-- R-coord-01: Cut lanes from main; merge main into a lane before spawn; lane→orch→main, no-ff, mutex, one merger; freeze parent. (why: serial merges reconcile; source: HandoffCore tests, inbox 19:39Z)
+- R-coord-01: Cut lanes from main; merge main in before spawn; lane→orch→main, no-ff, mutex, one merger; freeze parent. (why: serial merges reconcile; source: HandoffCore tests, inbox 19:55Z, 19:39Z)
 - R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
-- R-coord-03: Claude orchestrates and final-checks, never implements/researches; Haiku may first-pass (Q-003); pick writers via `route --explain`. (why: a Claude limit stops the run; source: common.md)
+- R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`. (why: a Claude limit stops the run; source: common.md)
 - R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
-- R-coord-09: Orchestrate only via the autoos-agent MCP/CLI above, never hand-roll; dogfood it, file failures as lessons. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
+- R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner; CAO separate. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
 
 ### orch (L2)
 
