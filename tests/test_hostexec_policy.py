@@ -715,9 +715,14 @@ class ChrtTasksetWatchWalkerTests(unittest.TestCase):
 #   chrt -- -i 0 /bin/echo x    -> chrt: invalid priority argument: '-i'
 #                                  (the positional region survives `--`)     rc 1
 #
-# Not exploitable -- no `--` or `-p` resolves on the policy's fixed PATH -- but
-# the model reported a head the real program never ran, and an audit that says
-# "`ls`" for `chrt 9 -- ls` is wrong on its face.
+# The token is not merely one the program errors on later -- it is the exec
+# target: with an executable literally named `--` / `-p` on the PATH (a temp dir
+# handed to the call), `chrt -i 0 -p 123` printed `RAN-STUB-p 123` and
+# `chrt -i 0 -- x`, `taskset 0x1 -- y` and `taskset 9 -- y` printed
+# `RAN-STUB-dashdash ...`, all rc 0. hostexec's fixed PATH holds no such file,
+# so nothing was reachable here -- but a head that reads `ls` for a call that
+# execs `--` is an audit record that is simply false, and it lets anything after
+# the separator out of the audit entirely.
 
 # (argv, the wrapped-command heads the walker must yield). A head that starts
 # with '-' is what these two programs really exec: the token verbatim.
@@ -731,8 +736,9 @@ _NON_PERMUTING_HEADS = (
     # not pid mode: `chrt 5 -p 123` execs -p rather than touching pid 123.
     (["chrt", "5", "-p", "123"], [["-p", "123"]]),
     (["taskset", "0x1", "-c", "ls"], [["-c", "ls"]]),
-    # The rest of argv still reaches the audit, so a forbidden command parked
-    # behind the `--` is not hidden by it.
+    # The separator does not truncate the head: `--` and everything after it
+    # land in it together, so a forbidden command parked behind it is not
+    # dropped from the audit (and the head denies on the `--` it starts with).
     (["chrt", "9", "--", "rm", "-rf", "/"], [["--", "rm", "-rf", "/"]]),
     # `--` before the positional terminates the options, so the command is the
     # token after it. The third row is the positional region swallowing a

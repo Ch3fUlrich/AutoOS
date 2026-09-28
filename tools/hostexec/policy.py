@@ -691,9 +691,10 @@ _XARGS_SPEC = _WrapperSpec("xargs", _XARGS_LONGS,
 _FLOCK_SPEC = _WrapperSpec("flock", _FLOCK_LONGS, short_value=frozenset("wE"),
                            stops=frozenset(("c", "command")),
                            positionals_before_command=1,
-                           # The program the permuting walker was modelled on:
-                           # `flock /tmp/l -c cmd` really does read -c as an
-                           # option, so the flag is explicit, not defaulted.
+                           # The program the permuting walker was modelled on,
+                           # measured: `flock /tmp/l -c '/bin/echo x'` runs the
+                           # shell string, so -c after the lockfile really is an
+                           # option. The flag is explicit, not defaulted.
                            permute=True)
 _SETSID_SPEC = _WrapperSpec("setsid", _SETSID_LONGS)
 _NOHUP_SPEC = _WrapperSpec("nohup", _NOHUP_LONGS)
@@ -790,11 +791,14 @@ def _walk_wrapper_options(
         if not isinstance(tok, str):
             i += 1
             continue
-        if not spec.permute and positionals >= spec.positionals_before_command:
+        if (not spec.permute and positionals
+                and positionals >= spec.positionals_before_command):
             # A `+`-mode getopt stopped scanning at the first non-option, so
-            # with the positional region satisfied there are no more options:
-            # this token is the command the program execs, `--` and `-p`
-            # included -- and it is the head verbatim, unresolvable or not.
+            # once one has been consumed there are no more options: this token
+            # is the command the program execs, `--` and `-p` included -- and it
+            # is the head verbatim, unresolvable or not. (`positionals` is what
+            # makes it the *first* non-option: a launcher with none to consume
+            # would still parse its leading options normally.)
             break
         if tok == "--":
             saw_dashdash = True
