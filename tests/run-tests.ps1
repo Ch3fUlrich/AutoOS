@@ -5901,6 +5901,60 @@ Test-Case 'retired agent-skills links: a failed swap keeps a link, and the recor
     Pass
 }
 
+Test-Case 'retired agent-skills links: a double-failed swap leaves no link and warns (WS-SKILLWIN2 review)' {
+    # WS-SKILLWIN2 review: the swap Move throws AND the old link cannot be put
+    # back (its target is dangling, and a junction needs its target to exist),
+    # so the retry Move of the staged link throws too: no link is left and the
+    # warning says the next run links it. Retired roots are passed explicitly:
+    # never the real ones.
+    # The $item.Delete()-throws branch is NOT covered here: Delete() on a
+    # reparse point removes the link only, and nothing in a scratch tree makes
+    # it throw without touching real filesystem ACLs or open handles, so any
+    # override of it would test the fake, not the code.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $src = Join-Path $repo '.agents\skills'
+    $clone = Join-Path $scratch 'Documents\Code\agent-skills\skills'
+    $dest = Join-Path $scratch 'dest-doublefail'
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+    $records = { param($d) @(Get-ChildItem -LiteralPath $scratch -Filter "$(Split-Path $d -Leaf).autoos-backup-*") }
+    $savedEnv = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    $mod = Get-Module AutoOS.Install
+    $realMove = & $mod { ${function:script:Move-AutoOSSkillLinkItem} }
+    try {
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path (Join-Path $clone 'alpha') -Force
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # A live link into the clone, then the clone's alpha is deleted (a
+        # junction needs a target to exist, so it is made first): the old link
+        # is dangling, and a dangling old link cannot be put back.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dest 'alpha') -Target (Join-Path $clone 'alpha')
+        Remove-Item -LiteralPath (Join-Path $clone 'alpha') -Recurse -Force
+        # A Move that always throws: the swap fails, the old (dangling) link
+        # cannot be recreated, and the retry Move of the staged link fails too.
+        & $mod { Set-Item function:script:Move-AutoOSSkillLinkItem { param($From, $To) throw 'boom' } }
+        Initialize-AutoOSLog -Path $log
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dest -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:Move-AutoOSSkillLinkItem $f } $realMove
+        $text = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        if (Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force -ErrorAction SilentlyContinue) { throw 'doublefail: an alpha entry is left in place' }
+        if (@(Get-ChildItem -LiteralPath $dest -Filter '*.autoos-new-*' -Force).Count) { throw 'doublefail: a staged link was left behind' }
+        if (@(& $records $dest).Count) { throw 'doublefail: a record was written for a swap that did not happen' }
+        if ($text -notmatch 'no link left') { throw "doublefail: the warning does not say no link is left: [$text]" }
+    } finally {
+        & $mod { param($f) Set-Item function:script:Move-AutoOSSkillLinkItem $f } $realMove
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $savedEnv
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by default; =0 keeps it (Q-018)' {
     # Operator Q-018 (2026-09-28): setup moves recognised links into the retired
     # clone, with a backup record. AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
