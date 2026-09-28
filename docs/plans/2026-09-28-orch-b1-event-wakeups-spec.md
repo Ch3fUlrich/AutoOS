@@ -159,7 +159,7 @@
 - D4.12 Say so plainly in operator reports; do not claim literal zero.
 - D4.13 Interval is a policy knob, not hardcoded doctrine.
 - D4.14 Raise it if phase 0 shows the 8 h rule counts only user turns.
-- D4.15 While any lane unit of this session runs, the dead-man interval is 30 min (stall detection for hung-but-alive workers); 3 h only when no lane runs (see Q2).
+- D4.15 While any lane unit of this session runs, the dead-man interval is 30 min (stall detection for hung-but-alive workers); 3 h only when no lane runs (see Q2). The cadence switches at the transition itself: spawning the first lane recreates the dead-man cron at 30 min immediately; the last lane ending recreates it at 3 h.
 - D4.16 Every dead-man firing unconditionally recreates its own cron (delete + CronCreate) so the 7-day expiry never removes it; also recreated after relaunch and clear.
 - D4.17 Rationale: polling is retained only as loss detector.
 - D4.18 Edge: dead-man itself must not do polling work when follower is healthy.
