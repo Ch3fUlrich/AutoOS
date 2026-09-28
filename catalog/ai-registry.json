@@ -1360,6 +1360,13 @@
         "source": "2026-09-25",
         "window": 1000000
       },
+      "claude-sonnet-1m": {
+        "cap_fraction": 0.25,
+        "cap_tokens": 250000,
+        "match": ["sonnet"],
+        "source": "routing-00 D-085 2026-09-28 (L2 sonnet orchestrators handed off every ~15 min at 150k; fresh L2 baseline 55.5k measured); lower again after RESTART packs if a relaunch costs < ~20k",
+        "window": 1000000
+      },
       "200k-class": {
         "cap_fraction": 0.75,
         "cap_tokens": 150000,

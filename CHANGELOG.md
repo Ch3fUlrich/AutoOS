@@ -25,6 +25,13 @@ unproven` and returned `input_required` — it looked like a fleet-wide outage.
 - **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
   `probe-effort`) default to the new path; the first run reads the legacy file so
   its verdicts carry over.
+### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
+  **`tools/autoos_context.py`** `DEFAULT_CAPS`: a sonnet L2 no longer falls into the 200k-class row.
+  Measured: L1-backlog handed off every ~15 min at 150k with a 55.5k fresh-session baseline. Temporary
+  until the RESTART packs land; lowered again if a measured relaunch costs < ~20k. Haiku and unknown
+  models keep 150k.
 
 ### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
 
