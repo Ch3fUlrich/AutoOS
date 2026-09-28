@@ -132,14 +132,95 @@ class PauseStateTests(unittest.TestCase):
         write_inbox(self.inbox, "2026-09-26T14:01:00Z operator: PAUSE NOW")
         self.assertTrue(hb.pause_state(self.inbox)["active"])
 
-    def test_ack_markers_are_the_one_list_the_pause_filter_uses(self):
-        # §0: one home. The regex must be built from ACK_MARKERS, not restated.
-        self.assertEqual(
-            hb._NOT_AN_ORDER_RE.pattern,
-            "|".join(re.escape(m) for m in hb.ACK_MARKERS))
+    # R2a2 (the Sonnet review of R2a, MEDIUM): an acknowledgement marker matched
+    # *anywhere* in the line, so a real order that happened to name one was
+    # swallowed. Reproduced against the shipped code:
+    #
+    #     pause_state(<"… operator: PAUSE all lanes; nothing merges → main
+    #     until I say so">)["active"] == False
+    #
+    # A marker counts only at the head of the record body — the text after the
+    # leading ISO timestamp and, at most, after one speaker prefix.
+
+    def test_an_order_that_names_a_marker_mid_line_is_still_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z operator: PAUSE all lanes; nothing merges "
+                    "→ main until I say so")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+
+    def test_a_marker_at_the_head_is_not_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z → main: PAUSE acknowledged")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_marker_at_the_head_after_a_from_prefix_is_not_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z from L1-main: → done: PAUSE lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_lesson_headed_line_that_quotes_a_pause_is_not_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z lesson: PAUSE was read as an order because "
+                    "→ done appeared mid-line")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    # One test per marker, head versus mid-sentence: the marker decides the line
+    # only where the inbox writers actually put it — at the head, after the
+    # timestamp and after at most one speaker prefix.
+
+    def test_every_marker_at_the_head_is_not_an_order(self):
         for marker in hb.ACK_MARKERS:
-            self.assertTrue(hb._NOT_AN_ORDER_RE.search("2026-09-26T14:01:00Z %s: PAUSE"
-                                                       % marker), marker)
+            head = marker if marker.endswith(":") else marker + ":"
+            for prefix in ("", "L1: ", "from L1-main: "):
+                write_inbox(self.inbox,
+                            "2026-09-28T10:00:00Z %s%s PAUSE acknowledged" % (prefix, head))
+                state = hb.pause_state(self.inbox)
+                self.assertFalse(state["active"], "%s%s: %s" % (prefix, head, state))
+
+    def test_every_marker_mid_sentence_keeps_the_order(self):
+        for marker in hb.ACK_MARKERS:
+            for prefix in ("", "operator: ", "from L0 (operator) "):
+                write_inbox(self.inbox,
+                            "2026-09-28T10:00:00Z %sPAUSE all lanes, %s when done"
+                            % (prefix, marker))
+                state = hb.pause_state(self.inbox)
+                self.assertTrue(state["active"], "%s…%s: %s" % (prefix, marker, state))
+
+    # The speaker-prefix shapes are derived read-only from the real inboxes
+    # (logs/handoff-sessions/20260925/inbox/*.md: `→ done:` 579x, `from L1-main`
+    # 254x with no colon, `from L1-main:` 79x, `from L0 (operator) PAUSE NOW` at
+    # L1-routing.md:126). Fixtures below are written by hand in those shapes.
+
+    def test_a_pause_after_a_bare_speaker_prefix_is_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z operator: PAUSE all lanes now")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_pause_after_a_from_note_prefix_is_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z from L0 (operator) PAUSE NOW (repeat of 11:19:41Z)")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_pause_with_no_prefix_at_all_is_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z PAUSE (operator, via L0 router): the host reboots "
+                    "soon (RAM upgrade)")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_marker_counts_only_at_the_head_of_the_record_body(self):
+        # The filter fires on a marker at the head only, never mid-sentence.
+        self.assertTrue(hb._acknowledgement("lesson: PAUSE quoted"))
+        self.assertTrue(hb._acknowledgement("L1: lesson: PAUSE quoted"))
+        self.assertFalse(hb._acknowledgement("PAUSE, lesson: quoted"))
+
+    def test_ack_markers_are_the_one_list_the_pause_filter_uses(self):
+        # §0: one home. The head anchor is built from ACK_MARKERS, not restated.
+        self.assertIn(
+            "|".join(re.escape(m) for m in hb.ACK_MARKERS),
+            hb._MARKER_AT_HEAD_RE.pattern)
+        for marker in hb.ACK_MARKERS:
+            head = marker if marker.endswith(":") else marker + ":"
+            self.assertTrue(hb._acknowledgement("%s PAUSE acknowledged" % head), marker)
+            self.assertTrue(hb._acknowledgement("from L1-main: %s PAUSE acknowledged"
+                                                 % head), marker)
 
     def test_session_start_is_the_first_transcript_timestamp(self):
         path = os.path.join(self._tmp.name, "t.jsonl")

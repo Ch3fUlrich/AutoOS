@@ -44,9 +44,14 @@ code from state the session keeps small at every wave. Then the context cap drop
   record before it is still returned when it is after P in file order, and is flagged `(late)`.
 - **No parseable timestamp:** an inbox with records but no timestamp (another shape) makes every
   reader exit 1 with `no timestamped records in <file>`. It never reads as "no events".
-- **Acknowledgement markers:** one list, `tools/autoos_heartbeat.py` `_NOT_AN_ORDER_RE`. It holds
-  only `lesson:|→ done` today. Lane R2a extends it to the markers in use (`→ done`, `→ ack`,
-  `→ relaunched`, `→ operator`, `→ main`) with a test per marker. §1 and §3 cite that one list.
+- **Acknowledgement markers:** one list, `ACK_MARKERS` in `tools/autoos_heartbeat.py`
+  (`lesson:`, `→ done`, `→ ack`, `→ relaunched`, `→ operator`, `→ main`); the shipped
+  `_MARKER_AT_HEAD_RE` is built from it, never restated. Lane R2a extended the old
+  `lesson:|→ done` pair to the markers in use, with a test per marker. **A marker counts
+  only at the head of the record body** — the text after the leading ISO timestamp and, at
+  most, after one speaker prefix (`from <name>:`, `from <name> (<note>):`, `<name>:`, the
+  shapes in the real inboxes) — so `operator: PAUSE all lanes; nothing merges → main until I
+  say so` is still an order (R2a review, MEDIUM). §1 and §3 cite that one list.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that
   has no trailing newline (a torn append): it is not a record and not a continuation, and the next
   read sees it whole. Writers append one complete line per write (`append_inbox_line` already does,
@@ -70,6 +75,9 @@ the run dir. A new run starts a new card, which is seeded from the old one's `go
 | traps | 8 | things a successor would get wrong, each with an evidence pointer |
 | operator | 4 | operator-only steps, verbatim |
 
+- A section's cap counts **content lines**: the `## <name>` heading and blank lines are not
+  content. The 40-line total counts every line of the file — headings and blanks included — and
+  it is the total that binds.
 - Every line is at most 200 characters (measured: today's status files break this, 31 of 105 lines
   in one). So a successor writes a fresh card and does not convert the old status file.
 - The card is updated every wave with a small edit. R-coord-06 changes from "at cap: rewrite
@@ -108,10 +116,11 @@ printed. The order is:
    - **Open questions** are NOT inferred from inbox text. Measured: real answers are free text
      ("Q-008 (a) -> REDACTMERGE queued", "answers Q-001/Q-003"), and mentions of an id are not
      questions, so no pattern classifies them (Sonnet v3 review). The source of truth is the card:
-     every open question is a `threads` line whose id starts with `Q` (`Q-008 | routing-00 | asked
+     every open question is a `threads` line whose id matches the Q-id shape `^[Qq][-:]?\d` — `Q-008`
+     and `q-008`, not `QUOTE-2` (`Q-008 | routing-00 | asked
      22:33Z | default a`). The session closes it by deleting the line when the answer arrives. The
-     pack prints those lines under the snapshot's `open questions` heading, and `card check` rejects a
-     `Q` thread without an `asked <time>` field.
+     pack prints those lines under the snapshot's `open questions` heading, and `card check` rejects
+     a Q-id thread without an `asked <time>` field.
 3. **Memory:** stub `memory: not wired (MEMSPEC)`.
 4. **Role brief:** `<RUN>/briefs/<name>.md`, verbatim.
 5. **State card:** verbatim.
@@ -205,7 +214,7 @@ part by sha, which proves lineage but can no longer rebuild the bytes.
 | lane | scope | files (one writer each) |
 |---|---|---|
 | R1 inbox | §0 module + `inbox`; replace `main()`'s dispatch fallthrough (`cmd_list … else cmd_run`) with an explicit verb table so later verbs cannot fall into `run` | tools/autoos_inbox.py (new), tools/autoos-agent.py (dispatch + inbox verb), tests |
-| R2a card | `card check` + extend `_NOT_AN_ORDER_RE` | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
+| R2a card | `card check` + the `ACK_MARKERS` list (R2a2: head-anchored, see §0) | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
 | R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
 | R3 pack | `pack`, budget, `l1_handoff.py --pack` | tools/autoos-agent.py, .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
@@ -223,7 +232,7 @@ items per worker run.
 |---|---|
 | blobs store raw inbox/brief text | §6 Redaction through autoos_redact; R7 after REDACTMERGE |
 | opus row also matches fable | §5 router D-044: cap is per role, row stays shared, both 350k |
-| `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it, test per marker |
+| `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it (as `ACK_MARKERS`), test per marker; R2a2 counts a marker only at the record head |
 | torn appends by concurrent writers | §0 last line without newline ignored; malformed reported |
 | R2/R5 over 3 items | R2a/R2b, R5a/R5b |
 | canonical JSON undefined | §6 pinned serialization + id test |

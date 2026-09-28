@@ -149,12 +149,13 @@ gen=<id> | context <n>k/<cap>k | last-event <position>`), the fixed section
 order (goal, state, next, threads, traps, operator), each section's line cap,
 the 40-line total, the 200-char line limit, and that `last-event` parses as a
 position — through `autoos_inbox.parse_position`, because §0 keeps one position
-parser. A `threads` line whose id starts with `Q` needs an `asked <time>`
-field (§3: those lines are the pack's open questions). Every problem prints on
-stdout with its line number, sorted by line; the reason a file cannot be read
-goes to stderr. The rules are `tools/autoos_card.py`, not restated here, and
-§0's acknowledgement markers are `autoos_heartbeat.ACK_MARKERS` — the same list
-the heartbeat's pause filter and the future `card: stale` check read. Read-only,
+parser. A `threads` line whose id matches the Q-id shape (`^[Qq][-:]?\\d`:
+`Q-008`, `q-008`) needs an `asked <time>` field (§3: those lines are the pack's
+open questions). Every problem prints on stdout with its line number, sorted by
+line; the reason a file cannot be read goes to stderr. The rules are
+`tools/autoos_card.py`, not restated here, and §0's acknowledgement markers are
+`autoos_heartbeat.ACK_MARKERS` — the same list the heartbeat's pause filter (at
+the head of a record) and the future `card: stale` check read. Read-only,
 so it is safe to run twice. Exit codes: 0 valid, 1 the card breaks at least one
 rule, 2 the file is unreadable.
 """

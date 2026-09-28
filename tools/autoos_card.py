@@ -18,8 +18,9 @@ What it checks (spec §1):
 * the file is at most 40 lines, and every line at most 200 characters.
 * `last-event` parses as a position, through ``autoos_inbox.parse_position``:
   §0 keeps one position parser, and this module does not own a second one.
-* a `threads` line whose id starts with `Q` carries an `asked <time>` field, so
-  the pack's `open questions` section can print it (§3).
+* a `threads` line whose id matches the Q-id shape (`^[Qq][-:]?\\d`, so `Q-008`
+  and `q-008` but not `QUOTE-2`) carries an `asked <time>` field, so the pack's
+  `open questions` section can print it (§3).
 
 Two counting decisions §1 leaves open, settled here because a successor has to
 write to the same numbers: a section's line count is its **content lines** — the
@@ -58,6 +59,9 @@ _CONTEXT_RE = re.compile(r"^\d+k\s*/\s*\d+k$")
 # or a table row `| Q-008 | …`.
 _THREAD_ID_RE = re.compile(r"^\s*[-*|]?\s*(?P<id>[^\s|]+)")
 _ASKED_RE = re.compile(r"\basked\s+\S+")
+# The open-question id shape (§3): `Q-008`, `q-008`, `Q:008`, `Q008`. An id that
+# merely begins with a Q — `QUOTE-2`, `Query-1` — is a lane, not a question.
+_Q_ID_RE = re.compile(r"^[Qq][-:]?\d")
 
 # A card saved from Windows PowerShell carries a BOM; it must still read.
 _READ_ENCODING = "utf-8-sig"
@@ -248,7 +252,7 @@ def _check_sections(lines, problems, header_line):
         line = lines[index - 1]
         found = _THREAD_ID_RE.match(line)
         thread_id = found.group("id") if found else ""
-        if thread_id.startswith("Q") and not _ASKED_RE.search(line):
+        if _Q_ID_RE.match(thread_id) and not _ASKED_RE.search(line):
             _add(problems, index, "open question '%s' has no `asked <time>` field "
                                   "(§3: the pack prints open questions)" % (thread_id,))
 

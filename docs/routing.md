@@ -92,14 +92,18 @@ session writes and nothing else touches. It checks the header (`# card <name> �
 section order (goal, state, next, threads, traps, operator) and each section's
 line cap, the 40-line total, the 200-char line limit, and that `last-event`
 parses as a position — read with `autoos_inbox`'s parser, never a second one. A
-`threads` line whose id starts with `Q` must carry `asked <time>`, since those
+`threads` line whose id matches the Q-id shape (`^[Qq][-:]?\d` — `Q-008` and
+`q-008`, not `QUOTE-2`) must carry `asked <time>`, since those
 lines are the pack's open questions (§3). Every problem prints on stdout with
 its line number, sorted by line; a file that cannot be read is a stderr notice.
 Exit 0 valid, 1 invalid, 2 unreadable. The rules live in `tools/autoos_card.py`;
 the acknowledgement markers the same spec §0 names one list are
 `autoos_heartbeat.ACK_MARKERS` (`lesson:`, `→ done`, `→ ack`, `→ relaunched`,
 `→ operator`, `→ main`), which is what keeps an acknowledgement of a finished
-order from reading as a new PAUSE.
+order from reading as a new PAUSE — the filter counts a marker only at the head
+of a record, after its timestamp and at most one speaker prefix
+(`from <name>:`, `from <name> (<note>):`, `<name>:`), so an order that names a
+marker mid-sentence still stops the run.
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;

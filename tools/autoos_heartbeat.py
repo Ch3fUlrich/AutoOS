@@ -31,14 +31,39 @@ _PAUSE_RE = re.compile(r"\bPAUSE\b")
 _RESUME_RE = re.compile(r"\bRESUME\b")
 # The acknowledgement markers: RESTART spec §0 names this list its one home, so
 # §1's `card: stale` check (lane R2b) and §3's pack cite it rather than
-# restating it. A line carrying one of these reports on something the session
-# already did, so it is never an order to pause: `pause_state` filters these
-# out of the PAUSE scan. The list held only `lesson:` and `→ done` until lane
-# R2a added the other markers in use — a `→ main` reply quoting a PAUSE read as
-# a fresh stop.
+# restating it. A line carrying one of these at its head reports on something
+# the session already did, so it is never an order to pause: `pause_state`
+# filters these out of the PAUSE scan. The list held only `lesson:` and `→ done`
+# until lane R2a added the other markers in use — a `→ main` reply quoting a
+# PAUSE read as a fresh stop.
 ACK_MARKERS = ("lesson:", "→ done", "→ ack", "→ relaunched", "→ operator", "→ main")
-# a line that reports on a pause is not an order to pause
-_NOT_AN_ORDER_RE = re.compile("|".join(re.escape(marker) for marker in ACK_MARKERS))
+# the same markers, head-anchored: mid-sentence a marker is only vocabulary
+_MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)"
+                                % "|".join(re.escape(marker) for marker in ACK_MARKERS))
+# The speaker prefix an inbox writer puts in front of its own line, at most one
+# per record. The shapes are what the real inboxes actually contain
+# (logs/handoff-sessions/20260925/inbox, read-only survey): `→ done:` 579 times,
+# `from <name>` 254 with no colon, `from <name>:` 79, and the operator's own
+# `from L0 (operator) PAUSE NOW`. The `from` form therefore takes the colon
+# optionally; a bare `<name>` needs it, so an ordinary first word is not read as
+# a speaker.
+_SPEAKER_PREFIX_RE = re.compile(r"\A(?:from\s+\S+(?:\s*\([^)]*\))?\s*:?|"
+                                r"\S+(?:\s*\([^)]*\))?\s*:)\s+")
+
+
+def _acknowledgement(text: str) -> bool:
+    """True when `text` (a record body, timestamp already removed) opens with an
+    acknowledgement marker — at its head, or at the head after one
+    `_SPEAKER_PREFIX_RE` prefix. Anywhere else in the line a marker is only
+    vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say
+    so` is an order that happens to name `→ main` (R2a review, MEDIUM).
+    """
+    if _MARKER_AT_HEAD_RE.match(text):
+        return True
+    prefix = _SPEAKER_PREFIX_RE.match(text)
+    return bool(prefix and _MARKER_AT_HEAD_RE.match(text[prefix.end():]))
+
+
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 
 # The first-80-chars report the CLI/MCP print for an active pause.
@@ -76,9 +101,10 @@ def parse_inbox_line(line: str):
     when the line is blank, has no text after its timestamp, or its leading
     token is not a parseable ISO-8601 timestamp.
 
-    A reply line (one that carries a "→ done:" marker somewhere in its
-    text) is parsed exactly the same way - it is still scanned for PAUSE/
-    RESUME below, since an operator may write either word inside a reply.
+    A reply line (one that opens with an `ACK_MARKERS` marker, the shape
+    `_acknowledgement` recognises) is parsed exactly the same way - it is still
+    scanned for PAUSE/RESUME below, since an operator may write either word
+    inside a reply.
     """
     line = line.rstrip("\n").rstrip("\r")
     if not line.strip():
@@ -121,8 +147,11 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     PAUSE is active when the newest line whose text contains the word PAUSE
     is newer than the newest line containing the word RESUME, or there is no
     RESUME line at all. A line older than `since` (the session start, see
-    session_start()) and an acknowledgement line carrying any `ACK_MARKERS`
-    marker never count as a PAUSE: the relaunch after a pause is its resume.
+    session_start()) and an acknowledgement line — one that opens with an
+    `ACK_MARKERS` marker, at the head of its body or at the head after one
+    `_SPEAKER_PREFIX_RE` prefix (see `_acknowledgement`) — never counts as a
+    PAUSE: the relaunch after a pause is its resume. Elsewhere in the line a
+    marker is vocabulary, not an acknowledgement.
     Lines are ordered by their own parsed timestamp, not file order, so an
     inbox is read correctly even if a line was appended
     out of order. A missing/unreadable inbox, or one with no PAUSE line
@@ -148,7 +177,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
             newest_resume = when
         if since is not None and when < since:
             continue
-        if (_PAUSE_RE.search(text) and not _NOT_AN_ORDER_RE.search(text)
+        if (_PAUSE_RE.search(text) and not _acknowledgement(text)
                 and (newest_pause is None or when > newest_pause[0])):
             newest_pause = (when, text)
     if newest_pause is None:

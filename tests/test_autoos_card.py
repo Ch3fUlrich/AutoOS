@@ -395,6 +395,37 @@ class QuestionThreadTests(unittest.TestCase):
                              "- Q-009 says the trap is the unfiltered suite.")
         self.assertEqual(problems(text), [])
 
+    # R2a2 (the Muse review of R2a): the check was `id.startswith("Q")`, which
+    # flagged any Q-word and missed a lowercase id. The Q-id shape is
+    # `^[Qq][-:]?\d` — what the inbox writers actually type.
+
+    def test_a_lowercase_q_thread_without_an_asked_field_is_reported(self):
+        text = VALID.replace("- Q-008 | routing-00 | asked 06:55Z | default (a).",
+                             "- q-008 | routing-00 | waiting on L0 | default (a).")
+        got = problems(text)
+        self.assertEqual(len(got), 1, got)
+        line, message = got[0]
+        self.assertIn("q-008", message)
+        self.assertIn("asked", message)
+        self.assertIn("q-008", text.splitlines()[line - 1])
+
+    def test_every_q_id_shape_is_treated_as_an_open_question(self):
+        for thread_id in ("Q-008", "q-008", "Q008", "Q:008"):
+            text = replace_section(
+                VALID, "threads",
+                ["- R2a | agent/20260928-r2a | working | finish tests.",
+                 "- %s | routing-00 | waiting on L0 | default (a)." % thread_id])
+            got = [message for _line, message in problems(text)]
+            self.assertEqual(len(got), 1, "%s: %s" % (thread_id, got))
+            self.assertIn("asked", got[0], thread_id)
+
+    def test_a_q_word_that_is_not_a_q_id_is_not_an_open_question(self):
+        for thread_id in ("QUOTE-2", "Query-1", "Q&A"):
+            text = VALID.replace("- Q-008 | routing-00 | asked 06:55Z | default (a).",
+                                 "- %s | routing-00 | waiting on L0 | no time field."
+                                 % thread_id)
+            self.assertEqual(problems(text), [], thread_id)
+
 
 class ReadFileTests(unittest.TestCase):
     def setUp(self):

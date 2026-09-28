@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a marker counts only at the head of a record, so a PAUSE naming one still stops the run (RESTART R2a2, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a, MEDIUM, safety): the
+  pause filter matched the §0 markers *anywhere* in the line, so
+  `2026-09-28T10:00:00Z operator: PAUSE all lanes; nothing merges → main until I
+  say so` — a real hard stop — read as `active: False`. A marker now counts only
+  at the head of the record body: the text after the leading ISO timestamp and,
+  at most, after one speaker prefix. `_NOT_AN_ORDER_RE` is gone; `_acknowledgement(body)`
+  combines `_MARKER_AT_HEAD_RE` and `_SPEAKER_PREFIX_RE`, both built from
+  `ACK_MARKERS` (a guard test pins them to that one list, §0). The prefix shapes
+  are read off the real inboxes (`logs/handoff-sessions/20260925/inbox`,
+  read-only: `→ done:` 579 times, `from <name>` 254 with no colon against 79
+  with, `from L0 (operator) PAUSE NOW` at L1-routing.md:126), so the `from` form
+  takes its colon optionally and a bare `<name>` needs it — otherwise an ordinary
+  first word reads as a speaker.
+- **Measured over that real corpus** (1796 timestamped records, 805 opening with
+  a marker, 7 naming PAUSE): the scan classified **4 orders before and 4 after,
+  no line changed** — today's inboxes contain no order that names a marker, which
+  is why R2a's marker tests passed while the bug shipped. Requiring the colon on
+  the `from` form gives the same 4, so the optionality costs nothing today and
+  covers the 254 no-colon lines later. The fixtures are hand-written in those
+  shapes; no inbox was copied into the repository (AGENTS.md §1).
+- **`tools/autoos_card.py`** (the Muse review of R2a, LOW): the open-question
+  rule was `thread_id.startswith("Q")` — it flagged a `QUOTE-2` lane and missed a
+  lowercase `q-008`. The shape is `^[Qq][-:]?\d` (`_Q_ID_RE`), so `Q-008`, `q-008`,
+  `Q008` and `Q:008` need an `asked <time>` field and `QUOTE-2`/`Query-1`/`Q&A`
+  do not. Wording moved with the rule (R-orch-11): `card check`'s CLI help,
+  `docs/routing.md`, spec §3.
+- **`docs/plans/2026-09-28-restart-spec.md`** (two LOWs): §1 now states the
+  counting rule the checker implements — a section's cap counts content lines
+  (headings and blank lines are not content) while the 40-line total counts every
+  line, and the total binds; §0 names `ACK_MARKERS` as the one list instead of the
+  removed `_NOT_AN_ORDER_RE` and states the head-anchored rule.
+- **Tests** (red before the code: 6 failed — 3 heartbeat, 3 card):
+  `tests/test_autoos_heartbeat.py` 50 → 60 (the reproduced line → active True, the
+  `→ main:` / `from L1-main: → done:` / `lesson:` heads → not orders, one case per
+  marker at the head and mid-sentence, one per speaker-prefix shape);
+  `tests/test_autoos_card.py` 64 → 67. Green: 184 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py
+  test_suite_wiring.py` (171 at the branch point).
+
 ### Added — `card check`: the state-card checker, and the §0 marker list completed (RESTART R2a, 2026-09-28)
 
 - **`tools/autoos_card.py`** (new, stdlib, read-only): the §1 shape of
