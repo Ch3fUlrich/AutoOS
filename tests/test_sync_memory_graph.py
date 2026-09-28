@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -57,6 +58,16 @@ def fixture_root():
         "| Closed cite thing (D-999) | tier1 | 2026-09-20 | green | Done 2026-09-20 |\n",
         encoding="utf-8",
     )
+    return tmp
+
+
+def fixture_root_with_tasks(rows):
+    """A fixture whose docs/tasks.md holds exactly ``rows`` (header added)."""
+    tmp = fixture_root()
+    body = ["| Task | Owner | Started | DONE-criteria | Status |",
+            "|---|---|---|---|---|"]
+    body.extend(rows)
+    (tmp / "docs" / "tasks.md").write_text("\n".join(body) + "\n", encoding="utf-8")
     return tmp
 
 
@@ -180,7 +191,10 @@ class LoadModeTests(unittest.TestCase):
                 seen["path"] = self.path
                 seen["auth"] = self.headers.get("Authorization")
                 seen["body"] = json.loads(self.rfile.read(length) or b"{}")
-                payload = json.dumps({"tables": []}).encode()
+                # Detailed per-table response so the load is confirmed (an
+                # empty-tables response would now refuse an edge batch).
+                payload = json.dumps(
+                    {"tables": [{"table_key": "Task", "rows_loaded": 5}]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -196,7 +210,8 @@ class LoadModeTests(unittest.TestCase):
             env = dict(os.environ)
             env["OMNIGRAPH_BASE_URL"] = f"http://127.0.0.1:{server.server_port}"
             env["OMNIGRAPH_TOKEN"] = "test-token"
-            rc = mod.main(["--load"], root=root, env=env)
+            rc = mod.main(["--known-slugs", "routing-d-085,routing-d-088,routing-d-100",
+                           "--load"], root=root, env=env)
         finally:
             server.shutdown()
             server.server_close()
@@ -210,6 +225,32 @@ class LoadModeTests(unittest.TestCase):
         for line in lines:
             rec = json.loads(line)
             self.assertTrue("type" in rec or "edge" in rec)
+
+    def test_load_body_lists_node_lines_before_edge_lines(self):
+        """An edge's endpoints must exist before the edge is loaded."""
+        mod = load_script()
+        root = fixture_root()
+        captured = {}
+        orig = mod.post_load
+
+        def capture(_base, _token, lines):
+            captured["lines"] = list(lines)
+            return {"tables": [{"table_key": "Task", "rows_loaded": 3}]}
+
+        mod.post_load = capture
+        try:
+            rc = mod.main(["--known-slugs", "routing-d-085,routing-d-088,routing-d-100",
+                           "--load"], root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertEqual(rc, 0)
+        recs = [json.loads(line) for line in captured["lines"]]
+        node_idx = [i for i, r in enumerate(recs) if "type" in r]
+        edge_idx = [i for i, r in enumerate(recs) if "edge" in r]
+        self.assertTrue(node_idx, recs)
+        self.assertTrue(edge_idx, recs)
+        self.assertLess(max(node_idx), min(edge_idx),
+                        "an edge line was emitted before a node line")
 
 
 class SeverityTests(unittest.TestCase):
@@ -248,7 +289,8 @@ class LoadConfirmTests(unittest.TestCase):
                         "error": "simulated failure"}]
         }
         try:
-            rc = mod.main(["--load"], root=root,
+            rc = mod.main(["--known-slugs", "routing-d-085,routing-d-088,routing-d-100",
+                           "--load"], root=root,
                           env={"OMNIGRAPH_TOKEN": "test-token",
                                "OMNIGRAPH_BASE_URL": "http://localhost:1"})
         finally:
@@ -258,6 +300,43 @@ class LoadConfirmTests(unittest.TestCase):
             self.assertEqual(ledger.read_text().split(), [])
         # Nothing was marked, so the full batch is still pending.
         self.assertEqual(len(mod.emit(root, ledger)), len(pending))
+
+    def test_empty_tables_response_with_edge_only_batch_is_not_confirmed(self):
+        """No per-table detail is no evidence. A node batch may be re-sent
+        idempotently; an edge-only batch would duplicate, so it is not marked."""
+        mod = load_script()
+        self.assertFalse(mod.load_confirmed({"tables": []}, 1, edge_only=1))
+
+    def test_empty_tables_response_with_node_only_batch_stays_permissive(self):
+        """Preserve prior behavior when the batch carries no edge-only record."""
+        mod = load_script()
+        self.assertTrue(mod.load_confirmed({"tables": []}, 1, edge_only=0))
+
+    def test_edge_only_batch_with_empty_tables_response_does_not_mark(self):
+        """Integration: an edge-only batch plus `{"tables": []}` must not mark."""
+        mod = load_script()
+        root = fixture_root()
+        ledger = root / ".state" / "graph-loaded.txt"
+        node_keys = [k for k, n, _ in mod.records(root) if n is not None]
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text("\n".join(node_keys) + "\n", encoding="utf-8")
+        before = set(ledger.read_text().split())
+        pending = mod.emit(root, ledger)
+        self.assertTrue(pending)
+        self.assertTrue(all(node is None for _, node, _ in pending), pending)
+        orig = mod.post_load
+        mod.post_load = lambda *a, **k: {"tables": []}
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = mod.main(
+                    ["--known-slugs", "routing-d-085,routing-d-088,routing-d-100",
+                     "--load"], root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertNotEqual(rc, 0)
+        self.assertIn("NOT confirmed", err.getvalue())
+        self.assertEqual(set(ledger.read_text().split()), before)
 
 
 class CitationParserTests(unittest.TestCase):
@@ -288,6 +367,53 @@ class CitationParserTests(unittest.TestCase):
     def test_supersedes_targets_window_ignores_a_distant_citation(self):
         text = "replaced the interim cap; " + "x" * 80 + " D-085"
         self.assertEqual(self.mod.supersedes_targets(text), [])
+
+    def test_bare_decision_number_is_zero_padded(self):
+        """D-88 and routing-d-88 are the same decision, keyed routing-d-088."""
+        self.assertEqual(self.mod.routing_citations("D-88"), ["routing-d-088"])
+        self.assertEqual(self.mod.routing_citations("routing-d-88"), ["routing-d-088"])
+        self.assertEqual(self.mod.routing_citations("D-8"), ["routing-d-008"])
+
+    def test_d_number_and_routing_slug_share_one_number_space(self):
+        """Design note, not a bug: AutoOS D-NNN ids ARE the router's routing
+        decision numbers, so a bare D-NNN and routing-d-NNN name the *same*
+        decision and both normalise to one slug -- there are not two ledgers
+        with two number spaces that could collide."""
+        self.assertEqual(self.mod.routing_citations("D-088"),
+                         self.mod.routing_citations("routing-d-088"))
+        self.assertEqual(self.mod.routing_citations("D-088"), ["routing-d-088"])
+        self.assertEqual(
+            self.mod.routing_citations("superseding D-88 equals routing-d-088"),
+            ["routing-d-088"])
+
+    def test_supersedes_targets_ignores_a_later_sentence_citation(self):
+        """A citation after the clause ends is not a replacement."""
+        self.assertEqual(
+            self.mod.supersedes_targets("superseding the interim cap. D-085 stays live"),
+            [])
+        self.assertEqual(
+            self.mod.supersedes_targets("replaced by the new cap; D-040 is unrelated"),
+            [])
+        self.assertEqual(
+            self.mod.supersedes_targets("superseding the cap\nD-085 is unrelated"),
+            [])
+
+    def test_supersedes_targets_data_driven_from_fixture_text(self):
+        """Table of fixture texts -> expected replacements, independent of the
+        module's DECISIONS constants."""
+        cases = [
+            ("superseding D-085's interim 250k", ["routing-d-085"]),
+            ("replaces routing-d-040 in the plan", ["routing-d-040"]),
+            ("superseded D-88 before the re-key", ["routing-d-088"]),
+            ("implements routing-d-040", []),
+            ("no replacement here", []),
+            ("superseding the old cap. D-085 remains", []),
+            ("replaced the interim cap; " + "x" * 80 + " D-085", []),
+            ("superseding the cap\nD-085 remains", []),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.mod.supersedes_targets(text), expected)
 
 
 class RoutingLinkTests(unittest.TestCase):
@@ -406,6 +532,154 @@ class RoutingLinkTests(unittest.TestCase):
         targets = {r["to"] for r in records if r.get("edge") in ("Implements", "Supersedes")}
         self.assertEqual(targets, {"routing-d-100"})
         self.assertIn("routing-d-088", err.getvalue())
+
+
+class RecordDedupeTests(unittest.TestCase):
+    def test_colliding_truncated_titles_emit_each_ledger_key_once(self):
+        """Two board rows whose titles collide once truncated to 60 chars mint
+        the same Task slug; records() emits that slug and its Implements edge
+        once, not once per row."""
+        mod = load_script()
+        shared = "collide shared prefix " * 4  # >60 chars once normalised
+        root = fixture_root_with_tasks([
+            f"| {shared}alpha (D-088) | o | 2026-09-28 | green | Running |",
+            f"| {shared}beta (D-088) | o | 2026-09-28 | green | Running |",
+        ])
+        batch = mod.records(root, known={"routing-d-088"})
+        keys = [k for k, _, _ in batch]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate ledger key emitted")
+        impl = [k for k in keys if k.startswith("Implements:")]
+        self.assertEqual(len(impl), len(set(impl)))
+        self.assertEqual(sum(k.endswith("->routing-d-088") for k in impl), 1)
+
+
+class KnownSlugsTests(unittest.TestCase):
+    """--known-slugs accepts - (stdin), a file, or =VALUE, and rejects junk."""
+
+    def setUp(self):
+        self.mod = load_script()
+        self.root = fixture_root()
+
+    def _targets(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.mod.main(list(argv), root=self.root, env={})
+        self.assertEqual(rc, 0)
+        recs = [json.loads(line) for line in out.getvalue().splitlines()]
+        return {r["to"] for r in recs
+                if r.get("edge") in ("Implements", "Supersedes")}
+
+    def test_dash_reads_slugs_from_stdin(self):
+        old = sys.stdin
+        sys.stdin = io.StringIO("routing-d-100\n")
+        try:
+            targets = self._targets(["--known-slugs", "-"])
+        finally:
+            sys.stdin = old
+        self.assertEqual(targets, {"routing-d-100"})
+
+    def test_file_path_reads_slugs(self):
+        path = self.root / "known-slugs.txt"
+        path.write_text("routing-d-100\nrouting-d-085\n", encoding="utf-8")
+        self.assertEqual(self._targets(["--known-slugs", str(path)]),
+                         {"routing-d-100", "routing-d-085"})
+
+    def test_equals_form_reads_slugs(self):
+        self.assertEqual(self._targets(["--known-slugs=routing-d-100"]),
+                         {"routing-d-100"})
+
+    def test_missing_value_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            self.mod._take_known_slugs(["--known-slugs"])
+
+    def test_option_as_value_is_an_error_and_does_not_swallow_load(self):
+        """`--known-slugs --load` must not consume --load as a slug value."""
+        with self.assertRaises(SystemExit):
+            self.mod._take_known_slugs(["--known-slugs", "--load"])
+
+    def test_empty_equals_value_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            self.mod._take_known_slugs(["--known-slugs="])
+
+
+class LoadGuardTests(unittest.TestCase):
+    """D-140 review: an unvalidated edge must never be loaded silently."""
+
+    KNOWN = "routing-d-085,routing-d-088,routing-d-100"
+
+    def _ledger_untouched(self, root):
+        ledger = root / ".state" / "graph-loaded.txt"
+        return not (ledger.exists() and ledger.read_text().split())
+
+    def test_load_without_known_slugs_refuses_an_edge_batch(self):
+        """--load with no --known-slugs must refuse (non-zero, nothing marked)
+        when the emitted batch carries an edge-only record."""
+        mod = load_script()
+        root = fixture_root()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = mod.main(["--load"], root=root,
+                          env={"OMNIGRAPH_TOKEN": "t",
+                               "OMNIGRAPH_BASE_URL": "http://127.0.0.1:1"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--known-slugs", err.getvalue())
+        self.assertTrue(self._ledger_untouched(root))
+
+    def test_dump_without_known_slugs_still_emits_every_citation(self):
+        """Plain dump mode keeps the permissive default (no filtering)."""
+        mod = load_script()
+        root = fixture_root()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = mod.main([], root=root, env={})
+        self.assertEqual(rc, 0)
+        recs = [json.loads(line) for line in out.getvalue().splitlines()]
+        targets = {r["to"] for r in recs if r.get("edge") == "Implements"}
+        self.assertIn("routing-d-088", targets)
+
+    def test_http_error_becomes_a_clear_message_not_a_traceback(self):
+        mod = load_script()
+        root = fixture_root()
+        orig = mod.post_load
+
+        def boom(*a, **k):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:1/graphs/autoos/load", 500,
+                "Internal Server Error", {}, None)
+
+        mod.post_load = boom
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = mod.main(["--known-slugs", self.KNOWN, "--load"],
+                              root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertNotEqual(rc, 0)
+        self.assertIn("500", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertTrue(self._ledger_untouched(root))
+
+    def test_unreachable_server_becomes_a_clear_message(self):
+        mod = load_script()
+        root = fixture_root()
+        orig = mod.post_load
+
+        def boom(*a, **k):
+            raise urllib.error.URLError("connection refused")
+
+        mod.post_load = boom
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = mod.main(["--known-slugs", self.KNOWN, "--load"],
+                              root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertNotEqual(rc, 0)
+        self.assertIn("connection refused", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertTrue(self._ledger_untouched(root))
 
 
 if __name__ == "__main__":
