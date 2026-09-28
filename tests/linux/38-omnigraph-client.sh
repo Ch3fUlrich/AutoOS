@@ -19,7 +19,7 @@ describe "omnigraph-client"
 
 # oh_hermetic_root: A7b moved three repo-scope duties into
 # install_omnigraph_client — name a shadowing user-scope omnigraph, approve this
-# checkout's project MCP servers, clean the retired homelab entry. They have
+# checkout's project MCP servers, report the retired homelab entry. They have
 # their own cases in 18-mcp-wiring.sh; here the component must point at a scratch
 # checkout that holds no .mcp.json (so the approve step warns and writes nothing)
 # and must never ask the real Claude Code for its server list. Call it inside the

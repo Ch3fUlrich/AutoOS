@@ -3627,7 +3627,7 @@ replace_stale_graphify_mcp_entry() {
 
     # The claude CLI reads $HOME; the home this run configures is $SYS_HOME. When the
     # resolver names a file outside it, the run is not pointed at that config — the
-    # same rule remove_stale_homelab_mcp_entry applies. A CLAUDE_CONFIG_DIR the user
+    # same rule report_stale_homelab_mcp_entry applies. A CLAUDE_CONFIG_DIR the user
     # set is explicit intent and honoured.
     if [[ -z "${CLAUDE_CONFIG_DIR:-}" && "$cfg" != "${SYS_HOME%/}/.claude.json" &&
           "$cfg" != "${SYS_HOME%/}/.claude/.config.json" ]]; then
@@ -3748,70 +3748,34 @@ print("agent-skills" if recognised else "other")
 PY
 }
 
-# remove_stale_homelab_mcp_entry: drop the user-scope 'homelab' MCP entry, but only
-# the one this installer can recognise as its upstream's leftover (spec §C; D14 makes
-# homelab not-an-AutoOS-component, so nothing else about it is ever touched). Read,
-# back up once, remove, report. Removal goes through `claude mcp remove --scope user`
-# rather than a hand-edited JSON: that CLI owns the file's format and everything else
-# in it, so the config keeps its shape and its session data. An entry that does not
-# point into the retired clone is the user's and stays exactly as it is; a second run
-# finds nothing and reports skipped.
-remove_stale_homelab_mcp_entry() {
-    local cfg kind backup
+# report_stale_homelab_mcp_entry: name the user-scope 'homelab' MCP entry when it is
+# the leftover this installer's retired upstream wrote (spec §C; D14 makes homelab
+# not-an-AutoOS-component), and leave it exactly where it is. Operator decision
+# 2026-09-28: the removal is deferred — the server-side homelab MCP is not finished,
+# so no step may take the entry out from under a running session. Nothing is written,
+# no backup is taken, `claude` is not called, and no failure is recorded; the one
+# output is a muted line the user can act on when they choose to. An entry that does
+# not point into the retired clone is the user's own server and is not mentioned at
+# all, and a second run says the same line again because the entry is still there.
+report_stale_homelab_mcp_entry() {
+    local cfg kind
     cfg="$(claude_user_config_file)"
 
     # The claude CLI reads $HOME, the home this run configures is $SYS_HOME. When
     # the resolver names a file outside it, the run is not pointed at that config:
-    # setup under sudo edits root's, and the test harness fakes SYS_HOME while HOME
-    # stays the operator's real home. Refusing is the same rule install_antigravity
-    # applies to a home it does not own. A CLAUDE_CONFIG_DIR the user set is explicit
-    # intent and honoured - that file is the one claude reads either way.
+    # setup under sudo reads root's, and the test harness fakes SYS_HOME while HOME
+    # stays the operator's real home. Nothing would be written either way, so the
+    # answer is silence rather than a line about someone else's session. A
+    # CLAUDE_CONFIG_DIR the user set is explicit intent and honoured.
     if [[ -z "${CLAUDE_CONFIG_DIR:-}" && "$cfg" != "${SYS_HOME%/}/.claude.json" &&
           "$cfg" != "${SYS_HOME%/}/.claude/.config.json" ]]; then
-        ui_muted "the user-scope claude config (${cfg}) is not in this run's home (${SYS_HOME}) - nothing removed (skipped)"
         return 0
     fi
 
     kind="$(homelab_user_entry "$cfg" 2>/dev/null)" || kind="none"
-
-    case "$kind" in
-        none)
-            ui_muted "no user-scope 'homelab' MCP entry in ${cfg} (skipped)"
-            return 0
-            ;;
-        agent-skills) ;;
-        *)
-            ui_warn "MCP server 'homelab' does not point into the retired agent-skills clone - left alone. If it is yours to remove: claude mcp remove homelab --scope user"
-            return 0
-            ;;
-    esac
-
-    if ! has_cmd claude; then
-        ui_warn "the stale 'homelab' entry was left in ${cfg} - claude is not on PATH to remove it (claude mcp remove homelab --scope user)"
-        return 0
+    if [[ "$kind" == agent-skills ]]; then
+        ui_muted "the user-scope 'homelab' MCP entry still points into the retired agent-skills tree; left in place until the homelab MCP server replaces it"
     fi
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would back up ${cfg}, run: claude mcp remove homelab --scope user (the entry's path is in the retired agent-skills clone)"
-        return 0
-    fi
-
-    # No copy, no write: the file is the user's, and it holds more than this entry.
-    backup=""
-    if [[ -f "$cfg" ]] && ! backup="$(backup_file "$cfg")"; then
-        ui_warn "could not back up ${cfg} - the 'homelab' entry was left unchanged"
-        return 0
-    fi
-
-    ui_muted "run: claude mcp remove homelab --scope user"
-    if ! claude mcp remove homelab --scope user; then
-        ui_warn "could not remove the 'homelab' entry - left unchanged${backup:+ (config backup: ${backup})}"
-        return 0
-    fi
-    if [[ "$(homelab_user_entry "$cfg" 2>/dev/null)" == agent-skills ]]; then
-        ui_warn "claude reported the entry gone but it is still in ${cfg} - left as claude wrote it${backup:+ (config backup: ${backup})}"
-        return 0
-    fi
-    ui_ok "removed the stale user-scope 'homelab' MCP entry${backup:+ (config backup: ${backup})}"
     return 0
 }
 
@@ -4677,10 +4641,12 @@ install_omnigraph_client() {
     else
         ui_warn "no .mcp.json in ${repo_root} — nothing to pin omnigraph/autoos-agent to."
     fi
-    # A recognised leftover of the retired clone's docker era (its own "not mine,
-    # not touched" rule lives in the helper). graphify's ~/.local/bin link is
-    # cleared by the graphify component, next to the install that path unblocks.
-    remove_stale_homelab_mcp_entry
+    # A recognised leftover of the retired clone's docker era: named, not
+    # removed — the operator deferred the homelab MCP switch (2026-09-28), so the
+    # entry stays until the server-side homelab MCP replaces it. graphify's
+    # ~/.local/bin link is cleared by the graphify component, next to the install
+    # that path unblocks.
+    report_stale_homelab_mcp_entry
 
     local base token
     base="$(omnigraph_url_answer)"

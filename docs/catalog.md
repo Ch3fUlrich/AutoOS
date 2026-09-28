@@ -176,7 +176,9 @@ Available standalone MCP components in the catalog:
   It is also where the MCP *wiring* that names `omnigraph` lives: it approves this
   checkout's project servers, warns about a user-scope `omnigraph` instead of
   writing one, writes Antigravity's `omnigraph` entry (that config has no project
-  scope), and removes the retired tree's user-scope `homelab` leftover. Those four
+  scope), and names the retired tree's user-scope `homelab` leftover without
+  removing it — the operator deferred the homelab MCP switch (2026-09-28), so the
+  entry stays until the server-side homelab MCP replaces it. Those four
   steps run even when the URL answer is blank — only the artifacts that carry the
   URL and token wait for it. See `docs/omnigraph.md`
   ("The `omnigraph-client` component").

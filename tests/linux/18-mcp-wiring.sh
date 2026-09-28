@@ -386,7 +386,7 @@ omni_client_spec() {
         omnigraph_install_bridge() { :; }
         omnigraph_install_wrapper() { :; }
         omnigraph_retire_rc_token_lines() { :; }
-        remove_stale_homelab_mcp_entry() { :; }
+        report_stale_homelab_mcp_entry() { :; }
         enable_project_mcp_server() { :; }
         mcp_has_server() { return 1; }
         has_cmd() { [[ "$1" == npm ]]; }
@@ -501,7 +501,7 @@ if it "omnigraph-client records a refused project-server approval for the summar
         omnigraph_install_bridge() { :; }
         omnigraph_install_wrapper() { :; }
         omnigraph_retire_rc_token_lines() { :; }
-        remove_stale_homelab_mcp_entry() { :; }
+        report_stale_homelab_mcp_entry() { :; }
         register_antigravity_mcp_server() { :; }
         mcp_has_server() { return 1; }
         mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
@@ -532,7 +532,7 @@ omni_client_run() {
         omnigraph_install_bridge() { : >>"$tmp/log/bridge"; }
         omnigraph_install_wrapper() { : >>"$tmp/log/wrapper"; }
         omnigraph_retire_rc_token_lines() { : >>"$tmp/log/retire"; }
-        remove_stale_homelab_mcp_entry() { : >>"$tmp/log/homelab"; }
+        report_stale_homelab_mcp_entry() { : >>"$tmp/log/homelab"; }
         register_mcp_server() { printf 'claude %s %s\n' "$1" "$2" >>"$tmp/log/claude"; }
         register_antigravity_mcp_server() { printf 'agy %s\n' "$1" >>"$tmp/log/agy"; }
         enable_project_mcp_server() { printf 'project %s %s\n' "$1" "$2" >>"$tmp/log/project"; }
@@ -586,20 +586,20 @@ if it "omnigraph-client only warns about a user-scope omnigraph, it never regist
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "omnigraph-client cleans the retired homelab entry as part of the wiring"; then
+if it "omnigraph-client reports the retired homelab entry as part of the wiring"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/repo"
     printf '{}\n' >"$tmp/repo/.mcp.json"
     omni_client_run "$tmp" >/dev/null
     problems=""
-    [[ -e "$tmp/log/homelab" ]] || problems+="[remove_stale_homelab_mcp_entry never ran] "
+    [[ -e "$tmp/log/homelab" ]] || problems+="[report_stale_homelab_mcp_entry never ran] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "omnigraph-client: with no server configured it still cleans up but writes no bridge config"; then
-    # The three repo-scope duties (approve the project servers, name a shadowing
-    # user entry, drop the retired homelab one) do not depend on a URL, so a
+if it "omnigraph-client: with no server configured it still reports but writes no bridge config"; then
+    # The four repo-scope duties (approve the project servers, name a shadowing
+    # user entry, report the retired homelab one) do not depend on a URL, so a
     # machine that skipped the prompt still gets them. The entry that CARRIES
     # the URL and token stays behind the gate: A3's "nothing configured, write
     # nothing" invariant, which also keeps a guessed host out of a public repo.
@@ -610,7 +610,7 @@ if it "omnigraph-client: with no server configured it still cleans up but writes
     problems=""
     [[ "$out" == *"state=skipped"* ]] || problems+="[no server configured, yet the step reported work: $(tail -n 3 <<<"$out")] "
     [[ -e "$tmp/log/project" ]] || problems+="[the project servers were not approved on a blank-URL machine] "
-    [[ -e "$tmp/log/homelab" ]] || problems+="[the retired entry was not cleaned on a blank-URL machine] "
+    [[ -e "$tmp/log/homelab" ]] || problems+="[the retired entry was not reported on a blank-URL machine] "
     for absent in env agy bridge wrapper; do
         [[ ! -e "$tmp/log/$absent" ]] || problems+="[a $absent artifact was written with no server configured] "
     done
@@ -2244,10 +2244,11 @@ if it "graphify registers once: the second run says skipped and already configur
 fi
 
 # ─── A4b: a user-scope homelab entry that points into the retired clone ─────
-# homelab is not an AutoOS component (spec D14): the only thing done here is
-# removing an entry AutoOS can recognise as its own leftover — a user-scope
-# entry whose PYTHONPATH or args name the retired agent-skills tree. Read, back
-# up once, remove through claude's own CLI, report. Anything else is the user's.
+# homelab is not an AutoOS component (spec D14), and the operator deferred its
+# MCP switch (2026-09-28): NO step may remove the user-scope 'homelab' entry. All
+# that is done is report a recognised leftover of the retired tree — an entry whose
+# PYTHONPATH or args name agent-skills — and leave it exactly where it is. No
+# backup, no claude call, no file write, no recorded failure.
 #
 # hl_cfg_write <tmp> <json mcpServers block>: write a Claude user config.
 hl_cfg_write() {
@@ -2256,73 +2257,84 @@ hl_cfg_write() {
     printf '{"mcpServers":%s,"firstTimeRun":true}\n' "$body" >"$tmp/.claude.json"
 }
 
-# hl_remove_run <tmp> <dry>: remove_stale_homelab_mcp_entry with a fake claude that
-# records its argv and, for `mcp remove <name> --scope user`, drops that key from
-# the top-level mcpServers the way the CLI does.
-hl_remove_run() {
-    local tmp="$1" dry="$2"
+# hl_report_run <tmp> <dry>: the report-only check on a scratch home, with a claude
+# stub that records its argv (the check must never reach it) and a backup_file stub
+# that records the attempt (the check must never make one).
+hl_report_run() {
+    local tmp="$1" dry="${2:-0}"
     (
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_DRY_RUN="$dry"
         unset CLAUDE_CONFIG_DIR
         claude() {
             printf 'claude %s\n' "$*" >>"$tmp/claude.log"
-            if [[ "${1:-} ${2:-}" == "mcp remove" ]]; then
-                python3 - "$tmp/.claude.json" "${3:-}" <<'PY'
-import json, sys
-path, name = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as fh:
-    data = json.load(fh)
-data.get("mcpServers", {}).pop(name, None)
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2)
-PY
-            fi
             return 0
         }
-        remove_stale_homelab_mcp_entry 2>&1
+        backup_file() {
+            printf 'backup %s\n' "$1" >>"$tmp/backup.log"
+            return 1
+        }
+        report_stale_homelab_mcp_entry 2>&1
     )
 }
 
-if it "homelab: an agent-skills PYTHONPATH entry is backed up and removed"; then
+# hl_untouched <tmp> <before>: the user config is byte-for-byte what it was.
+hl_untouched() {
+    local tmp="$1" before="$2"
+    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || return 1
+    [[ -s "$tmp/claude.log" ]] && return 1
+    [[ -s "$tmp/backup.log" ]] && return 1
+    compgen -G "$tmp/.claude.json.autoos-backup-*" >/dev/null && return 1
+    return 0
+}
+
+if it "homelab: the removal code path is gone from lib/"; then
+    # Operator decision 2026-09-28: the entry is never removed. A leftover
+    # `claude mcp remove homelab` or a dead remove_* helper would still be
+    # reachable by hand, so the whole path must go, not just its caller.
+    problems=""
+    grep -q 'mcp remove homelab' lib/linux/install.sh \
+        && problems+="[lib/ still runs claude mcp remove homelab] "
+    grep -q 'remove_stale_homelab_mcp_entry' lib/linux/install.sh \
+        && problems+="[the removing helper is still there under its old name] "
+    grep -q 'report_stale_homelab_mcp_entry' lib/linux/install.sh \
+        || problems+="[nothing reports the recognised leftover] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a recognised stale entry is reported and left exactly as it was"; then
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     hl_cfg_write "$tmp" '{"homelab":{"type":"stdio","command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}},"serena":{"command":"uvx" }}'
-    out="$(hl_remove_run "$tmp" 0)"
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$out" == *"removed"* ]] || problems+="[nothing said removed: $out] "
-    grep -qxF 'claude mcp remove homelab --scope user' "$tmp/claude.log" \
-        || problems+="[claude got: $(tr '\n' '|' <"$tmp/claude.log")] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
-        || problems+="[the user config was rewritten with no backup] "
-    kept="$(python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(','.join(sorted(d.get('mcpServers', {})) + ['firstTimeRun' if 'firstTimeRun' in d else 'LOST']))
-" "$tmp/.claude.json" 2>/dev/null || echo unreadable)"
-    [[ "$kept" == "serena,firstTimeRun" ]] \
-        || problems+="[the config lost or kept the wrong keys: $kept] "
+    [[ "$out" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[nothing named the retired tree: $out] "
+    [[ "$out" == *"left in place"* ]] \
+        || problems+="[nothing said it stays: $out] "
+    [[ "$out" != *"removed"* ]] || problems+="[claimed a removal: $out] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[the user config, claude or a backup was touched: $(cat "$tmp/claude.log" "$tmp/backup.log" 2>/dev/null | tr '\n' '|')$(ls "$tmp")]"
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: the second run reports skipped and writes no second backup"; then
-    if ! has_cmd python3; then skip "python3 not found"; else
+if it "homelab: the report is the same in a dry run and a live run, and writes nothing"; then
+    # Read-only by construction, so there is no third behaviour to announce.
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
-    first="$(hl_remove_run "$tmp" 0)"
-    second="$(hl_remove_run "$tmp" 0)"
-    n_backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
-    n_removes="$(grep -c 'mcp remove' "$tmp/claude.log" || true)"
+    before="$(cat "$tmp/.claude.json")"
+    dry="$(hl_report_run "$tmp" 1)"
+    live="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$first" == *"removed"* ]] || problems+="[the first run did not remove: $first] "
-    [[ "$second" == *"skipped"* ]] || problems+="[the second run did not say skipped: $second] "
-    [[ "$second" != *"removed"* ]] || problems+="[the second run removed again: $second] "
-    [[ "$n_backups" == "1" ]] || problems+="[$n_backups backups, expected 1] "
-    [[ "$n_removes" == "1" ]] || problems+="[$n_removes remove calls, expected 1] "
+    [[ "$dry" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[the dry run said nothing: $dry] "
+    [[ "$live" == "$dry" ]] || problems+="[dry and live differ: [$dry] vs [$live]] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[a run wrote to the config or the disk] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-    fi
 fi
 
 if it "homelab: an agent-skills path in the args is recognised just like PYTHONPATH"; then
@@ -2334,39 +2346,60 @@ if it "homelab: an agent-skills path in the args is recognised just like PYTHONP
     rm -rf "$tmp"
 fi
 
-if it "homelab: an entry that is not an agent-skills leftover is left alone"; then
-    # The user's own homelab server: same name, nothing in it AutoOS recognises.
-    # Removing it would delete a working server the operator installed by hand.
+if it "homelab: a second run reports it again — nothing changed in between"; then
+    # The old shape converged to "skipped" because the first run fixed the
+    # machine. A report that stays put on a still-stale entry is the point: the
+    # line must not silently age out just because a run already said it.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"homelab":{"command":"docker","args":["run","-i","--rm","homelab-mcp:latest"],"env":{"HOMELAB_CONFIG":"/home/u/h.yaml"}}}'
+    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
     before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 0)"
+    first="$(hl_report_run "$tmp" 0)"
+    second="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$out" == *"alone"* ]] || problems+="[nothing said it was left alone: $out] "
-    [[ "$out" != *"removed"* ]] || problems+="[claimed a removal it did not do: $out] "
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed the user's entry] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[a backup of a file it never changed] "
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the config was rewritten] "
+    [[ "$first" == *"agent-skills"* ]] || problems+="[the first run said nothing: $first] "
+    [[ "$second" == "$first" ]] || problems+="[the second run differed: $second] "
+    hl_untouched "$tmp" "$before" || problems+="[a run touched the config] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: no user-scope entry says skipped, not failed"; then
+if it "homelab: an entry that is not an agent-skills leftover is untouched and unsaid"; then
+    # The user's own homelab server: same name, nothing in it AutoOS recognises.
+    # Neither removed nor commented on — the report is only about AutoOS's own
+    # leftover, and a line naming a working server on every run is noise.
+    if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"serena":{"command":"uvx"}}'
-    out="$(hl_remove_run "$tmp" 0)"
-    if [[ "$out" == *"skipped"* ]]; then pass; else fail "expected skipped, got: $out"; fi
+    hl_cfg_write "$tmp" '{"homelab":{"command":"docker","args":["run","-i","--rm","homelab-mcp:latest"],"env":{"HOMELAB_CONFIG":"/home/u/h.yaml"}}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[said something about the user's entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
     rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
 fi
 
-if it "homelab: a config outside this run's home is never touched"; then
+if it "homelab: no user-scope entry says nothing"; then
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"serena":{"command":"uvx"}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[invented a line for an absent entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a config outside this run's home is not reported on"; then
     # The claude CLI reads $HOME, but the home this run configures is $SYS_HOME.
     # When the two differ - setup under sudo, or a harness that fakes SYS_HOME and
     # leaves HOME at the operator's real one - the file the resolver names belongs
-    # to somebody else's session, and removing an entry from it edits a config
-    # this run was never pointed at. Refuse, say skipped, touch nothing.
+    # to somebody else's session. Nothing is written to it, and a line about it
+    # would describe a config this run was never pointed at, so: say nothing.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     run_home="$tmp/run"; cfg_home="$tmp/cfg"
@@ -2377,14 +2410,14 @@ if it "homelab: a config outside this run's home is never touched"; then
         SYS_HOME="$run_home" HOME="$cfg_home" AUTOOS_DRY_RUN=0
         unset CLAUDE_CONFIG_DIR
         claude() { printf 'claude %s\n' "$*" >>"$tmp/claude.log"; return 0; }
-        remove_stale_homelab_mcp_entry 2>&1
+        backup_file() { printf 'backup %s\n' "$1" >>"$tmp/backup.log"; return 1; }
+        report_stale_homelab_mcp_entry 2>&1
     ) )"
     problems=""
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed an entry outside this run's home] "
-    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
+    [[ "$out" != *homelab* ]] || problems+="[reported on a config outside this run's home: $out] "
     [[ "$(cat "$cfg_home/.claude.json")" == "$before" ]] || problems+="[the config outside this run's home was rewritten] "
-    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
-    [[ "$out" != *"the stale user-scope"* ]] || problems+="[claimed a removal it did not do: $out] "
+    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[ran claude against a config outside this run's home] "
+    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
@@ -2392,52 +2425,36 @@ fi
 
 if it "homelab: a project-scoped entry of that name is not the user scope"; then
     # ~/.claude.json also carries per-project servers. Those belong to the repo's
-    # own .mcp.json approval, never to a user-scope cleanup.
+    # own .mcp.json approval, never to a user-scope check.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    mkdir -p "$tmp"
     printf '%s\n' '{"mcpServers":{},"projects":{"/home/u/repo":{"mcpServers":{"homelab":{"command":"python","args":["/home/u/Documents/code/agent-skills/mcp/homelab/server.py"]}}}}}' \
         >"$tmp/.claude.json"
     before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 0)"
+    out="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the project-scoped entry was touched] "
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed a project-scope entry] "
-    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *homelab* ]] || problems+="[reported on a project-scope entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the project-scoped entry was touched] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: the dry run announces the removal and writes nothing"; then
-    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
-    before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 1)"
-    problems=""
-    [[ "$out" == *"would"* ]] || problems+="[the dry run made no announcement: $out] "
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the dry run rewrote the user config] "
-    [[ -s "$tmp/claude.log" ]] && problems+="[the dry run ran claude: $(tr '\n' '|' <"$tmp/claude.log")] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[the dry run wrote a backup] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "homelab: the removal runs once, from the omnigraph component"; then
-    # An orphan function nothing calls is a test fixture, not a feature: the
-    # retirement cleanup belongs with the omnigraph wiring it shares a reason
-    # with (A7b: install_omnigraph_client), and exactly once — a second caller
-    # would re-back-up a file it already cleaned. The body is taken whole; a
-    # fixed window of lines would miss the call as the function grows.
+if it "homelab: the report runs once, from the omnigraph component"; then
+    # An orphan function nothing calls is a test fixture, not a feature: naming
+    # the leftover belongs with the omnigraph wiring it shares a reason with
+    # (A7b: install_omnigraph_client), and exactly once — a second caller would
+    # print the line twice per run. The body is taken whole; a fixed window of
+    # lines would miss the call as the function grows.
     body="$(awk '/^install_omnigraph_client\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
     retired="$(awk '/^install_agent_skills\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
     links="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-    calls="$(grep -c 'remove_stale_homelab_mcp_entry' <<<"$body" || true)"
-    total="$(grep -cE '^[[:space:]]+remove_stale_homelab_mcp_entry$' lib/linux/install.sh || true)"
+    calls="$(grep -c 'report_stale_homelab_mcp_entry' <<<"$body" || true)"
+    total="$(grep -cE '^[[:space:]]+report_stale_homelab_mcp_entry$' lib/linux/install.sh || true)"
     problems=""
     [[ "$calls" == "1" ]] || problems+="[install_omnigraph_client calls it $calls times] "
-    grep -q 'remove_stale_homelab_mcp_entry' <<<"$retired" && problems+="[the retired step still calls it] "
-    grep -q 'remove_stale_homelab_mcp_entry' <<<"$links" && problems+="[the skills linker calls it too] "
+    grep -q 'report_stale_homelab_mcp_entry' <<<"$retired" && problems+="[the retired step still calls it] "
+    grep -q 'report_stale_homelab_mcp_entry' <<<"$links" && problems+="[the skills linker calls it too] "
     [[ "$total" == "1" ]] || problems+="[$total call sites in lib/linux/install.sh] "
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi

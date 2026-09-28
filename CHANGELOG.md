@@ -5,7 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed - the `agent-skills` step is a tombstone; its twelve duties have homes (A7b, Linux/macOS, 2026-09-28)
+### Changed — the user-scope `homelab` MCP entry is never removed, only reported (NOHL, 2026-09-28)
+
+Operator decision 2026-09-28 06:2xZ (via L0): the homelab MCP switch is **not** to
+be done now — the server-side homelab MCP is not finished, so no step may take the
+user-scope `homelab` entry away. It is the entry the homelab server will be
+configured through, not a leftover to clean up.
+
+- **`lib/linux/install.sh`**: `remove_stale_homelab_mcp_entry` is gone and
+  `report_stale_homelab_mcp_entry` replaces it. The whole removal path went with
+  it — the `backup_file` call, `claude mcp remove homelab --scope user`, the
+  post-removal re-check, the `has_cmd claude` precondition and the dry-run
+  branch (a check that writes nothing has no separate dry-run behaviour to
+  announce, so dry and live now print the same line). What is left: classify the
+  config with `homelab_user_entry` (kept — it is what the report is about), and
+  when it says `agent-skills`, print one muted line naming the retired tree and
+  saying the entry is left in place. No backup, no `claude` call, no file write,
+  no recorded failure. `none` and `other` say nothing at all: a line on every run
+  about an absent entry, or about a server the user wrote themselves, is noise —
+  and the old `other` branch ended in `claude mcp remove homelab --scope user`,
+  which is now an order AutoOS must not give. The `$SYS_HOME` guard stays: a
+  config outside the home this run configures belongs to another session (setup
+  under sudo reads root's), and reporting on it would describe a file the run was
+  never pointed at.
+- **`install_omnigraph_client`**: calls the report where it called the removal,
+  still before the URL/token/npm gates and still exactly once; the case that
+  guards against an orphan or a second caller now pins the new name.
+- Tests (`tests/linux/18-mcp-wiring.sh`): the removal cases are replaced by
+  report cases. A recognised stale entry leaves the config byte-identical with no
+  backup file, no `claude` invocation and no `backup_file` attempt (both stubs
+  record, so the absence is proven, not assumed) and prints the line; a second run
+  prints the same line again, because nothing changed in between — the old shape
+  converged to *skipped* precisely because the first run had mutated the machine;
+  dry and live are identical; an unrecognised entry, an absent entry and a
+  project-scope entry each get no line and an untouched file; a config outside this
+  run's home is not reported on. One case greps `lib/` for `mcp remove homelab` and
+  for the old helper name, so the removal cannot come back under a new caller.
+- Docs: `docs/catalog.md`, the A4b row and spec §C/D14 of
+  `docs/plans/2026-09-27-omnigraph-mcp-catalog-{plan,spec}.md` say the removal is
+  deferred by operator decision rather than done. `homelab_user_entry` still
+  recognises the shape, and `docs/omnigraph.md` never described this duty, so
+  neither needed a change.
+
+### Changed — the `agent-skills` step is a tombstone; its twelve duties have homes (A7b, Linux/macOS, 2026-09-28)
 
 - **`catalog/linux.json`, `catalog/macos.json`**: new `agent-skill-links`
   component (`provider: custom`, `postInstall: install_agent_skill_links`,
@@ -33,7 +75,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that named this checkout's servers — approve the `.mcp.json` project servers
   (`omnigraph`, `autoos-agent`), warn about a shadowing user-scope `omnigraph`
   instead of ever writing one, write Antigravity's `omnigraph` entry (its config
-  has no project scope) and remove the retired tree's user-scope `homelab` entry.
+  has no project scope) and report — never remove — the retired tree's user-scope
+  `homelab` entry (that removal was deferred, see the NOHL entry below).
   The first, second and fourth run **before** the URL/token/npm gates, because a
   machine that never answered the prompt still wants a clean, working Claude Code;
   the entry that *carries* the URL and token stays behind them, which is A3's
@@ -62,7 +105,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `14-state-verify-and-undo.sh`, `38-omnigraph-client.sh`): the linking cases
   moved to the new component and gained second-run, keep-yours, dry-run,
   moved-checkout and one-destination-list assertions; the omnigraph-client block
-  asserts the approvals, the warning-only rule, the homelab cleanup and the
+  asserts the approvals, the warning-only rule, the homelab report and the
   blank-URL machine that still gets the repo-scope duties and writes no bridge
   config; one case fails the suite if any installer calls an `mcp-*` postInstall
   from another component; and the Antigravity merge is now proven on a real
