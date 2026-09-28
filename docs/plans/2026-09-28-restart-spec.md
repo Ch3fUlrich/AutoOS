@@ -98,6 +98,38 @@ It prints the line only; running it is the parent's action.
 - Before: the 48 h up to the RESTART merge. After: the 48 h after the cap change is live. Both
   numbers go to the L0 router with their windows and the counts behind them.
 
+## 6. Context provenance (operator D-042, PLAN §16)
+
+Goal: lineage for every context a session starts from. The console can show which pack a session
+started from, diff two packs, and answer "why this decision" by replaying the exact pack.
+
+- **Store:** `logs/context/` in the repo the session runs from (git-ignored, like `logs/sandboxes/`).
+  - `blobs/<sha256>` holds each part once, content-addressed. The cached prefix, card, snapshot,
+    memory block and events block are separate blobs, so an unchanged prefix is stored once.
+  - `manifests/<manifest-id>.json`, where manifest-id = sha256 of the canonical manifest JSON (first 16 hex).
+  - `events.jsonl` is append-only, with one `{"type":"context_pack", ...manifest}` line per pack. It
+    stands in for the console's event stream until that exists.
+- **Manifest fields** (all required; absent ones are explicit `null`):
+  - `session` (name + Claude session id when known) and `generation` (n = previous generation + 1,
+    read from the last manifest of that name);
+  - `reason` (`cap` | `clear` | `crash` | `operator` | `first`);
+  - `prefix` {sha, skill sha, brief path + sha}, `card` {sha}, `snapshot` {sha};
+  - `memory` {recall ids + versions; stub `[]`}, `events` {first id, last id, count};
+  - `tokens` {prefix, variable}, `created` UTC, `parent` (the manifest id that session relaunched from).
+- **Carry-through:** `pack` prints `gen=<manifest-id>` as the pack's first line. The session copies it
+  into its card header. `ready`, `question:`/`Q:` and decision lines written through the tools carry
+  ` gen=<id>` (the `ready` subcommand appends it when the card has one).
+- **Spawn briefs:** `autoos-agent.py run` stores the brief blob plus a manifest of type `spawn`, with
+  brief sha, the resolver's choice (route, leg, client, model, reason), parent session + gen, and
+  sandbox branch. The run prints `gen=<id>` in its header, and the lane record cites it.
+- **Card versions:** every `card check` that passes stores the card as a blob and appends a `card`
+  event (sha, previous sha). A successor can diff any two waves.
+- **Retention:** `autoos-agent.py context-store prune` deletes blobs older than 90 days that no
+  manifest from the last 90 days references. Manifests and `events.jsonl` are kept forever.
+  Heartbeat runs the prune at most once a day.
+- **Replay:** `autoos-agent.py pack --replay <manifest-id>` reassembles the exact bytes from blobs.
+  It exits 1 naming the missing blob when a pruned part is gone. `pack --diff <id1> <id2>` diffs two packs part by part.
+
 ## Delivery (lanes, each test-first, cheap writer → cross-family review → Sonnet final)
 
 | lane | scope | files |
@@ -108,9 +140,11 @@ It prints the line only; running it is the parent's action.
 | R4 relaunch | `relaunch-line` from the run config | tools/autoos-agent.py, config example, tests |
 | R5 metric+cap | `usage --orchestrators`, before number, then cap 350k | tools/autoos_usage.py, catalog/ai-registry.json, tests |
 | R6 skill | R-coord-06/08 point at card/pack/inbox tools; state-file.md becomes the card spec | SKILL.md, references/ |
+| R7 provenance | §6: blob store + manifests + events.jsonl, `gen=` carry-through, spawn manifests, card versions, prune, `--replay`/`--diff` | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
 
-Order: R1 → R2 → R3 (needs R1, R2) → R4, then R5 (before-number first, cap last), then R6. R1 and R5's
-measurement can run in parallel.
+Order: R1 → R2 → R3 (needs R1, R2) → R7 (needs R3's parts; the store module can start in parallel
+with R1) → R4, then R5 (before-number first, cap last), then R6. R1 and R5's measurement can run in
+parallel.
 
 ## Open (decide in review)
 
