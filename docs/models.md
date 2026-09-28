@@ -588,6 +588,24 @@ is skipped by `tools/registry.py plan_dead_reasons()` with the reason
 answer. `mistral-small-latest` was consequently removed from every route that
 listed it.
 
+**The replacement, measured through the gateway 2026-09-28 (MISTRALFIX2).** The
+operator's rule was: replace `mistral-small` with Mistral Codestral wherever it
+was a leg, and where both codestral siblings answer, take `mistral-code-latest`.
+Three calls each through the gateway (`max_tokens 4096`,
+`work/L1-routing/MISTRALREPL.probe.jsonl`): `mistral/mistral-code-latest` 3/3
+200 (p50 0.3 s), `mistral/codestral-latest` 3/3 200 (p50 0.3 s),
+`mistral/mistral-small-latest` 0/3 (429) — the gateway agrees with the table
+above. So `t3-driver` keeps `mistral/mistral-code-latest` as its head (it was
+already L1, so nothing was added), `codestral-latest` is registered as the
+tested alternative (`models.codestral-latest`, with its measured limits row) and
+is deliberately **not** a leg of any route, and the freed slots in
+`t2-worker-clean` / `t3-driver-clean` stayed empty: `mistral-code-latest`
+trains on prompts (`models.mistral-code-latest.trains_on_prompts`), so spec 3.1
+rule 3 rejects it in a `-clean` route and `registry.py validate` exits 1 if it is
+listed there. Those twins are where a `privacy=sensitive` card lands, so one
+live leg (`deepseek/deepseek-flash`, their head) beats a second leg that would
+bill private prompts to a training pool.
+
 ## Connect each app (key = `AUTOOS_OMNIROUTE_KEY`)
 
 - **OpenCode** — repo default already points at `:20128`

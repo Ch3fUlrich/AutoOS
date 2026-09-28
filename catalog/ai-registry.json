@@ -137,6 +137,22 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "codestral-latest": {
+      "$comment": "BRIEF MISTRALFIX2 (S1, operator via L1-main 2026-09-28 11:5xZ): mistral-small does not work - replace it with Mistral Codestral wherever it was a leg; if both mistral-code-latest and codestral-latest answer, use mistral-code-latest. Measured through the gateway (3 calls each, max_tokens 4096, evidence work/L1-routing/MISTRALREPL.probe.jsonl): codestral-latest 3/3 200 p50 0.3 s, mistral-code-latest 3/3 200 p50 0.3 s, mistral-small-latest 0/3 (429). Both siblings answer, so the operator's tie-break picks mistral-code-latest as the replacement and THIS model is registered as the tested alternative, deliberately not a leg of any route (a route change is the operator's, and it would need a plan-limits row plus a probe of its own in every surface it lands in). context_advertised / context_usable / output_max / reasoning are inherited from its provider sibling models.'mistral-code-latest' and models.'mistral-small-latest', NOT measured for codestral - they are the shape this provider's records carry, so re-measure before a leg depends on them. price_in / price_out are 0.0 because no vendor figure was sourced (same stance as mistral-small-latest - not a free-tier guarantee, do not use for cost math). tool_calls: unproven (tools/probe-toolcalls.py never probed it). No model-level trains_on_prompts: it inherits providers.mistral.trains_on_prompts = false, which is how this registry has always treated a mistral direct-key model (mistral-small-latest carried the same shape); PRIV 2026-09-26 recorded a model-level override only for mistral-code-latest's free pool, which was found to train. Nobody has measured whether codestral trains - a -clean leg needs that sourced first (spec 3.1 rule 3 / private_safe()), and MISTRALFIX2's own clean-twin guard test (tests/test_registry.py MistralReplaceTests) is where that would surface.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "mistral",
+      "id": "codestral-latest",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "command-a-03-2025": {
       "$comment": "t4-rag head; tier-profiles.json calls its keys 'trial keys' - a temporary free trial, not a published free tier. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
       "context_advertised": 131072,
@@ -501,7 +517,7 @@
       "trains_on_prompts": true
     },
     "mistral-small-latest": {
-      "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses t2-worker-clean's 32768 (its larger use site) as the model's own ceiling; t3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). MISTRALFIX (2026-09-28): this model answers 429 at 0 requests/minute on the operator's plan (the number lives on providers.mistral.limits.mistral-small-latest, one home per fact), so it is no leg of any route - the resolver would skip it anyway via plan_dead_reasons(), and a route must not carry a leg it can never serve.",
+      "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses t2-worker-clean's 32768 (its larger use site) as the model's own ceiling; t3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). MISTRALFIX (2026-09-28): this model answers 429 at 0 requests/minute on the operator's plan (the number lives on providers.mistral.limits.mistral-small-latest, one home per fact), so it is no leg of any route - the resolver would skip it anyway via plan_dead_reasons(), and a route must not carry a leg it can never serve. MISTRALFIX2 (L1-routing gateway probe 2026-09-28T11:5xZ, evidence work/L1-routing/MISTRALREPL.probe.jsonl): 0/3, 429 - the gateway agrees with the 0 rpm reading; its replacement is mistral/mistral-code-latest (the operator's tie-break between the two codestral siblings, both measured 3/3 200) everywhere a leg may train, and no leg at all in a -clean route (spec 3.1 rule 3).",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -2185,12 +2201,17 @@
       "trains_on_prompts": true
     },
     "mistral": {
-      "$comment": "BRIEF MISTRALFIX (L1-routing 2026-09-28T10:5xZ): a direct probe of api.mistral.ai with this key, reading x-ratelimit headers per model, measured the PLAN rather than the vendor's published ladder. Full measured table (status / requests per minute / tokens per minute): mistral-small-latest 429 0 rpm; devstral-latest 429 0 rpm; mistral-medium-latest 429 0 rpm; magistral-medium-latest 429 0 rpm; mistral-large-latest 403 (not on the plan at all); codestral-latest 200 125 rpm 625000 tpm; mistral-code-latest 200 125 rpm 625000 tpm; open-mistral-nemo 200 188 rpm 625000 tpm; ministral-8b-latest 200 188 rpm 625000 tpm. Only the two models this registry carries a record for get a machine-readable row below (rule 10: a limits key must resolve to a model of this provider) - the other seven are recorded here so a later lane does not re-probe what was already measured or invent a model row off a probe alone. The gateway's own 7-day log agrees with the 0-rpm row: mistral/mistral-small-latest failed 51 of 51 calls. devstral/medium/magistral/mistral-large/codestral/open-mistral-nemo/ministral have no models record here at all, so they are reachable through no leg today. Two shapes say 'cannot serve' and each carries only what was measured: rpm 0 is a zero request quota (the 429 rows - mistral-small-latest), plan_available false is a model the plan does not carry at all (the 403 row - mistral-large-latest, which has no registry model record, so nothing carries that flag today). tools/registry.py plan_dead_reasons() reads both and the resolver skips such a leg.",
+      "$comment": "BRIEF MISTRALFIX (L1-routing 2026-09-28T10:5xZ): a direct probe of api.mistral.ai with this key, reading x-ratelimit headers per model, measured the PLAN rather than the vendor's published ladder. Full measured table (status / requests per minute / tokens per minute): mistral-small-latest 429 0 rpm; devstral-latest 429 0 rpm; mistral-medium-latest 429 0 rpm; magistral-medium-latest 429 0 rpm; mistral-large-latest 403 (not on the plan at all); codestral-latest 200 125 rpm 625000 tpm; mistral-code-latest 200 125 rpm 625000 tpm; open-mistral-nemo 200 188 rpm 625000 tpm; ministral-8b-latest 200 188 rpm 625000 tpm. Only the two models this registry carries a record for get a machine-readable row below (rule 10: a limits key must resolve to a model of this provider) - the other seven are recorded here so a later lane does not re-probe what was already measured or invent a model row off a probe alone. The gateway's own 7-day log agrees with the 0-rpm row: mistral/mistral-small-latest failed 51 of 51 calls. devstral/medium/magistral/mistral-large/codestral/open-mistral-nemo/ministral have no models record here at all, so they are reachable through no leg today. Two shapes say 'cannot serve' and each carries only what was measured: rpm 0 is a zero request quota (the 429 rows - mistral-small-latest), plan_available false is a model the plan does not carry at all (the 403 row - mistral-large-latest, which has no registry model record, so nothing carries that flag today). tools/registry.py plan_dead_reasons() reads both and the resolver skips such a leg. MISTRALFIX2 (L1-routing 2026-09-28T11:5xZ, evidence work/L1-routing/MISTRALREPL.probe.jsonl): the codestral pair was re-probed THROUGH the gateway (3 calls each, max_tokens 4096) - mistral/mistral-code-latest 3/3 200 p50 0.3 s, mistral/codestral-latest 3/3 200 p50 0.3 s, mistral/mistral-small-latest 0/3 (429), so the gateway agrees with the 10:5xZ direct probe. Both siblings answer, so the operator's tie-break names mistral-code-latest as mistral-small's replacement leg (t3-driver already heads with it) and codestral-latest is registered as the tested alternative (models.'codestral-latest'), not a leg of any route. codestral's limits row carries the 11:5xZ gateway-probe source string while its 125 rpm / 625000 tpm figures are the 10:5xZ direct probe's x-ratelimit headers (the gateway probe counted answers, not quota). One measured fact the brief did not expect: mistral-code-latest cannot replace mistral-small inside the -clean twins - models.'mistral-code-latest' has trains_on_prompts: true, so spec 3.1 rule 3 (private_safe) rejects the leg and validate exits 1 on both routes; those twins are where a privacy=sensitive card lands, so the swap was refused rather than made to pass (tests/test_registry.py MistralReplaceTests is the guard).",
       "api_base": null,
       "id": "mistral",
       "litellm_env": "MISTRAL_API_KEY",
       "litellm_prefix": null,
       "limits": {
+        "codestral-latest": {
+          "rpm": 125,
+          "source": "L1-routing gateway probe 2026-09-28T11:5xZ (MISTRALREPL.probe.jsonl)",
+          "tpm": 625000
+        },
         "mistral-code-latest": {
           "rpm": 125,
           "source": "L1-routing direct probe 2026-09-28T10:5xZ x-ratelimit headers",
@@ -2815,7 +2836,7 @@
       }
     },
     "t2-worker-clean": {
-      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest left the last position — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log, so a request that reached it was a dead end, not a fallback. The route keeps three legs and its native deepseek/deepseek-flash head, so it still serves; the openrouter and opencode-zen legs behind the head stay as they were (provider-level and per-leg gates).",
+      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest left the last position — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log, so a request that reached it was a dead end, not a fallback. The route keeps three legs and its native deepseek/deepseek-flash head, so it still serves; the openrouter and opencode-zen legs behind the head stay as they were (provider-level and per-leg gates). MISTRALFIX2 (operator 2026-09-28T11:5xZ): the freed slot was offered mistral/mistral-code-latest - measured 3/3 200 through the gateway (evidence work/L1-routing/MISTRALREPL.probe.jsonl) - and refused by spec 3.1 rule 3, because that model's free pool trains on prompts (models.'mistral-code-latest'.trains_on_prompts) and this twin is where a privacy=sensitive card lands. mistral/codestral-latest answers too and is registered as the tested alternative (models.'codestral-latest'), not as a leg. So the twin keeps MISTRALFIX's three legs and exactly one live leg, its native deepseek/deepseek-flash head - it still serves, which is what the route-liveness invariant requires (tests/test_registry.py MistralReplaceTests pins both facts).",
       "class": "mid",
       "id": "t2-worker-clean",
       "legs": [
@@ -2999,7 +3020,7 @@
       }
     },
     "t3-driver-clean": {
-      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest is out of the middle — measured 429 at 0 requests/minute on this plan (providers.mistral.limits), 51/51 gateway failures. The twin does NOT go unavailable: it keeps a live head leg (deepseek/deepseek-flash, back on after the DSBACK top-up), so it still has one leg that is neither denied, gated nor plan-dead. The rule this leaves in place is the invariant in tests/test_registry.py — a route that serves traffic must keep at least one live leg, and a -clean twin with none is marked unavailable instead of being routed into a dead leg.",
+      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest is out of the middle — measured 429 at 0 requests/minute on this plan (providers.mistral.limits), 51/51 gateway failures. The twin does NOT go unavailable: it keeps a live head leg (deepseek/deepseek-flash, back on after the DSBACK top-up), so it still has one leg that is neither denied, gated nor plan-dead. The rule this leaves in place is the invariant in tests/test_registry.py — a route that serves traffic must keep at least one live leg, and a -clean twin with none is marked unavailable instead of being routed into a dead leg. MISTRALFIX2 (operator 2026-09-28T11:5xZ): the same replacement was considered for the freed middle slot and refused for the same reason - mistral/mistral-code-latest measures 3/3 200 through the gateway but its free pool trains on prompts (models.'mistral-code-latest'), so spec 3.1 rule 3 rejects it in a route a privacy=sensitive card lands on; mistral/codestral-latest answers as well and is registered as the tested alternative (models.'codestral-latest'), not as a leg. The twin keeps MISTRALFIX's two legs and one live leg, its native deepseek/deepseek-flash head.",
       "class": "cheap",
       "id": "t3-driver-clean",
       "legs": [
