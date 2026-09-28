@@ -320,7 +320,7 @@ fi
 
 if it "the payload carries installed component flags"; then
     ok=1
-    for marker in '"installed":' '"installed applications"' "installed_ids"; do
+    for marker in '"installed":' '"installed applications"' '"installedStatus":' "state_components"; do
         grep -q "$marker" lib/linux/serve.py || { ok=0; echo "missing: $marker" >&2; }
     done
     if (( ok )); then pass; else fail "serve.py does not report installed components"; fi
