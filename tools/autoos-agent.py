@@ -1369,6 +1369,19 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
         if route is None:
             if _native_model_name(source):
                 return _leg_is_claude(model, registry)
+            # SB-C2 item 4: a bare NAME that is no route can still be a model
+            # the registry prices — `deepseek-flash` is the bulk paid leg under
+            # DSGUARD's $25 cap, and its row (and every alias row of the same
+            # family spelling) carries the same price the spend guard bills.
+            # The refusal was right for a string the registry knows nothing
+            # about; it was wrong for one it has a priced row for. An
+            # anthropic-family row answers Claude whatever its name says.
+            row = (registry.get("models") or {}).get(combo)
+            if isinstance(row, dict):
+                if (row.get("family") or "").lower() in ("anthropic", "claude"):
+                    return True
+                if resolver.credit_leg_priced(combo, registry):
+                    return False
             return None
         # A combo route is what the gateway resolves; it falls through past a
         # rate-limited leg to the next one, so the route is a Claude spend
@@ -3344,7 +3357,8 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
                    client_state: dict, client: str = "opencode",
                    env: dict | None = None,
-                   overlay_missing_at: str | None = None) -> dict:
+                   overlay_missing_at: str | None = None,
+                   credit_guards: dict | None = None) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
@@ -3373,7 +3387,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
-                           client, env)
+                           client, env, credit_guards)
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"

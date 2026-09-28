@@ -95,13 +95,21 @@ class FakeServerContractTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 rows = json.loads(resp.read().decode("utf-8"))["rows"]
             self.assertEqual(rows[0]["p.slug"], "autoos")
-            self.assertIn("p.repository", rows[0])
+            self.assertNotIn("p.repository", rows[0])
 
     def test_a_path_the_bridge_never_calls_is_404(self):
         with module.FakeOmnigraphServer(graph_id="autoos") as srv:
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 urllib.request.urlopen(srv.base_url + "/graphs/autoos/schema", timeout=5)
             self.assertEqual(ctx.exception.code, 404)
+
+
+class WhoamiQueryTests(unittest.TestCase):
+    def test_whoami_query_asks_only_for_properties_the_live_schema_has(self):
+        # Project has no `repository` property live: asking for it is a type error
+        # (T6), which made the bridge check fail against a healthy server.
+        self.assertNotIn("repository", module.WHOAMI_QUERY)
+        self.assertIn("$p.slug", module.WHOAMI_QUERY)
 
 
 class BridgeBenchmarkTests(unittest.TestCase):

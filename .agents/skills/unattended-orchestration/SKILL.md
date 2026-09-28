@@ -135,6 +135,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-worker-08: Verify on a detached copy (`git clone --no-hardlinks`, `worktree add --detach`; `tar` only if no test reads git); never cp a worktree. (why: copies share its index; source: ci7)
 - R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 - R-worker-10: Accept a detector or redactor on the real output corpus; give each new raw-data consumer its own redaction test. (why: fixtures passed; a secret leaked; source: SPAWNFIX3d, REDACTFIX3)
+- R-worker-11: A 'summarise, no tools' ask is harness compaction unless a leading <cross-session-message from=> wrapper marks a peer. (why: transcript export; source: D-146, SB-C2, CompactionRuleTests)
 
 ## CAO quickstart
 

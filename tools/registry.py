@@ -196,7 +196,11 @@ COMMENT_KEYS = ("$comment", "comment")
 # unavailable_until's whole job is to hold a date (rule 7 checks the value
 # parses); version is a date by definition. Neither is a rule-5 violation.
 # monthly_cap_source is a source like any other: who set the cap, and when.
-DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source")
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source",
+                    # the schema's price_source asks for a DATED attribution by
+                    # name ("gateway /v1/models 2026-09-28"); rule 5 must not
+                    # fight rule-for-field honesty (SB-C2 item 4)
+                    "price_source")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -2824,6 +2828,144 @@ def _check_monthly_caps(registry) -> list:
     return problems
 
 
+def _check_credit_guards(registry) -> list:
+    """Every `credit`-tier provider carries a complete spend guard (brief FREEKEYS-1,
+    D-132/D-141): `credit_usd` is the operator's grant, `monthly_cap_usd` equals it (a
+    caller REFUSES at 100 % of the grant) and `monthly_warn_fraction` is a fraction in
+    (0, 1) naming where it WARNS first (0.8 = 80 %).
+
+    The trio is checked as data, not prose: a credit row with no cap would be spent
+    without a limit, a cap that is not the grant silently raises or lowers the refuse
+    line below what the operator actually funded, and a warn fraction outside (0, 1)
+    warns at or after the refusal (0.0 warns on every call, 1.0 never warns) - all
+    three read as "configured" while doing nothing.
+    """
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or provider.get("tier") != "credit":
+            continue
+        credit = provider.get("credit_usd")
+        if isinstance(credit, bool) or not isinstance(credit, (int, float)) or credit <= 0:
+            problems.append("providers.%s: tier credit needs a positive credit_usd, got %r"
+                            % (provider_id, credit))
+        cap = provider.get("monthly_cap_usd")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+            problems.append("providers.%s: tier credit needs monthly_cap_usd (the refuse "
+                            "line), got %r" % (provider_id, cap))
+        elif not isinstance(credit, bool) and isinstance(credit, (int, float)) and cap != credit:
+            problems.append("providers.%s: monthly_cap_usd %r != credit_usd %r - the guard "
+                            "must refuse at 100%% of the grant the operator funded"
+                            % (provider_id, cap, credit))
+        fraction = provider.get("monthly_warn_fraction")
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) \
+                or not 0 < fraction < 1:
+            problems.append("providers.%s: tier credit needs a monthly_warn_fraction in "
+                            "(0, 1) (0.8 = warn at 80%% of the grant), got %r"
+                            % (provider_id, fraction))
+    # A warn fraction without a cap is a number nothing reads.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if isinstance(provider, dict) and "monthly_warn_fraction" in provider \
+                and "monthly_cap_usd" not in provider:
+            problems.append("providers.%s: monthly_warn_fraction without monthly_cap_usd"
+                            % provider_id)
+    # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
+    # label every reader branches on, so a row that keeps `credit_usd` and calls
+    # itself `free` silently un-limits the money, drops out of the leg filter's
+    # guard, and re-admits the provider to the `-clean` sweeps. A real downgrade has
+    # to move the grant out of the row, which is the edit a reviewer can see.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or provider.get("tier") == "credit":
+            continue
+        credit = provider.get("credit_usd")
+        if credit:
+            cap = provider.get("monthly_cap_usd")
+            problems.append("providers.%s: tier %r carries credit_usd %r - a funded grant "
+                            "stays tier credit (its refuse line monthly_cap_usd %r is "
+                            "checked only there); move the money out of the row to "
+                            "downgrade it" % (provider_id, provider.get("tier"),
+                                              credit, cap))
+    return problems
+
+
+def _provider_model_ids(model_id, model, provider_id, provider) -> list:
+    """The namespaces `model` is spelled under for `provider_id`, if any.
+
+    A model belongs to a provider in one of three spellings, all of them read from
+    the data instead of a name list: its `display_name` carries a gateway namespace
+    (``deepinfra/google/gemini-2.5-flash``), its own id does (``meta/muse-...``), or
+    it is namespaced by the provider with a hyphen (``morph-dsv4flash``, served as
+    ``morph/morph-dsv4flash``). Returns every namespace among the provider's id,
+    ``omniroute_id`` and declared ``model_prefix`` that one of those spellings starts
+    with -- more than one is normal (a provider id and its prefix are often equal).
+    """
+    shown = str(model.get("display_name") or "")
+    names = {"pid": provider_id, "omni": provider.get("omniroute_id"),
+             "prefix": provider.get("model_prefix")}
+    out = []
+    for kind, namespace in names.items():
+        if not namespace:
+            continue
+        if (shown.startswith(namespace + "/") or model_id.startswith(namespace + "/")
+                or (kind != "prefix" and model_id.startswith(namespace + "-"))):
+            out.append(namespace)
+    return out
+
+
+def _check_model_prefix(registry) -> list:
+    """``model_prefix`` must name a namespace the provider's models really carry.
+
+    The field is what `gateway_ref()` rewrites a registry leg to at render time and
+    what a consumer strips to recover the model id, so a row whose models are served
+    under a namespace and whose prefix is null leaves the stripping unresolvable
+    (brief FREEKEYS-1b item 1 / rev-freekeys1 finding 1: `morph`, `deepinfra` and
+    `nebius` serve ``morph/*``, ``deepinfra/*`` and ``nebius/*`` per the live
+    gateway's ``GET /v1/models``, and both checks below fail closed on exactly that
+    shape). A prefix that is not the namespace its own models sit under is worse
+    than none: the render silently asks the gateway for models it does not have.
+
+    A provider with no registered model rows is never judged -- most declared
+    prefixes today name a connection nobody has registered a model against yet.
+    """
+    problems = []
+    models = _section(registry, "models")
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        declared = provider.get("model_prefix")
+        served = []  # (model_id, namespaces it is served under)
+        for model_id, model in sorted(models.items()):
+            if not isinstance(model, dict):
+                continue
+            namespaces = _provider_model_ids(model_id, model, provider_id, provider)
+            if namespaces:
+                served.append((model_id, namespaces))
+        if not served:
+            continue
+        own = {provider_id, provider.get("omniroute_id")}
+        if declared is None:
+            # Only a gateway namespace (a `display_name` spelled `<ns>/<id>`) proves
+            # the provider's models are served prefixed; a bare `<pid>-<model>` id is
+            # how this registry spells them, which is not a claim about the gateway.
+            namespaced = [(model_id, namespace)
+                          for model_id, spaces in served for namespace in spaces
+                          if namespace in own
+                          and str(models[model_id].get("display_name") or "")
+                          .startswith(namespace + "/")]
+            if namespaced:
+                model_id, namespace = namespaced[0]
+                problems.append("providers.%s.model_prefix is null while %s is served "
+                                "under '%s/': set model_prefix to '%s'"
+                                % (provider_id, model_id, namespace, namespace))
+            continue
+        for model_id, spaces in served:
+            if declared in spaces:
+                continue
+            problems.append("providers.%s.model_prefix is '%s' but %s is spelled under "
+                            "'%s': a prefix must name the namespace the gateway serves"
+                            % (provider_id, declared, model_id, "', '".join(spaces)))
+    return problems
+
+
 def check_registry(registry) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -2838,6 +2980,8 @@ def check_registry(registry) -> list:
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
+    problems.extend(_check_credit_guards(registry))
+    problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
