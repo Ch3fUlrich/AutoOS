@@ -94,11 +94,13 @@ ROLES = (
     "l3-reviewer",
 )
 LEAF_ROLES = ("l3-worker", "l3-reviewer")
-# Spec 3.2 as fixed in review round 1: only the L1 coordinator roles carry
-# the lane-push / workflow-dispatch pre-grants. l0-router and l2-orchestrator
-# run ungranted (unlisted is fail-closed under the launch flags).
+# Spec 3.2 as fixed in review round 1 and narrowed in round 3 (D-138): only
+# the L1 coordinator roles carry the lane-push / workflow-dispatch pre-grants
+# in full, while l2-orchestrator carries the narrower own-prefix set below.
+# l0-router runs ungranted (unlisted is fail-closed under the launch flags).
 L1_ROLES = ("l1-coordinator", "l1-routing")
-UNGRANTED_ROLES = ("l0-router", "l2-orchestrator")
+L2_ROLES = ("l2-orchestrator",)
+UNGRANTED_ROLES = ("l0-router",)
 NON_LEAF_ROLES = tuple(r for r in ROLES if r not in LEAF_ROLES)
 
 
@@ -356,6 +358,57 @@ BRANCH_LANE_COMMANDS = (
     "git push -u origin L1-backlog/x",
 )
 
+# L2 own-prefix pushes (round 3, D-138): the only pushes the l2-orchestrator
+# grant pre-approves - the L2 lane-branch prefix, origin remote, with and
+# without -u. No stated L2 branch-naming convention exists in the skill or
+# docs text; the live branches are L2-<name>/... (e.g. L2-general/*), so the
+# grant keys on the `L2-` prefix. L2-main pins the same no-over-deny
+# boundary as main2 above: a lane merely containing "main" is not main.
+BRANCH_L2_ALLOW_COMMANDS = (
+    "git push origin L2-example-1",
+    "git push origin L2-general/wt-example-1",
+    "git push origin L2-main",
+    "git push -u origin L2-example-1",
+    "git push -u origin L2-general/wt-example-1",
+)
+
+# Pushes the L2 grant must leave unlisted (fail closed, never allowed): any
+# branch outside the own prefix - generic lanes, L1 lanes, a lowercase
+# look-alike (the glob is case-sensitive) - and any non-origin remote.
+BRANCH_L2_UNLISTED_COMMANDS = (
+    "git push origin wt-example-1",
+    "git push origin L1-backlog/x",
+    "git push origin l2-example-1",
+    "git push upstream L2-example-1",
+)
+
+# L2 refspec/flag tricks that MUST deny (round 3, D-138): each matches an L2
+# allow glob, so the decision proves deny beats the new allows - the same
+# always-deny fence set, unchanged.
+BRANCH_L2_FENCE_DENY_COMMANDS = (
+    "git push origin L2-example-1:main",
+    "git push origin L2-example-1:refs/heads/main",
+    "git push -u origin L2-example-1:main",
+    "git push origin L2-example-1 --force",
+    "git push origin L2-example-1 --force-with-lease",
+    "git push origin L2-example-1 --tags",
+)
+
+# L2 workflow dispatch (round 3, D-138): only --ref on the own prefix is
+# pre-granted, in both --ref spellings. A bare run and any non-own ref stay
+# unlisted; --ref main denies via the same fence as L1.
+L2_WORKFLOW_ALLOW_COMMANDS = (
+    "gh workflow run ci.yml --ref L2-example-1",
+    "gh workflow run ci.yml --ref=L2-example-1",
+    "gh workflow run ci.yml --ref L2-general/wt-example-1",
+)
+L2_WORKFLOW_UNLISTED_COMMANDS = (
+    "gh workflow run ci.yml",
+    "gh workflow run ci.yml --ref wt-example-1",
+    "gh workflow run ci.yml --ref L1-backlog/x",
+    "gh workflow run ci.yml --ref l2-example-1",
+)
+
 
 class BranchScopeTests(unittest.TestCase):
     def test_push_to_main_is_denied_by_every_profile(self):
@@ -383,12 +436,14 @@ class BranchScopeTests(unittest.TestCase):
                     )
 
     def test_lane_branch_push_is_pre_granted_to_l1_only(self):
-        # Spec 3.2 as fixed in review round 1: the lane-push grant is L1
+        # Spec 3.2 as fixed in review round 1: the full lane-push grant is L1
         # only. Spec Q9 leaves workers/reviewers at read-only, and spec 2
         # makes a leaf grant smaller, never larger, than its harness leaf
         # fences - so a lane push is allowed on L1, denied outright on
         # leaves (by the rendered bash_deny_leaf push fence, not merely
-        # unlisted), and unlisted (fail closed) on the ungranted l0/l2.
+        # unlisted), and unlisted (fail closed) on the ungranted l0-router.
+        # Round 3 (D-138) narrows l2-orchestrator to its own prefix (below),
+        # so the generic lanes here stay unlisted on L2 as well.
         for role in L1_ROLES:
             profile = load_profile(role)
             for command in BRANCH_LANE_COMMANDS:
@@ -399,7 +454,7 @@ class BranchScopeTests(unittest.TestCase):
             for command in BRANCH_LANE_COMMANDS:
                 with self.subTest(role=role, command=command):
                     self.assertEqual(decide(profile, "Bash", command), "deny")
-        for role in UNGRANTED_ROLES:
+        for role in UNGRANTED_ROLES + L2_ROLES:
             profile = load_profile(role)
             for command in BRANCH_LANE_COMMANDS:
                 with self.subTest(role=role, command=command):
@@ -429,11 +484,120 @@ class BranchScopeTests(unittest.TestCase):
             with self.subTest(role=role, command=command):
                 self.assertFalse(decide_deny(profile, "Bash", command))
                 self.assertEqual(decide(profile, "Bash", command), "allow")
-        for role in UNGRANTED_ROLES + LEAF_ROLES:
+        for role in UNGRANTED_ROLES + L2_ROLES + LEAF_ROLES:
             profile = load_profile(role)
             command = "gh workflow run ci.yml --ref wt-example-1"
             with self.subTest(role=role, command=command):
                 self.assertEqual(decide(profile, "Bash", command), "none")
+
+
+# ---------------------------------------------------------------------------
+# l2-orchestrator scope (round 3, D-138): own-prefix push and own-ref
+# workflow dispatch, under the same always-deny fences
+
+
+class L2ScopeTests(unittest.TestCase):
+    def test_l2_own_prefix_push_is_allowed(self):
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l2_other_branch_push_is_unlisted_not_allowed(self):
+        # Narrower than the L1 grant: anything outside L2-* (or off origin)
+        # is fail-closed unlisted, never allowed - and never denied either,
+        # so the fence set stays the only denier.
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_UNLISTED_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(decide(profile, "Bash", command), "none")
+
+    def test_l2_refspec_onto_main_is_denied(self):
+        # Each command matches an L2 allow glob (checked below), so deny
+        # proves deny beats the new allows: an `L2-x:main` refspec pushes a
+        # local L2 branch onto main and must deny.
+        profile = load_profile("l2-orchestrator")
+        allow = perms_of(profile)["allow"]
+        for command in BRANCH_L2_FENCE_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    any(
+                        split_rule(rule)[0] == "Bash"
+                        and bash_matches(split_rule(rule)[1], command)
+                        for rule in allow
+                    ),
+                    "%s matches no L2 allow entry" % command,
+                )
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+        # The -f flag between push and origin matches no allow glob at all,
+        # but the fence still denies it.
+        self.assertTrue(
+            decide_deny(profile, "Bash", "git push -f origin L2-example-1")
+        )
+
+    def test_l2_main_spellings_deny_like_every_profile(self):
+        # The shared fence set renders into every profile unchanged: the
+        # full BRANCH_DENY_COMMANDS table denies on L2 too.
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_DENY_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_wrapper_push_with_l2_ref_is_denied(self):
+        # Wrapper/option argv shapes are never pre-granted (H3), even for an
+        # L2 ref that the plain-spelling grant would allow.
+        profile = load_profile("l2-orchestrator")
+        denied = (
+            "git -C /example/repo push origin L2-example-1",
+            "git --git-dir=/example/repo/.git push origin L2-example-1",
+            "git -c foo.bar=baz push origin L2-example-1",
+        )
+        for command in denied:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_l2_compound_push_follows_each_part(self):
+        profile = load_profile("l2-orchestrator")
+        self.assertEqual(
+            decide(profile, "Bash", "git push origin L2-a && git push origin L2-b"),
+            "allow",
+        )
+        self.assertEqual(
+            decide(profile, "Bash", "git fetch && git push origin L2-a"), "none"
+        )
+        self.assertEqual(
+            decide(profile, "Bash", "git push origin L2-a && git push origin main"),
+            "deny",
+        )
+
+    def test_l2_workflow_run_requires_the_own_ref(self):
+        profile = load_profile("l2-orchestrator")
+        for command in L2_WORKFLOW_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+        # Never a bare run, never a non-own ref: unlisted (fail closed).
+        for command in L2_WORKFLOW_UNLISTED_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(decide(profile, "Bash", command), "none")
+
+    def test_l2_workflow_run_cannot_name_main(self):
+        profile = load_profile("l2-orchestrator")
+        for command in (
+            "gh workflow run ci.yml --ref main",
+            "gh workflow run ci.yml --ref=main",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(decide_deny(profile, "Bash", command))
 
 
 # ---------------------------------------------------------------------------
@@ -860,9 +1024,11 @@ class RenderTests(unittest.TestCase):
 
     def test_grant_sets_are_shared_not_copied(self):
         # One template per role name, rendered from shared grant sets so they
-        # cannot drift: only the L1 roles carry the lane-push / workflow
-        # pre-grants, l1-routing extends them with exactly the apply.sh
-        # grant, and every other role carries no pre-grant.
+        # cannot drift: only the L1 roles carry the full lane-push /
+        # workflow pre-grants, l1-routing extends them with exactly the
+        # apply.sh grant, l2-orchestrator carries exactly the narrower
+        # own-prefix set (round 3, D-138 - never the bare L1 grants), and
+        # every other role carries no pre-grant.
         profiles = {role: perms_of(load_profile(role))["allow"] for role in ROLES}
         base = profiles["l1-coordinator"]
         self.assertEqual(base, list(lp.COORDINATOR_ALLOW))
@@ -871,6 +1037,11 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(routing[:-1], base)
         self.assertEqual(routing[-1], "Bash(bash configuration/omniroute/apply.sh:*)")
         self.assertNotIn("apply.sh", " ".join(base))
+        l2 = profiles["l2-orchestrator"]
+        self.assertEqual(l2, list(lp.L2_ALLOW))
+        self.assertNotIn("Bash(git push:*)", l2)
+        self.assertNotIn("Bash(gh workflow run:*)", l2)
+        self.assertNotIn("apply.sh", " ".join(l2))
         for role in UNGRANTED_ROLES + LEAF_ROLES:
             with self.subTest(role=role):
                 self.assertEqual(profiles[role], [])

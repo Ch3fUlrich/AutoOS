@@ -88,15 +88,25 @@ Two deny-precedence consequences a reviewer must know (both pinned by
 Role table (spec 2 launch identities; the Q2 default - the ``role`` field
 carries the launch identity, the MCP document rides as ``mcpConfig``):
 
-- ``l1-coordinator`` and ``l1-routing`` are the only roles with
+- ``l1-coordinator`` and ``l1-routing`` are the only roles with the full
   pre-grants (review round 1, spec 3.2): the lane-branch push and
   ``gh workflow run`` grants, with ``l1-routing`` alone extending them
   with the gateway ``apply.sh`` run grant (A1-D4, the MISTRALFIX precedent
   - the model may run the script but stays denied reading its key, which
   the script reads in its own process).
-- ``l0-router`` and ``l2-orchestrator`` map to the orchestrator harness
-  roles but carry no pre-grant: unlisted stays fail-closed under the
-  launch flags.
+- ``l2-orchestrator`` carries a NARROWER push grant (review round 3,
+  D-138): push only to its own lane-branch prefix, ``Bash(git push origin
+  L2-*)`` plus the ``-u`` spelling, and ``gh workflow run`` only with
+  ``--ref`` on that same prefix - never a bare run. No stated L2
+  branch-naming convention exists in the skill or docs text; the live
+  branches are ``L2-<name>/...`` (``L2-general/*``), so the grant keys on
+  the ``L2-`` prefix. The always-deny fence set renders into the L2
+  profile unchanged, and deny still beats the new allows (an ``L2-x:main``
+  refspec matches the allow glob and still denies).
+- ``l0-router`` maps to the orchestrator harness role but carries no
+  pre-grant: unlisted stays fail-closed under the launch flags.
+- ``l3-worker``/``l3-reviewer`` map to the leaf harness roles with an
+  empty pre-grant set (spec Q9 default: no pre-grants beyond read-only).
 - ``l3-worker``/``l3-reviewer`` map to the leaf harness roles with an
   empty pre-grant set (spec Q9 default: no pre-grants beyond read-only).
 - ``mcpConfig`` names the restart-spec section 8 documents
@@ -122,24 +132,42 @@ ROLES = {
     "l0-router": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "none"},
     "l1-coordinator": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "coordinator"},
     "l1-routing": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "routing"},
-    "l2-orchestrator": {"harness": "suborchestrator", "mcp": "l2-orchestrator", "grants": "none"},
+    "l2-orchestrator": {"harness": "suborchestrator", "mcp": "l2-orchestrator", "grants": "l2"},
     "l3-worker": {"harness": "leaf-implementer", "mcp": "l3-worker", "grants": "leaf"},
     "l3-reviewer": {"harness": "leaf-reviewer", "mcp": "l3-reviewer", "grants": "leaf"},
 }
 
 # The shared grant sets, rendered per role so they cannot drift: only the L1
-# roles share the lane-push / workflow pre-grants, l1-routing extends them
-# with exactly the apply.sh grant, every other role carries no pre-grant
-# (spec 3.2 as fixed in review round 1, A1-D4, Q9).
+# roles share the full lane-push / workflow pre-grants, l1-routing extends
+# them with exactly the apply.sh grant, l2-orchestrator carries exactly the
+# narrower own-prefix set, every other role carries no pre-grant (spec 3.2
+# as fixed in review round 1 and narrowed in round 3, A1-D4, Q9).
 COORDINATOR_ALLOW = (
     "Bash(git push:*)",
     "Bash(gh workflow run:*)",
 )
 APPLY_ALLOW = "Bash(bash configuration/omniroute/apply.sh:*)"
+# L2 lane-branch prefix (round 3, D-138): narrower than the L1 grant. Push
+# only to the own prefix on origin - the plain and -u spellings, the exact
+# Claude Code rule syntax the L1 grant already uses - and workflow dispatch
+# only with --ref on that prefix (both --ref spellings, mirroring the
+# GH_REF_MAIN fence below), never a bare `gh workflow run`. Non-origin
+# remotes, other prefixes and wrapper push shapes stay unlisted; main in
+# every spelling stays denied by the unchanged fence set (deny wins).
+L2_PUSH_ALLOW = (
+    "Bash(git push origin L2-*)",
+    "Bash(git push -u origin L2-*)",
+)
+L2_WORKFLOW_ALLOW = (
+    "Bash(gh workflow run * --ref L2-*)",
+    "Bash(gh workflow run * --ref=L2-*)",
+)
+L2_ALLOW = L2_PUSH_ALLOW + L2_WORKFLOW_ALLOW
 
 GRANT_SETS = {
     "coordinator": tuple(COORDINATOR_ALLOW),
     "routing": tuple(COORDINATOR_ALLOW) + (APPLY_ALLOW,),
+    "l2": tuple(L2_ALLOW),
     "none": (),
     "leaf": (),
 }

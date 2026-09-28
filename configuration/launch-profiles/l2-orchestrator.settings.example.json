@@ -4,7 +4,12 @@
   "harnessRole": "suborchestrator",
   "mcpConfig": "configuration/mcp/l2-orchestrator.json",
   "permissions": {
-    "allow": [],
+    "allow": [
+      "Bash(git push origin L2-*)",
+      "Bash(git push -u origin L2-*)",
+      "Bash(gh workflow run * --ref L2-*)",
+      "Bash(gh workflow run * --ref=L2-*)"
+    ],
     "deny": [
       "Bash(*git push * main)",
       "Bash(*git push * main *)",

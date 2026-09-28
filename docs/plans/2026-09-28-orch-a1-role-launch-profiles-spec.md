@@ -45,7 +45,7 @@ Local to this spec; operator decisions keep the global `D-nn` form.
 | A1-D1 | A launch profile is a per-role **pre-reviewed grant bundle**: a tracked `.example` template plus a git-ignored runtime file, the same shape as `configuration/mcp/<role>.json` in the restart spec §8. |
 | A1-D2 | Path `configuration/launch-profiles/<role>.settings.json`. The `.settings.json` suffix makes the existing `**/*settings*.json` rule in `policy.risk_rules` (operator Q-013) cover a profile automatically, with no new risk rule. |
 | A1-D3 | The profile's **deny set is rendered from `catalog/agent-harness.json` `fences`** — one home. The profile restates no secret pattern and no `.claude.json` pattern of its own. |
-| A1-D4 | The **pre-granted allow set is narrow and role-scoped**: lane-branch push and `gh workflow run` for coordinator roles; gateway `apply.sh` only in the `l1-routing` profile. |
+| A1-D4 | The **pre-granted allow set is narrow and role-scoped**: lane-branch push and `gh workflow run` for coordinator roles; gateway `apply.sh` only in the `l1-routing` profile; `l2-orchestrator` pushes only its own `L2-*` lane-branch prefix and runs workflows only with `--ref` on it, under the same always-deny fences (round 3, D-138). |
 | A1-D5 | `git push` to `main` and every secret read/write are **always-deny, no override**; a later allow entry can never win (tested, §3.2). |
 | A1-D6 | No profile sets `--dangerously-skip-permissions`, disables the classifier, or otherwise weakens Claude Code's own permission system (§6). |
 | A1-D7 | `autoos-agent run` and the MCP `spawn` load the profile through Claude Code's own `--settings` (claude/qoder only), keyed by the launch role; an unknown launching role is an error naming the role, never a silent no-profile run. |
@@ -145,12 +145,16 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
 |---|---|---|---|
 | `Bash(git push:*)` **to a lane branch** | coordinators (`l1-*`) | the coordinator pushes lane branches and must not stop on a prompt | the always-deny below removes `main`; a test enumerates the ways to spell "main" |
 | `Bash(gh workflow run:*)` | coordinators | CI is triggered by workflow dispatch from a branch (the repo's own pre-merge gate, AGENTS.md §7) | branch-scoped by the command; `main` dispatch stays deny |
+| `Bash(git push origin L2-*)` (+ the `-u` spelling) and `Bash(gh workflow run * --ref L2-*)` (+ the `--ref=` spelling) | **`l2-orchestrator` only** (round 3, D-138) | the orchestrator pushes its own lane branch and dispatches CI on it without a prompt | narrower than the coordinator grant: other prefixes, non-origin remotes and bare runs stay unlisted; the same always-deny fence set applies and deny wins (an `L2-x:main` refspec denies) |
 | `Bash(bash configuration/omniroute/apply.sh:*)` | **`l1-routing` only** | the gateway apply is a reviewed, idempotent, site-free script (APPLYIDEM `36be9c9`) | the model may *run* apply.sh but may not *read* its key (below); apply.sh reads `manage.key` itself |
 
 - The gateway-apply entry is the sharpest illustration of "narrower pre-reviewed grant": the
   session is allowed to **run** the script but stays **denied** reading
   `configuration/api-keys.yml`, `~/.config/autoos/ai-stack/client.key` and `manage.key`. The
   secret never enters the model's context; the reviewed tool reads it in its own process.
+- The `L2-` prefix (round 3, D-138) is read off the repo's own branches (`L2-<name>/...`):
+  no stated L2 branch-naming convention exists in the orchestration skill or docs text. If
+  that convention ever changes, the grant prefix moves with it in the same change.
 - Every grant is scoped by role. The set is deliberately tiny; adding an entry is a HIGH-risk
   change (§5) and needs a test that the new entry is reachable and the deny set still wins.
 

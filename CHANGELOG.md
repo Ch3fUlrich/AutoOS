@@ -12,7 +12,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §2–§3).
   The L1 roles (`l1-coordinator`, `l1-routing`) pre-grant lane-branch push
   and `gh workflow run`; `l1-routing` alone adds the gateway `apply.sh` run
-  grant; `l0-router`, `l2-orchestrator` and the leaves carry no pre-grant.
+  grant; `l2-orchestrator` (round 3, D-138) pre-grants only push to `L2-*`
+  lane branches and `gh workflow run --ref L2-*`, under the same always-deny
+  fences (deny wins); `l0-router` and the leaves carry no pre-grant.
   Every profile denies push-to-`main` (fence set, not one string: ref
   spellings plus `--all`/`--mirror`/`HEAD`/bare, `-C`/`--git-dir`/`-c`
   wrappers, compound and prefixed spellings), secret access and
