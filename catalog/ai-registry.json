@@ -407,6 +407,23 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
+    "longcat-2.5-preview-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/longcat-2.5-preview-free resolves to a family. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), tool_calls stays 'unproven', and effort_ladder is empty because no ladder was probed. trains_on_prompts is unset, so it inherits providers.zen's false — and the leg is still never private-safe, because a free tier is not (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule the sibling contributor leg already carries ('OpenCode's free tier can only be used from within OpenCode', combos.json's own comment), not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "meituan",
+      "id": "longcat-2.5-preview-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "meta/muse-spark-1.3-contributor": {
       "$comment": "The OpenRouter contributor (paid) leg of the same real model as models.muse-spark; price reused from that llm-models.json entry - identical commercial arrangement, different provider path. Model-level trains_on_prompts override (PRIV2 brief, 2026-09-26): a contributor leg trains by contract - tests/run-tests.sh's own combos.json policy comment: '-contributor (trains by contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21 contributor-only block (paid-only, trains).' registry.py's CLEAN_ROUTE_EXEMPTIONS is the one place that deliberate trade-off is allowed through.",
       "context_advertised": 1048576,
@@ -431,6 +448,23 @@
       "reasoning": true,
       "tool_calls": "unproven",
       "trains_on_prompts": true
+    },
+    "mimo-v2.6-flash-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "xiaomi",
+      "id": "mimo-v2.6-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
     },
     "minimax-m2.7": {
       "$comment": "cheaperinference resale leg inside t3-driver (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -558,6 +592,27 @@
       "output_max": 131072,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "nemotron-3-ultra-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/nemotron-3-ultra-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Numbers reused from models.'openrouter-nemotron-ultra' — the same vendor model line (nvidia/nemotron-3-ultra), different provider path — not measured on this leg, so the ladder keeps that row's conservative three rungs and tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "nemotron-3-ultra-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -1715,6 +1770,33 @@
         "family": "qwen",
         "paid": false,
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/longcat-2.5-preview-free",
+        "family": "meituan",
+        "leg": "opencode-zen/longcat-2.5-preview-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/nemotron-3-ultra-free",
+        "family": "nvidia",
+        "leg": "opencode-zen/nemotron-3-ultra-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/mimo-v2.6-flash-free",
+        "family": "xiaomi",
+        "leg": "opencode-zen/mimo-v2.6-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
       },
       {
         "client": "claude",
