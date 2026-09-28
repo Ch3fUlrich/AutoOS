@@ -141,9 +141,15 @@ tracked task):
 
 **Host fences (OpenCode config).**
 - `external_directory: deny`;
-- every `read` and `bash` deny/allow pattern is `catalog/agent-harness.json`'s
+- every `read`, `grep`, `glob`, `external_directory` and `bash` deny/allow pattern is
+  `catalog/agent-harness.json`'s
   `read_deny_all` / `read_allow_all` / `bash_deny_all` / `bash_deny_leaf` / `bash_allow_all`,
   rendered by `lib/agent_harness.py` and asserted by both suites — read them there, not here.
+  A fence is only as wide as what the engine matches: a `grep`/`glob` rule sees the search
+  *pattern*, and only `external_directory` sees a searched *path* (KEYDENY3).
+- An MCP tool's rule can name the **tool only** — no path — so every tool that can hand back
+  file bytes is denied to a leaf outright: `mcp_servers.serena.raw_content_tools`, again
+  rendered and asserted, never restated.
 - The only permission rule that lets a Claude session start a leaf is
   `Bash(wsl -e bash -lc *run-leaf.sh *)`. The classifier refuses raw `opencode run` ("Create
   Unsafe Agents", measured).

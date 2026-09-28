@@ -311,14 +311,26 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
     if tier is not None:
         argv += ["--tier", str(int(tier))]
         route = {"combo": None, "reason": "explicit-tier"}
+        run_tier, gate_card = int(tier), None
     else:
         card = routing.normalize(card or {})
         combo, reason = routing.select_combo(card, bool(req.get("allow_training")))
         route = {"combo": combo, "reason": reason}
         argv += ["--card", ",".join("%s=%s" % kv for kv in sorted(card.items()))]
+        run_tier, gate_card = agent._tier_for_route(combo), card
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # KEYDENY3g item 2: a spawned tier never runs in the caller's checkout. The
+    # verdict is the CLI's own helper (leaf_isolation_refusal) — no second rule
+    # table here, so the two cannot drift. A caller that asked for no isolation
+    # is not refused but *forced*, because its caller is a headless agent that
+    # cannot fix a flag interactively, and the alternative is a job that reports
+    # as started and then exits 2.
+    if not req.get("isolate") and agent.leaf_isolation_refusal(
+            run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card)):
+        req = dict(req, isolate=True)
+        route["forced_isolate"] = True
     if req.get("max_depth") is not None:
         try:
             req = dict(req, max_depth=int(req["max_depth"]))  # JSON callers send "2"
@@ -771,7 +783,13 @@ def serve() -> None:
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
         ctx: 128k|1m, privacy: public|sensitive, spend: free-ok|credit}; omitted fields
         take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
-        isolate: private git clone on its own branch. lean: no serena/playwright
+        isolate: private git clone on its own branch, forked from `cwd`'s repo and
+        HEAD. It is FORCED for every spawned tier (2 and 3) and for a role that
+        wears a leaf (`leaf: true` in catalog/agent-harness.json — role=review or
+        a trivial card), because grep/glob is fenced on the search *pattern* and
+        cannot see a git-ignored key file sitting in the caller's checkout; the
+        clone holds committed files only. Only tier 1 (role=orchestrate) runs in
+        place. lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is

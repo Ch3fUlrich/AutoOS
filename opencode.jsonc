@@ -80,7 +80,9 @@
       "model": "omniroute/t1-orchestrator#high",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "t2-worker", "effect": "allow" }
+        { "action": "subagent", "resource": "t2-worker", "effect": "allow" },
+        { "action": "task", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "t2-worker", "effect": "allow" }
       ]
     },
     "t2-worker": {
@@ -89,7 +91,9 @@
       "model": "omniroute/t2-worker",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" }
+        { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" },
+        { "action": "task", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "t3-reviewer", "effect": "allow" }
       ]
     },
     "t3-reviewer": {
@@ -97,7 +101,15 @@
       "mode": "subagent",
       "model": "omniroute/t3-driver",
       "permissions": [
+        // KEYDENY3b: the spawn gate has two spellings in v2.0.16 — the canonical
+        // action `subagent` and the legacy tool name `task` (its rename map is
+        // {bash: shell, task: subagent, apply_patch: patch}). `subagent` is the
+        // fence; the `task` rule is insurance for a build that still matches the
+        // alias, and is not proof — see the `bash` note below, an alias rule can
+        // match nothing. A leaf that could spawn would hand the work to a child
+        // carrying none of the fences below, key file included.
         { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "*", "effect": "deny" },
         { "action": "edit", "resource": "*", "effect": "deny" },
         { "action": "write", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
@@ -151,33 +163,49 @@
         { "action": "shell", "resource": "*git *restore*", "effect": "deny" },
         // MCP write tools bypass the edit/write deny: serena is deny-by-default
         // with a read-only allow list; memory-graph and browser-code writes off.
+        // KEYDENY3: an MCP rule can only name the tool (v2.0.16 asserts every
+        // MCP call as {action:"<server>_<tool>", resources:["*"]}), so nothing
+        // on that list can be fenced by path — the allow list therefore excludes
+        // every serena tool that can return file bytes: read_file and
+        // search_for_pattern directly, find_symbol / find_declaration /
+        // find_implementations / find_referencing_symbols through their
+        // include_body parameter (serena 1.7.0, tools/symbol_tools.py). What is
+        // left returns names or diagnostics, and the leaf still has the
+        // path-fenced read tool. catalog/agent-harness.json holds the list.
         { "action": "serena_*", "resource": "*", "effect": "deny" },
         { "action": "serena_activate_project", "resource": "*", "effect": "allow" },
         { "action": "serena_initial_instructions", "resource": "*", "effect": "allow" },
         { "action": "serena_check_onboarding_performed", "resource": "*", "effect": "allow" },
         { "action": "serena_get_symbols_overview", "resource": "*", "effect": "allow" },
-        { "action": "serena_find_symbol", "resource": "*", "effect": "allow" },
-        { "action": "serena_find_declaration", "resource": "*", "effect": "allow" },
-        { "action": "serena_find_implementations", "resource": "*", "effect": "allow" },
-        { "action": "serena_find_referencing_symbols", "resource": "*", "effect": "allow" },
         { "action": "serena_get_diagnostics_for_file", "resource": "*", "effect": "allow" },
-        { "action": "serena_search_for_pattern", "resource": "*", "effect": "allow" },
         { "action": "serena_list_dir", "resource": "*", "effect": "allow" },
         { "action": "serena_find_file", "resource": "*", "effect": "allow" },
-        { "action": "serena_read_file", "resource": "*", "effect": "allow" },
         { "action": "omnigraph_mutate", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_load", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_create", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_merge", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_delete", "resource": "*", "effect": "deny" },
         { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" },
+        // KEYDENY3b: an MCP rule can only name the tool (resources is ["*"]), so
+        // a server whose tools read by URL or path goes whole, not tool by tool.
+        // browser_navigate takes a file:// path — run_code_unsafe was never the
+        // only door. context7 fetches remote docs by id/topic for the same reason.
+        { "action": "playwright_*", "resource": "*", "effect": "deny" },
+        { "action": "context7_*", "resource": "*", "effect": "deny" },
         // A leaf never spawns: the spawner's MCP tools (autoos-agent_spawn and
         // friends, registered for every agent) are off here too.
         { "action": "autoos-agent_*", "resource": "*", "effect": "deny" },
-        // The read_deny_all fences (catalog/agent-harness.json) as `read`
-        // denies: `read: * allow` above left the real key files —
-        // configuration/api-keys.yml and the gateway client.key/manage.key —
-        // readable by a leaf. Last match wins, so the allows come after, and
+        // The read_deny_all fences (catalog/agent-harness.json) as `read`,
+        // `grep`, `glob` and `external_directory` denies: `read: * allow` above
+        // left the real key files — configuration/api-keys.yml and the gateway
+        // client.key/manage.key — readable by a leaf, and KEYDENY3 closes the
+        // two other doors to the same bytes. opencode v2.0.16 asserts a
+        // different resource per action, so one deny list means three different
+        // matching semantics: `grep`/`glob` are matched against the *search
+        // pattern* the leaf passed (it stops a search naming a key file, not a
+        // search that happens to hit one), and the searched path is checked only
+        // by `external_directory` — which is why a path-scoped deny goes there.
+        // Last match wins, so the allows come after, and
         // each one is an exact path suffix: a `shell` allow is matched against
         // the whole command line, so any allow there licenses a real key file
         // paired on the same line (KEYDENY2). There is no shell allow for a key
@@ -192,7 +220,35 @@
         { "action": "read", "resource": "*manage.key*", "effect": "deny" },
         { "action": "read", "resource": "*.claude.json*", "effect": "deny" },
         { "action": "read", "resource": "*.env.example", "effect": "allow" },
-        { "action": "read", "resource": "*configuration/api-keys.example.yml", "effect": "allow" }
+        { "action": "read", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "grep", "resource": "*.env", "effect": "deny" },
+        { "action": "grep", "resource": "*.env.*", "effect": "deny" },
+        { "action": "grep", "resource": "*auth.json", "effect": "deny" },
+        { "action": "grep", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "grep", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "grep", "resource": "*client.key*", "effect": "deny" },
+        { "action": "grep", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "grep", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "grep", "resource": "*.env.example", "effect": "allow" },
+        { "action": "grep", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "glob", "resource": "*.env", "effect": "deny" },
+        { "action": "glob", "resource": "*.env.*", "effect": "deny" },
+        { "action": "glob", "resource": "*auth.json", "effect": "deny" },
+        { "action": "glob", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "glob", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "glob", "resource": "*client.key*", "effect": "deny" },
+        { "action": "glob", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "glob", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "glob", "resource": "*.env.example", "effect": "allow" },
+        { "action": "glob", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "external_directory", "resource": "*.env", "effect": "deny" },
+        { "action": "external_directory", "resource": "*.env.*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*auth.json", "effect": "deny" },
+        { "action": "external_directory", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*client.key*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*.claude.json*", "effect": "deny" }
       ]
     }
   },
