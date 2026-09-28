@@ -86,7 +86,13 @@ cloned a second repository and its installer did the MCP wiring. This lane
 finishes the retirement on Windows. The native Windows twins
 (`agent-skill-links`, `omnigraph-client`) are deliberately *not* added (D-066:
 the Windows path is frozen to fixes), so the four `mcp-*` components are the
-whole successor set there.
+only successors the catalog names there. What `Install-AutoOSAgentSkills`
+additionally did on Windows (the project-scope `omnigraph`/`autoos-agent` pins,
+the Antigravity MCP merge, the user-scope skill links) now has no catalog
+caller: it is reachable only from tests, and its Windows successor is the parked
+w1 lane. Known, accepted under D-066. Leftovers deliberately kept (a frozen
+path gets fixes only): the unreachable `agent-skills` probe in
+`AutoOS.Detect.psm1` and the function itself as a test fixture.
 
 - **`catalog/windows.json`**: `agent-skills` is `"tombstone": true` with the
   note *its work moved to the mcp-\* components* and `replaced_by` naming the
