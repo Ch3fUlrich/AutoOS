@@ -1323,8 +1323,13 @@ EOF
     if command -v pwsh >/dev/null; then
         cp "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp" \
             "$tmp/.local/share/autoos/omnigraph-mcp/bin/omnigraph-mcp.cmd"
+        # The PowerShell twin resolves the bridge under %LOCALAPPDATA%, which
+        # Windows and Linux deliberately spell differently.
+        mkdir -p "$tmp/autoos/omnigraph-mcp"
+        cp "$tmp/wrapper_report.sh" "$tmp/autoos/omnigraph-mcp/omnigraph-mcp.cmd"
+        chmod 755 "$tmp/autoos/omnigraph-mcp/omnigraph-mcp.cmd"
         cp tools/omnigraph-mcp-autoos.ps1 "$tmp/wrapper.ps1"
-        got_p="$(env -i USERPROFILE="$tmp" HOME="$tmp" PATH="$PATH" \
+        got_p="$(env -i USERPROFILE="$tmp" LOCALAPPDATA="$tmp" HOME="$tmp" PATH="$PATH" \
             pwsh -NoProfile -ExecutionPolicy Bypass -File "$tmp/wrapper.ps1" 2>&1)"
     fi
     rm -rf "$tmp"
