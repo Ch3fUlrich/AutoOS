@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import shutil
@@ -3597,6 +3598,143 @@ elif mode == "commit-sibling-worktree":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "sibling lane worker change"], check=True)
     print("fake: a sibling lane's worker committed in its own worktree")
+elif mode == "parent-ff-onto-lane":
+    # LEAKFP A (review-fold2e.out): the orchestrator fast-forwards the parent
+    # worktree's OWN branch onto another lane's worker commits while this
+    # (read-only review) run is going. HEAD's first-parent chain now carries
+    # autoos-worker commits it never wrote.
+    git("switch", "-q", "-c", "lane-ff")
+    with open(os.path.join(root, "lane-ff.txt"), "w") as fh:
+        fh.write("lane\\n")
+    git("add", "lane-ff.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "another lane's worker change")
+    git("switch", "-q", "-")
+    git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
+        "merge", "-q", "--ff-only", "lane-ff")
+    print("fake: parent branch fast-forwarded onto another lane's commits")
+elif mode == "ff-old-lane-commit":
+    # LEAKFP A, harder shape: the lane finished BEFORE this run (its commit is
+    # dated years back, made in another writer's clone so this worktree's HEAD
+    # reflog never saw it) and the orchestrator deletes the lane branch after
+    # the fast-forward, so no ref but the parent's own carries it -- only the
+    # commit's timestamp says it cannot be this worker's.
+    import shutil as _sh
+    import tempfile as _tf
+    old = dict(os.environ)
+    old["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+    old["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+    par = _tf.mkdtemp(prefix="autoos-fake-lane-")
+    other = os.path.join(par, "lane")
+    git("clone", "-q", "--local", root, other)
+
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True, env=old)
+    ogit("switch", "-q", "-c", "lane-old")
+    with open(os.path.join(other, "lane-old.txt"), "w") as fh:
+        fh.write("old lane\\n")
+    ogit("add", "lane-old.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "a finished lane's commit")
+    git("fetch", "-q", other, "lane-old:refs/heads/lane-old")
+    git("merge", "-q", "--ff-only", "lane-old")
+    git("branch", "-q", "-D", "lane-old")
+    _sh.rmtree(par, True)
+    print("fake: parent branch fast-forwarded onto a pre-run lane commit")
+elif mode == "commit-in-another-clone":
+    # LEAKFP B (MUSEAPI2.out tail): another writer's lane in the SAME
+    # repository advanced an existing branch. Every worktree and clone of one
+    # .git shares refs, and this worktree's HEAD never visited that branch, so
+    # "checked out in another worktree" cannot excuse the moved ref.
+    import shutil as _sh
+    import tempfile as _tf
+    par = _tf.mkdtemp(prefix="autoos-fake-sib-")
+    other = os.path.join(par, "lane")
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True)
+    git("clone", "-q", "--local", root, other)
+    ogit("switch", "-q", "side")
+    with open(os.path.join(other, "asm.txt"), "w") as fh:
+        fh.write("asm\\n")
+    ogit("add", "asm.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "another lane's worker change")
+    git("fetch", "-q", other, "side:side")
+    _sh.rmtree(par, True)
+    print("fake: a shared-repo branch moved under another writer")
+elif mode == "commit-worker-with-lane-present":
+    # The boundary the two fixes above must not cross: a real leak (the worker
+    # commits into the parent checkout under the worker identity) while an
+    # unrelated lane ref also exists in the repository.
+    git("branch", "lane-present")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: committed as worker with a lane ref present")
+elif mode == "decoy-branch-after-commit":
+    # LEAKFP2 evasion 1 (review of 75f2866): the worker commits in the parent
+    # and then puts a NEW branch on its own tip. 75f2866's `_lane_work` read
+    # "contained in a ref that did not exist at the snapshot" as another
+    # writer's lane work and exempted the leak.
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    git("branch", "decoy")
+    print("fake: worker commit in the parent, then a decoy branch at the tip")
+elif mode == "backdated-worker-commit":
+    # LEAKFP2 evasion 2: the same commit with GIT_COMMITTER_DATE (and the
+    # author date) backdated before the run. 75f2866's run window dropped it.
+    env = dict(os.environ)
+    env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+    env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    subprocess.run(["git", "-C", root, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=autoos-worker@users.noreply.github.com",
+                    "commit", "-q", "-m", "backdated worker change"],
+                   check=True, capture_output=True, text=True, env=env)
+    print("fake: worker commit with a backdated committer timestamp")
+elif mode == "switch-c-ff-back":
+    # LEAKFP2 evasion 3: commit on a branch created during the run, then
+    # fast-forward the parent's own branch onto it. 75f2866's made_on leg
+    # exempted the commit as "lane work on a new branch".
+    back = subprocess.run(["git", "-C", root, "branch", "--show-current"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    git("switch", "-q", "-c", "tmp-leak")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    git("switch", "-q", back)
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "merge", "-q", "--ff-only", "tmp-leak")
+    print("fake: worker commit through a branch created during the run, ff'd back")
+elif mode == "commit-on-branch-created-in-run":
+    # A branch created during the run is never exempt: the worker switches to
+    # its own new branch IN THE PARENT CHECKOUT and commits there.
+    git("switch", "-q", "-c", "lane-mine")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: worker commit on a branch created during the run")
 elif mode == "untracked-in-parent":
     # A worker with full write rights drops a NEW untracked file into the parent
     # checkout (review of 6622d29: git status ran with --untracked-files=no).
@@ -3913,6 +4051,108 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_parent_fast_forward_onto_another_lanes_commits_is_a_leak_with_the_hint(self):
+        # LEAKFP A (work/L1-routing/review-fold2e.out, exit 7) is NOT exempted
+        # in code (LEAKFP2 decision): nothing but "do not move a parent while
+        # its child runs" (skill R-coord-01) makes this case identifiable, so a
+        # moved parent stays a containment failure and the message tells the
+        # orchestrator that moving the branch itself is what it just did.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "parent-ff-onto-lane")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("worker commits in the parent checkout", out + err)
+        self.assertIn("if you moved this branch yourself during the run (merge/ff)",
+                      out + err)
+        self.assertIn("R-coord-01", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_prerun_lane_commit_fast_forwarded_in_is_a_leak_too(self):
+        # LEAKFP2: the run window is gone with the exemptions - a pre-run lane
+        # commit the orchestrator fast-forwards in cannot be told apart from a
+        # worker's write, so the run is blamed (conservative by design; the
+        # frozen-parent rule is procedural, not code).
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "ff-old-lane-commit")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_shared_repo_branch_moving_without_a_sibling_worktree_is_a_leak(self):
+        # LEAKFP B's exemption is narrow: ONLY a branch checked out in another
+        # worktree at both ends of the run is excused (the test above). A ref an
+        # outside clone fetched into the shared repository is checked out
+        # nowhere, so the strict check keeps flagging it - 75f2866 read
+        # MUSEAPI2.out too broadly and lost the side-branch leak here.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-in-another-clone")
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn("refs/heads/side", out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_decoy_branch_at_the_tip_does_not_exempt_a_parent_commit(self):
+        # Evasion 1 of 75f2866: `git branch decoy` after the worker commit made
+        # the leak read as another lane's work.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "decoy-branch-after-commit")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_backdated_worker_commit_in_the_parent_is_a_leak(self):
+        # Evasion 2: GIT_COMMITTER_DATE in the past fell outside 75f2866's run
+        # window. The strict check reads no clock at all.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "backdated-worker-commit")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_via_switch_c_and_a_fast_forward_back_is_a_leak(self):
+        # Evasion 3: commit on a branch created during the run, ff the parent's
+        # branch onto it, delete the branch - 75f2866's made_on-leg exempted it.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "switch-c-ff-back")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_on_a_branch_created_during_the_run_is_a_leak(self):
+        # The parent checkout moved, and the branch it moved on is brand new:
+        # newness is not an excuse for a commit this worktree made.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(
+            root, stub, state, "commit-on-branch-created-in-run")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_in_the_parent_is_still_a_leak_with_a_lane_present(self):
+        # The boundary of both exemptions: a lane ref in the repository must not
+        # excuse a worker commit made on the parent's own branch.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state,
+                                         "commit-worker-with-lane-present")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
@@ -4535,6 +4775,129 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
+
+
+class LeakStrictnessTests(unittest.TestCase):
+    """LEAKFP2: the detection itself is the pre-75f2866 strict one, with exactly
+    ONE narrow exemption - false positive B, a ref that is another worktree's
+    own checked-out branch at BOTH the snapshot and the check. These call the
+    real parent_snapshot/parent_leak against real temp repositories; the
+    matching cmd_run-level evasions are the IsolateContainmentTests above."""
+
+    WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+    WORKER_ID = ["-c", "user.name=autoos-worker", "-c", "user.email=" + WORKER_EMAIL]
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def git(self, *args, **kw):
+        return subprocess.run(
+            ["git", "-C", kw.get("cwd") or self.root, *args],
+            capture_output=True, text=True, check=True,
+            env=kw.get("env")).stdout.strip()
+
+    def sibling_worktree(self, branch, existing=False):
+        """`git worktree add` at a fresh path: `existing` checks that branch
+        out, otherwise the branch is created here."""
+        path = tempfile.mkdtemp()
+        shutil.rmtree(path)
+        self.addCleanup(shutil.rmtree, path, True)
+        if existing:
+            self.git("worktree", "add", "-q", path, branch)
+        else:
+            self.git("worktree", "add", "-q", "-b", branch, path)
+        return path
+
+    def worker_commit(self, cwd, name, env=None):
+        with open(os.path.join(cwd, name), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        self.git("add", name, cwd=cwd)
+        self.git(*self.WORKER_ID, "commit", "-q", "-m", "worker change",
+                 cwd=cwd, env=env)
+        return self.git("rev-parse", "HEAD", cwd=cwd)
+
+    def test_a_sibling_worktrees_own_checked_out_branch_moving_is_not_a_leak(self):
+        wt = self.sibling_worktree("lane-sib")
+        snap = self.agent.parent_snapshot(self.root)
+        self.worker_commit(wt, "sib.txt")
+        # The exemption must be doing real work: the ref did move, and the
+        # commit is the worker's own.
+        self.assertNotEqual(snap[3]["refs/heads/lane-sib"],
+                            self.git("rev-parse", "lane-sib"))
+        self.assertEqual([], self.agent.parent_leak(snap, self.root))
+        # and the move was the worker's own commit, not a no-op fixture
+        self.assertEqual(self.WORKER_EMAIL,
+                         self.git("log", "-1", "--format=%ae", "lane-sib"))
+
+    def test_a_worktree_added_during_the_run_does_not_exempt_its_ref(self):
+        # The exemption needs BOTH ends: `side` existed at the snapshot checked
+        # out nowhere, so another writer that adopts it mid-run is still a leak
+        # here - newness (of a ref or of a worktree) is never an excuse.
+        snap = self.agent.parent_snapshot(self.root)
+        wt = self.sibling_worktree("side", existing=True)
+        self.worker_commit(wt, "late.txt")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any("refs/heads/side" in ln for ln in leak), leak)
+
+    def test_a_worktree_inside_the_sandbox_is_not_exempt(self):
+        # "another worktree" means another LANE: a worktree of the parent
+        # repository that lives in this run's sandbox is not one.
+        sb = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, sb, True)
+        wt = os.path.join(sb, "sandboxes", "run-1")
+        os.makedirs(os.path.dirname(wt))
+        self.git("worktree", "add", "-q", "-b", "lane-sbx", wt)
+        snap = self.agent.parent_snapshot(self.root)
+        self.worker_commit(wt, "sbx.txt")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("refs/heads/lane-sbx" in ln for ln in leak), leak)
+
+    def test_a_worker_commit_on_a_branch_created_during_the_run_is_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        self.git("switch", "-q", "-c", "lane-mine")
+        sha = self.worker_commit(self.root, "mine.txt")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln and "parent checkout" in ln for ln in leak),
+                        leak)
+
+    def test_a_decoy_branch_at_the_tip_does_not_exempt_a_parent_commit(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sha = self.worker_commit(self.root, "worker.txt")
+        self.git("branch", "decoy")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_backdated_worker_commit_is_a_leak(self):
+        env = dict(os.environ)
+        env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+        env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+        snap = self.agent.parent_snapshot(self.root)
+        sha = self.worker_commit(self.root, "old.txt", env=env)
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_switch_c_and_fast_forward_back_is_a_leak(self):
+        # The branch stays alive: 75f2866's made_on-leg read the reflog entry as
+        # "made on a branch created during the run" and exempted the commit
+        # entirely (LEAKFP2 review, evasion 3). Deleting it only made the old
+        # code catch the leak by accident.
+        snap = self.agent.parent_snapshot(self.root)
+        back = self.git("branch", "--show-current")
+        self.git("switch", "-q", "-c", "tmp-leak")
+        sha = self.worker_commit(self.root, "tmp.txt")
+        self.git("switch", "-q", back)
+        self.git("merge", "-q", "--ff-only", "tmp-leak")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any(sha in ln for ln in leak), leak)
+
+    def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        with open(os.path.join(self.root, "stray.txt"), "w", encoding="utf-8") as fh:
+            fh.write("leak\n")
+        leak = self.agent.parent_leak(snap, self.root)
+        self.assertTrue(any("stray.txt" in ln for ln in leak), leak)
 
 
 class ProviderStopFallthroughTests(unittest.TestCase):
@@ -6484,6 +6847,34 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertFalse(report["final"]["ok"])
         self.assertIn("sonnet", report["final"]["detail"].lower())
 
+    def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
+        # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
+        # model that is not the final checker — signed the lane off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                report = self.status("AutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY" % spelling)
+                self.assertFalse(report["ready"], report)
+                self.assertFalse(report["final"]["ok"])
+
+    def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
+        # The NAME, case-insensitive, or the vendor's full model id — not a
+        # substring of either.
+        for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                self.assertTrue(report["ready"], report)
+
+    def test_the_final_match_ignores_surrounding_space(self):
+        # A record written by hand can pad the value; padding is not a
+        # different model. Fed straight to _final_review because the line
+        # parser splits on whitespace and can never carry it.
+        for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
+            with self.subTest(reviewer=spelling):
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
+                self.assertTrue(self.agent._final_review([entry])["ok"])
+
     def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
         report = self.status(FINAL_LINE)
         self.assertFalse(report["ready"])
@@ -6646,6 +7037,292 @@ class ReviewStatusTests(unittest.TestCase):
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+
+class ReadyCommandTests(unittest.TestCase):
+    """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
+
+    Until now an orchestrator appended `ready <branch> <sha>` to autoos-L1-main's
+    inbox by hand, after recalling that the record had both reviews and that the
+    sha was pushed — and L1-main refused one that lacked reviews (inbox
+    00:31:52Z). `ready` makes the claim itself, and only when the two facts that
+    justify it hold: `review_status` says the record carries both reviews, and
+    `origin/<branch>` actually points at the sha.
+
+    Real temp git repos (a bare `origin` plus a clone, as the --isolate
+    containment tests use) and the real parser / main entry: this is a CLI
+    contract, so a test that called cmd_ready directly could pass a command nobody
+    can type.
+    """
+
+    BRANCH = "lane/work"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def make_inbox(self, content=None):
+        """An inbox file (or, for content=None, a path that does not exist yet)."""
+        path = os.path.join(tempfile.mkdtemp(), "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        if content is not None:
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        return path
+
+    def read_inbox(self, path):
+        if not os.path.exists(path):
+            return None
+        with io.open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def make_repo(self, push=True):
+        """A bare `origin` plus a clone with one commit on BRANCH.
+
+        Returns (repo_dir, sha). With push=False the branch exists only locally,
+        which is exactly the state `ready` must refuse as "not pushed".
+        """
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        origin = os.path.join(base, "origin.git")
+        repo = os.path.join(base, "work")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master"]
+        subprocess.run(git + ["init", "-q", "--bare", origin], check=True)
+        subprocess.run(git + ["clone", "-q", origin, repo], check=True,
+                       stderr=subprocess.DEVNULL)
+        with open(os.path.join(repo, "tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("lane work\n")
+        subprocess.run(git + ["-C", repo, "add", "tracked.txt"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "-m", "lane work"], check=True)
+        subprocess.run(git + ["-C", repo, "switch", "-q", "-c", self.BRANCH], check=True)
+        sha = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD"],
+                             check=True, capture_output=True,
+                             text=True).stdout.strip()
+        if push:
+            subprocess.run(git + ["-C", repo, "push", "-q", "origin",
+                                  "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        return repo, sha
+
+    def ready(self, record, repo, sha, inbox, extra=()):
+        """Run the real CLI. `repo=None` means let it default to the cwd."""
+        argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha, "--inbox", inbox]
+        if repo is not None:
+            argv += ["--repo", repo]
+        argv += ["--registry", self.registry_path, *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    READY_RECORD = (CROSS_FAMILY_LINE, FINAL_LINE)
+    NOT_PUSHED_SHA = "0" * 40
+
+    # --- the review gate ----------------------------------------------------
+
+    def test_an_unreviewed_record_is_refused_and_nothing_is_appended(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(
+            self.write_record("# Lane x", "STATUS: DONE. Gate green, shipped it."),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertIn("ready: no", out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_same_family_reviewer_is_refused(self):
+        # The case the inbox refused at 00:31:52Z: a record that LOOKS reviewed.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(
+            self.write_record(
+                "AutoOS-Review: kind=cross-family author=muse-contrib "
+                "reviewer=omniroute/muse verdict=PASS", FINAL_LINE),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("same family", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_final_reviewer_that_only_contains_sonnet_is_refused(self):
+        # REVGATE2 (HIGH): the substring match let "notsonnet" carry the final
+        # sign-off, so `ready` appended the line for a lane nobody signed off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 1)
+                self.assertIn("not sonnet", out)
+                self.assertEqual(self.read_inbox(inbox),
+                                 "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_final_reviewer_naming_sonnet_appends_the_line(self):
+        for spelling in ("Sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_the_review_gate_is_checked_before_the_sha(self):
+        # A record that never got its review is not "unpushed work waiting on a
+        # push": the caller has to know WHICH gate it hit, so the review report
+        # prints and the sha is never reached.
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _err = self.ready(
+            self.write_record("STATUS: DONE."), repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertNotIn("not pushed", out)
+
+    # --- the pushed-sha gate ------------------------------------------------
+
+    def test_a_sha_that_is_not_the_tip_of_origin_is_refused(self):
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD),
+                                repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_branch_absent_from_origin_is_refused_as_not_pushed(self):
+        repo, sha = self.make_repo(push=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertIn(self.BRANCH, out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_git_failure_exits_2_not_1(self):
+        # rc 1 means "go do the work"; rc 2 means "the gate could not run". A repo
+        # with no `origin` remote is the second, and a caller that waits on 1 must
+        # not wait forever on a misconfigured checkout.
+        bad_repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bad_repo, True)
+        subprocess.run(["git", "-c", "init.defaultBranch=master", "init", "-q", bad_repo],
+                       check=True)
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                   bad_repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("origin", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    # --- the append ---------------------------------------------------------
+
+    def test_a_ready_lane_appends_exactly_one_line_to_the_inbox(self):
+        repo, sha = self.make_repo()
+        # No trailing newline on the existing line: an append must not join it to
+        # ours, and must not rewrite it either.
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 2, text)
+        self.assertEqual(lines[0], "2026-09-28T00:00:00Z handoff lane")
+        match = re.match(
+            r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) ready %s %s reviews: "
+            r"(.+) \| (.+)$" % (re.escape(self.BRANCH), sha), lines[1])
+        self.assertIsNotNone(match, lines[1])
+        self.assertEqual(match.group(2), "qwen3.8-flash reviewed by omniroute/muse (meta)")
+        self.assertEqual(match.group(3), "sonnet verdict READY")
+        self.assertIn(lines[1], out)
+
+    def test_a_ready_lane_creates_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        self.assertEqual(len(text.splitlines()), 1, text)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), text)
+
+    def test_the_repo_defaults_to_the_cwd(self):
+        # The orchestrator runs from its own lane checkout; --repo is the
+        # exception, not the rule.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, old_cwd)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), None, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_dry_run_prints_the_line_and_appends_nothing(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_dry_run_does_not_create_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.read_inbox(inbox))
+
+    def test_an_unwritable_inbox_exits_2_not_1(self):
+        # A typo'd inbox is not a lane awaiting its review either.
+        repo, sha = self.make_repo()
+        inbox = os.path.join(tempfile.mkdtemp(), "no-such-dir", "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(inbox), True)
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("L1.md", err)
+
+    # --- the record ---------------------------------------------------------
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(
+            os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"),
+            repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_stdin_record_is_accepted_like_review_status(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO("\n".join(self.READY_RECORD) + "\n")
+        try:
+            rc, out, _ = self.ready("-", repo, sha, inbox)
+        finally:
+            sys.stdin = old_stdin
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
 
 def _reviewer_client_state():
