@@ -823,7 +823,7 @@ if it "catalog tombstone: the interactive menu never hands a retired id to the p
         for ((j = 0; j < "$(catalog_index_of replaced-demo)"; j++)); do keys+="j"; done
         fifo="$tree/keys.fifo" capture="$tree/capture.txt"
         mkfifo "$fifo"; : > "$capture"
-        timeout 90 script -qec "bash '$tree/setup.sh' --profile custom --no-color --dry-run" /dev/null \
+        HOME="$tree/home" timeout 90 script -qec "bash '$tree/setup.sh' --profile custom --no-color --dry-run" /dev/null \
             <"$fifo" >"$capture" 2>&1 &
         pty_pid=$!
         # Launch first, then open the write end: opening a FIFO for writing blocks
