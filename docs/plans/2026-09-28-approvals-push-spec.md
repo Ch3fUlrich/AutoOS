@@ -26,7 +26,8 @@ Placeholder rule (hard): `<push service>`, `<management host>`, and
 
 The gap in one paragraph: this repo already classifies the risk of a change
 from its diff — `tools/autoos_risk.py` applies `policy.risk_rules` to the diff
-at `merge-base(base, sha)` (`tools/autoos_risk.py:1-11`), exposed as
+at `merge-base(base, sha)` (`tools/autoos_risk.py:535-561`, merge-base
+resolution at `tools/autoos_risk.py:186-199`), exposed as
 `python3 tools/autoos-agent.py risk --sha <sha>` (`tools/autoos-agent.py:92`,
 `tools/autoos-agent.py:1387-1426`, flags `--sha`/`--base`/`--repo`/`--registry`/`--json`
 at `tools/autoos-agent.py:4818-4831`) — and already prices each class in review
@@ -68,6 +69,16 @@ Net: categories 1–3, 7, 8 already classify `high` through real rules;
 categories 4–6 need new `policy.risk_rules` entries (or an explicit
 hook-owned decision for 6) — §10 lane 1.
 
+Mapping note (reason strings → §2 categories, which the §3 gate needs to test
+category presence): no such mapping exists yet, and one checkout rule already
+shows why it must be written carefully — the `.github/workflows/**` rule with
+reason `CI workflows` (`catalog/ai-registry.json:1582-1587`), read literally,
+would send EVERY CI workflow edit to operator approval, not just
+firewall/edge-relevant ones. That conservative overclaim is accepted for now
+(deliberately fail-closed) but the `risk-rules-gap` lane (§10) must either
+narrow the rule or confirm the breadth explicitly — see
+`Q: APPROVALS | reason-category mapping` (§9).
+
 ## 3. Auto-merge path
 
 Cite, don't redesign. The review-count policy already exists and this spec
@@ -94,9 +105,19 @@ Auto-merge rule (this spec's only new sentence about merging): a lane whose
 diff classifies `normal` (or `high` with its final in hand), whose two
 cross-family reviews and required final are recorded, whose deterministic
 gates (tests, lint, drift, CI — the Q-013 list at `common.md:78-82`) pass, and
-whose risk reasons touch NONE of the §2 approval categories, merges without a
-human. Every other shape — any §2 reason present, any gate unproven rather
-than passed, any policy-file reason (§2 row 9) — takes the §4 path. "Unproven"
+whose change touches NONE of the §2 approval categories, merges without a
+human. The test is category presence, not reason presence: until
+`policy.risk_rules` actually covers rows 4–6 (the `risk-rules-gap` lane, §10),
+those categories are approval-required by an explicit fail-closed category
+check (a fixed list the gate consults directly — firewall/auth, deploy action,
+public push/PR destination), not by waiting for a matching risk reason to
+appear. A firewall/deploy/public-push change with no generated reason therefore
+blocks on approval; it never auto-merges for lack of a reason. Once
+`risk-rules-gap` lands, the category check and the reason check should agree —
+the category check stays as the backstop and the reasons become its evidence.
+Every other shape — any §2 category present, any gate unproven rather
+than passed, any policy/skill/contract reason (§2 row 9 — which also covers
+non-policy paths such as `docs/plans/**`, so "policy-file" undersells it) — takes the §4 path. "Unproven"
 includes exit-2 classification: a diff nobody could read is approval-path, not
 auto-merge (`tools/autoos-agent.py:1412-1416`).
 
@@ -124,10 +145,19 @@ consumer rewrites). The record is one JSON object, written once, never edited:
 - `type: approval` is new and mandatory: today's ask-back has no approval
   type — every block is a generic question (`tools/autoos-ask.py:12-24`) —
   and the type tag is what lets consumers distinguish an approval from a
-  question without parsing prose.
+  question on the §4.1 RECORD, once it exists. It does not type the upstream
+  §4.2 `question.json`, which legitimately stays prose-only (`{"text",
+  "asked"}` — no new field is added to that schema); the translator (§4.2
+  step 4) parses the embedded core out of that prose to produce the typed
+  record.
 - Exactly-once: the writer creates the record with exclusive-create semantics
   (the `_create_json_exclusive` pattern — `tools/autoos-ask.py:74-89`); a
   duplicate decision for the same `(sha, nonce)` is rejected, never merged.
+  `(sha, nonce)` is a DE-DUPLICATION key, not the security boundary: two
+  different decisions for the same sha with different nonces both pass
+  exclusive-create today (e.g. approve then deny), and the real control is the
+  §4.3/§5 endpoint credential. Nonce uniqueness stops double-writes; it does
+  not stop a second, different decision.
   History is append-only (`qa-<n>.json` precedent —
   `tools/autoos-ask.py:110-144`); a stale/orphan answer is archived with a
   marker, never silently deleted (`tools/autoos-ask.py:146-156`).
@@ -142,10 +172,15 @@ change stays off`). Until `<push service>` exists, the approval path runs on
 that exact pattern composed with the ask-back primitive:
 
 1. The worker classifies (`risk --sha`, `tools/autoos-agent.py:1387-1426`); on
-   any §2 reason it writes `question.json` (`{"text", "asked"}` —
+   any §2 category (per the §3 category check, not just a generated reason)
+   it writes `question.json` (`{"text", "asked"}` —
    `tools/autoos-ask.py:19-21`, exclusively — `tools/autoos-ask.py:192-199`)
-   whose text embeds the machine-readable core `approval? sha=<hex>
-   reasons=<n>`, and blocks in `input_required` (`tools/autoos-ask.py:19-24`).
+   whose text embeds the machine-readable core `approval? sha=<hex>` followed
+   by the risk reason strings verbatim (not just a count — the operator must
+   see what §4.4 requires without opening another tool; where reasons are
+   long, a stable short reference the operator can expand may substitute, but
+   the default is the full strings), and blocks in `input_required`
+   (`tools/autoos-ask.py:19-24`).
 2. The orchestrator surfaces the pending question to the operator (today: the
    inbox line; tomorrow: §4.3) and records the operator's words.
 3. The answer lands via `answer.json` (`{"text", "answered"}` —
@@ -156,7 +191,11 @@ that exact pattern composed with the ask-back primitive:
 5. Timeout/withdrawal follows the existing rule: question withdrawn, run back
    to working, late answers archived stale (`tools/autoos-ask.py:222-232`,
    exit codes `tools/autoos-ask.py:39-44`). A timed-out approval is a DENY
-   by default (fail-closed; §5) — the lane does not proceed on silence.
+   by default (fail-closed; §5) — the lane does not proceed on silence — and
+   the timeout writes a §4.1 record with `decision: deny`, `channel: inbox`,
+   and `by` naming the timeout mechanism itself (not a human operator id).
+   This is the one record type where `by` isn't a person; the field shape is
+   otherwise identical so consumers need no second parser.
 
 ### 4.3 Target: `<push service>` with Approve/Deny action buttons
 
@@ -191,12 +230,28 @@ key is not a gate.** Hard invariant, not a nice-to-have:
   There is no agent-scoped token, no "approve own work" role, no break-glass
   flag readable by a worker. Any lane proposing such a credential fails review
   unconditionally.
+- Carve-out for the §4.2 stand-in (scoping, not weakening, the invariant):
+  until §4.3's `<push service>` endpoint exists, the trust boundary is
+  procedural, not credential-enforced. The orchestrator translates the
+  answered `qa-<n>.json` pair into the §4.1 record (§4.2 step 4) with nothing
+  operator-authenticated in that translation step — the `answer.json` file
+  itself is written by the MCP `respond()` tool, which the orchestrator's own
+  process calls — so the orchestrator is trusted to relay what a human
+  operator actually typed into the inbox/ask-back channel. That is the same
+  trust this run already places in every "operator-confirmed" inbox line
+  (e.g. `common.md:62`, where routing-00 routes/decides/asks/verifies on the
+  operator's confirmation and executes nothing itself). The hard invariant
+  becomes literally credential-enforced only once the §4.3 endpoint exists
+  and checks an operator-only credential; until then the stand-in meets it
+  procedurally, and §8 step 2 ships that stand-in with eyes open.
 - Timeout is deny (§4.2 step 5). A worker that cannot reach the operator waits
   or stops; it never self-approves, and "the operator is slow" is never a
   reason recorded for proceeding.
-- Adjacent pieces this checkout already enforces: the sudo/root category is
-  already approval-routed at the classifier (`catalog/ai-registry.json:1733-1738`,
-  reason `root/sudo (R-orch-10)`); operator-only steps already exist as a
+- Adjacent pieces this checkout already enforces: sudo/root is already
+  classified as an approval category (§2 row 3), and §3 routes it to §4
+  (the classifier's part is the `added_regex` `\bsudo\b` at
+  `catalog/ai-registry.json:1733-1738`, reason `root/sudo (R-orch-10)` — it
+  classifies `high`, it does not itself route anything to a human); operator-only steps already exist as a
   first-class blocked state — the restart spec's lane table carries an
   `operator` row for "operator-only steps, verbatim"
   (`docs/plans/2026-09-28-restart-spec.md:147`), spawned briefs terminate in
@@ -263,13 +318,22 @@ computes a revert rate or a per-lane red-CI signal (verified by grep for
   comes first. The window, threshold, and per-project-vs-per-lane scoping are
   `Q: APPROVALS | revert-rate definition` (§9).
 - **What "clears it" means:** a human (the operator, or routing-00 on the
-  operator's instruction — cf. `common.md:62-66`) records an explicit clear
-  decision naming the evidence: the red run id and its fix commit, or the
-  revert-rate numbers recomputed after the window moved on. The clear is
-  itself an approval-path action — a §4.1 record with `decision: approve`
-  and the evidence in place of `risk_reasons` — not a separate unlock
-  mechanism, so there is exactly one place to audit who let merging resume
-  `(inference)`. A clear never back-dates: lanes merged during the pause stay
+  operator's instruction — cf. `common.md:123`, where OmniRoute PR #14992 was
+  published by routing-00 on the operator's instruction) records an explicit
+  clear decision naming the evidence: the red run id and its fix commit, or
+  the revert-rate numbers recomputed after the window moved on. The clear is
+  itself an approval-path action with its own explicit field shape — it
+  reuses the SAME approval infrastructure (exclusive-create, append-only
+  history, operator-only credential) with a different payload shape, not
+  literally the same §4.1 required fields (a CI-red/revert-rate clear has
+  neither a single 40-hex commit for `sha` nor classifier output for
+  `risk_reasons`, and the `(sha, nonce)` exactly-once key is undefined for
+  it):
+  `{"type": "clear", "project": "<project>", "evidence": {"red_run_id" |
+  "revert_rate": "...", "fix_commit": "<hex>"}, "decision": "approve",
+  "by": "<operator id>", "at": "<UTC ISO-8601>", "channel": "inbox|push",
+  "nonce": "<uuid>"}` — not a separate unlock mechanism, so there is exactly
+  one place to audit who let merging resume `(inference)`. A clear never back-dates: lanes merged during the pause stay
   unmerged until re-approved.
 
 ## 8. Migration
@@ -288,9 +352,12 @@ a resolved-then-re-run classifier returns the same class for the same sha
    behavior change.
 2. **Record format + inbox stand-in.** Adopt the §4.1 record and run approvals
    through the §4.2 inbox-line + ask-back path. No new service, no new
-   credential; the only new artifact is the `type: approval` tag
-   distinguishing approvals from generic questions.
-3. **Default-deny wiring.** Flip the merge gate: any §2 reason without a
+   credential; the only new artifact is the `type: approval` tag on the §4.1
+   record distinguishing approvals from generic questions — the ask-back
+   `question.json` schema itself does not change (it stays prose-only; §4.1).
+3. **Default-deny wiring.** Flip the merge gate: any §2 category present
+   (per the §3 fail-closed category check — including firewall/auth, deploy,
+   and public-push categories with no classifier reason yet) without a
    matching §4.1 approval record blocks merge. Order matters — wire the block
    before announcing the gate, so there is no window where a flagged change
    auto-merges because the gate "isn't on yet". Re-running the wiring is a
@@ -327,6 +394,19 @@ pipe fields, so they drop into either convention unchanged.
   rule; (b) add a proxy rule (e.g. workflows/configs declaring a public
   remote) so the reason line exists for the approval record. (a) is smaller;
   (b) gives the §4.1 record a reason to carry.
+- `Q: APPROVALS | reason-category mapping | asked <date> | default conservative,
+  then narrow` — §§2–3: no mapping exists from classifier reason strings to
+  §2 categories, and the §3 category check needs one. Concrete overclaim to
+  decide: the `.github/workflows/**` rule's reason `CI workflows`
+  (`catalog/ai-registry.json:1582-1587`), read literally, sends EVERY CI
+  workflow edit to operator approval, not just firewall/edge-relevant ones —
+  accepted for now as deliberately conservative (fail-closed), with the
+  `risk-rules-gap` lane to narrow it or confirm the breadth. Related wording
+  fix already in §3: §2 row 9 covers non-policy paths (e.g. `docs/plans/**`)
+  as well as policy files (`AGENTS.md` at
+  `catalog/ai-registry.json:1600-1605`, `docs/plans/**` at
+  `catalog/ai-registry.json:1612-1617`), so the gate says
+  "policy/skill/contract", not "policy-file".
 - `Q: APPROVALS | endpoint home | asked <date> | default autoos-agent MCP` —
   §4.3: does the Approve/Deny callback land in the existing `autoos-agent`
   MCP/CLI surface (`tools/autoos-agent.py`, whose `respond`-side tool today
