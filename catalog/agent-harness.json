@@ -82,6 +82,14 @@
         "delete_memory",
         "rename_memory"
       ],
+      "raw_content_tools": [
+        "read_file",
+        "search_for_pattern",
+        "find_symbol",
+        "find_declaration",
+        "find_implementations",
+        "find_referencing_symbols"
+      ],
       "excluded_tools": [
         "create_text_file",
         "read_file",

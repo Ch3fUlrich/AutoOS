@@ -88,6 +88,26 @@ def validate(harness):
         problems.append(
             "mcp_servers.serena.memory_tools must be exactly the 6 memory tools"
         )
+    # Also exact: the leaf agents' deny list is derived from it, and a dropped
+    # entry here un-fences a tool that can hand a leaf a key file's bytes
+    # (KEYDENY3). The set is the pinned serena agent's own: read_file and
+    # search_for_pattern return content, and the four symbol tools do so
+    # through their include_body parameter. get_symbols_overview, list_dir,
+    # find_file and the diagnostics tools return names or messages, never a
+    # file's bytes, so they stay out of the fence.
+    raw_content_tools = serena.get("raw_content_tools")
+    if set(raw_content_tools or []) != {
+        "read_file",
+        "search_for_pattern",
+        "find_symbol",
+        "find_declaration",
+        "find_implementations",
+        "find_referencing_symbols",
+    } or not isinstance(raw_content_tools, list):
+        problems.append(
+            "mcp_servers.serena.raw_content_tools must be exactly the 6 tools "
+            "that can return file content"
+        )
 
     roles = harness.get("roles")
     roles = roles if isinstance(roles, dict) else {}
@@ -191,7 +211,7 @@ def _unexpected_type(user):
     if permission is not None and not isinstance(permission, dict):
         return "permission is not an object"
     if isinstance(permission, dict):
-        for key in ("bash", "read"):
+        for key in ("bash", "read", "grep", "glob", "external_directory"):
             if key in permission and not isinstance(permission[key], (str, dict)):
                 return "permission.%s is neither a string nor an object" % key
     if "instructions" in user and not isinstance(user["instructions"], list):
@@ -308,6 +328,25 @@ def desired_opencode(user, harness, repo_root, skills_source):
         list(fences["read_deny_all"]),
         list(fences["read_allow_all"]),
     )
+    # KEYDENY3: the read fence fenced one tool, and opencode matches a
+    # *different* resource per action (v2.0.16). `grep` and `glob` are asserted
+    # against the search pattern the agent passed, not the files it searches, so
+    # here they fence a search whose pattern names a key file; the searched path
+    # is only checked through `external_directory` (FileAccess.authorizeExternal),
+    # which sees a path — that is where the same list fences a leaf grepping an
+    # absolute key file outside the project. All three carry the identical deny
+    # list so one catalog edit moves all of them.
+    for action in ("grep", "glob"):
+        permission[action] = _rebuild_read(
+            permission.get(action),
+            list(fences["read_deny_all"]),
+            list(fences["read_allow_all"]),
+        )
+    permission["external_directory"] = _rebuild_read(
+        permission.get("external_directory"),
+        list(fences["read_deny_all"]),
+        [],
+    )
 
     instructions = list(doc.get("instructions") or [])
     # No source means no paths: joining "" would append "some-skill/SKILL.md",
@@ -325,6 +364,8 @@ def desired_opencode(user, harness, repo_root, skills_source):
 
     agent = doc.setdefault("agent", {})
     servers = list((harness.get("mcp_servers") or {}).keys())
+    serena = (harness.get("mcp_servers") or {}).get("serena") or {}
+    serena_raw_content_tools = list(serena.get("raw_content_tools") or [])
     for name, role in harness["roles"].items():
         existing = agent.get(name)
         existing = existing if isinstance(existing, dict) else {}
@@ -338,6 +379,16 @@ def desired_opencode(user, harness, repo_root, skills_source):
         }
         role_mcp = set(role.get("mcp") or [])
         tools = {"%s*" % server: False for server in servers if server not in role_mcp}
+        if role.get("leaf") and "serena" in role_mcp:
+            # KEYDENY3: an MCP tool's rule can only name the tool — v2.0.16
+            # dispatches every MCP call as
+            # Permission.assert({action:"<server>_<tool>", resources:["*"]}) —
+            # so a tool that can return a file's bytes cannot be fenced by path
+            # for a leaf and goes whole; the leaf keeps the path-fenced Read
+            # tool. A spawning role keeps it: denying there would cost it every
+            # file read, not just the fenced ones.
+            for tool in serena_raw_content_tools:
+                tools["serena_%s" % tool] = False
         if tools:
             block["tools"] = tools
         agent[name] = block

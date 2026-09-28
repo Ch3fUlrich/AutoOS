@@ -21,6 +21,19 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
   the template with the read tool, and the read allow is narrowed to the exact suffix
   `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+- KEYDENY3 (2026-09-28, same lane): the fence covered the **`read` tool only**, and opencode
+  v2.0.16 matches a *different* resource per action — a `grep`/`glob` rule is matched against the
+  search **pattern**, the searched **path** is checked only by `external_directory`, and an MCP
+  rule can name the **tool** and nothing else (every MCP call is asserted as
+  `{action:"<server>_<tool>", resources:["*"]}`). So a leaf could still pull the key bytes with
+  `grep`, with `serena_read_file`, or with a symbol tool's `include_body`. The same
+  `read_deny_all` / `read_allow_all` lists now also render as `grep`, `glob` and
+  `external_directory` maps, and the new `mcp_servers.serena.raw_content_tools` (serena 1.7.0:
+  `read_file`, `search_for_pattern`, and `find_symbol` / `find_declaration` /
+  `find_implementations` / `find_referencing_symbols` through `include_body`) is denied to every
+  leaf role in the render and dropped from `t3-reviewer`'s serena allow list. Name-only tools
+  (`get_symbols_overview`, `list_dir`, `find_file`, diagnostics) stay; spawning roles keep the
+  readers, because there is no path scoping and denying them there would cost every file read.
 
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 

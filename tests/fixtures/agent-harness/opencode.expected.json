@@ -67,6 +67,43 @@
       "*.claude.json*": "deny",
       "*.env.example": "allow",
       "*configuration/api-keys.example.yml": "allow"
+    },
+    "grep": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*auth.json": "deny",
+      "*api_keys*": "deny",
+      "*api-keys*": "deny",
+      "*client.key*": "deny",
+      "*manage.key*": "deny",
+      "*.claude.json*": "deny",
+      "*.env.example": "allow",
+      "*configuration/api-keys.example.yml": "allow"
+    },
+    "glob": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*auth.json": "deny",
+      "*api_keys*": "deny",
+      "*api-keys*": "deny",
+      "*client.key*": "deny",
+      "*manage.key*": "deny",
+      "*.claude.json*": "deny",
+      "*.env.example": "allow",
+      "*configuration/api-keys.example.yml": "allow"
+    },
+    "external_directory": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*auth.json": "deny",
+      "*api_keys*": "deny",
+      "*api-keys*": "deny",
+      "*client.key*": "deny",
+      "*manage.key*": "deny",
+      "*.claude.json*": "deny"
     }
   },
   "instructions": [
@@ -239,7 +276,13 @@
       "tools": {
         "playwright*": false,
         "omnigraph*": false,
-        "autoos-agent*": false
+        "autoos-agent*": false,
+        "serena_read_file": false,
+        "serena_search_for_pattern": false,
+        "serena_find_symbol": false,
+        "serena_find_declaration": false,
+        "serena_find_implementations": false,
+        "serena_find_referencing_symbols": false
       }
     },
     "leaf-reviewer": {
@@ -297,7 +340,13 @@
       "tools": {
         "playwright*": false,
         "omnigraph*": false,
-        "autoos-agent*": false
+        "autoos-agent*": false,
+        "serena_read_file": false,
+        "serena_search_for_pattern": false,
+        "serena_find_symbol": false,
+        "serena_find_declaration": false,
+        "serena_find_implementations": false,
+        "serena_find_referencing_symbols": false
       }
     }
   },

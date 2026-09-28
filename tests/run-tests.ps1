@@ -7213,7 +7213,8 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
     Assert-Equal $t3[6].action 'shell'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
     Assert-True (@($t3 | Where-Object { $_.action -eq 'bash' }).Count -eq 0) 'bash rule is dead in opencode v2'
     # Every harness fence is a shell deny on the leaf, and MCP writers are off.
-    $fences = (Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding utf8 | ConvertFrom-Json).fences
+    $harnessDoc = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $fences = $harnessDoc.fences
     foreach ($pat in @($fences.bash_deny_all) + @($fences.bash_deny_leaf)) {
         $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer shell fence missing: $pat"
@@ -7234,6 +7235,22 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
         $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer read allow missing: $pat"
     }
+    # KEYDENY3: one deny list, three actions — opencode v2.0.16 matches a
+    # grep/glob rule against the search *pattern* and checks the searched path
+    # only through `external_directory`, so a read-only fence left both doors
+    # open for a leaf.
+    foreach ($act in @('grep', 'glob', 'external_directory')) {
+        foreach ($pat in @($fences.read_deny_all)) {
+            $hit = @($t3 | Where-Object { $_.action -eq $act -and $_.resource -eq $pat })
+            Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer $act fence missing: $pat"
+        }
+    }
+    foreach ($act in @('grep', 'glob')) {
+        foreach ($pat in @($fences.read_allow_all)) {
+            $hit = @($t3 | Where-Object { $_.action -eq $act -and $_.resource -eq $pat })
+            Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer $act allow missing: $pat"
+        }
+    }
     # KEYDENY: a fence is a decision over a path, not a list of names — last
     # matching rule wins, so walk the rules and keep the final verdict. Fixture
     # paths only; the suite never opens a real key file.
@@ -7247,6 +7264,15 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
         }
         Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
         Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
+        # KEYDENY3: the same path decided as a search pattern and as a searched
+        # directory. Fixture strings only — no key file is opened.
+        foreach ($act in @('grep', 'glob', 'external_directory')) {
+            $verdict = ''
+            foreach ($rule in $t3) {
+                if ($rule.action -eq $act -and $path -like $rule.resource) { $verdict = $rule.effect }
+            }
+            Assert-Equal $verdict 'deny' "t3-reviewer may reach $path through $act"
+        }
     }
     # KEYDENY2: a shell rule matches the whole command line, so the substring
     # allow *api-keys.example* licensed the real key file as soon as the
@@ -7269,6 +7295,13 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
     }
     Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
     Assert-Equal $shellVerdict 'deny' 't3-reviewer may cat the key example'
+    foreach ($act in @('grep', 'glob')) {
+        $verdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq $act -and $example -like $rule.resource) { $verdict = $rule.effect }
+        }
+        Assert-Equal $verdict 'allow' "t3-reviewer is denied the example through $act"
+    }
     # A read allow is a path, not a substring: a backup named after the
     # template stays denied.
     foreach ($path in @('/tmp/api-keys.example.yml.bak', '/tmp/api-keys.example/stolen')) {
@@ -7278,8 +7311,21 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
         }
         Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
     }
-    foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
-        Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"
+    $serenaAllowed = @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' } | ForEach-Object { $_.action })
+    foreach ($action in $serenaAllowed) {
+        Assert-True ($action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $action"
+    }
+    # KEYDENY3: an MCP rule cannot name a path (v2.0.16 asserts every MCP call
+    # as {action:"<server>_<tool>", resources:["*"]}), so a serena tool that can
+    # return file bytes is off the allow list outright — the list comes from the
+    # harness, never a copy here. Tools that return names or diagnostics stay.
+    $rawReaders = @($harnessDoc.mcp_servers.serena.raw_content_tools | ForEach-Object { "serena_$_" })
+    Assert-True ($rawReaders.Count -gt 0) 'harness lists no serena raw-content tools'
+    foreach ($action in $serenaAllowed) {
+        Assert-True ($rawReaders -notcontains $action) "t3-reviewer may read file bytes through $action"
+    }
+    foreach ($keep in @('serena_get_symbols_overview', 'serena_list_dir', 'serena_find_file')) {
+        Assert-True ($serenaAllowed -contains $keep) "t3-reviewer lost the name-only tool $keep"
     }
     Assert-Equal $agents.'t3-reviewer'.mode 'subagent'
 }

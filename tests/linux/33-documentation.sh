@@ -765,11 +765,18 @@ fi
 # through the shell and overwrite a file through serena's create_text_file.
 # KEYDENY 2026-09-28: the same stanza allowed every `read`, so the read_deny_all
 # fences are asserted here too — as patterns and as a decision on real paths.
-if it "t3-reviewer fences the shell, read, serena and omnigraph writes"; then
+# KEYDENY3 2026-09-28: the fence stopped at the `read` tool. opencode v2.0.16
+# matches `grep`/`glob` against the search pattern and checks the searched path
+# only through `external_directory`, and an MCP rule can only name a tool
+# (resources is the literal ["*"]), so the same list now has to land on grep,
+# glob and external_directory, and every serena tool that can return file bytes
+# has to be off the allow list.
+if it "t3-reviewer fences the shell, read, grep, glob, serena and omnigraph writes"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
-fences = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))["fences"]
+harness = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
+fences = harness["fences"]
 t3 = [(p["action"], p["resource"], p["effect"]) for p in oc["agents"]["t3-reviewer"]["permissions"]]
 problems = []
 if any(act == "bash" for act, _, _ in t3):
@@ -789,6 +796,16 @@ for pat in fences["bash_allow_all"]:
 for pat in fences["read_allow_all"]:
     if last("read", pat) != "allow":
         problems.append("read-allow:" + pat)
+# KEYDENY3: one deny list, three actions. grep/glob are matched against the
+# pattern the leaf passes, external_directory against the path it searches.
+for act in ("grep", "glob", "external_directory"):
+    for pat in fences["read_deny_all"]:
+        if last(act, pat) != "deny":
+            problems.append(act + ":" + pat)
+for act in ("grep", "glob"):
+    for pat in fences["read_allow_all"]:
+        if last(act, pat) != "allow":
+            problems.append(act + "-allow:" + pat)
 # KEYDENY: a fence is a decision over a path, not a list of names. Fixture
 # paths only — no real key file is opened, the deny is on the name.
 import fnmatch
@@ -805,6 +822,11 @@ for path in ("configuration/api-keys.yml",
         problems.append("read-open:" + path)
     if decide("shell", "cat " + path) != "deny":
         problems.append("shell-open:" + path)
+    # KEYDENY3: the same path decided as a search pattern (grep/glob) and as a
+    # searched directory (external_directory).
+    for act in ("grep", "glob", "external_directory"):
+        if decide(act, path) != "deny":
+            problems.append(act + "-open:" + path)
 # KEYDENY2: a shell rule matches the whole command line, so the substring allow
 # *api-keys.example* licensed the real key file the moment its name shared a
 # line with the template — and let a copy out under an *.example* path.
@@ -816,6 +838,9 @@ for command in ("cat configuration/api-keys.yml configuration/api-keys.example.y
 example = "configuration/api-keys.example.yml"
 if decide("read", example) != "allow":
     problems.append("read-denied-example")
+for act in ("grep", "glob"):
+    if decide(act, example) != "allow":
+        problems.append(act + "-denied-example")
 if decide("shell", "cat " + example) != "deny":
     problems.append("shell-cats-example")
 # A read allow is a path, not a substring: a backup named after the template
@@ -831,6 +856,17 @@ for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "
 allowed = [a for a, r, e in t3 if a.startswith("serena_") and e == "allow"]
 writers = ("create", "replace", "insert", "rename", "delete", "edit", "write", "execute")
 problems += ["serena-writer-allowed:" + a for a in allowed if any(w in a for w in writers)]
+# KEYDENY3: an MCP rule cannot name a path (v2.0.16 dispatches every MCP call as
+# {action:"<server>_<tool>", resources:["*"]}), so a serena tool that can return
+# file bytes has to be off the allow list outright. The list is the harness's,
+# never a copy — one edit moves the render and this assertion together.
+raw_readers = ["serena_" + t for t in harness["mcp_servers"]["serena"]["raw_content_tools"]]
+problems += ["serena-raw-reader-allowed:" + a for a in allowed if a in raw_readers]
+# And the tools that return names or diagnostics, never bytes, stay usable —
+# over-denying here is a defect too (a tool-less reviewer refuses the task).
+for keep in ("serena_get_symbols_overview", "serena_list_dir", "serena_find_file"):
+    if keep not in allowed:
+        problems.append("serena-name-only-denied:" + keep)
 if not allowed:
     problems.append("serena-read-tools-missing")
 print(" ".join(problems))

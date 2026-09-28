@@ -120,6 +120,13 @@ AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh
   an `edit` deny). `t3-reviewer` now denies the harness fences and every MCP
   write tool by name; `tools/autoos-agent.py` is the one-command way to spawn
   a tier agent on its own model.
+- **A permission rule fences what the engine matches, not what its name says**
+  (measured in `@opencode/cli` 2.0.16, KEYDENY3 2026-09-28): `read` sees a path,
+  `grep`/`glob` see the *search pattern*, a searched path is checked only by
+  `external_directory`, and every MCP call is asserted as
+  `{action:"<server>_<tool>", resources:["*"]}` — so an MCP tool can never be
+  fenced by path, only denied whole. `catalog/agent-harness.json`
+  `mcp_servers.serena.raw_content_tools` is the denied-to-leaves list.
 - Serena memory tools are off by design; Omnigraph + graphify are the
   memory/graph layers. Zen free 500s at peak / Zen paid 402s without balance
   (chain hops). `/v1/models` 401s for client keys (use `--probe` / authed

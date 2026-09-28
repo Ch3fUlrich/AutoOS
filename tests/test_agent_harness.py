@@ -455,6 +455,80 @@ class OpencodeMergeTests(unittest.TestCase):
                 self.assertFalse(fnmatch.fnmatch("cat " + path, pattern),
                                  "bash_allow_all %s matches cat of %s" % (pattern, path))
 
+    def test_grep_glob_and_external_directory_carry_the_read_fence(self):
+        # KEYDENY3: read_deny_all fenced the `read` tool and nothing else, while
+        # opencode v2.0.16 asserts a *different* resource per action — the grep
+        # and glob tools call Permission.assert({action:"grep"|"glob",
+        # resources:[<the search pattern>]}) and check the searched path only
+        # through the `external_directory` action (FileAccess.authorizeExternal).
+        # So the fence list has to land on three more maps: as the pattern for
+        # grep/glob (a leaf grepping for "api-keys" is stopped), and as the path
+        # for external_directory (a leaf grepping /home/x/.config/autoos/... is
+        # stopped at the path). Decided on the rendered map; no key file opened.
+        fences = harness_data()["fences"]
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for pattern in fences["read_deny_all"]:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(doc["permission"][action][pattern], "deny",
+                                     "%s %s" % (action, pattern))
+            for pattern in fences["read_allow_all"]:
+                for action in ("grep", "glob"):
+                    self.assertEqual(doc["permission"][action][pattern], "allow",
+                                     "%s %s" % (action, pattern))
+            for path in KEY_PATHS:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(fence_verdict(doc["permission"][action], path),
+                                     "deny", "%s may reach %s" % (action, path))
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(doc["permission"]["grep"], path),
+                                 "deny", path)
+            for action in ("grep", "glob"):
+                self.assertEqual(fence_verdict(doc["permission"][action], KEY_EXAMPLE),
+                                 "allow", "%s is denied the example" % action)
+
+    def test_a_leaf_is_denied_every_serena_tool_that_returns_file_bytes(self):
+        # KEYDENY3: an MCP tool's permission rule can only name the tool — the
+        # MCP dispatcher asserts {action:"<server>_<tool>", resources:["*"]}
+        # (v2.0.16), so there is no path to fence and the whole tool must go.
+        # The catalog lists which serena tools carry raw file bytes: read_file
+        # and search_for_pattern by design, find_symbol/find_declaration/
+        # find_implementations/find_referencing_symbols through their
+        # include_body parameter (serena 1.7.0, tools/symbol_tools.py). A leaf
+        # keeps the path-fenced Read tool and the name-only tools (overview,
+        # list_dir, find_file, diagnostics). Spawning roles keep them: they are
+        # the trusted sessions, and denying here would cost the orchestrator
+        # every file read, not just the fenced ones.
+        harness = harness_data()
+        readers = harness["mcp_servers"]["serena"]["raw_content_tools"]
+        self.assertTrue(readers)
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                tools = doc["agent"][name].get("tools", {})
+                for tool in readers:
+                    key = "serena_" + tool
+                    if role["leaf"] and "serena" in role["mcp"]:
+                        self.assertEqual(tools.get(key), False,
+                                         "%s may use %s" % (name, key))
+                    else:
+                        self.assertNotIn(key, tools,
+                                         "%s is denied %s without cause" % (name, key))
+
+    def test_check_requires_the_serena_raw_content_tool_set(self):
+        # Same reasoning as the memory_tools pin: the render derives its leaf
+        # deny list from this field, so a typo silently un-fences a reader.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["mcp_servers"]["serena"]["raw_content_tools"] = ["read_file"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("raw_content_tools", result.stdout)
+
     def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
