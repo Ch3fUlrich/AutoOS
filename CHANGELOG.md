@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - parsed `uv` output is read colour-free (GFX, 2026-09-28)
+
+- **`lib/linux/install.sh`**: new **`uv_plain()`** (`NO_COLOR=1 uv --color never "$@"`),
+  and the two uv calls whose *output* is parsed now go through it -
+  `graphify_mcp_link_prepare`'s `uv tool dir` and `graphify_installed_version`'s
+  `uv tool list`. uv colourises stdout on `FORCE_COLOR`/`CLICOLOR_FORCE` with no tty
+  at all, and measured on uv 0.12.18 that wraps the answers in escapes
+  (`\e[36m/home/u/.local/share/uv/tools\e[39m`, `\e[1mgraphifyy v0.9.63\e[0m`). The
+  link classifier prefix-matches the path, so on such a host uv's OWN shim at
+  `~/.local/bin/graphify-mcp` was classified `blocked` ("yours to move"), the graphify
+  step returned 1, and every `setup.sh --profile ai-coding|workstation --dry-run`
+  exited 1 once the pinned tool had been installed once - measured here:
+  `FORCE_COLOR=3 bash setup.sh --only mcp-graphify --dry-run` rc 1 before, rc 0 and the
+  plan byte-identical to the plain run after. The version read failed the same quiet
+  way: nothing parsed, so the pin "installed" on every run. `uv tool install` is
+  deliberately *not* routed through the helper - its output is for the user, and only
+  its exit code is read.
+- Tests (`tests/linux/18-mcp-wiring.sh`): the five per-driver uv stubs collapse into
+  one **`gfy_uv()`** that mirrors the measured contract - argv recording, the tools
+  dir, the `<dist> v<ver>` line, the writes `tool install` performs, and colourisation
+  on uv's own precedence (`--color never` beats `NO_COLOR` beats `FORCE_COLOR` beats a
+  tty), so a caller reproduces a coloured host with `FORCE_COLOR=3 <driver> …`. Four
+  new cases: uv's own link is still `uv` when `tool dir` is coloured, the user's own
+  link is still `blocked` then (colour must not become a rubber stamp), the pinned
+  tool stays `skipped` with rc 0 and no reinstall, and the version parser reads the
+  catalog pin out of a coloured `tool list`; plus a grep guard that no `$(uv …)` /
+  `< <(uv …)` in `lib/linux` bypasses the helper. 5 red on a scratch copy with only
+  the two callsites reverted, green here: 41 passed / 0 failed with and without
+  `FORCE_COLOR=3`, 46 passed / 0 failed for `--filter='dry run'` both ways,
+  `shellcheck -S warning` clean.
+
 ### Changed — the user-scope `homelab` MCP entry is never removed, only reported (NOHL, 2026-09-28)
 
 Operator decision 2026-09-28 06:2xZ (via L0): the homelab MCP switch is **not** to

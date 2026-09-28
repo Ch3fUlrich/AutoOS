@@ -1615,6 +1615,71 @@ gfy_repo_skeleton() {
     chmod +x "$1/repo/infra/mcp-servers/bin/graphify-mcp"
 }
 
+# gfy_uv <uv args...>: the one fake uv every graphify test drives, shaped like the
+# real tool measured on uv 0.12.18 (the host this was found on has graphifyy
+# installed by it):
+#   tool dir          prints the tools dir
+#   tool list         prints "<dist> v<version>" then one "- <exe>" line per command,
+#                     or "No tools installed" when nothing is
+#   tool install SPEC records SPEC's version and writes the tool's executable into
+#                     its own tools dir plus the shim link at .local/bin/graphify-mcp
+# and — the part every parser in install.sh was broken by — it colourises stdout on
+# uv's own precedence: `--color never` wins, then NO_COLOR, then FORCE_COLOR /
+# CLICOLOR_FORCE forcing it on with no tty at all, then a tty. The escapes are the
+# measured ones: cyan around `tool dir`, bold around the version line.
+#
+# The subshell that calls it configures it through globals:
+#   gfy_uv_log     append every argv here
+#   gfy_uv_state   file holding the installed version (absent = nothing installed)
+#   gfy_uv_name    distribution name (default graphifyy)
+#   gfy_uv_tools   uv's tools dir (default $SYS_HOME/uvtools)
+#   gfy_uv_install "fail" = the outage: install exits 1 and writes nothing
+gfy_uv() {
+    local argv="$*" colour=0 v ver=""
+    local dir="${gfy_uv_tools:-$SYS_HOME/uvtools}" name="${gfy_uv_name:-graphifyy}"
+    if [[ "$argv" == *"--color never"* || "$argv" == *"--color=never"* ]]; then
+        colour=0
+    elif [[ -n "${NO_COLOR:-}" ]]; then
+        colour=0
+    elif [[ -n "${FORCE_COLOR:-}" || -n "${CLICOLOR_FORCE:-}" ]]; then
+        colour=1
+    elif [[ -t 1 ]]; then
+        colour=1
+    fi
+    [[ -z "${gfy_uv_log:-}" ]] || printf '%s\n' "$argv" >>"$gfy_uv_log"
+    # uv's global --color flag is not the subcommand: real uv still runs `tool dir`
+    # behind it, so the fake drops it (and its value) before dispatching.
+    if [[ "${1:-}" == "--color" ]]; then shift 2; elif [[ "${1:-}" == --color=* ]]; then shift; fi
+    if [[ "${1:-} ${2:-}" == "tool install"* ]]; then
+        if [[ "${gfy_uv_install:-ok}" == fail ]]; then
+            printf 'error: failed to fetch the package index\n' >&2
+            return 1
+        fi
+        ver="${*: -1}"; ver="${ver##*==}"
+        [[ -n "${gfy_uv_state:-}" ]] && printf '%s' "$ver" >"$gfy_uv_state"
+        mkdir -p "$SYS_HOME/.local/bin" "$dir/$name/bin"
+        printf '#!/bin/sh\nexit 0\n' >"$dir/$name/bin/graphify-mcp"
+        chmod +x "$dir/$name/bin/graphify-mcp"
+        ln -sfn "$dir/$name/bin/graphify-mcp" "$SYS_HOME/.local/bin/graphify-mcp"
+        return 0
+    fi
+    case "${1:-} ${2:-}" in
+        "tool dir")
+            if (( colour )); then printf '\033[36m%s\033[39m\n' "$dir"
+            else printf '%s\n' "$dir"; fi ;;
+        "tool list")
+            [[ -n "${gfy_uv_state:-}" && -s "${gfy_uv_state}" ]] && v="$(cat "$gfy_uv_state" 2>/dev/null || true)"
+            if [[ -z "${v:-}" ]]; then
+                printf 'No tools installed\n'
+            elif (( colour )); then
+                printf '\033[1m%s v%s\033[0m\n- graphify\n- graphify-mcp\n' "$name" "$v"
+            else
+                printf '%s v%s\n- graphify\n- graphify-mcp\n' "$name" "$v"
+            fi ;;
+    esac
+    return 0
+}
+
 # gfy_link_shape <tmp> <shape>: put ~/.local/bin/graphify-mcp in that shape.
 #   cloned     a link into the retired agent-skills clone (live or dangling)
 #   wrapper    a link into this checkout's infra/mcp-servers/bin wrapper
@@ -1643,10 +1708,12 @@ gfy_link_shape() {
 }
 
 # gfy_link_run <tmp> <dry>: the verdict, with the step's own report in front of it.
+# A caller that wants the host's view prefixes the call with FORCE_COLOR=3 — bash
+# puts that in the driver's environment, and the subshell below inherits it.
 gfy_link_run() {
     (
         SYS_HOME="$1" AUTOOS_ROOT="$1/repo" AUTOOS_DRY_RUN="$2"
-        uv() { [[ "${1:-} ${2:-}" == "tool dir" ]] && printf '%s/uvtools\n' "$SYS_HOME"; return 0; }
+        uv() { gfy_uv "$@"; }
         graphify_mcp_link_prepare 2>&1
         printf 'STATE=%s\n' "${GRAPHIFY_LINK_STATE:-unset}"
     )
@@ -1725,6 +1792,32 @@ if it "graphify link prepare knows uv's own tool link is not the user's file"; t
     else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
 fi
 
+if it "graphify link prepare reads uv's own link on a host that forces colour"; then
+    # The regression (measured on uv 0.12.18 with FORCE_COLOR=3 in the environment):
+    # `uv tool dir` prints its path wrapped in \033[36m…\033[39m, so the prefix match
+    # above failed against uv's own shim, called it "the user's file", and made the
+    # step refuse. The verdict must not depend on the host's colour preference.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    out="$(FORCE_COLOR=3 gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=uv* && "$got" == */uvtools/graphifyy/bin/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare still blocks the user's own link when uv is coloured"; then
+    # Colour must not turn the classifier into a rubber stamp: a link into somewhere
+    # that is not uv's tools dir is still the user's, escapes or no escapes.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownlink
+    out="$(FORCE_COLOR=3 gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=blocked* && "$got" == */other/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
 if it "graphify link prepare removes an agent-skills link whose clone is gone"; then
     # The realistic migration case: the user deleted the retired clone, which
     # leaves ~/.local/bin/graphify-mcp dangling. Resolving it is not possible and
@@ -1786,7 +1879,8 @@ fi
 # second run meets the real tool's contract instead of a frozen answer. <have> seeds
 # that file only when it does not exist yet: a caller that runs twice wants the
 # second run to read the first one's result. The pin and the distribution name come
-# from the catalog, never from this file.
+# from the catalog, never from this file. The step's exit code is the last line,
+# because what a coloured host broke was the exit code, not only the wording.
 gfy_tool_run() {
     local tmp="$1" have="$2" dry="$3" log="$4" state="$5"
     local name pin
@@ -1795,31 +1889,10 @@ gfy_tool_run() {
     [[ -f "$state" ]] || printf '%s' "$have" >"$state"
     (
         SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
-        uv_log="$log" uv_state="$state" uv_name="$name"
-        uv() {
-            printf '%s\n' "$*" >>"$uv_log"
-            case "${1:-} ${2:-}" in
-                "tool list")
-                    local v; v="$(cat "$uv_state" 2>/dev/null || true)"
-                    if [[ -n "$v" ]]; then
-                        printf '%s v%s\n- graphify\n- graphify-mcp\n' "$uv_name" "$v"
-                    else
-                        printf 'No tools installed\n'
-                    fi ;;
-                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-                "tool install")
-                    local spec="${*: -1}" v
-                    [[ "$spec" == *"=="* ]] || { printf 'error: no pin\n' >&2; return 2; }
-                    v="${spec##*==}"
-                    printf '%s' "$v" >"$uv_state"
-                    mkdir -p "$SYS_HOME/uvtools/$uv_name/bin"
-                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/$uv_name/bin/graphify-mcp"
-                    ln -sfn "$SYS_HOME/uvtools/$uv_name/bin/graphify-mcp" \
-                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
-            esac
-            return 0
-        }
+        gfy_uv_log="$log" gfy_uv_state="$state" gfy_uv_name="$name"
+        uv() { gfy_uv "$@"; }
         install_graphify_tool 2>&1
+        printf 'RC=%s\n' "$?"
     )
 }
 
@@ -1829,7 +1902,9 @@ if it "graphify tool install: nothing installed installs the pin without --force
     out="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
     pin="$(mcp_package graphify)"
     problems=""
-    [[ "$(grep -c '^tool ' "$log")" == "2" ]] \
+    # Two calls: the version read and the install. Matched anywhere in the line,
+    # because the parsed one carries uv's global --color flag in front of it.
+    [[ "$(grep -c 'tool ' "$log")" == "2" ]] \
         || problems+="[uv calls: $(tr '\n' '|' <"$log")] "
     grep -qxF "tool install $pin" "$log" \
         || problems+="[planned: $(tr '\n' '|' <"$log"), expected: tool install $pin] "
@@ -1978,6 +2053,78 @@ if it "graphify tool install: the dry run names the action the real run takes"; 
     done
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+
+# ─── uv's colours must not decide what AutoOS recognises ───────────────────
+# Measured on uv 0.12.18, the version that ships the tool this step pins. On a host
+# with FORCE_COLOR=3 in the environment — which is what CI containers, some
+# dotfiles' terminal setup, and any wrapper that believes stdout is a tty produce:
+#   uv tool dir   -> "\033[36m/home/<u>/.local/share/uv/tools\033[39m"
+#   uv tool list  -> "\033[1mgraphifyy v0.9.63\033[0m" then the "- <exe>" lines
+# Both are parsed here — the first to recognise uv's own shim, the second to read the
+# installed version — and a coloured match matches nothing: the shim reads as the
+# user's own file (so the step refuses and the whole dry run exits 1) and the version
+# reads as nothing installed (so the pin "installs" on every run). gfy_uv above emits
+# those escapes unless argv carries --color never, so these tests are the real
+# contract, not a convenience fake.
+
+if it "graphify tool install: uv's own shim stays uv's and the pin is skipped when uv is coloured"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    out="$(FORCE_COLOR=3 gfy_tool_run "$tmp" "$pin" 0 "$log" "$state")"
+    problems=""
+    grep -q '^tool install' "$log" && problems+="[reinstalled although pinned: $(tr '\n' '|' <"$log")] "
+    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *"yours to move"* ]] || problems+="[called uv's own shim the user's file] "
+    [[ "$out" == *RC=0* ]] || problems+="[the step failed: $out] "
+    [[ -L "$tmp/.local/bin/graphify-mcp" ]] || problems+="[uv's link was not kept] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: a coloured uv still gives the dry run exit 0"; then
+    # The failure the operator met: setup.sh --profile ai-coding|workstation
+    # --dry-run exiting 1 on a machine that had the tool installed once.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    out="$(FORCE_COLOR=3 gfy_tool_run "$tmp" "$pin" 1 "$log" "$state")"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the dry run exited non-zero: $out] "
+    [[ "$out" == *"skipped"* ]] || problems+="[the plan did not read as a skip: $out] "
+    grep -q 'tool install' "$log" && problems+="[the dry run installed: $(tr '\n' '|' <"$log")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify reads the pinned version out of a coloured uv tool list"; then
+    # The parser on its own, because "skipped" and "installed every run" are the two
+    # answers this line decides between.
+    tmp="$(mktemp -d)"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    name="$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')"
+    printf '%s' "$pin" >"$tmp/uv.version"
+    ver="$(
+        SYS_HOME="$tmp" gfy_uv_state="$tmp/uv.version" gfy_uv_name="$name"
+        FORCE_COLOR=3
+        uv() { gfy_uv "$@"; }
+        graphify_installed_version "$name"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$ver" "$pin"
+fi
+
+if it "every uv call whose output install.sh parses runs colour-free"; then
+    # The structural half of the fix: a later `$(uv …)` added beside these two would
+    # re-introduce the same host-dependent classification, and no test below would
+    # notice. Grep catches it at review time instead.
+    bad="$(grep -rnE '(\$\(|< *\()[[:space:]]*uv[[:space:]]' lib/linux/*.sh || true)"
+    if [[ -z "$bad" ]]; then pass
+    else fail "uv output parsed without --color never: $bad"; fi
 fi
 
 
@@ -2148,22 +2295,10 @@ gfy_register_run() {
     local tmp="$1" log="$2"
     (
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-        uv() {
-            case "${1:-} ${2:-}" in
-                "tool list") printf 'No tools installed\n' ;;
-                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-                "tool install")
-                    # Real uv writes the tool's executable and links it into its own
-                    # bin dir; the registration below is only allowed to name it once
-                    # that file is there.
-                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
-                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
-                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
-            esac
-            return 0
-        }
+        # No gfy_uv_state: nothing is ever installed here, so every run takes the
+        # install branch and real uv's own writes (the executable plus the shim link
+        # into its tools dir) are what the registration is allowed to name.
+        uv() { gfy_uv "$@"; }
         claude() {
             printf 'claude %s\n' "$*" >>"$log"
             return 0
@@ -2199,33 +2334,15 @@ if it "graphify registers once: the second run says skipped and already configur
     log="$tmp/claude.log"; : >"$log"; state="$tmp/uv.version"; : >"$state"
     first="$(
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-        uv() {
-            case "${1:-} ${2:-}" in
-                "tool list") printf 'No tools installed\n' ;;
-                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-                "tool install")
-                    printf '%s' "${*: -1}" | sed -e 's/.*==//' >"$state"
-                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
-                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
-                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
-            esac
-            return 0
-        }
+        gfy_uv_state="$state"
+        uv() { gfy_uv "$@"; }
         claude() { return 0; }
         install_mcp_graphify 2>&1
     )"
     second="$(
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-        uv() {
-            case "${1:-} ${2:-}" in
-                "tool list") printf '%s v%s\n- graphify-mcp\n' \
-                    "$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')" "$(cat "$state")" ;;
-                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-            esac
-            return 0
-        }
+        gfy_uv_state="$state"
+        uv() { gfy_uv "$@"; }
         claude() {
             [[ "${1:-} ${2:-}" == "mcp list" ]] && printf 'graphify: command - ✓\n'
             return 0
@@ -2557,30 +2674,8 @@ gfy_wire_run() {
     (
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
         unset CLAUDE_CONFIG_DIR
-        uv() {
-            case "${1:-} ${2:-}" in
-                "tool list")
-                    if [[ -s "$state" ]]; then
-                        printf '%s v%s\n- graphify\n- graphify-mcp\n' \
-                            "$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')" "$(cat "$state")"
-                    else
-                        printf 'No tools installed\n'
-                    fi ;;
-                "tool dir") printf '%s/uvtools\n' "$SYS_HOME" ;;
-                "tool install")
-                    if [[ "$verdict" == fail ]]; then
-                        printf 'error: failed to fetch the package index\n' >&2
-                        return 1
-                    fi
-                    printf '%s' "${*: -1}" | sed -e 's/.*==//' >"$state"
-                    mkdir -p "$SYS_HOME/.local/bin" "$SYS_HOME/uvtools/graphifyy/bin"
-                    printf '#!/bin/sh\nexit 0\n' >"$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    chmod +x "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp"
-                    ln -sfn "$SYS_HOME/uvtools/graphifyy/bin/graphify-mcp" \
-                        "$SYS_HOME/.local/bin/graphify-mcp" ;;
-            esac
-            return 0
-        }
+        gfy_uv_state="$state" gfy_uv_install="$verdict"
+        uv() { gfy_uv "$@"; }
         claude() { gfy_claude "$log" "$cfg" "$@"; }
         install_mcp_graphify 2>&1
         printf 'RC=%s\n' "$?"

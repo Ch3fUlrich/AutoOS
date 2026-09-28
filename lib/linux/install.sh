@@ -2195,6 +2195,21 @@ install_uv() {
     return $rc
 }
 
+# uv_plain <uv args...>: call uv when this script reads what it printed, never when
+# the user reads it. uv colourises stdout on its own precedence — FORCE_COLOR or
+# CLICOLOR_FORCE in the environment is enough, no tty required — and then, measured
+# on uv 0.12.18, `uv tool dir` prints its path wrapped in \e[36m…\e[39m and
+# `uv tool list` prints \e[1m<dist> v<version>\e[0m. Every parser of that output
+# prefix-matches or splits it, so on such a host uv's OWN shim at
+# ~/.local/bin/graphify-mcp read as "the user's file" (the graphify step refused and
+# the whole dry run exited 1) and an installed version read as nothing installed
+# (the pin "installed" on every run). --color is uv's own switch and beats the
+# environment; NO_COLOR covers anything else in uv's process environment. Output the
+# user watches — an install's progress — is never routed here, so it keeps its colour.
+uv_plain() {
+    NO_COLOR=1 uv --color never "$@"
+}
+
 install_ollama() {
     # This used to be `curl -fsSL $url | sh` - an unverified remote script
     # piped straight into a shell (A14, the exact finding this branch exists
@@ -5012,7 +5027,7 @@ graphify_mcp_link_prepare() {
         # clone's link to the "this is the user's own" branch.
         [[ -z "$current" || "$current" == /* ]] || current="$(dirname "$link")/$current"
         local uv_tools=""
-        if has_cmd uv; then uv_tools="$(uv tool dir 2>/dev/null)" || uv_tools=""; fi
+        if has_cmd uv; then uv_tools="$(uv_plain tool dir 2>/dev/null)" || uv_tools=""; fi
         if [[ "$current" == */agent-skills/* ]]; then
             state="removed"; reason="the retired agent-skills clone"
         elif [[ "$current" == "$wrapper" ]]; then
@@ -5054,15 +5069,18 @@ graphify_mcp_link_prepare() {
 }
 
 # graphify_installed_version <distribution>: the version `uv tool list` reports for
-# that tool, nothing when it is not installed. uv's own shape (measured on uv 0.12.18)
-# is "<name> v<version>" then "  - <executable>" per command, and the flat line "No
-# tools installed" when there is none. The name is the distribution as the catalog
-# spells it — graphify's is already lowercase, so no normalisation is needed here.
+# that tool, nothing when it is not installed — read through uv_plain, because the
+# bold uv puts on this very line under FORCE_COLOR made the version unreadable, so
+# the pin "installed" on every run. uv's own shape (measured on uv 0.12.18) is
+# "<name> v<version>" then "  - <executable>" per command, and the flat
+# line "No tools installed" when there is none. The name is the distribution as the
+# catalog spells it — graphify's is already lowercase, so no normalisation is needed
+# here.
 graphify_installed_version() {
     local want="$1" line ver=""
     while IFS= read -r line; do
         [[ "$line" == "$want v"* ]] && { ver="${line#"$want v"}"; break; }
-    done < <(uv tool list 2>/dev/null || true)
+    done < <(uv_plain tool list 2>/dev/null || true)
     printf '%s\n' "$ver"
 }
 
