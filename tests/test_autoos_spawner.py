@@ -9550,16 +9550,48 @@ class ClientSpawnGateTests(unittest.TestCase):
         self.assertEqual(clients.LEAF_SPAWN_DENY["qwen"][0], "--exclude-tools")
 
     def test_a_leaf_command_carries_the_gate_and_a_spawner_one_does_not(self):
-        for name in ("claude", "qoder", "qwen"):
-            client = clients.CLIENTS[name]
-            leaf = clients.build_command(client, "t", None, "edit",
-                                         deny_spawn=True)
-            plain = clients.build_command(client, "t", None, "edit",
-                                          deny_spawn=False)
+        # KEYDENY3 (Sonnet HIGH/MED): qodercli's --disallowed-tools binds ONE
+        # value per occurrence and claude's --disallowed-tools <tools...> is
+        # variadic, so an unbound tool name and the trailing task leak into the
+        # query / the deny list. Assert the exact argv: every denied tool bound
+        # to its flag, and the multi-word task intact as ONE final argument.
+        task = "write the report and commit it"
+        qoder_model = ["--model", clients.QODER_DEFAULT_MODEL]
+        expect = {
+            ("claude", False): ["claude", "-p", "--permission-mode", "acceptEdits", task],
+            ("claude", True): ["claude", "-p", "--permission-mode", "acceptEdits",
+                               "--disallowed-tools", "Task", "Agent", "--", task],
+            ("qoder", False): ["qodercli", "-p", "--permission-mode",
+                               "bypass_permissions"] + qoder_model + [task],
+            ("qoder", True): ["qodercli", "-p", "--permission-mode",
+                              "bypass_permissions"] + qoder_model +
+                             ["--disallowed-tools", "Agent",
+                              "--disallowed-tools", "Task", "--", task],
+            ("qwen", False): ["omniroute", "run", "qwen", "--model", "t3-worker",
+                              "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                              "--approval-mode", "auto-edit", "-p", task],
+            ("qwen", True): ["omniroute", "run", "qwen", "--model", "t3-worker",
+                             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                             "--approval-mode", "auto-edit",
+                             "--exclude-tools", "task", "agent", "subagent",
+                             "-p", task],
+        }
+        for (name, gated), argv in sorted(expect.items()):
+            cmd = clients.build_command(clients.CLIENTS[name], task, "t3-worker",
+                                        "edit", deny_spawn=gated)
+            self.assertEqual(argv, cmd, "%s gated=%s" % (name, gated))
             gate = clients.LEAF_SPAWN_DENY[name][0]
-            self.assertIn(gate, leaf, name)
-            self.assertNotIn(gate, plain, name)
-            self.assertNotIn(gate, plain, name)
+            self.assertEqual(gated, gate in cmd, name)
+            self.assertEqual(task, cmd[-1], "%s: task must be ONE final argument" % name)
+            self.assertNotIn(task, cmd[:-1], name)
+            if gated and name in ("claude", "qoder"):
+                # the deny list is terminated before the prompt
+                self.assertEqual("--", cmd[-2], name)
+            if gated and name == "qoder":
+                for tool in clients.LEAF_SPAWN_DENY[name][1:]:
+                    idx = cmd.index(tool)
+                    self.assertEqual(gate, cmd[idx - 1],
+                                     "%s: tool %s not bound to its flag" % (name, tool))
 
 
 class LeafSpawnGateOverlayTests(unittest.TestCase):
