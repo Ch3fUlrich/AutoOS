@@ -115,7 +115,9 @@ reach it, and puts a working bridge on disk. Linux carries it in the
 `workstation`, `ai-coding`, `light` and `server` profiles — a headless server
 running agents needs the bridge as much as a desktop does (operator decision
 2026-09-28). macOS carries the first three; the macOS catalog has no `server`
-profile at all.
+profile at all. Windows carries the first three too, and its catalog has no
+`server` profile either (SPEC-OMNI A3, landed 2026-09-28 — see "On Windows"
+below).
 
 **Inputs — both are required, and neither is guessed:**
 
@@ -158,8 +160,8 @@ not a failure, because nothing on the machine was wrong yet.
    `127` and one stderr line naming the component to re-run. **A user-scope MCP
    entry that needs omnigraph should call this wrapper**, not `npx`, so a
    non-interactive `bash -c` client gets the token with no rc file in the path.
-   Its PowerShell twin is `tools/omnigraph-mcp-autoos.ps1`, which parses the
-   same forms.
+   Its PowerShell twin is `tools/omnigraph-mcp-autoos.ps1`, which parses the same
+   forms and is the file the Windows component installs (see "On Windows").
 4. The retirement of one rc-file line: a line that both reads from the retired
    `agent-skills` tree and names `OMNIGRAPH_TOKEN` is AutoOS's own older form, so
    it is removed after a backup. Anything else in `.bashrc`/`.zshrc` stays —
@@ -190,6 +192,46 @@ machine.
 This repository's own `.mcp.json` still runs the bridge through `npx` at project
 scope: that entry is the repo's, not a machine default, and is unchanged here.
 
+### On Windows
+
+`Install-AutoOSOmnigraphClient` (`lib/windows/AutoOS.Install.psm1`) is the twin of
+`install_omnigraph_client`. It reads the same two inputs, skips the same way when
+either is missing, installs the same pinned bridge and copies the same tracked
+wrapper. What differs is where the artifacts live and how the token file is
+protected — and two of the Linux steps have no Windows counterpart at all.
+
+| Linux | Windows |
+|---|---|
+| `~/.autoos-omnigraph.env`, mode `600` | `%USERPROFILE%\.autoos-omnigraph.env`, with inheritance stripped and the account granted alone (`icacls /inheritance:r /grant:r`) |
+| the `~/.config/environment.d` link, and the rc-file reader | the `OMNIGRAPH_TOKEN` **user** environment variable — one named variable, read first and written only when it differs, so every newly started process sees it |
+| prefix `~/.local/share/autoos/omnigraph-mcp`, bin at `<prefix>/bin/…` | prefix `%LOCALAPPDATA%\autoos\omnigraph-mcp`; Windows npm links a global package's bin into the prefix itself (`<prefix>\omnigraph-mcp.cmd`), the same layout as `%APPDATA%\npm` |
+| `~/.local/bin/omnigraph-mcp-autoos`, mode `755` | `%USERPROFILE%\.local\bin\omnigraph-mcp-autoos.ps1` plus an `omnigraph-mcp-autoos.cmd` shim beside it — a client that resolves a bare command through `cmd.exe` will not find an extension-less script — and that directory is *appended* to the persistent user PATH by `Add-AutoOSPathEntry` |
+| retirement of the older rc-file line (step 4) | nothing to retire: no Windows installer ever wrote an rc line, so no file the user owns is touched |
+
+The bytes are a live bearer token, so the file is never written and then
+restricted: `Write-AutoOSProtectedFile` creates an empty sibling, protects *that*,
+writes the content into it and moves it onto the target name on the same volume,
+where the rename carries the DACL and the target path is never itself created with
+the profile's inherited permissions. A protection that fails stops the write and
+the component says so. A file it replaces is backed up first, and the backup is
+protected the same way.
+
+Detection answers the coarse question and only the coarse question:
+`Get-AutoOSInstalledStatus` reports the component installed once the prefix and
+the shim are both there, which is what lets a re-run say `skipped` before the
+pipeline runs anything. The compare of *values* lives in the postInstall, which
+`setup.ps1` also runs on a `skipped` component — so a rotated token, a moved pin
+or a deleted wrapper is still repaired, and the two answers cannot drift, because
+the postInstall is the only code that decides what "current" means.
+
+What the Windows installer does **not** do is remove an MCP entry. A user-scope
+`omnigraph` server is called out with the command that deletes it, because it
+silently overrides the per-repo one; everything else the user configured at that
+scope is left exactly as it is. And the `agent-skills` clone this function used to
+perform is gone (SPEC-OMNI D14): the servers it wires come from this checkout's own
+`.mcp.json`, the URL and token moved here, and a machine that ran the old installer
+keeps its `Documents\code\agent-skills` checkout untouched.
+
 ### Token rotation
 
 The token has exactly one home per machine, which is what makes rotating it
@@ -198,11 +240,14 @@ boring:
 1. Edit the `omnigraph_token` key in `configuration/api-keys.yml` (or export
    `OMNIGRAPH_TOKEN=<new token>` for one run) — the new value is issued by the
    graph server.
-2. `./setup.sh --only omnigraph-client --yes` — rewrites the two keys in
+2. `./setup.sh --only omnigraph-client --yes` — on Windows
+   `.\setup.ps1 -Only omnigraph-client` — rewrites the two keys in
    `~/.autoos-omnigraph.env`, backing the old file up, and leaves everything else
    (other keys, the bridge, the wrapper) untouched. The component is not skipped
    here: its `already installed` gate compares the token it resolves *now*, so a
-   rotated value is seen as a change instead of reading as "already current".
+   rotated value is seen as a change instead of reading as "already current". The
+   Windows run sets the `OMNIGRAPH_TOKEN` user variable at the same time, so
+   nothing has to be re-logged-in for a *new* process to pick the value up.
 3. Restart whatever holds a client open: the clients read the env at start-up, so
    restart the desktop session or `systemctl --user restart autoos-opencode`,
    and start new agent sessions. A long-running process keeps the old token until

@@ -168,15 +168,20 @@ Available standalone MCP components in the catalog:
 - `mcp-graphify`: Codebase knowledge graph queries via `graphify.serve`.
 - `mcp-playwright`: Headless browser automation via `@playwright/mcp`.
 - `mcp-context7`: Real-time documentation lookups via `@upstash/context7-mcp`.
-- `omnigraph-client`: the machine half of `omnigraph` on Linux and macOS — the
-  env file (`~/.autoos-omnigraph.env`, mode 600) holding the server URL and the
-  bearer token, the pinned bridge pre-installed into a private npm prefix, and
-  the `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with
-  a hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing.
-  See `docs/omnigraph.md` ("The `omnigraph-client` component").
+- `omnigraph-client`: the machine half of `omnigraph` on all three platforms —
+  the env file (`~/.autoos-omnigraph.env`, mode 600 on the shell side, user-only
+  ACL on the Windows side) holding the server URL and the bearer token, the
+  pinned bridge pre-installed into a private npm prefix, and the
+  `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with a
+  hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing —
+  it is the only component that asks for that answer.
+  See `docs/omnigraph.md` ("The `omnigraph-client` component", "On Windows").
 
 The `agent-skills` component wires the complete MCP stack above, along with
-`omnigraph` project-scoped memory.
+`omnigraph` project-scoped memory, and links this repository's own skills into
+whatever directory each client reads. It clones nothing: the servers it wires are
+declared by this checkout's `.mcp.json`, and the machine half of `omnigraph` is
+`omnigraph-client`'s (SPEC-OMNI D14).
 
 | Server | Scope | Configuration & Precedence |
 |---|---|---|

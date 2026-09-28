@@ -5,6 +5,106 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added - `omnigraph-client` on Windows, and `agent-skills` stops cloning (A3 Windows twin, 2026-09-28)
+
+The Linux side got its machine component on 2026-09-27/28; Windows had no
+equivalent, so a Windows machine answered the `omnigraph_url` prompt inside
+`agent-skills` and cloned a *second repository* to find the MCP declarations AutoOS
+already ships (SPEC-OMNI D14). Both halves land here, because the clone and the
+component share exactly two facts — the URL answer and the env file — and leaving
+one in place would mean two owners of each.
+
+- **`catalog/windows.json`**: new component `omnigraph-client` — `provider
+  custom`, `postInstall Install-AutoOSOmnigraphClient`, `requires [nodejs]`,
+  `prompt omnigraph_url`, profiles `workstation` / `ai-coding` / `light` (the
+  Linux set minus `server`, which this catalog does not define). The bridge pin is
+  *not* repeated: it is read from `catalog/agent-harness.json` the way Linux reads
+  it, which is what the `mcp pins` group requires. `agent-skills` loses its
+  `prompt` (the answer would otherwise be collected twice, and the two can differ)
+  and its description no longer promises a clone.
+- **`lib/windows/AutoOS.Detect.psm1`**: `Get-AutoOSOmnigraphClientPath` is one
+  home for the layout — env file under `%USERPROFILE%`, private npm prefix under
+  `%LOCALAPPDATA%\autoos\omnigraph-mcp`, wrapper and its `.cmd` under
+  `%USERPROFILE%\.local\bin` — read by the installer, by the detection probe and
+  by the suite. `Get-AutoOSInstalledStatus` grows a `custom` probe for the
+  component: prefix plus shim present means `installed`. That is the *coarse*
+  answer only; the compare of values stays in the postInstall, which `setup.ps1`
+  also runs for a skipped component, so a rotated token or a moved pin is still
+  repaired and the two cannot disagree about what "current" means.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSOmnigraphClient` and its
+  three parts (`Install-AutoOSOmnigraphBridge`,
+  `Install-AutoOSOmnigraphWrapper`, `Set-AutoOSOmnigraphEnv -Token`). A missing
+  URL or token is `skipped` with the remedy named, never a failure and never a
+  guessed value: the token comes from `OMNIGRAPH_TOKEN`, else the git-ignored
+  `configuration/api-keys.yml` key `omnigraph_token` — read through
+  `Get-AutoOSApiKeySetting`, extracted from `Set-AutoOSApiKeyEnv` so the keys-file
+  lookup has one home — and a `REPLACE_WITH_…` template is not a credential. The
+  bridge is `npm install -g --prefix <private prefix> <pinned spec>`, skipped when
+  the prefix already holds that pin and reinstalled when the pin moved; a spec
+  with no `@version` is refused rather than run. The wrapper is **copied**, never
+  linked, and replaced only on a content difference *and* only if it carries the
+  `# AutoOS:omnigraph-mcp-autoos` marker; a file of the user's own there is left
+  alone with a warning, because overwriting one is the defect AGENTS.md §1 and §5
+  exist to prevent. PATH goes through `Add-AutoOSPathEntry` (append only) and only
+  on a Windows host: off Windows the registry scopes are silently ignored, so
+  asking would report a change that cannot happen.
+- **`Write-AutoOSProtectedFile`** (new) + `Protect-AutoOSUserFile`: the token
+  file is not written and then restricted. An empty sibling is created,
+  `icacls /inheritance:r /grant:r` is applied to it *before* any byte lands, then
+  the content goes in and the file is renamed onto the target on the same volume,
+  where the rename carries the DACL and the target path is never itself created
+  with the profile's inherited ACLs. A protection that failed stops the write and
+  returns `failed`; the file it replaces is backed up first and the backup gets the
+  same restriction. `Set-AutoOSOmnigraphEnv` returns `written` / `unchanged` /
+  `failed` so its caller can report a truthful idempotency answer.
+- **`Install-AutoOSAgentSkills`**: the `git clone`/`pull --ff-only` of
+  `Ch3fUlrich/agent-skills` into `Documents\code`, the `omnigraph_url` + env-file
+  duty it also carried, and the `$dest\skills` junction loop that read it are gone;
+  `.mcp.json` project approval and the readiness probe now read this checkout
+  (`-RepoRoot`, and `Write-AutoOSOmnigraphReadiness`'s `-AgentSkillsDir` is renamed
+  to match). The linking duty did **not** go with the clone — AGENTS.md's skill
+  table promises `~/.claude/skills` and `~/.gemini/config/skills` are filled by the
+  installers, so `Sync-AutoOSAgentSkillTargets` now mirrors the resolved skills
+  source (the repo's own `.agents/skills`, or a mid-migration machine's retired
+  checkout) into those two vendor directories as well as the convention ones,
+  through the same `Sync-AutoOSSkillDirs` rules rather than a second bespoke loop.
+  Nothing removes an MCP entry —
+  a user-scope `omnigraph` is still only called out with the command that deletes
+  it, and every other user-scope server (the operator's `homelab` among them) is
+  untouched. A machine that ran the old installer keeps its stale checkout: this
+  lane deletes files nobody asked it to delete.
+- **`tools/omnigraph-mcp-autoos.ps1`**: carried the same Windows wiring. Its
+  bridge path is now the `%LOCALAPPDATA%` prefix (it read a `.local\share` path
+  that nothing on Windows writes — the file was the tracked source of a step that
+  had not landed), it carries the marker line installers match on, and its header
+  says why the path is a second spelling the suite must bind. The suite runs the
+  file and compares the path in its own 127 refusal against what
+  `Get-AutoOSOmnigraphBridgePath` computed, so a drift between the two fails a
+  test instead of failing every client start-up.
+- Tests (`tests/run-tests.ps1`, group `omnigraph-client`, 18 cases): hermetic —
+  `%USERPROFILE%`, `%LOCALAPPDATA%`, `%APPDATA%` and a repo fixture with its own
+  `catalog/agent-harness.json` and `tools/` copy all point into one temp
+  directory, and `npm` is a stub that reproduces the *Windows* prefix layout (the
+  package under `<prefix>\node_modules`, the bin shim in the prefix root) and
+  refuses a call with no `--prefix` or an unpinned spec. Cases: skip-with-hint and
+  nothing written for a missing URL, for a missing token, and for a missing npm;
+  token from env and from `api-keys.yml`; a placeholder is no token; the pinned
+  prefix install and the same pin not reinstalling; a moved pin reinstalling;
+  wrapper and shim placement; the wrapper's own refusal binding to the installer's
+  path; a user wrapper left alone and an older marked AutoOS copy replaced with a
+  backup; the env file born user-only with its backup protected; a second run
+  `skipped` with no new bytes, no new npm call and no new backup, and detected as
+  installed; a rotated token reopening the gate; a dry run announcing everything
+  and writing nothing; `agent-skills` never cloning and `omnigraph_url` owned by
+  one component. `Get-AutoOSConsoleCapture` moved next to the other harness
+  helpers — a script-level function exists only from its definition line forward,
+  and an installer case needed it earlier in the file.
+- Docs: `docs/omnigraph.md` gains an "On Windows" section (the path and ACL
+  differences in one table, why the rc-line retirement and the MCP-entry removal
+  have no Windows counterpart) and names the Windows command in the rotation
+  recipe; `docs/catalog.md` says the component is now on all three platforms and
+  that `agent-skills` clones nothing.
+
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.

@@ -1426,11 +1426,18 @@ Test-Case 'no bearer token is ever invented' {
 }
 
 Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
-    if ($installSource -notmatch 'agySkills = Join-Path \$env:USERPROFILE ''\.gemini\\config\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Antigravity skills'
+    # The duty predates the clone and outlives it: AGENTS.md's skill table says
+    # ~/.claude/skills and ~/.gemini/config/skills are linked by the installers, so
+    # retiring the clone had to leave the wiring standing. It lives in
+    # Sync-AutoOSAgentSkillTargets now - one home for "which user-scope directory
+    # gets our skills" - and the function that used to spell the paths out itself
+    # names none of them, which is what keeps the two from drifting.
+    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
+    if ($fn -notmatch 'Sync-AutoOSAgentSkillTargets -Source \$skillsSource') {
+        throw 'Install-AutoOSAgentSkills no longer syncs the skill targets'
     }
-    if ($installSource -notmatch 'claudeSkills = Join-Path \$env:USERPROFILE ''\.claude\\skills''') {
-        throw 'Install-AutoOSAgentSkills does not configure Claude Code skills'
+    if ($fn -match 'agySkills = Join-Path') {
+        throw 'the installer spells out a client skills directory again instead of asking the sync helper'
     }
     Pass
 }
@@ -5640,6 +5647,39 @@ Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
         if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
     } finally {
         Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links repo skills into Claude Code and Antigravity dirs' {
+    # AGENTS.md's skill table promises ~/.claude/skills and ~/.gemini/config/skills
+    # are linked by the installers. Until SPEC-OMNI A3 the only thing feeding them
+    # on Windows was the retired clone's skills directory, so the clone could not
+    # simply be deleted: the duty moved with the source into the one helper that
+    # answers "which user-scope directories get our skills".
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dests = @((Join-Path $homeDir '.claude\skills'), (Join-Path $homeDir '.gemini\config\skills'))
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        foreach ($dest in $dests) {
+            $item = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "$dest was not created" }
+            if ($item.LinkType) { throw "$dest is a $($item.LinkType), not a real directory" }
+            foreach ($n in @('alpha', 'beta')) {
+                $link = Join-Path $dest $n
+                if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) { throw "skill '$n' not linked into $dest" }
+                if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md unreadable through $dest" }
+            }
+            if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked into $dest" }
+        }
+    } finally {
+        foreach ($dest in $dests) { Remove-TestDirLinks -Directory $dest }
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
     Pass

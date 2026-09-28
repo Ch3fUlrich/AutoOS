@@ -2954,18 +2954,28 @@ function Sync-AutoOSAgentSkillTargets {
       .DESCRIPTION
         Clients that follow the Agent Skills convention read a user-scope
         directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
-        ~/.codex/skills. Each skill is linked individually by
-        Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
-        never touched, and a second run is a no-op.
+        ~/.codex/skills. Claude Code and Antigravity each read a vendor directory
+        of their own (~/.claude/skills and ~/.gemini/config/skills), and those are
+        fed from the same source: until SPEC-OMNI A3 the only thing that filled
+        them was the retired clone, so dropping them with the clone would have
+        quietly unlinked every skill from two of the clients this wires. Each
+        skill is linked individually by Sync-AutoOSSkillDirs, so the user's own
+        entries sit beside ours and are never touched, and a second run is a no-op.
 
         ~/.codex/skills is only written when codex is actually there (its
         command is on PATH or its ~/.codex directory exists): creating the
         directory for a tool the machine does not have is worse than doing
         nothing. ~/.agents/skills has no such guard - it is the shared
-        convention directory, not one vendor's.
+        convention directory, not one vendor's. The Claude and Antigravity
+        directories carry no guard either, because the clients this component
+        wires are those two, and both are named by AGENTS.md's skill table.
     #>
     param([Parameter(Mandatory)][string]$Source)
     $ok = Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $HOME '.agents\skills')
+    foreach ($vendor in @((Join-Path $HOME '.claude\skills'),
+                          (Join-Path $HOME '.gemini\config\skills'))) {
+        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination $vendor) -and $ok
+    }
     $codexHome = Join-Path $HOME '.codex'
     if ((Test-Path -LiteralPath $codexHome) -or (Get-Command codex -ErrorAction SilentlyContinue)) {
         $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $codexHome 'skills')) -and $ok
