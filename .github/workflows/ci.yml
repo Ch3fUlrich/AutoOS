@@ -10,12 +10,37 @@ permissions:
   contents: read
 
 jobs:
-  linux:
-    name: Linux suite
+  # WS-CIPAR (2026-09-28): the Linux suite was one serial 11-16 min job. It now
+  # runs as parallel shards (tests/ci-shards.txt, one line per shard) next to a
+  # separate lint job. The plan job refuses a shard map that leaves a
+  # tests/linux part out or runs one twice (tests/ci-shards.py), and the `linux`
+  # job keeps the "Linux suite" check name as the one aggregate that passes only
+  # when the plan, every shard and the lint job passed.
+  linux-plan:
+    name: Linux suite plan
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Every part in exactly one shard
+        id: plan
+        run: |
+          python3 tests/test_ci_shards.py
+          echo "matrix=$(python3 tests/ci-shards.py)" >> "$GITHUB_OUTPUT"
+
+  linux-shard:
+    name: Linux suite shard ${{ matrix.shard }}
+    needs: linux-plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.linux-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck/yamllint are also used inside the suite (static-analysis parts).
       - name: Install linters
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
 
@@ -29,7 +54,9 @@ jobs:
       # real network fails fast instead of silently depending on it. The
       # canary proves the isolation is actually in effect, so a runner-image
       # change cannot quietly turn this back into an ordinary run.
-      - name: Test suite (loopback-only network)
+      # AUTOOS_TEST_PARTS picks this shard's parts; AUTOOS_FULL_SUITE=1 keeps
+      # its meaning (the opt-in to an unfiltered run of the selected parts).
+      - name: Test suite shard ${{ matrix.shard }} (loopback-only network)
         run: |
           sudo unshare --net -- bash -c '
             set -e
@@ -40,8 +67,17 @@ jobs:
             fi
             echo "network isolated: loopback only"
             exec setpriv --reuid="$1" --regid="$2" --init-groups \
-              env AUTOOS_FULL_SUITE=1 HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
-          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH"
+              env AUTOOS_FULL_SUITE=1 AUTOOS_TEST_PARTS="$6" HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH" "${{ matrix.parts }}"
+
+  linux-lint:
+    name: Linux suite lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
 
       - name: Progress regression tests
         run: |
@@ -60,6 +96,22 @@ jobs:
 
       - name: Documentation links
         run: python3 tests/check-links.py .
+
+  # The required check keeps its name: "Linux suite" is green only when the
+  # plan, every shard and the lint job succeeded (a skipped or cancelled
+  # dependency is a failure here, never a pass).
+  linux:
+    name: Linux suite
+    if: always()
+    needs: [linux-plan, linux-shard, linux-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All shards and lint passed
+        run: |
+          echo "plan=${{ needs.linux-plan.result }} shards=${{ needs.linux-shard.result }} lint=${{ needs.linux-lint.result }}"
+          test "${{ needs.linux-plan.result }}" = success
+          test "${{ needs.linux-shard.result }}" = success
+          test "${{ needs.linux-lint.result }}" = success
 
   windows:
     name: Windows suite
