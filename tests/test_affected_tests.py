@@ -820,6 +820,26 @@ class RegionSyntaxTests(unittest.TestCase):
                                         UNBAL_PHANTOM_CASE, UNBAL_REAL_CASE])
         self.assertIn("muse-spark", blocks[UNBAL_REAL_CASE])
 
+    def test_the_plain_fallback_never_lets_a_heredoc_group_heading_eat_a_case(self):
+        # Sonnet AFFFIX3 round 4: a later, genuinely unterminated quote makes the
+        # whole file fall back to plain scanning; a `describe` line inside an
+        # EARLIER, well-formed heredoc must not become a group boundary then, or
+        # the real case's tail (its id mention) belongs to no block at all.
+        text = (
+            'if it "the real case with a heredoc"; then\n'
+            '    out="$(cat <<\'EOS\'\n'
+            'describe "phantom group inside the heredoc"\n'
+            'EOS\n'
+            ')"\n'
+            '    assert_contains "$out" "muse-spark"\n'
+            'fi\n'
+            'if it "a later case with an unterminated quote"; then\n'
+            '    echo "never closed\n'
+            'fi\n')
+        self.assertFalse(at.masked_lines(text, "sh")[1])
+        blocks = self.blocks(text, "sh")
+        self.assertIn("muse-spark", blocks["the real case with a heredoc"])
+
     def test_an_unbalanced_here_string_scan_drops_its_masking_too(self):
         masked, balanced = at.masked_lines(PS_UNBALANCED_TEXT, "ps1")
         self.assertTrue(masked)

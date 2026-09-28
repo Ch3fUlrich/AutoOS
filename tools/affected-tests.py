@@ -380,8 +380,12 @@ def regions(text: str, header: re.Pattern, group: re.Pattern, syntax: str,
     if not found:
         return
     heads = [line_of(m.start()) for m in found]
-    groups = sorted(line_of(m.start()) for m in group.finditer(text)
-                    if line_of(m.start()) not in masked)
+    # The plain fallback matches no group headings: an unmasked phantom header
+    # only adds a block (over-inclusion), but an unmasked phantom `describe`
+    # would cut the real case above it and orphan its tail (review AFFFIX3 #4).
+    groups = [] if not balanced else sorted(
+        line_of(m.start()) for m in group.finditer(text)
+        if line_of(m.start()) not in masked)
     begins = []
     for head in heads:
         begin = head
