@@ -7179,7 +7179,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     }
 }
 
-Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
+Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $agents = ($stripped | ConvertFrom-Json).agents
@@ -7248,6 +7248,19 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
         Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
         Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
     }
+    # KEYDENY2: a shell rule matches the whole command line, so the substring
+    # allow *api-keys.example* licensed the real key file as soon as the
+    # template's name shared a line with it (and let a copy out under an
+    # *.example* path). Fixture strings only — no key file is opened.
+    foreach ($command in @('cat configuration/api-keys.yml configuration/api-keys.example.yml',
+                           'cp configuration/api-keys.yml /tmp/api-keys.example/x',
+                           'cat /tmp/api-keys.example/stolen')) {
+        $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'shell' -and $command -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may run $command"
+    }
     $example = 'configuration/api-keys.example.yml'
     $readVerdict = ''; $shellVerdict = ''
     foreach ($rule in $t3) {
@@ -7255,7 +7268,16 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
         if ($rule.action -eq 'shell' -and ("cat " + $example) -like $rule.resource) { $shellVerdict = $rule.effect }
     }
     Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
-    Assert-Equal $shellVerdict 'allow' 't3-reviewer is denied cat of the key example'
+    Assert-Equal $shellVerdict 'deny' 't3-reviewer may cat the key example'
+    # A read allow is a path, not a substring: a backup named after the
+    # template stays denied.
+    foreach ($path in @('/tmp/api-keys.example.yml.bak', '/tmp/api-keys.example/stolen')) {
+        $readVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+    }
     foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
         Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"
     }

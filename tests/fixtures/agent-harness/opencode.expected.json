@@ -52,9 +52,7 @@
       "*.config/opencode*": "deny",
       "*.local/share/opencode*": "deny",
       "set": "deny",
-      "cat /proc/*": "deny",
-      "*.env.example*": "allow",
-      "*api-keys.example*": "allow"
+      "cat /proc/*": "deny"
     },
     "skill": "allow",
     "read": {
@@ -68,7 +66,7 @@
       "*manage.key*": "deny",
       "*.claude.json*": "deny",
       "*.env.example": "allow",
-      "*api-keys.example*": "allow"
+      "*configuration/api-keys.example.yml": "allow"
     }
   },
   "instructions": [
@@ -129,9 +127,7 @@
           "*git *stash*": "allow",
           "*git *checkout*": "allow",
           "*git *switch*": "allow",
-          "*git *restore*": "allow",
-          "*.env.example*": "allow",
-          "*api-keys.example*": "allow"
+          "*git *restore*": "allow"
         }
       }
     },
@@ -184,9 +180,7 @@
           "*git *stash*": "allow",
           "*git *checkout*": "allow",
           "*git *switch*": "allow",
-          "*git *restore*": "allow",
-          "*.env.example*": "allow",
-          "*api-keys.example*": "allow"
+          "*git *restore*": "allow"
         }
       }
     },
@@ -239,9 +233,7 @@
           "*git *stash*": "deny",
           "*git *checkout*": "deny",
           "*git *switch*": "deny",
-          "*git *restore*": "deny",
-          "*.env.example*": "allow",
-          "*api-keys.example*": "allow"
+          "*git *restore*": "deny"
         }
       },
       "tools": {
@@ -299,9 +291,7 @@
           "*git *stash*": "deny",
           "*git *checkout*": "deny",
           "*git *switch*": "deny",
-          "*git *restore*": "deny",
-          "*.env.example*": "allow",
-          "*api-keys.example*": "allow"
+          "*git *restore*": "deny"
         }
       },
       "tools": {

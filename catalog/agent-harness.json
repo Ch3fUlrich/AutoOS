@@ -55,10 +55,7 @@
       "*git *switch*",
       "*git *restore*"
     ],
-    "bash_allow_all": [
-      "*.env.example*",
-      "*api-keys.example*"
-    ],
+    "bash_allow_all": [],
     "read_deny_all": [
       "*.env",
       "*.env.*",
@@ -71,7 +68,7 @@
     ],
     "read_allow_all": [
       "*.env.example",
-      "*api-keys.example*"
+      "*configuration/api-keys.example.yml"
     ]
   },
   "mcp_servers": {

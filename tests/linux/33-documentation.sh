@@ -805,11 +805,24 @@ for path in ("configuration/api-keys.yml",
         problems.append("read-open:" + path)
     if decide("shell", "cat " + path) != "deny":
         problems.append("shell-open:" + path)
+# KEYDENY2: a shell rule matches the whole command line, so the substring allow
+# *api-keys.example* licensed the real key file the moment its name shared a
+# line with the template — and let a copy out under an *.example* path.
+for command in ("cat configuration/api-keys.yml configuration/api-keys.example.yml",
+                "cp configuration/api-keys.yml /tmp/api-keys.example/x",
+                "cat /tmp/api-keys.example/stolen"):
+    if decide("shell", command) != "deny":
+        problems.append("shell-substring-abuse:" + command)
 example = "configuration/api-keys.example.yml"
 if decide("read", example) != "allow":
     problems.append("read-denied-example")
-if decide("shell", "cat " + example) != "allow":
-    problems.append("shell-denied-example")
+if decide("shell", "cat " + example) != "deny":
+    problems.append("shell-cats-example")
+# A read allow is a path, not a substring: a backup named after the template
+# stays denied.
+for path in ("/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"):
+    if decide("read", path) != "deny":
+        problems.append("read-open-near-miss:" + path)
 if last("serena_*", "*") != "deny":
     problems.append("serena-writes-open")
 for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "autoos-agent_*"):

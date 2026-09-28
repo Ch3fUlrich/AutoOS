@@ -14,6 +14,14 @@ now denied for read and shell everywhere (with `*api-keys.example*` allowed thro
 deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
 allowed every `read`, carries the `read_deny_all` patterns as denies.
 
+- KEYDENY2 (2026-09-28, same lane): that shell **allow** was matched against the whole command
+  line, not a path, so `cat configuration/api-keys.yml configuration/api-keys.example.yml`,
+  `cp configuration/api-keys.yml /tmp/api-keys.example/x` and `cat /tmp/api-keys.example/stolen`
+  all resolved to `allow` — a substring allow can never fence a command line. Both shell allows
+  are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
+  the template with the read tool, and the read allow is narrowed to the exact suffix
+  `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and

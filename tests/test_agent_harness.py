@@ -58,6 +58,20 @@ KEY_PATHS = [
     "/home/x/.config/autoos/ai-stack/manage.key",
 ]
 KEY_EXAMPLE = "configuration/api-keys.example.yml"
+# KEYDENY2: a shell rule is matched against the whole command line, so an allow
+# whose pattern is a *substring* of the line licenses every other path that
+# shares it. These are the three command lines that walked the
+# `*api-keys.example*` shell allow past the `*api-keys*` deny. Fixture strings
+# only — no real key file is opened or copied by this suite.
+SHELL_ABUSE = [
+    "cat configuration/api-keys.yml configuration/api-keys.example.yml",
+    "cp configuration/api-keys.yml /tmp/api-keys.example/x",
+    "cat /tmp/api-keys.example/stolen",
+]
+# A read rule sees one path, so the example's allow has to be its exact
+# suffix, not a substring: this is a backup of a key file that merely contains
+# the example's name.
+READ_NEAR_MISS = ["/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"]
 
 
 def fence_verdict(pattern_map, value):
@@ -380,9 +394,11 @@ class OpencodeMergeTests(unittest.TestCase):
                     self.assertEqual(fence_verdict(top_bash, "cat " + path), "deny",
                                      "top level may cat %s" % path)
 
-    def test_a_leaf_may_still_read_and_cat_the_key_example(self):
-        # The template has to stay readable — same deny-then-allow mechanism
-        # as *.env.example*, allow winning because it is emitted last.
+    def test_a_leaf_reads_the_key_example_but_never_cats_it(self):
+        # The template has to stay readable — read rules see one path, so the
+        # allow is the example's exact suffix. `cat` of it is denied: a shell
+        # rule sees the whole command line, and an allow that is only a
+        # substring of that line cannot be bounded to one file (KEYDENY2).
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
             config, _ = self.merge_fixture(tmp)
@@ -391,8 +407,53 @@ class OpencodeMergeTests(unittest.TestCase):
             for name, bash_map in leaf_bash_maps(doc, harness):
                 self.assertEqual(fence_verdict(read_map, KEY_EXAMPLE), "allow",
                                  "%s is denied the example" % name)
-                self.assertEqual(fence_verdict(bash_map, "cat " + KEY_EXAMPLE), "allow",
-                                 "%s is denied cat of the example" % name)
+                self.assertEqual(fence_verdict(bash_map, "cat " + KEY_EXAMPLE), "deny",
+                                 "%s may cat the example" % name)
+                self.assertEqual(fence_verdict(doc["permission"]["bash"],
+                                               "cat " + KEY_EXAMPLE), "deny",
+                                 "top level may cat the example")
+
+    def test_a_leaf_reads_the_example_only_at_its_exact_path(self):
+        # KEYDENY2: `*api-keys.example*` as a read allow also licensed
+        # /tmp/api-keys.example.yml.bak — a copy of the real key file named
+        # after the template. Only the exact example suffix is allowed.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(read_map, path), "deny", path)
+
+    def test_a_substring_allow_cannot_license_a_command_line(self):
+        # KEYDENY2: the shell allow `*api-keys.example*` won over the
+        # `*api-keys*` deny whenever the example's name appeared anywhere in
+        # the line, so a leaf could read the real key file by pairing it with
+        # the template, or by exfiltrating a copy under an *.example* path.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            top_bash = doc["permission"]["bash"]
+            for command in SHELL_ABUSE:
+                self.assertEqual(fence_verdict(top_bash, command), "deny", command)
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                for command in SHELL_ABUSE:
+                    self.assertEqual(fence_verdict(bash_map, command), "deny",
+                                     "%s may run %s" % (name, command))
+
+    def test_the_shell_fence_grants_no_substring_pattern(self):
+        # The structural reason the abuse worked: bash_allow_all is matched
+        # against a command line, so no entry of it may match a command that
+        # names a real key file. Guard the list itself, not just the verdict.
+        fences = harness_data()["fences"]
+        for pattern in fences["bash_allow_all"]:
+            for command in SHELL_ABUSE:
+                self.assertFalse(fnmatch.fnmatch(command, pattern),
+                                 "bash_allow_all %s matches %s" % (pattern, command))
+            for path in KEY_PATHS:
+                self.assertFalse(fnmatch.fnmatch("cat " + path, pattern),
+                                 "bash_allow_all %s matches cat of %s" % (pattern, path))
 
     def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
         harness = harness_data()
