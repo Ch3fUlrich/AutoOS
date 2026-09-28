@@ -103,9 +103,13 @@ item 3, measured 2026-09-27; the track record carries failure class
 deliverable is its diff), so nothing is lost); 10 = an --isolate run that exited 0 having changed
 nothing AND printed no REPORT heading (INCOMPLETE: the worker stopped mid-task, so there is no report
 to disbelieve - relaunch it, never resume, skill R-orch-06; the track record carries failure class
-"capability", like the NO-OP); 11 = an --isolate run marked --read-only (or a card whose kind/role is
+"capability", like the NO-OP; the heading counts only in the client's final message, and a line the
+spawner itself sent (the brief a worker echoes back) never counts - SPAWNFIX3c);
+11 = an --isolate run marked --read-only (or a card whose kind/role is
 research) that changed its sandbox anyway (READ-ONLY WRITE: changing nothing is that run's success, so an
-edit is the failure - the diff stat is printed and the track record carries failure class "capability".
+edit is the failure - the diff stat is printed, plus any commit the sandbox's own reflog still shows
+beyond its base (a commit the run reset away - SPAWNFIX3c), and the track record carries failure class
+"capability".
 The same marked run that only reported is NOT a failure: it exits 0 with "RESEARCH: report only"); the child's
 exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
@@ -1621,6 +1625,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     if overlay:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            # The text this run sends the client (containment prefix + task),
+            # kept so the REPORT check can tell the worker's own words from its
+            # brief echoed back at it (SPAWNFIX3c).
+            "brief": cmd[-1],
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "sandbox": sandbox, "cwd": sandbox["path"] if sandbox else os.getcwd(),
             "session_tag": tag}
@@ -2682,12 +2690,81 @@ def sandbox_diffstat(path: str, base: str) -> str:
     return proc.stdout.strip()
 
 
-def _reflog_len(root: str, branch: str) -> int:
-    r = subprocess.run(["git", "-C", root, "reflog", "show", "refs/heads/" + branch],
+def _reflog_count(root: str, ref: str) -> int:
+    """How many entries `ref`'s own reflog has (0 when it has none at all)."""
+    r = subprocess.run(["git", "-C", root, "reflog", "show", ref],
                        capture_output=True, text=True)
     if r.returncode != 0:
         return 0
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
+
+
+def _reflog_len(root: str, branch: str) -> int:
+    return _reflog_count(root, "refs/heads/" + branch)
+
+
+# The refs a sandbox run can move. HEAD and its own branch carry a commit the
+# run made; refs/stash is the same commit hidden from the worktree by
+# `git stash` instead of a reset.
+SANDBOX_REFLOG_REFS = ("HEAD", "refs/stash")
+
+
+def sandbox_reflog_snapshot(path: str, branch: str) -> dict:
+    """{"counts": {ref: reflog length}, "known": {sha, ...}} for a sandbox.
+
+    Taken before the client starts, so the clone and its `switch -c` are already
+    in it. `counts` bounds the reflog read to what the run appended; `known` is
+    every commit that already existed anywhere in the clone (`git rev-list
+    --all`, and `--all` walks every fetched ref, so a full clone's whole history
+    costs ~15 ms for ~1.4 k commits here) — the shas a run may legitimately move
+    HEAD onto. A commit the run itself made is in neither.
+    """
+    refs = list(SANDBOX_REFLOG_REFS) + ["refs/heads/" + branch]
+    r = subprocess.run(["git", "-C", path, "rev-list", "--all"],
+                       capture_output=True, text=True)
+    known = set(r.stdout.split()) if r.returncode == 0 else set()
+    return {"counts": {ref: _reflog_count(path, ref) for ref in refs},
+            "known": known}
+
+
+def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
+    """Short shas of commits the sandbox's own reflogs still show beyond `base`.
+
+    A run that edits, commits and then `reset --hard`s back to its base leaves a
+    clean final `git status --short` and an empty `base..branch` - the only two
+    reads sandbox_verdict used to make, and the escape SPAWNFIX3c (S2) item 2
+    measured. A reflog entry whose new value carries commits past `base` IS that
+    commit. The run's own moves are not: a switch, a checkout or a reset onto a
+    commit that already existed (`snapshot["known"]`, taken before the client
+    started) is a research run reading history, and a reset back onto `base`
+    names `base` itself, which `base..sha` renders empty.
+
+    Same shape as parent_leak's commit-then-reset scan, with one difference:
+    there the worker identity is the signal (an orchestrator legitimately merges
+    into a parent); here the sandbox is private to the run, so ANY commit past
+    its base is the write. Returns [] when the snapshot is missing (a run that
+    never took one).
+    """
+    counts = (snapshot or {}).get("counts") or {}
+    known = (snapshot or {}).get("known") or set()
+    found = set()
+    for ref, before in counts.items():
+        new = _reflog_count(path, ref) - before
+        if new <= 0:
+            continue
+        r = subprocess.run(["git", "-C", path, "reflog", "show", "--format=%H",
+                            "-n", str(new), ref], capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+        for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
+            if sha == base or sha in known:
+                continue
+            probe = subprocess.run(["git", "-C", path, "rev-list", "--max-count=1",
+                                    base + ".." + sha],
+                                   capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout.strip():
+                found.add(sha[:10])
+    return sorted(found)
 
 
 # The return contract (docs/agent-protocol.md): a finished worker prints a
@@ -2696,17 +2773,87 @@ def _reflog_len(root: str, branch: str) -> int:
 # only starts with the same letters ("REPORTED").
 REPORT_HEADING_RE = re.compile(r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?\b")
 
+# The same token anywhere in a line. A heading line that carries it twice is
+# QUOTING the contract ("# REPORT heading, optionally wrapped in markdown
+# (`**REPORT**`, `# REPORT:`)."), which is exactly what a worker dumping the
+# spawner's source prints - not a report about its own run.
+REPORT_TOKEN_RE = re.compile(r"\breport\b", re.IGNORECASE)
+
+# A markdown/ASCII code-fence delimiter: text between an opening and a closing
+# one is quoted, never the client's own message.
+_CODE_FENCE_RE = re.compile(r"^\s*(?:```+|~~~+)")
+
+# The lines a client's harness prints for its own tool calls, as opposed to its
+# message text. Everything before the LAST of them is transcript: a REPORT
+# heading there belongs to an earlier turn (or to a run that died in that tool
+# call), not to the closing message the return contract asks for. Anchored at
+# the line start and deliberately tiny: a report body may quote any of these
+# shapes mid-sentence, and a false INCOMPLETE relaunches a finished research run.
+FINAL_SEGMENT_MARKER_RES = (
+    # agy prints one of these per tool event - the same prefix
+    # headless_refusal() trusts (HEADLESS_REFUSAL_PREFIX).
+    re.compile(r"^jetski[:>]", re.IGNORECASE),
+    # A tool call as the captured transcript renders it: `Read(path)`,
+    # `Bash(git status)`, `apply_patch(...)`.
+    re.compile(r"^(?:read|write|edit|glob|grep|bash|shell|exec|search|find|task|think"
+               r"|apply_patch|webfetch|web_fetch|web_search|fetch|question)\w*\s*\(",
+               re.IGNORECASE),
+)
+
 INCOMPLETE_MESSAGE = ("INCOMPLETE: the worker stopped without a REPORT - "
                       "relaunch it (never resume)")
 
 
-def has_report(output: str) -> bool:
-    """True when the captured client output carries a REPORT heading line."""
-    return REPORT_HEADING_RE.search(output or "") is not None
+def final_message_segment(output: str, brief: str = "") -> str:
+    """The part of a captured client tail that is its closing message.
+
+    run_client merges the child's stdout+stderr and keeps the last TAIL_LIMIT
+    bytes verbatim, so the tail is the whole raw transcript: the task text the
+    client echoed, its tool output, and only at the end the assistant's final
+    message. Three things come out of it here:
+
+    - everything up to the last tool-call line (FINAL_SEGMENT_MARKER_RES): the
+      client was still working there;
+    - the brief's own lines: a worker that cats or echoes its brief prints a
+      line starting "REPORT:" (every brief ends with the return contract's field
+      list) and that is the spawner's text, not the worker's report;
+    - anything inside a ``` fence: quoted code or prose, not a message.
+
+    What is left is what the client's final message said. A tool RESULT printed
+    plainly after its own command echo is indistinguishable from message text in
+    a merged stream, which is why the brief rule above is the one that carries
+    the measured case.
+    """
+    quoted = {ln.strip() for ln in (brief or "").splitlines() if ln.strip()}
+    segment, fenced = [], False
+    for raw in (output or "").splitlines():
+        if _CODE_FENCE_RE.match(raw):
+            fenced = not fenced
+            continue
+        line = _ANSI_RE.sub("", raw).strip()
+        if fenced or not line or line in quoted:
+            continue
+        if any(m.match(line) for m in FINAL_SEGMENT_MARKER_RES):
+            del segment[:]
+            continue
+        segment.append(line)
+    return "\n".join(segment)
+
+
+def has_report(output: str, brief: str = "") -> bool:
+    """True when the client's FINAL MESSAGE carries a REPORT heading line.
+
+    `brief` is the text this run sent the client (plan["brief"]): its lines never
+    count, because echoing the brief back is not reporting on the task.
+    """
+    for line in final_message_segment(output, brief).splitlines():
+        if REPORT_HEADING_RE.search(line) and len(REPORT_TOKEN_RE.findall(line)) < 2:
+            return True
+    return False
 
 
 def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
-                    diffstat: str = ""):
+                    diffstat: str = "", reflog: str = "", brief: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
@@ -2723,21 +2870,38 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
     writer run is rewarded for is the failure this one is judged by. The diff
     stat goes into the message because the run's work is now in the sandbox: the
     operator has to see what to throw away without another git command.
+
+    SPAWNFIX3c (S2) item 2: a read-only run's two reads were the final
+    `git status --short` and `base..branch`, so a worker that committed and
+    `reset --hard` back to base escaped with an empty sandbox in both. `reflog`
+    is what sandbox_reflog_writes found in the sandbox's own reflogs (short shas,
+    comma-joined) and it counts as a change for the read-only verdict ONLY: a
+    writer run that reset its own work away is still the unfinished run its
+    porcelain says it is, never a pass.
+
+    `brief` (item 1) is the text this run sent the client: has_report() must not
+    read the worker's own instructions back to it as its report.
     """
     if route.get("review"):
         return None, ""
-    if not changed and not ahead:
-        if not has_report(output):
-            return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
-        if route.get("read_only"):
-            return 0, "RESEARCH: report only"
-        return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
-                   "unverified and the run as failed (exit 5)")
-    if route.get("read_only"):
+    read_only = bool(route.get("read_only"))
+    if read_only and (changed or ahead or reflog):
+        detail = diffstat or "(no diff stat)"
+        if reflog:
+            detail += ("; commits its reflog still shows, beyond the base: %s "
+                       "(commit then reset; the sandbox reflog is the only witness)"
+                       % reflog)
         return EXIT_READ_ONLY_WRITE, (
             "READ-ONLY WRITE: a read-only run changed its sandbox "
             "(exit %d) - its deliverable was the report, never the edit: %s"
-            % (EXIT_READ_ONLY_WRITE, diffstat or "(no diff stat)"))
+            % (EXIT_READ_ONLY_WRITE, detail))
+    if not changed and not ahead:
+        if not has_report(output, brief):
+            return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
+        if read_only:
+            return 0, "RESEARCH: report only"
+        return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
+                   "unverified and the run as failed (exit 5)")
     return None, ""
 
 
@@ -3648,6 +3812,10 @@ def cmd_run(args, cfg: dict) -> int:
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
+        # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
+        # later read sees only what the run appended. Kept in the dict, which a
+        # provider-stop fallthrough re-run inherits with the sandbox itself.
+        sb["reflog"] = sandbox_reflog_snapshot(sb["path"], sb["branch"])
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the
@@ -3834,12 +4002,20 @@ def cmd_run(args, cfg: dict) -> int:
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
+        read_only = bool(plan["route"].get("read_only"))
+        # SPAWNFIX3c (S2): only a read-only run is judged on an untouched
+        # sandbox, so only it pays for the reflog read and the diff stat. A
+        # commit the run reset away leaves both of those empty (the worktree is
+        # back at base) — the reflog shas are the only witness.
+        reset_away = sandbox_reflog_writes(sb["path"], sb.get("reflog"),
+                                           sb["base"]) if read_only else []
         override, message = sandbox_verdict(
             plan["route"], changed, ahead, client_tail,
-            # Only the read-only verdict quotes it, so only the read-only run
-            # pays for the extra git call.
-            sandbox_diffstat(sb["path"], sb["base"])
-            if plan["route"].get("read_only") else "")
+            # Only the read-only verdict quotes the diff stat, so only the
+            # read-only run pays for the extra git call.
+            sandbox_diffstat(sb["path"], sb["base"]) if read_only else "",
+            reflog=", ".join(reset_away),
+            brief=plan.get("brief") or "")
         leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run

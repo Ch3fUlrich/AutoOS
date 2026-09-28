@@ -2307,20 +2307,238 @@ class NoOpGuardTests(unittest.TestCase):
                             "rc 10 must be recorded, not dropped")
 
 
+# The task text an L2 hands an L3. Every real brief ends with the REPORT field
+# list the return contract asks for (docs/agent-protocol.md §REPORT) — which is
+# exactly the line a worker that cats or echoes its brief prints back.
+BRIEF_SHAPED_TASK = "\n".join((
+    "BRIEF SPAWNFIX3c (FIX-FIRST). Load skill .agents/skills/unattended-orchestration.",
+    "1. HIGH tools/autoos-agent.py ~2697 REPORT_HEADING_RE scans the whole tail.",
+    "2. MEDIUM sandbox_verdict reads only the final `git status --short`.",
+    'Commit: git -c user.name="autoos-worker" commit -m "fix(spawner): ..."',
+    "REPORT: sha, tests before/after, how each client's final message is "
+    "isolated (file:line), lesson:, open:.",
+))
+
+
+class ReportProvenanceTests(unittest.TestCase):
+    """SPAWNFIX3c (S2, after the Sonnet final): who is allowed to say "REPORT".
+
+    run_client (autoos-agent.py:3207-3276, the tail is built at :3249-3251)
+    merges the child's stdout+stderr, streams it to the spawner's stdout and
+    keeps the last TAIL_LIMIT bytes (autoos-agent.py:169) on ClientExit.tail;
+    cmd_run hands that tail to sandbox_verdict as `output`
+    (autoos-agent.py:4005-4015). So the string
+    has_report() searched was the RAW client transcript — the task text the
+    client echoed, every tool call and its output, and only at the end the
+    assistant's closing message. Every brief ends with an instruction line that
+    starts "REPORT:", so a worker that cat'd or echoed its own brief and then
+    died counted as reported and INCOMPLETE (10) never fired.
+
+    The contract that counts is the client's FINAL MESSAGE (docs/agent-protocol.md
+    §REPORT): the text after the last line its harness printed for a tool event,
+    with the brief's own lines and fenced quotations removed — neither is the
+    worker reporting.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    # A realistic brief: the spawner's own containment prefix (isolate_task_prefix,
+    # autoos-agent.py:220) plus the task text an L2 hands an L3.
+    BRIEF = "\n".join((
+        "Your working directory /tmp/sb is your only writable checkout; never cd, "
+        "git -C or write into /repo or any other path outside it.",
+        "The run is headless: nobody will answer questions or approve anything - "
+        "decide, commit, and report.",
+        BRIEF_SHAPED_TASK,
+    ))
+
+    # The transcript up to the last tool call, as a captured client prints it:
+    # agy's harness line per tool event (HEADLESS_REFUSAL_PREFIX,
+    # autoos-agent.py:1936) and a tool-call rendering.
+    TOOL_TAIL = "\n".join((
+        "I'll read the spawner first.",
+        "jetski: running command sed -n 2690,2710p tools/autoos-agent.py",
+        "def has_report(output: str) -> bool:",
+        '    return REPORT_HEADING_RE.search(output or "") is not None',
+        "Read(tools/autoos-agent.py)",
+        "# The return contract (docs/agent-protocol.md): a finished worker prints a",
+        "Now I'll write the failing test.",
+    ))
+
+    def test_a_brief_echoed_by_the_worker_is_not_its_report(self):
+        # The measured bug: the tail IS the brief, then a planning sentence, then
+        # the worker dies. The "REPORT: sha, tests..." line is the brief's own
+        # last line, quoted back — not a report.
+        tail = self.BRIEF + "\nI'll start by reading tools/autoos-agent.py.\n"
+        self.assertFalse(self.cli.has_report(tail, self.BRIEF))
+
+    def test_an_echoed_brief_inside_a_tool_transcript_is_not_a_report(self):
+        tail = "cat brief.md\n" + self.BRIEF + "\nLet me plan the fix.\n"
+        self.assertFalse(self.cli.has_report(tail, self.BRIEF))
+
+    def test_the_verdict_grades_an_echoed_brief_as_incomplete(self):
+        tail = self.BRIEF + "\nReading the resolver now.\n"
+        for route in ({"review": False}, {"review": False, "read_only": True}):
+            with self.subTest(read_only=bool(route.get("read_only"))):
+                rc, msg = self.cli.sandbox_verdict(route, changed="", ahead="",
+                                                   output=tail, brief=self.BRIEF)
+                self.assertEqual(rc, self.cli.EXIT_INCOMPLETE, msg)
+
+    def test_a_real_final_report_counts_in_every_shape(self):
+        for head in ("**REPORT** fix-x · completed · a.py · pytest -> pass · · -",
+                     "## REPORT\nfix-x · completed\n",
+                     "REPORT — fix-x · completed · - · - · - · -",
+                     "All done. Here it is:\n\nREPORT fix-x · completed"):
+            with self.subTest(head=head):
+                self.assertTrue(self.cli.has_report(self.TOOL_TAIL + "\n" + head,
+                                                     self.BRIEF), head)
+
+    def test_the_verdict_keeps_a_real_final_report_a_research_ok(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output=self.TOOL_TAIL + "\n\nREPORT fix-x · completed · - · - · - · -",
+            brief=self.BRIEF)
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(msg, "RESEARCH: report only")
+
+    def test_the_regexs_own_docstring_and_comment_lines_are_not_a_report(self):
+        # The heading check quoted into a tail — a worker that cats the spawner,
+        # or a brief that quotes it — says nothing about this run. Every quoting
+        # shape must miss: fenced, brief-quoted, and a comment line that quotes
+        # the token again inside itself.
+        quoted = "\n".join((
+            "# The return contract (docs/agent-protocol.md): a finished worker prints a",
+            "# REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).",
+            'REPORT_HEADING_RE = re.compile(r"(?im)^\\s*(?:[#>*-]+\\s*)?(?:\\*\\*)?REPORT(?:\\*\\*)?\\b")',
+        ))
+        self.assertFalse(self.cli.has_report("Reading tools/autoos-agent.py:\n```\n"
+                                             + quoted + "\n```\nThat is the check.", ""))
+        self.assertFalse(self.cli.has_report(quoted, ""))
+        self.assertFalse(self.cli.has_report(quoted, quoted))
+
+    def test_a_dump_of_a_report_template_inside_a_fence_is_not_a_report(self):
+        # docs/agent-protocol.md's own template line quoted at the end of a tail:
+        # it matches the heading pattern once, so only the fenced-block rule
+        # (and the brief rule, when the brief quoted it) keeps it out.
+        tail = ("Here is the contract this repo uses:\n"
+                "```\n"
+                "REPORT <id> · <status> · <files> · <tests> · <blockers> · <lessons>\n"
+                "```\n"
+                "I'll follow it at the end.\n")
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_report_that_is_not_the_last_thing_the_client_printed(self):
+        # The final message segment is the text AFTER the last tool line: a
+        # heading followed by more tool activity is the worker mid-run, and the
+        # run then died in that tool call rather than closing with its report.
+        tail = ("**REPORT** fix-x · completed · a.py · pytest -> pass · · -\n"
+                "jetski: running command git status\n"
+                "On branch agent/x\n")
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_report_still_counts_when_no_brief_was_passed(self):
+        # Callers that cannot supply the brief keep today's behaviour for a real
+        # report and for prose.
+        self.assertTrue(self.cli.has_report("REPORT fix-x · completed"))
+        self.assertFalse(self.cli.has_report("I will report the results later"))
+
+    def test_the_read_only_write_verdict_names_a_commit_the_reflog_hid(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output="REPORT fix-x · completed", diffstat="",
+            reflog="1234abcd5678")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+        self.assertIn("1234abcd5678", msg)
+        self.assertIn("commit then reset", msg)
+
+    def test_a_writer_run_is_not_judged_by_its_reflog(self):
+        # The reflog signal exists to catch a read-only run's destroyed commit; a
+        # writer that reset its own work away is still the unfinished run it looks
+        # like, never a pass.
+        rc, _msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="REPORT fix-x · completed",
+                                            reflog="1234abcd5678")
+        self.assertEqual(rc, 5)
+
+    def test_the_sandbox_reflog_sees_a_commit_reset_back_to_base(self):
+        # Direct on a real clone: snapshot the reflog counts, commit, reset --hard
+        # back; the porcelain and `base..branch` are clean again — only the reflog
+        # still names the commit.
+        cli = self.cli
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        clone = os.path.join(tempfile.mkdtemp(), "clone")
+        self.addCleanup(shutil.rmtree, os.path.dirname(clone), True)
+        subprocess.run(["git", "clone", "-q", "--local", root, clone], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "-c", "agent/x"], check=True)
+        base = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        snap = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        self.assertEqual(cli.sandbox_reflog_writes(clone, snap, base), [])
+        with open(os.path.join(clone, "sneaky.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        subprocess.run(["git", "-C", clone, "add", "sneaky.txt"], check=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=autoos-worker",
+                        "-c", "user.email=autoos-worker@users.noreply.github.com",
+                        "commit", "-q", "-m", "worker change"], check=True)
+        sha = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", clone, "reset", "-q", "--hard", base], check=True)
+        # The escapes this must still catch, and the moves it must not.
+        self.assertEqual(cli.sandbox_reflog_writes(clone, snap, base), [sha[:10]])
+        clean = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        subprocess.run(["git", "-C", clone, "switch", "-q", "side"], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "agent/x"], check=True)
+        self.assertEqual(cli.sandbox_reflog_writes(clone, clean, base), [],
+                         "moving HEAD onto base is not a write")
+        # A research run that walks the clone's history is not a write either:
+        # the commits it switches onto already existed when the snapshot was
+        # taken, so they are in its known set even when they sit past base.
+        subprocess.run(["git", "-C", clone, "switch", "-q", "-c", "lane-read"], check=True)
+        with open(os.path.join(clone, "lane.txt"), "w", encoding="utf-8") as fh:
+            fh.write("pre-existing lane work\n")
+        subprocess.run(["git", "-C", clone, "add", "lane.txt"], check=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=orch",
+                        "-c", "user.email=orch@example.invalid",
+                        "commit", "-q", "-m", "a lane commit"], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "agent/x"], check=True)
+        before_history = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        subprocess.run(["git", "-C", clone, "switch", "-q", "lane-read"], check=True)
+        self.assertEqual(cli.sandbox_reflog_writes(clone, before_history, base), [],
+                         "switching onto a branch that existed at the snapshot is reading")
+        # `git stash` is the same escape as the reset, with a different verb: it
+        # commits the dirt and leaves a clean worktree, and only refs/stash and
+        # its own reflog remember it.
+        subprocess.run(["git", "-C", clone, "reset", "-q", "--hard", base], check=True)
+        snap2 = cli.sandbox_reflog_snapshot(clone, "lane-read")
+        with open(os.path.join(clone, "tracked.txt"), "a", encoding="utf-8") as fh:
+            fh.write("stashed away\n")
+        subprocess.run(["git", "-C", clone, "-c", "user.name=autoos-worker",
+                        "-c", "user.email=autoos-worker@users.noreply.github.com",
+                        "stash", "-q"], check=True)
+        self.assertEqual(
+            subprocess.run(["git", "-C", clone, "status", "--short"],
+                           capture_output=True, text=True, check=True).stdout.strip(), "")
+        self.assertTrue(cli.sandbox_reflog_writes(clone, snap2, base),
+                        "a stashed change must read as the write it is")
+
+
 class IncompleteRunEndToEndTests(unittest.TestCase):
     """SPAWNFIX3 (S3) item 1, through the real cmd_run: the verdict the operator
     sees is the one the run ends with. Reuses the --isolate fake-client harness
     (IsolateContainmentTests) rather than a new one, so the worker is the same
     fake the containment and provider-stop contracts run."""
 
-    def _run(self, mode):
+    def _run(self, mode, **kw):
         if os.name == "nt":
             self.skipTest("sh stub; POSIX only")
         case = IsolateContainmentTests("setUp")
         case.setUp()
         self.addCleanup(case.doCleanups)
         root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
-        rc, out, err = case.run_isolated(root, stub, state, mode)
+        rc, out, err = case.run_isolated(root, stub, state, mode, **kw)
         return rc, out + err, case.agent
 
     def test_a_silent_no_change_run_exits_incomplete_not_no_op(self):
@@ -2334,6 +2552,16 @@ class IncompleteRunEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 5, both)
         self.assertIn("NO-OP", both)
         self.assertNotIn("INCOMPLETE", both)
+
+    def test_a_worker_that_echoed_its_brief_and_stopped_is_incomplete(self):
+        # SPAWNFIX3c (S2): the measured escape. The run's whole stdout is its own
+        # brief (which ends with the "REPORT: ..." instruction line) plus a
+        # planning sentence, so nothing here is a report — and every one of those
+        # lines is text the spawner itself sent.
+        rc, both, agent = self._run("brief-echo", task=BRIEF_SHAPED_TASK)
+        self.assertEqual(rc, agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("NO-OP", both)
 
 
 class ReadOnlyRunEndToEndTests(unittest.TestCase):
@@ -2371,6 +2599,27 @@ class ReadOnlyRunEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, case.agent.EXIT_INCOMPLETE, both)
         self.assertIn("INCOMPLETE", both)
         self.assertNotIn("RESEARCH", both)
+
+    def test_a_read_only_run_that_echoed_its_brief_is_incomplete_not_research_ok(self):
+        # SPAWNFIX3c (S2): the escape that made every read-only run look like a
+        # success — the brief it was handed ends with a "REPORT:" instruction
+        # line, so echoing it printed a "report".
+        rc, both, case = self._run("brief-echo", task=BRIEF_SHAPED_TASK)
+        self.assertEqual(rc, case.agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("RESEARCH", both)
+
+    def test_a_read_only_run_that_committed_then_reset_exits_read_only_write(self):
+        # SPAWNFIX3c (S2) item 2: the run wrote, committed, and reset the commit
+        # away, so the final `git status --short` is clean and `base..branch` is
+        # empty — the two reads this verdict used to make. The sandbox's own
+        # reflog still names the commit.
+        rc, both, case = self._run("sandbox-commit-reset")
+        self.assertEqual(rc, case.agent.EXIT_READ_ONLY_WRITE, both)
+        self.assertIn("READ-ONLY WRITE", both)
+        self.assertIn("commit then reset", both)
+        self.assertNotIn("RESEARCH", both)
+        self.assertNotIn("LEAK", both, "a commit inside the sandbox is not a leak")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
@@ -3708,6 +3957,29 @@ if mode == "report":
     # SPAWNFIX3 (S3) item 1: a worker that stopped having printed its REPORT
     # (but changed nothing) is a NO-OP, not an INCOMPLETE.
     print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "brief-echo":
+    # SPAWNFIX3c (S2): the worker cats its own brief. argv's last element IS the
+    # text the spawner sent (the containment prefix plus the task), and every
+    # brief ends with a line starting "REPORT:" — so this whole stdout is
+    # quoted instruction text, and the run then stopped mid-plan.
+    print(sys.argv[-1])
+    print("I'll start by reading tools/autoos-agent.py.")
+elif mode == "sandbox-commit-reset":
+    # SPAWNFIX3c (S2) item 2: the read-only worker writes in its own sandbox,
+    # COMMITS it, then `reset --hard` back to base. The final `git status
+    # --short` is clean and `base..branch` is empty — the only two reads the
+    # read-only check made — and the worktree looks untouched.
+    cwd = os.getcwd()
+    base = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    with open(os.path.join(cwd, "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    subprocess.run(["git", "-C", cwd, "add", "worker-new.txt"], check=True)
+    subprocess.run(["git", "-C", cwd, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=autoos-worker@users.noreply.github.com",
+                    "commit", "-q", "-m", "worker change"], check=True)
+    subprocess.run(["git", "-C", cwd, "reset", "-q", "--hard", base], check=True)
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
 elif mode == "sandbox-edit":
     # SPAWNFIX3 (S3) item 4: the client's cwd IS its own sandbox, so this is
     # not a leak (7) — it is the change a read-only run must not make.
@@ -4137,7 +4409,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
-    def run_isolated(self, root, stubdir, statedir, mode, card=None, read_only=False):
+    def run_isolated(self, root, stubdir, statedir, mode, card=None, read_only=False,
+                     task="do the thing"):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
@@ -4145,7 +4418,7 @@ class IsolateContainmentTests(unittest.TestCase):
         os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
-                client="agy", tier=None if card else 2, card=card, task="do the thing",
+                client="agy", tier=None if card else 2, card=card, task=task,
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=True, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
