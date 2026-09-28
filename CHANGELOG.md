@@ -32,6 +32,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   zero-merge window printing `n/a` instead of dividing. 27 red before the tool
   existed, green after.
 
+### Changed — `token-rate` reports the in-session subagent share (RESTART R5a follow-up, router D-045, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: an `isSidechain` record — a turn of an
+  in-session subagent the orchestrator spawned — is orchestrator cost, so D-045
+  keeps it in the numerator and reports how big that part is instead of
+  filtering it out. Four new labelled lines in the text report and four keys in
+  `--json` (`subagent_records`, `subagent_weighted`, `subagent_naive`,
+  `subagent_share_pct`, the share over the *weighted* numerator, `n/a`/None when
+  the numerator is empty). The split is a view onto the same records:
+  `weighted` still includes `subagent_weighted`, so the R5a before-numbers are
+  unchanged — re-measured over the same 48 h window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`), L1-routing 5,462 records /
+  148,504,022.4 weighted / 28 merges, L1-backlog 4,907 / 138,537,540.9 / 34,
+  L1-main 2,959 / 104,906,139.8 / 76 — every row reproduced the R5a report to
+  the token. The measured caveat the operator has to decide: this client writes
+  sidechain usage records to `<project>/<session>/subagents/*.jsonl`, one level
+  below what `discover_transcripts` scans, so all three rows print `0.0%` while
+  those files hold 4,283 / 7,153 / 417 in-window records (26.5 % / 47.3 % /
+  4.6 % of their numerator *if* discovery reached them). Widening discovery is a
+  before-number change and therefore an operator call, not a metric-reporting
+  one.
+- **`tests/test_autoos_tokenrate.py`**: `SidechainTests` (new, 6 cases) plus
+  three report/CLI assertions, on fixtures that mix `isSidechain` true and false
+  records in one transcript — the flag parses, the sidechain turn is *not*
+  dropped from the numerator, the split is exact, the share is over weighted,
+  and an empty numerator prints `n/a` rather than dividing. 10 red before the
+  change (9 new cases + the `--json` key test), 36 green after.
+
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
 

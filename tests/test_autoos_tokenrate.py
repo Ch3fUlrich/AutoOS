@@ -52,8 +52,16 @@ OTHER = "/home/user/code/AutoOS-lanes/L1-backlog"
 
 def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
                ts="2026-09-27T12:00:00.000Z", cwd=PREFIX, session="sess-1",
-               with_iterations=True):
-    """One assistant record, key-for-key as the real transcript writes it."""
+               with_iterations=True, sidechain=False):
+    """One assistant record, key-for-key as the real transcript writes it.
+
+    `sidechain=True` is the in-session subagent turn (router D-045): the same
+    shape with `isSidechain` true, plus the `agentId` key only the subagent
+    files carry (measured 2026-09-28: top-level records have `isSidechain:
+    false` and no `agentId`; the 8,888 records under
+    `<projects>/<session>/subagents/*.jsonl` have `isSidechain: true`,
+    `agentId`, `sessionKind: "bg"`, and the parent's `cwd`).
+    """
     usage = {
         "input_tokens": input_tokens,
         "cache_creation_input_tokens": cache_creation,
@@ -83,7 +91,7 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
         "timestamp": ts,
         "sessionId": session,
         "session_id": session,
-        "isSidechain": False,
+        "isSidechain": sidechain,
         "gitBranch": "L1-routing/R5ARATE",
         "uuid": "uuid-%s" % input_tokens,
         "message": {
@@ -92,6 +100,8 @@ def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
             "usage": usage,
         },
     }
+    if sidechain:
+        record["agentId"] = "agent-%s" % session
     return json.dumps(record)
 
 
@@ -175,6 +185,81 @@ class AllRecordsTests(unittest.TestCase):
                              "2026-09-28T00:00:00Z")
         self.assertEqual(res.sessions, 2)
         self.assertEqual(res.records, 3)
+
+
+class SidechainTests(unittest.TestCase):
+    """Router D-045: in-session subagent turns stay in the numerator, split out.
+
+    The decision is that an `isSidechain` record is orchestrator cost — the
+    parent session paid for it — so nothing is filtered out; what was missing
+    was the visibility of how big that part is.
+    """
+
+    def mixed(self):
+        """One parent turn (weighted 400) and one subagent turn (weighted 100)."""
+        return [
+            usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                       cache_read=1000),
+            usage_line(input_tokens=10, output_tokens=20, cache_creation=30,
+                       cache_read=400, sidechain=True),
+        ]
+
+    def test_parse_record_carries_the_sidechain_flag(self):
+        parent = tr.parse_record(usage_line(input_tokens=1))
+        child = tr.parse_record(usage_line(input_tokens=1, sidechain=True))
+        self.assertFalse(parent.sidechain)
+        self.assertTrue(child.sidechain)
+
+    def test_sidechain_record_is_not_excluded_from_the_numerator(self):
+        total = tr.sum_records(tr.iter_usage_records(self.mixed()))
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 500.0)
+        self.assertEqual(total.naive, 1760)
+
+    def test_sidechain_split_of_a_mixed_fixture(self):
+        total = tr.sum_records(tr.iter_usage_records(self.mixed()))
+        self.assertEqual(total.subagent_records, 1)
+        self.assertAlmostEqual(total.subagent_weighted, 100.0)
+        self.assertEqual(total.subagent_naive, 460)
+
+    def test_all_parent_fixture_reports_a_zero_subagent_split(self):
+        total = tr.sum_records(tr.iter_usage_records(
+            [usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                        cache_read=1000)] * 2))
+        self.assertEqual(total.subagent_records, 0)
+        self.assertAlmostEqual(total.subagent_weighted, 0.0)
+        self.assertEqual(total.subagent_naive, 0)
+        self.assertAlmostEqual(total.summary().subagent_share_pct(), 0.0)
+
+    def test_measure_splits_sidechain_over_files(self):
+        lines = self.mixed() + [usage_line(input_tokens=6, output_tokens=0,
+                                           cache_creation=0, cache_read=0,
+                                           session="sess-2", sidechain=True)]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", lines)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 3)
+        self.assertAlmostEqual(res.weighted, 506.0)  # 400 + 100 + 6
+        self.assertEqual(res.naive, 1766)
+        self.assertEqual(res.subagent_records, 2)
+        self.assertAlmostEqual(res.subagent_weighted, 106.0)
+        self.assertEqual(res.subagent_naive, 466)
+        self.assertAlmostEqual(res.subagent_share_pct(),
+                               round(100.0 * 106.0 / 506.0, 1))
+
+    def test_share_is_of_weighted_and_survives_rounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", self.mixed())
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["subagent_records"], 1)
+        self.assertEqual(res["subagent_weighted"], 100.0)
+        self.assertEqual(res["subagent_naive"], 460)
+        self.assertEqual(res["subagent_share_pct"], 20.0)  # 100 of 500 weighted
 
 
 class WindowTests(unittest.TestCase):
@@ -379,6 +464,41 @@ class ReportTests(unittest.TestCase):
         self.assertIn("rewards shorter sessions", text)
         self.assertIn("prices the orchestrator only", text)
 
+    def test_subagent_columns_are_in_the_text_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", [
+                usage_line(input_tokens=100, output_tokens=100,
+                           cache_creation=100, cache_read=1000),
+                usage_line(input_tokens=10, output_tokens=20, cache_creation=30,
+                           cache_read=400, sidechain=True),
+            ])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+            text = tr.format_text(res)
+        self.assertIn("subagent-records: 1", text)
+        self.assertIn("subagent-weighted: 100", text)
+        self.assertIn("subagent-naive: 460", text)
+        self.assertIn("subagent-share: 20.0%", text)
+        # the numerator is unchanged by the split: D-045 keeps sidechain in it.
+        self.assertIn("weighted: 500", text)
+
+    def test_empty_numerator_share_is_na_not_a_division(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1, cwd=OTHER)])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+            text = tr.format_text(res)
+        self.assertEqual(res["weighted"], 0.0)
+        self.assertIsNone(res["subagent_share_pct"])
+        self.assertIn("subagent-share: n/a", text)
+        self.assertNotIn("nan", text)
+        json.dumps(res)
+
     def test_json_output_is_machine_readable(self):
         with tempfile.TemporaryDirectory() as tmp:
             projects = self.build(tmp)
@@ -386,7 +506,9 @@ class ReportTests(unittest.TestCase):
                             branch="main", branch_prefixes=["L1-routing/"],
                             since="2026-09-26T00:00:00Z", until="2026-09-28T00:00:00Z")
         for key in ("window", "sessions", "records", "weighted", "naive",
-                    "merges", "weighted_per_merge", "naive_per_merge", "bias"):
+                    "merges", "weighted_per_merge", "naive_per_merge", "bias",
+                    "subagent_records", "subagent_weighted", "subagent_naive",
+                    "subagent_share_pct"):
             self.assertIn(key, res)
         json.dumps(res)
 
@@ -420,8 +542,32 @@ class CliTests(unittest.TestCase):
                              "--until", "2026-09-28T00:00:00Z")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for label in ("window:", "sessions:", "records:", "weighted:", "naive:",
-                      "merges:", "weighted-per-merge:", "naive-per-merge:", "bias:"):
+                      "subagent-records:", "subagent-weighted:",
+                      "subagent-naive:", "subagent-share:",
+                      "merges:", "weighted-per-merge:", "naive-per-merge:",
+                      "bias:"):
             self.assertIn(label, proc.stdout)
+
+    def test_cli_json_reports_the_subagent_split(self):
+        lines = [usage_line(input_tokens=1, output_tokens=2, cache_creation=3,
+                            cache_read=40),
+                 usage_line(input_tokens=10, output_tokens=0, cache_creation=0,
+                            cache_read=100, sidechain=True)]
+        write_transcript(self.projects, PREFIX, "b.jsonl", lines)
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        # setUp's parent (weighted 10) + this parent (10) + subagent (20) = 40,
+        # and half of the numerator is the subagent turn.
+        self.assertEqual(data["records"], 3)
+        self.assertEqual(data["weighted"], 40.0)
+        self.assertEqual(data["subagent_records"], 1)
+        self.assertEqual(data["subagent_weighted"], 20.0)
+        self.assertEqual(data["subagent_naive"], 110)
+        self.assertEqual(data["subagent_share_pct"], 50.0)
 
     def test_cli_json(self):
         proc = self.run_tool("--projects-dir", str(self.projects),

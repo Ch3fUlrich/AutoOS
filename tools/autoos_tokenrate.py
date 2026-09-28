@@ -17,6 +17,14 @@ one file per session (ADR 0001). Sessions are selected by the record's `cwd`
 field, so a lane sandbox deep under the orchestrator's directory still counts
 while a sibling directory with a shared string prefix does not.
 
+Router D-045: an `isSidechain` record (an in-session subagent turn) is
+orchestrator cost and stays in the numerator; the subagent columns report how
+large that part of it is. `discover_transcripts` scans the session files at the
+top of a project dir, so the share is over the records that are in the
+numerator — measured 2026-09-28, this host's client writes sidechain usage to
+`<project>/<session>/subagents/*.jsonl` instead, which is a separate discovery
+scope, not a filter.
+
 Stdlib only; read-only over the transcripts and `git log`.
 """
 from __future__ import annotations
@@ -51,7 +59,13 @@ _RELATIVE_UNIT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 @dataclass
 class UsageRecord:
-    """One assistant turn's cost, its session and where it ran."""
+    """One assistant turn's cost, its session and where it ran.
+
+    `sidechain` is the transcript's own `isSidechain` flag: the turn belongs to
+    an in-session subagent rather than to the orchestrator's own reasoning.
+    Router D-045 keeps those turns in the numerator — the parent session pays
+    for them — and reports their share instead of filtering them.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -60,6 +74,7 @@ class UsageRecord:
     timestamp: datetime | None = None
     cwd: str = ""
     session: str = ""
+    sidechain: bool = False
 
     def weighted(self) -> float:
         return (self.input_tokens + self.output_tokens
@@ -73,26 +88,61 @@ class UsageRecord:
 
 @dataclass
 class Totals:
-    """Aggregated usage over the records that survived the filters."""
+    """Aggregated usage over the records that survived the filters.
+
+    The `subagent_*` fields are a *view onto* the same records the plain fields
+    sum, never a subtraction from them: `weighted` already includes
+    `subagent_weighted` (D-045).
+    """
 
     records: int = 0
     weighted: float = 0.0
     naive: int = 0
+    subagent_records: int = 0
+    subagent_weighted: float = 0.0
+    subagent_naive: int = 0
     session_ids: set = field(default_factory=set)
+
+    def add(self, record: UsageRecord, session_fallback: str = "") -> None:
+        """Count one record once, in the totals and in the subagent view."""
+        weighted = record.weighted()
+        naive = record.naive()
+        self.records += 1
+        self.weighted += weighted
+        self.naive += naive
+        if record.sidechain:
+            self.subagent_records += 1
+            self.subagent_weighted += weighted
+            self.subagent_naive += naive
+        session = record.session or session_fallback
+        if session:
+            self.session_ids.add(session)
 
     def summary(self) -> "Summary":
         return Summary(records=self.records, weighted=round(self.weighted, 1),
-                       naive=self.naive, sessions=len(self.session_ids))
+                       naive=self.naive, sessions=len(self.session_ids),
+                       subagent_records=self.subagent_records,
+                       subagent_weighted=round(self.subagent_weighted, 1),
+                       subagent_naive=self.subagent_naive)
 
 
 @dataclass
 class Summary:
-    """The numerator as four scalars: sessions, records, weighted, naive."""
+    """The numerator: sessions, records, weighted, naive, plus the subagent split."""
 
     records: int = 0
     weighted: float = 0.0
     naive: int = 0
     sessions: int = 0
+    subagent_records: int = 0
+    subagent_weighted: float = 0.0
+    subagent_naive: int = 0
+
+    def subagent_share_pct(self):
+        """Subagent weighted tokens as a percent of the weighted numerator."""
+        if not self.weighted:
+            return None
+        return round(100.0 * self.subagent_weighted / self.weighted, 1)
 
 
 def parse_moment(text):
@@ -182,6 +232,7 @@ def parse_record(line):
         timestamp=moment,
         cwd=str(obj.get("cwd") or ""),
         session=str(obj.get("sessionId") or obj.get("session_id") or ""),
+        sidechain=bool(obj.get("isSidechain")),
     )
 
 
@@ -211,11 +262,7 @@ def sum_records(records) -> Totals:
         record = item if isinstance(item, UsageRecord) else parse_record(item)
         if record is None:
             continue
-        totals.records += 1
-        totals.weighted += record.weighted()
-        totals.naive += record.naive()
-        if record.session:
-            totals.session_ids.add(record.session)
+        totals.add(record)
     return totals
 
 
@@ -256,10 +303,7 @@ def measure(projects_dir, cwd_prefixes, since, until, now=None) -> Summary:
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 for record in iter_usage_records(fh, cwd_prefixes, start, end):
-                    totals.records += 1
-                    totals.weighted += record.weighted()
-                    totals.naive += record.naive()
-                    totals.session_ids.add(record.session or path.stem)
+                    totals.add(record, path.stem)
         except OSError:
             continue
     return totals.summary()
@@ -303,7 +347,8 @@ def _fmt(moment) -> str:
 
 def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
            branch_prefixes=(), since="48h", until=None, now=None) -> dict:
-    """The §5 numbers: numerator, denominator, both rates, and the stated bias."""
+    """The §5 numbers: numerator, denominator, both rates, the subagent split,
+    and the stated bias."""
     projects_dir = Path(projects_dir) if projects_dir else (
         Path.home() / ".claude" / "projects")
     start, end = resolve_window(since, until, now=now)
@@ -317,6 +362,10 @@ def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
         "records": totals.records,
         "weighted": weighted,
         "naive": totals.naive,
+        "subagent_records": totals.subagent_records,
+        "subagent_weighted": totals.subagent_weighted,
+        "subagent_naive": totals.subagent_naive,
+        "subagent_share_pct": totals.subagent_share_pct(),
         "merges": merges,
         "weighted_per_merge": round(weighted / merges, 1) if merges else None,
         "naive_per_merge": round(totals.naive / merges, 1) if merges else None,
@@ -338,6 +387,10 @@ def _number(value) -> str:
     return "{:,}".format(value) if isinstance(value, int) else "{:,.1f}".format(value)
 
 
+def _percent(value) -> str:
+    return "n/a" if value is None else "%.1f%%" % value
+
+
 def format_text(data: dict) -> str:
     """The report, one labelled line per fact, greppable by an orchestrator."""
     return "\n".join([
@@ -349,6 +402,12 @@ def format_text(data: dict) -> str:
         "weighted: %s  (cache reads at %s)" % (
             _number(data["weighted"]), data["cache_read_weight"]),
         "naive: %s  (unweighted sum, diagnostic)" % _number(data["naive"]),
+        "subagent-records: %d  (in-session subagent turns, counted above)"
+        % data["subagent_records"],
+        "subagent-weighted: %s" % _number(data["subagent_weighted"]),
+        "subagent-naive: %s" % _number(data["subagent_naive"]),
+        "subagent-share: %s  (subagent weighted / weighted)"
+        % _percent(data["subagent_share_pct"]),
         "merges: %d" % data["merges"],
         "weighted-per-merge: %s" % _number(data["weighted_per_merge"]),
         "naive-per-merge: %s" % _number(data["naive_per_merge"]),
