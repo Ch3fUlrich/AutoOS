@@ -5,6 +5,111 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — the user-scope `homelab` MCP entry is never removed, only reported (NOHL, 2026-09-28)
+
+Operator decision 2026-09-28 06:2xZ (via L0): the homelab MCP switch is **not** to
+be done now — the server-side homelab MCP is not finished, so no step may take the
+user-scope `homelab` entry away. It is the entry the homelab server will be
+configured through, not a leftover to clean up.
+
+- **`lib/linux/install.sh`**: `remove_stale_homelab_mcp_entry` is gone and
+  `report_stale_homelab_mcp_entry` replaces it. The whole removal path went with
+  it — the `backup_file` call, `claude mcp remove homelab --scope user`, the
+  post-removal re-check, the `has_cmd claude` precondition and the dry-run
+  branch (a check that writes nothing has no separate dry-run behaviour to
+  announce, so dry and live now print the same line). What is left: classify the
+  config with `homelab_user_entry` (kept — it is what the report is about), and
+  when it says `agent-skills`, print one muted line naming the retired tree and
+  saying the entry is left in place. No backup, no `claude` call, no file write,
+  no recorded failure. `none` and `other` say nothing at all: a line on every run
+  about an absent entry, or about a server the user wrote themselves, is noise —
+  and the old `other` branch ended in `claude mcp remove homelab --scope user`,
+  which is now an order AutoOS must not give. The `$SYS_HOME` guard stays: a
+  config outside the home this run configures belongs to another session (setup
+  under sudo reads root's), and reporting on it would describe a file the run was
+  never pointed at.
+- **`install_omnigraph_client`**: calls the report where it called the removal,
+  still before the URL/token/npm gates and still exactly once; the case that
+  guards against an orphan or a second caller now pins the new name.
+- Tests (`tests/linux/18-mcp-wiring.sh`): the removal cases are replaced by
+  report cases. A recognised stale entry leaves the config byte-identical with no
+  backup file, no `claude` invocation and no `backup_file` attempt (both stubs
+  record, so the absence is proven, not assumed) and prints the line; a second run
+  prints the same line again, because nothing changed in between — the old shape
+  converged to *skipped* precisely because the first run had mutated the machine;
+  dry and live are identical; an unrecognised entry, an absent entry and a
+  project-scope entry each get no line and an untouched file; a config outside this
+  run's home is not reported on. One case greps `lib/` for `mcp remove homelab` and
+  for the old helper name, so the removal cannot come back under a new caller.
+- Docs: `docs/catalog.md`, the A4b row and spec §C/D14 of
+  `docs/plans/2026-09-27-omnigraph-mcp-catalog-{plan,spec}.md` say the removal is
+  deferred by operator decision rather than done. `homelab_user_entry` still
+  recognises the shape, and `docs/omnigraph.md` never described this duty, so
+  neither needed a change.
+
+### Changed — the `agent-skills` step is a tombstone; its twelve duties have homes (A7b, Linux/macOS, 2026-09-28)
+
+- **`catalog/linux.json`, `catalog/macos.json`**: new `agent-skill-links`
+  component (`provider: custom`, `postInstall: install_agent_skill_links`,
+  profiles `workstation` + `ai-coding`). It carries no `requires` — linking a
+  directory of markdown needs neither git nor nodejs, and naming them would drag
+  both into a skills-only run — and no `prompt`, which was never its question.
+  `agent-skills` keeps its id (a saved selection, a state file and
+  `--only agent-skills` all still resolve) and loses the `omnigraph_url` prompt
+  and the `git`/`nodejs` requires it no longer spends.
+- **`lib/linux/install.sh`** (`install_agent_skill_links`,
+  `agent_skill_link_dests`, `agent_skill_links_current`): the skills-linking duty
+  moved here and now goes through `link_skill_dirs` for every destination,
+  replacing the step's own hand-rolled loop. Two behaviour differences, both
+  intended: only a directory holding a `SKILL.md` is a skill (the old loop linked
+  any child directory), and a dangling link this checkout created is *repaired*
+  where the old loop left it — a moved checkout used to mean silently no skills
+  in Antigravity and Claude Code. Nothing is ever *copied* any more: the loop's
+  `ln -snf … || cp -r …` fallback would have written a second, unversioned copy of
+  the skills into the user's home if `ln` failed, and no test ever reached it.
+  `agent_skill_link_dests` is the one home for the destination list, so the
+  writer and the detection gate cannot disagree about what "done" covers, and
+  `~/.codex/skills` is created only where codex is installed or its home exists.
+  `~/.openhands/skills` stays owned by `setup_openhands_config`.
+- **`lib/linux/install.sh`** (`install_omnigraph_client`): took the wiring duties
+  that named this checkout's servers — approve the `.mcp.json` project servers
+  (`omnigraph`, `autoos-agent`), warn about a shadowing user-scope `omnigraph`
+  instead of ever writing one, write Antigravity's `omnigraph` entry (its config
+  has no project scope) and report — never remove — the retired tree's user-scope
+  `homelab` entry (that removal was deferred, see the NOHL entry below).
+  The first, second and fourth run **before** the URL/token/npm gates, because a
+  machine that never answered the prompt still wants a clean, working Claude Code;
+  the entry that *carries* the URL and token stays behind them, which is A3's
+  "nothing configured, write nothing" rule. Its refusal to touch a file the run
+  could not back up is recorded under the id being installed, so the summary
+  cannot read "done" over a change that never happened.
+- **Removed from the step that used to do all of this**: the four
+  `install_mcp_*` calls (each is a catalog postInstall with its own profile and
+  `requires`; a second caller double-ran them and counted one broken wiring
+  twice), the retired-clone hint (the clone is a detection fallback in
+  `autoos_skills_source`, not something to advertise) and `omnigraph_readiness`
+  together with its caller — the check that can name a missing token, a rejected
+  token or a missing graph is `tools/check-omnigraph.py`, which the healthchecks
+  already call; an installer guessing at Docker state across a machine it cannot
+  see was the weaker copy of that. The "restart Claude Code and Antigravity" line
+  moved with the work it describes. `docs/catalog.md` follows in the same change.
+- **Detection**: `custom_is_installed` gains `agent-skill-links` (delegating to
+  `agent_skill_links_current`, the same function the postInstall asks) and the
+  retired `agent-skills` id now reports done whatever is on disk, because there
+  is never work left under it. A destination that is itself a symlink — the old
+  whole-directory layout, which AGENTS.md section 8 says is left with one warning
+  — counts as settled: it is a directory of the user's, `link_skill_dirs` will not
+  write through it, and holding it against the machine would re-plan the component
+  every run and then report it *installed* having done nothing.
+- Tests (`tests/linux/18-mcp-wiring.sh`, `13-end-to-end-dry-run-only.sh`,
+  `14-state-verify-and-undo.sh`, `38-omnigraph-client.sh`): the linking cases
+  moved to the new component and gained second-run, keep-yours, dry-run,
+  moved-checkout and one-destination-list assertions; the omnigraph-client block
+  asserts the approvals, the warning-only rule, the homelab report and the
+  blank-URL machine that still gets the repo-scope duties and writes no bridge
+  config; one case fails the suite if any installer calls an `mcp-*` postInstall
+  from another component; and the Antigravity merge is now proven on a real
+  `mcp_config.json` that already holds the user's own server.
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
