@@ -1,14 +1,14 @@
 # Fleet Console — spec (agents, spawn tree, kanban, costs, actions)
 
-SPEC — not approved; no implementation. L2-general lane `fleetspec`. Inputs: `logs/review/fleet-inputs/fleet-r1.out` (OmniRoute architecture), `fleet-r2.out` (AutoOS spawner inventory), `fleet-r3.out` (Conductor / orchestration canvas / A2A / v4 gate), `fleetspec-outline.md` (L2-general decisions; ADDENDUM 2 overrides sections 3, 10, Q1/Q2), `fleetspec-answers.md` (routing-00 answers + operator additions A1–A5). OmniRoute paths are prefixed `omniroute:`; AutoOS paths are repo-relative `tools/...`. Anything not from those files is marked "(inference)". PUBLIC repo: "the operator's hosts", `<domain>`, "the edge proxy"; no hostname / domain / IP / username / key.
+SPEC — not approved; no implementation. L2-general lane `fleetspec`. Inputs: `logs/review/fleet-inputs/fleet-r1.out` (OmniRoute architecture), `fleet-r2.out` (AutoOS spawner inventory), `fleet-r3.out` (Conductor / orchestration canvas / A2A / v4 gate), `fleetspec-outline.md` (L2-general decisions; ADDENDUM 2 overrides sections 3, 10, Q1/Q2), `fleetspec-answers.md` (routing-00 answers + operator additions A1–A5, D-042 "Context provenance" and D-043 "Project pages"). The A1 memory-event shape is **agreed with L1-backlog (2026-09-28, `schema: 2`)** — §4.3 states it; the facade spec is `docs/plans/2026-09-28-memory-facade-spec.md` (L1-backlog lane). OmniRoute paths are prefixed `omniroute:`; AutoOS paths are repo-relative `tools/...`. Anything not from those files is marked "(inference)". PUBLIC repo: "the operator's hosts", `<domain>`, "the edge proxy"; no hostname / domain / IP / username / key.
 
 ## 0. Summary
 
-The operator needs one phone-readable view over every agent on every host: state per project, who-spawned-whom-and-why, cost, and one-tap actions (answer / steer / stop / resume / approve) — every steer logged so the parent agent sees it. AutoOS records enough lineage to build this but joins nothing (r2 §7). OmniRoute already ships a fleet board — Conductor + an orchestration canvas — and all the cost/auth/UI kit the console needs (r1, r3). Recommendation (ADDENDUM 2): a small AutoOS hub **"fleetd"** that speaks the OmniConductor hub API so existing Conductor/canvas show AutoOS agents with **zero OmniRoute change (P1)**, then a v4-shaped module, staged flag-off in the `autoos/omniroute` image, that adds the pieces the hub protocol cannot carry — spawn tree, kanban, answer/steer, cost-per-agent, provenance, memory feed. Design as upstream module, ship as in-image flag-off. Phases P0–P5, each with a measurable acceptance and a data ladder rung. Three open operator questions remain in section 12.
+The operator needs one phone-readable view over every agent on every host: state per project, who-spawned-whom-and-why, cost, and one-tap actions (answer / steer / stop / resume / approve) — every steer logged so the parent agent sees it. AutoOS records enough lineage to build this but joins nothing (r2 §7). OmniRoute already ships a fleet board — Conductor + an orchestration canvas — and all the cost/auth/UI kit the console needs (r1, r3). Recommendation (ADDENDUM 2): a small AutoOS hub **"fleetd"** that speaks the OmniConductor hub API so existing Conductor/canvas show AutoOS agents with **zero OmniRoute change (P1)**, then a v4-shaped module, staged flag-off in the `autoos/omniroute` image, that adds the pieces the hub protocol cannot carry — spawn tree, kanban, answer/steer, cost-per-agent, provenance, memory feed, and **per-project spaces (D-043)**: a portfolio home plus a project page (Overview · Changelog · Questions · Decisions · Reports · Knowledge · Agents) fed by the router's question/decision files, each repo's changelog and ADRs, and agent-published reports (§4.1/§5.7/§8.10–8.11). Design as upstream module, ship as in-image flag-off; the memory-event envelope is **settled with L1-backlog (`schema: 2`, §4.3)**. Phases P0–P5, each with a measurable acceptance and a data ladder rung. Three open operator questions remain in section 12.
 
 ## 1. Goal and non-goals
 
-**Goal** — the operator's 5 needs (outline §1):
+**Goal** — the operator's 5 needs (outline §1) plus the project space added by D-043:
 
 | # | Need | Where |
 |---|---|---|
@@ -17,8 +17,9 @@ The operator needs one phone-readable view over every agent on every host: state
 | G3 | Spawn-history tree with the reason for each edge | tree; P1→P3 |
 | G4 | Telemetry + cost per agent / project / model | costs; P2 |
 | G5 | Actions: answer, approve, deny, open chat, steer, stop, resume — every steer logged for the parent | drawer; P3 |
+| G6 | **Project spaces (D-043)** — one home per project: state, progress vs plan, changelog, its questions/decisions, agent reports, its knowledge, its agents | portfolio home 8.10, project page 8.11; P3–P4 |
 
-**Non-goals** (outline §1): Grafana/Alloy is not the UI (may remain a metrics backend); no second agent launcher (the `autoos-agent` spawner stays the only launcher, §5); no replacement for Claude Remote Control chat (deep-link to it); no body-of-knowledge store here — memory is an external graph reached through a typed facade (A1, §4/§7).
+**Non-goals** (outline §1): Grafana/Alloy is not the UI (may remain a metrics backend); no second agent launcher (the `autoos-agent` spawner stays the only launcher, §5); no replacement for Claude Remote Control chat (deep-link to it); no body-of-knowledge store here — memory is an external graph reached through a typed facade (A1, §4/§7); the only bodies fleetd stores are provenance packs (§4.5) and agent-published reports (§4.1/§9), neither of which is knowledge-graph text.
 
 ## 2. What exists (facts, cited)
 
@@ -100,7 +101,8 @@ The orchestration canvas (`omniroute:src/app/(dashboard)/dashboard/orchestration
 | kanban | none exists (r1 §6, "no kanban") | **build** on `@dnd-kit` (P4) |
 | questions/decisions store | `question.json`/`answer.json` (r2) | **build** `questions`/`decisions` tables (P4) |
 | memory graph | external MEMSPEC (A1) | **subscribe** to its events; store refs only |
-| provenance packs | RESTART persists them (answers §A4) | **ingest** + link (P4 views) |
+| provenance packs | RESTART persists them (answers §A4/D-042) | **ingest** + link (P4 views) |
+| project space (D-043) | nothing upstream: no project entity exists in Conductor, the canvas or AutoOS records | **build** `projects`/`plan_phases`/`changelog_entries`/`reports` + importer + two views (P3–P4, §4.1/§5.7/§8.10–8.11) |
 
 ## 3. Options and recommendation (ADDENDUM 2 overrides)
 
@@ -118,7 +120,7 @@ Three homes for the console, all sharing fleetd as the backend and `call_logs.ru
 3. **Never C** — rejected: two websites, two auth surfaces, cross-origin cost access.
 4. **P1 needs ZERO OmniRoute change**: AutoOS runs **fleetd**, a small hub that *speaks the OmniConductor hub API* (`/v1/runners` = hosts/clients, `/v1/tasks` = spawner runs, `/v1/events` SSE) so the existing Conductor panel + canvas show AutoOS agents immediately by pointing `CONDUCTOR_HUB_URL` at fleetd. fleetd is also the console's single REST+MCP backend that the spawner and node agents post to; it keeps its own small SQLite and leaves cost data in OmniRoute (`call_logs.run_id` join).
 
-**Naming** (r1 §9 collision note): the hub already uses "Fleet"/"fleetd"; the canvas already uses "orchestration"/"Conductor". New user-facing surface is named **"Agents"** (avoid `pool`/`fleet`/`orchestration` as *new* MCP tool / i18n-namespace roots; check `RESERVED_MCP_NAMES` at build time). "fleetd" is the internal hub process name only, never a tool prefix.
+**Naming** (r1 §9 collision note): the hub already uses "Fleet"/"fleetd"; the canvas already uses "orchestration"/"Conductor". New user-facing surfaces are named **"Agents"** and — for D-043 — **"Projects"** (avoid `pool`/`fleet`/`orchestration` as *new* MCP tool / i18n-namespace roots; check `RESERVED_MCP_NAMES` at build time, which is also why the tools are `projects_list`/`project_get`/`publish_report` rather than `fleet_reports_*`). "fleetd" is the internal hub process name only, never a tool prefix.
 
 **Why each option fails alone:**
 
@@ -143,12 +145,19 @@ fleetd stores orchestration state; **OmniRoute stays the source of cost** (joine
 | **agents** | `id TEXT`(=canonical run id), `kind TEXT[claude-session\|spawner-run\|external]`, `project TEXT`, `host_id TEXT`, `client TEXT`, `model TEXT`, `tier TEXT`, `title TEXT`, `role TEXT[orchestrator\|worker\|reviewer]`, `state TEXT`, `state_detail TEXT`, `started_at INTEGER`, `ended_at INTEGER`, `rc INTEGER`, `parent_agent_id TEXT`, `session_tag TEXT`, `remote_control_url TEXT`, `transcript_ref TEXT`, `cwd TEXT`, `branch TEXT`, `archived_at INTEGER` | PK `id`; FK `host_id→hosts`, `parent_agent_id→agents`; `idx(state,project)`, `idx(parent_agent_id)` |
 | **spawn_edges** | `parent_id TEXT`, `child_id TEXT`, `at INTEGER`, `card JSON`, `resolver JSON`, `reason_text TEXT` | PK `(parent_id,child_id)`; `resolver` = `{route,class,leg,reason,p,expected_cost,bucket,effort,skipped_legs}` (r2 §3 full `route_plan` set, persisted at P0); "who spawned whom, why" (G3) |
 | **tasks** | `id TEXT`, `project TEXT`, `title TEXT`, `body TEXT`, `column TEXT[backlog\|next\|doing\|review\|done]`, `priority TEXT`, `owner_agent_id TEXT`, `created_by TEXT`, `links JSON`, `created_at INTEGER`, `updated_at INTEGER`, `archived_at INTEGER` | PK `id`; `created_by` ∈ operator \| `agent:<id>` — A5 lets **both** create; `links` = task↔agent↔question↔memory refs |
-| **questions** | `id TEXT`, `agent_id TEXT`, `task_id TEXT?`, `text TEXT`, `options JSON`, `default_option TEXT`, `asked_at INTEGER`, `deadline INTEGER`, `answered_at INTEGER`, `answer TEXT`, `answered_by TEXT`, `channel TEXT` | PK `id`; mirrors `question.json`/`answer.json` (`autoos-ask.py:193`, `autoos_agent_mcp.py:621-638`) |
-| **decisions** | `id TEXT`, `question_id TEXT?`, `text TEXT`, `decided_by TEXT`, `at INTEGER`, `evidence JSON`, `gen_id TEXT?` | PK `id`; **append-only**; `evidence` may carry the SHIP/FIX-FIRST verdict r2 §7 lacks a store for; `gen_id`→`generations` (A4 "why this decision", §4.5) |
+| **questions** | `id TEXT`, `project_id TEXT?`, `agent_id TEXT`, `task_id TEXT?`, `text TEXT`, `options JSON`, `default_option TEXT`, `deadline INTEGER`, `blocks TEXT?`, `asked_at INTEGER`, `answered_at INTEGER`, `answer TEXT`, `answered_by TEXT`, `channel TEXT` | PK `id`; mirrors `question.json`/`answer.json` (`autoos-ask.py:193`, `autoos_agent_mcp.py:621-638`); **D-043**: `project_id` scopes it to a project's Questions tab, `options`/`default_option`/`deadline`/`blocks` are what the tab shows and what it answers in place |
+| **decisions** | `id TEXT`, `project_id TEXT?`, `question_id TEXT?`, `adr_ref TEXT?`, `text TEXT`, `why TEXT?`, `decided_by TEXT`, `at INTEGER`, `evidence JSON`, `superseded_by TEXT?`, `gen_id TEXT?` | PK `id`; **append-only**; `evidence` may carry the SHIP/FIX-FIRST verdict r2 §7 lacks a store for; `gen_id`→`generations` (A4/D-042 "why this decision", §4.5); **D-043**: `project_id` scopes it, `question_id` is the answered question that produced it, `adr_ref` points at the repo's `docs/decisions/` ADR when the decision was written down that way (§5.7) |
 | **approvals** | `id TEXT`, `agent_id TEXT`, `risk_class TEXT`, `action TEXT`, `detail JSON`, `requested_at INTEGER`, `decided_at INTEGER`, `decision TEXT`, `decided_by TEXT` | PK `id`; feeds the "needs you" column (§4.4) |
 | **events** | `id TEXT`(ULID), `at INTEGER`, `agent_id TEXT?`, `type TEXT`, `actor TEXT[operator\|agent:<id>\|system]`, `payload JSON` | PK `id`; **append-only log of everything, incl. every steer message** (principle: steering is never silent, G5) |
 | **run_usage** (view) | join `call_logs ⨝ request_cost_ledger ON request_id` filtered by `call_logs.run_id`, aggregated to agent | not a table; §5.3. Columns surfaced: `agent_id, provider, model, tokens_in, tokens_out, tokens_cache, cost_usd` (outline §4). Non-gateway clients → cost NULL, shown "unknown" (r2 §7) |
-| **knowledge_links** | `id TEXT`, `from_kind TEXT[agent\|task\|question\|decision]`, `from_id TEXT`, `entity_ref TEXT`, `relation TEXT`, `created_at INTEGER`, `created_by TEXT` | PK `id`; **ADDENDUM + answers**: `entity_ref` is the **STABLE id** of a memory-graph entity, kept **opaque — no schema coupling** (the shared knowledge graph is being redesigned by routing-00) |
+| **knowledge_links** | `id TEXT`, `project_id TEXT?`, `from_kind TEXT[agent\|task\|question\|decision\|report]`, `from_id TEXT`, `entity_ref TEXT`, `relation TEXT`, `created_at INTEGER`, `created_by TEXT` | PK `id`; **ADDENDUM + answers**: `entity_ref` is the **STABLE id** of a memory-graph entity, kept **opaque — no schema coupling**; the graph's *entity* schema is still routing-00's redesign, but its *event envelope* is now agreed (`schema: 2`, §4.3) |
+| **projects** (D-043) | `id TEXT`, `name TEXT`, `repo_url TEXT?`, `state TEXT[active\|paused\|archived]`, `goal TEXT`, `plan_ref TEXT?`, `handoff_note_ref TEXT?`, `created_at INTEGER` | PK `id`; one space per project (G6). `repo_url` is a public URL or an opaque label — never a private host path (§9). `state=paused` renders `handoff_note_ref` **as** the Overview tab (§8.11) |
+| **plan_phases** (D-043) | `project_id TEXT`, `phase TEXT`, `title TEXT`, `status TEXT[done\|active\|pending\|blocked]`, `updated_at INTEGER` | PK `(project_id,phase)`; FK `project_id→projects`; "progress vs plan" on Overview (§8.11). Imported from the project's plan doc (`projects.plan_ref`) — inference: answers name the field, not the importer |
+| **changelog_entries** (D-043) | `id TEXT`(ULID), `project_id TEXT`, `at INTEGER`, `title TEXT`, `commit_sha TEXT?`, `pr_ref TEXT?`, `agent_id TEXT?`, `source TEXT[changelog\|merge]` | PK `id`; FKs `project_id→projects`, `agent_id→agents`; `idx(project_id,at)`; one row per changelog entry **or** per merge on `main`, both linked to commit/PR and the authoring agent when known (§5.7) |
+| **reports** (D-043) | `id TEXT`, `project_id TEXT`, `title TEXT`, `author_agent_id TEXT`, `gen TEXT?`, `created_at INTEGER` | PK `id`; FKs `project_id→projects`, `author_agent_id→agents`; `gen`→`generations` so a report traces to the pack that produced it (D-042) |
+| **report_versions** (D-043) | `report_id TEXT`, `version INTEGER`, `format TEXT[html\|md]`, `blob_hash TEXT`, `created_at INTEGER` | PK `(report_id,version)`; **append-only** — publishing never overwrites; `blob_hash` addresses the body in the content-addressed store (§4.5 shape, §4.7 retention: no expiry); rendered only inside the §9 sandbox |
+
+Three notes on the D-043 rows. (1) inference: the answers list `project_id` + `adr_ref` for *both* `questions` and `decisions`, but `adr_ref` is only read on `decisions` — an ADR records a decision, and the question behind it is reached through `decisions.question_id`. (2) inference: `changelog_entries.id` is a ULID added here as the PK because the answers name no key for that row; dedup against the source is on `(project_id, commit_sha, source)` (§5.7). (3) `report_versions` is the one place fleetd stores an agent-authored **body**. Memory-graph bodies stay external (§4.3: no body in any event); a report's HTML/markdown is console content the operator asked for, so it is addressed by `blob_hash` like the §4.5 pack blobs, append-only, **outside the 90-day pack expiry** (inference: the answers set no report retention, and a report version is cited by later decisions — §4.7), and renderable only under the §9 sandbox.
 
 ### 4.2 `spawn_edges.resolver` — the persisted `route_plan` (G3 + G4)
 
@@ -165,16 +174,31 @@ fleetd stores the resolver's whole plan (r2 §3, `autoos_resolver.py:1734-1757`)
 
 `card` is the normalized task card (r2 :59, `autoos_routing.py:134/:226`) and joins to the `track-record.jsonl` scoring dims `route|class|served_leg|bucket|effort|p_success` (`autoos_track.py:20-32,133-167`) for a "did this class work" rollup.
 
-### 4.3 Memory events (A1 — cross-session channel)
+### 4.3 Memory events (A1 — agreed with L1-backlog, `schema: 2`)
 
-The shared knowledge graph (one graph behind a typed **memory facade, MEMSPEC**, L1-backlog lead) doubles as a channel: **every memory write emits an event**. fleetd subscribes and republishes on the console's `agents`/`memory` channel; the console shows a "new decisions / lessons" feed per project/domain and delivers them to subscribed sessions. Proposed shape (**"shape pending L1-backlog agreement"** — proposal sent 06:3xZ, `inbox/L1-backlog.md`):
+The shared knowledge graph (one graph behind a typed **memory facade, MEMSPEC**, L1-backlog lead — its spec is `docs/plans/2026-09-28-memory-facade-spec.md`) doubles as a channel: **every memory write emits an event**. fleetd subscribes and republishes on the console's `agents`/`memory` channel; the console shows a "new decisions / lessons" feed per project/domain and delivers them to subscribed sessions. **This is the shape agreed with L1-backlog (2026-09-28, `schema: 2`); it supersedes the 06:3xZ proposal in full**, so the memory feed is no longer blocked on an envelope question (§12):
 
 ```
-{ id: ULID, at, type: "memory.<kind>.<created|updated|merged|deleted>",
-  project, domain?, entity_id: <stable id>, entity_kind, title: "<=120 chars>",
-  actor: {kind, id}, source_ref?, supersedes?, merged_from?, visibility, schema: 1 }
+{ id: ULID, at: <ISO UTC>,
+  type: "memory.<entity_kind>.<created|updated|merged|superseded|redirected>",
+  project, domain?, entity_id: <stable id>, entity_kind,
+  version_id,                       // the new node version
+  prev_version_id?,                 // updated | superseded only
+  gen,                              // restart generation id (D-042)
+  title: "<=120 chars>", actor: {kind: agent|operator|curator, id: <author session name>},
+  source_ref?, supersedes?, merged_from?,
+  visibility: project|global, schema: 2 }
 ```
-No body in the event — the body is fetched from the graph by `entity_id`. Delivery is **at-least-once per-subscriber cursor** (same cursor discipline the Conductor bridge already uses, `omniroute:src/lib/conductor/bridge.ts:177-250`).
+
+- **There is no `deleted` verb.** Nothing is hard-deleted: an orphan prune is a `superseded` by a tombstone version, which is why every prune stays undoable.
+- **Merged ids stay resolvable.** The facade answers an old id with a redirect to the survivor (the `redirected` event carries `merged_from`), and **undoing a merge is an inverse split event** — never a rewind of the store.
+- **Edges have their own events**: `memory.edge.<linked|unlinked> {edge_id, rel (closed list), from_id, to_id, version_id}`. The hub-neighbourhood view (§8.7) follows these instead of polling the graph.
+- **No body and no secret in any event** — `title` (≤120 chars) is the only carried content; the text is fetched from the graph by `entity_id` + `version_id`.
+- **Append-only store; at-least-once delivery on a per-subscriber cursor** (the same cursor discipline the Conductor bridge already persists, `omniroute:src/lib/conductor/bridge.ts:177-250`).
+- **Health metrics come from the facade as `memory_health()`** — nodes, edges, duplicate rate, orphan share, mean hops to hub, curator merges. §8.6 renders them; fleetd computes none of them.
+- `actor.id` is the **author session name** (e.g. a worker's run title), not a person or an account — so the §9 privacy rule still holds when an event crosses the wire.
+
+`gen` on every event ties a memory write back to the pack that produced it (`output_links`, §4.5), so "which context produced this lesson" traces exactly like "why this decision" (§8.9).
 
 ### 4.4 State vocabulary + board-column mapping
 
@@ -216,9 +240,11 @@ For every agent response and restart, the operator sees **exactly which cards an
 |---|---|---|
 | `events`, `run_usage` view | follow OmniRoute retention settings (`callLogs 30d` default) | `omniroute:src/types/databaseSettings.ts:58-81` (r1 §5) |
 | `agents` | archive `done` after 24h (`archived_at`), keep 30d | outline §4, answers "retention: (a)" |
-| memory events | follow the graph's own retention; fleetd keeps only the cursor + emitted envelope | A1 |
+| memory events (`memory.<kind>.*` + `memory.edge.*`, `schema: 2`) | follow the graph's own retention; fleetd keeps only the cursor + emitted envelope | A1, §4.3 |
 | `pack_blobs` | **90 days** | A4 |
 | `manifest_items`, `output_links`, `transcript_refs` | **forever** (overrides the 30d default) | A4 |
+| `projects`, `plan_phases`, `changelog_entries`, `decisions` | **forever** — a project's history is the thing the page exists to show; `archived` state is a flag, never a delete | D-043 (inference: answers name no retention for these; they are append-only rows) |
+| `reports` / report blobs | **all versions kept, no expiry** | D-043; inference: answers set none, and a later decision cites a report by version |
 | `track-record.jsonl` / `orch-*.log` | unchanged on the AutoOS side (unbounded today, r2 §7) — fleetd does not replicate them | — |
 
 ### 4.8 fleetd ↔ OmniRoute boundary
@@ -228,7 +254,8 @@ Two stores, one join key, no double-counting of cost.
 | concern | owner | why |
 |---|---|---|
 | agents, hosts, spawn_edges, tasks, questions, decisions, approvals, events | **fleetd** SQLite (small) | orchestration truth; must exist offline (r2 §5.2) |
-| provenance: generations, pack_blobs, manifest_items, output_links, transcript_refs | **fleetd** SQLite | produced by RESTART/spawn (answers §A4), read by the console |
+| provenance: generations, pack_blobs, manifest_items, output_links, transcript_refs | **fleetd** SQLite | produced by RESTART/spawn (answers §A4/D-042), read by the console |
+| project spaces: projects, plan_phases, changelog_entries, reports, report_versions (+ their blobs) | **fleetd** SQLite | imported from git and the router's files (§5.7) — the repo stays the source of truth, fleetd keeps the readable index (D-043) |
 | memory graph (nodes/edges/entities) | **external MEMSPEC graph** (L1-backlog) | fleetd holds only the emitted envelope + `knowledge_links.entity_ref` (stable id, opaque, §4.3) |
 | per-request cost: `call_logs`, `request_cost_ledger` | **OmniRoute** SQLite (already the source, r1 §5) | single cost ledger; no second one |
 | the join | `call_logs.run_id` (new column) ↔ `agents.id` | §5.3; `run_usage` is a *view*, not stored |
@@ -247,6 +274,7 @@ Every field the console shows originates in an existing AutoOS record; fleetd on
 | REPORT block (`autoos_report.py:43`) + verdict lines (`:1008-1036`) | `decisions.evidence` | no structured verdict store (§2.2) |
 | `context --json` (`:1529-1565`) + heartbeat (`:1592-1668`) | agent detail state card + context fill (A3) | not persisted today |
 | gateway `call_logs ⨝ request_cost_ledger` (`autoos_usage.py:238`) | `run_usage` view | no cost per run (§2.2) |
+| router `QUESTIONS.md`/`DECISIONS.md`, each repo's `CHANGELOG.md` + `docs/decisions/` ADRs, MCP `publish_report` | `projects`, `plan_phases`, `questions`, `decisions`, `changelog_entries`, `reports` (§5.7) | no project space exists anywhere (D-043) |
 
 ### 5.1 Canonical run id + parent + host (P0, AutoOS only)
 
@@ -284,6 +312,20 @@ Statuses must map onto the hub's vocabulary, which the bridge turns into A2A (`b
 
 RESTART and spawn already **persist every context pack + manifest content-addressed, tagged `gen=<id>`** (answers §A4); MEMSPEC recalls carry node+version ids; outputs (ready, decisions, memory writes, questions/answers) carry `gen=<id>`. fleetd ingests these as `generations`/`manifest_items`/`output_links` (§4.5) and links a decision → `gen_id` for the "why this decision" trace. Memory writes reach fleetd **as events** (§4.3), not as stored bodies — `knowledge_links.entity_ref` holds only the stable graph id.
 
+### 5.7 Project import + report ingestion (D-043)
+
+Every project page is built from artifacts that **already exist** — the import is a reader, not a new writing convention. Four readers, one publisher:
+
+| source | → fleetd | how |
+|---|---|---|
+| the router's `QUESTIONS.md` / `DECISIONS.md` — each entry already carries a `project:` field | `projects` (upsert by name), `questions`, `decisions` (+ `project_id`) | same parser that P4 uses to *export* inbox files (§10): import and export are one reader, so the file format cannot drift twice |
+| each repo's `CHANGELOG.md` **or** its `changelog.d/` fragments — OmniRoute's own convention is `changelog.d/features/<PR>-<slug>.md` (r1 §10) — plus **merges on `main`** | `changelog_entries` with `source=changelog` / `source=merge` | merge rows carry `commit_sha`, `pr_ref`, and `agent_id` when the merge was agent-driven (join `agents` by branch/run id, §5.1) |
+| the repo's `docs/decisions/` ADRs | `decisions.adr_ref` | the console links out to the ADR; it never restates its text (the ADR is the durable form, the row is the index) |
+| the project's own plan doc (`projects.plan_ref`) | `plan_phases` | inference: the answers carry `plan_ref` and the Overview's "progress vs plan", but name no importer — the reader walks the plan's phase headings (this spec's own §10 table is exactly that shape) |
+| MCP `publish_report(project, title, html\|md)` (§7.2) | `reports` + `report_versions` + blob | version increments, nothing overwrites; `gen` recorded so a report traces to the pack that produced it (§4.5) |
+
+Cadence and safety: the importer runs on the same at-least-once outbox discipline as §5.2 — a repo or a router lane can be offline, and a re-read is idempotent (`changelog_entries` dedups on `(project_id, commit_sha, source)`, falling back to `(project_id, title, source)` for a fragment that names no sha; `decisions`/`questions` upsert on the stable id the file already carries). An entry that fails to parse becomes a visible console alert plus an `events` row, never a quietly empty tab (§11 "import drift"). `projects.state` is set by the operator, or derived from the registry's project state; `state=paused` makes the handoff note the Overview (§8.11) — the same handoff artifact a lane writes for its successor session (`unattended-orchestration` `references/layers.md`: "a successor brief is written from the predecessor's DONE note").
+
 ## 6. Kanban: built-in vs Vikunja
 
 Answered: **(a) built-in** (answers "kanban: (a)").
@@ -312,13 +354,22 @@ Answered: **(a) built-in** (answers "kanban: (a)").
 | POST | `/api/agents/:id/stop` | operator session | – | cancel (SIGTERM group, `autoos_agent_mcp.py:641-660`) |
 | POST | `/api/agents/:id/resume` | operator session | – | resume from `waiting` (`resume_at`) |
 | GET/POST/PATCH | `/api/tasks` | operator or `tasks:write` | task fields | board columns; **A5: creatable by operator AND by `agent:<id>`**, each carrying its full response history (`tasks ⨝ questions ⨝ decisions` order) |
-| GET/POST | `/api/questions` | write scope | question fields | pending questions |
+| GET/POST | `/api/questions` | write scope | question fields; query `?project=` | pending questions with options / default / deadline / blocks (§8.11 Questions tab) |
 | POST | `/api/questions/:id/answer` | operator session | `{answer, answered_by}` | writes `answer.json`, flips `input_required→working` |
+| GET | `/api/decisions` | manage | `?project=&since=` | decisions with why / sources / who / `superseded_by` / `adr_ref` / `gen_id` (D-043 + D-042) |
 | GET/POST | `/api/approvals/:id/decide` | operator session | `{decision, decided_by}` | approve/deny (G5) |
 | GET | `/api/spawn-tree` | manage | `?root=<agent_id>` | nested `agents`+`spawn_edges` (G3) |
+| GET | `/api/projects` | manage | query: `state` | **portfolio cards** (§8.10): state pill, open-question count, running agents, last change, spend this week |
+| GET | `/api/projects/:id` | manage | – | project + `plan_phases` + questions + decisions + report cards + its agents (G6, §8.11) |
+| PATCH | `/api/projects/:id` | operator session | `{state?,goal?,plan_ref?,handoff_note?}` | set state / the paused project's handoff note (D-043) |
+| GET | `/api/projects/:id/changelog` | manage | `?since=&source=changelog\|merge` | `changelog_entries` with commit / PR / authoring agent (§5.7) |
+| GET | `/api/projects/:id/reports` | manage | – | reports + their version list, newest version first |
+| POST | `/api/projects/:id/reports` | `reports:write` (agent key) or MCP | `{title, format: html\|md, body}` | `{report_id, version}`; body → blob, a prior version is **never** overwritten (§5.7) |
+| GET | `/api/reports/:id/versions/:n` | manage | – | one stored body, served **only** for the §9 sandbox: no session cookie on that response, `Content-Security-Policy` header, separate origin where the deployment allows |
 | GET | `/api/usage` | manage | `?group_by=agent\|project\|model&window=today\|7d\|30d` | cost rollup (view over `call_logs.run_id`, G4) |
 | GET | `/api/provenance/:gen_id` | manage | – | generation + manifest_items + pack diff vs a second `gen_id` (A4) |
-| GET | `/api/memory/feed` | manage | `?project=&domain=&cursor=` | recent `memory.*` events (§4.3), at-least-once via `cursor` |
+| GET | `/api/memory/feed` | manage | `?project=&domain=&cursor=` | recent `memory.<kind>.*` and `memory.edge.*` events (§4.3, `schema: 2`), at-least-once via `cursor` |
+| GET | `/api/memory/health` | manage | `?project=` | the facade's `memory_health()` passed through — nodes, edges, dup rate, orphan share, mean hops→hub, curator merges (§8.6); fleetd computes none of it |
 | SSE/WS | `/api/agents/stream` (channel `agents`) | session | `?last_event_id=` | live updates on the existing event bus (`omniroute:src/lib/events/eventBus.ts`; canvas already refetches on WS `agents`, `useOrchestrationSnapshot.ts:178-188`) |
 
 ### 7.2 MCP tools (any model orchestrates; scopes `read`/`write`/`admin`; names checked against `RESERVED_MCP_NAMES` at build)
@@ -335,7 +386,11 @@ Answered: **(a) built-in** (answers "kanban: (a)").
 | `steer_send` | `id,text` (always logged as an `events` row) | admin (operator-gated) |
 | `spawn` | proxies to the AutoOS spawner's `route`/`spawn` so the console is the single back-end | write |
 | `provenance_get` | `gen_id` | read |
-| `memory_feed` | `project?,domain?,cursor?` | read |
+| `memory_feed` | `project?,domain?,cursor?` (`memory.<kind>.*` + `memory.edge.*`, §4.3) | read |
+| `memory_health` | `project?` (passes the facade's `memory_health()` through, §8.6) | read |
+| `projects_list` | `state?` | read |
+| `project_get` | `id` → overview: state, goal, plan phases, open questions, running agents, last change, spend | read |
+| `publish_report` | `project, title, html?\|md?` (exactly one body; new `report_versions` row, `gen` recorded) | write |
 
 AutoOS side (`autoos-agent` CLI/MCP) **keeps working offline**; it gains a `--console` URL/key (`api-keys.yml`) and becomes a thin client of this API only when set (outline §7). No new top-level OmniRoute dependency; MCP tool names must not collide with the shipped `pool_*` set (r1 §9).
 
@@ -345,15 +400,17 @@ fleetd publishes one append-only stream carrying both the orchestration events a
 
 ```
 { id: "<ULID>", at: 1759030200, type: "agent.steer|agent.state|question.asked|
-                question.answered|approval.requested|memory.<kind>.<verb>",
+                question.answered|approval.requested|
+                memory.<entity_kind>.<created|updated|merged|superseded|redirected>|
+                memory.edge.<linked|unlinked>",
   agent_id: "20260928-…-a1b2c3", actor: "operator|agent:<id>|system",
   payload: {…} }
 ```
-`memory.*` payloads use the §4.3 shape (entity id only, no body). Delivery is **at-least-once, per-subscriber cursor** — same discipline the Conductor bridge persists in `key_value` (`omniroute:src/lib/conductor/bridge.ts:177-250`), so a reconnect replays from `last_event_id` and the console dedups on the event ULID. Producers map to the state machine: a `spawn` emits `agent.state submitted→working`; `respond`/`answer.json` emits `question.answered` and flips `input_required→working`; a steer emits `agent.steer` (the parent reads it, G5).
+`memory.*` payloads carry the §4.3 envelope (`schema: 2`) unchanged inside `payload` — entity/edge id and `version_id` only, **no body**; note the two `at` formats are deliberate: the fleetd envelope's `at` is an INTEGER epoch (§4.1), the memory event's is ISO UTC (§4.3). Delivery is **at-least-once, per-subscriber cursor** — same discipline the Conductor bridge persists in `key_value` (`omniroute:src/lib/conductor/bridge.ts:177-250`), so a reconnect replays from `last_event_id` and the console dedups on the event ULID. Producers map to the state machine: a `spawn` emits `agent.state submitted→working`; `respond`/`answer.json` emits `question.answered` and flips `input_required→working`; a steer emits `agent.steer` (the parent reads it, G5); a published report emits a `report.published` row so the project's Reports tab refreshes live (D-043, inference: this console-side type is not in the answers' event list).
 
 ## 8. Mobile UX (ASCII sketches, ~40 cols)
 
-Views 1–5 are the hub-and-module core; 6–9 are the A2/A4 additions (after P3).
+Views 1–5 are the hub-and-module core; 6–9 are the A2/A4 additions (after P3); 10–11 are the D-043 project spaces.
 
 ### 8.1 Board (G1/G2) — project tabs + swipeable lanes
 
@@ -448,7 +505,7 @@ Backed by `omniroute:src/shared/components/UsageAnalytics.tsx` (presets 1d/7d/30
 | dup node#88  ⟶ node#12   [undo]     |
 +--------------------------------------+
 ```
-Metrics computed from the graph behind MEMSPEC (A1); merges are undo-able actions surfaced from the graph, not stored bodies.
+Metrics come from the facade as `memory_health()` (§4.3, surfaced by `GET /api/memory/health`) — fleetd computes none of them. Curator merges are `memory.<kind>.merged` events and their inverse-split undo (§4.3), surfaced as actions, never copied as bodies.
 
 ### 8.7 Hub neighbourhood (A2) — project's graph around its hub, @xyflow
 
@@ -463,7 +520,7 @@ Metrics computed from the graph behind MEMSPEC (A1); merges are undo-able action
 |      hop:1 ●  hop:2 ○  hop:3 ·       |
 +--------------------------------------+
 ```
-`@xyflow` FlowCanvas again; nodes are `knowledge_links.entity_ref` stable ids expanded one-hop by the graph API (opaque here).
+`@xyflow` FlowCanvas again; nodes are `knowledge_links.entity_ref` stable ids expanded one-hop by the graph API (opaque here). The neighbourhood is **maintained from the `memory.edge.<linked|unlinked>` events** (§4.3) on the same cursor the feed uses — not by re-polling the graph.
 
 ### 8.8 Lineage / provenance (A4) — generations + restart reasons
 
@@ -495,12 +552,63 @@ Rows = `generations`; `▸diff` compares two `pack_hash`es; `◂uses` = `output_
 ```
 `decision → gen_id → pack → manifest_items → sources/authors` (§4.5). `replay pack` rebuilds exact text from `pack_blobs` + versioned `manifest_items`.
 
+### 8.10 Portfolio home (G6, D-043) — one card per project
+
+```
++--------------------------------------+
+| Projects        [active|paused|arch] |
+|                                      |
+| AutoOS              ● active         |
+|  Q 3 · agents 2 run · $14.72 this wk |
+|  last change: merge a1b2c3d 2h ago   |
+|                                      |
+| fleetspec           ● active         |
+|  Q 1 · agents 0 run · $3.10 this wk  |
+|  last change: spec pass-1 20m ago    |
+|                                      |
+| omnigraph           ⏸ paused         |
+|  "handoff: wait for cluster apply"   |
+|  last change: merge 4e5f607 3d ago   |
++--------------------------------------+
+```
+
+Exactly the five facts the operator asked for per card (answers D-043): **state pill** (`projects.state`), **open-questions count** (`questions` where `answered_at IS NULL`), **running agents** (`agents` in `working`/`input_required` for that project), **last change** (`changelog_entries` head), **spend this week** (`run_usage` windowed by `project`, G4). A card taps through to the project page (8.11); a **paused** card shows its handoff note as its only body line, because that is what the next session needs to read first (§8.11 Overview, §5.7 import).
+
+### 8.11 Project page (G6, D-043) — seven tabs, one per kind of answer
+
+```
++--------------------------------------+
+| AutoOS ▾ [Ovr|Chg|Q|Dec|Rpt|Kno|Agt] |
+| ● active · goal: one machine → fleet |
+| plan  P0✓ P1✓ P2• P3 P4 P5           |
+| running 2 · needs you 1 · waiting 0  |
+| last merges: a1b2c3d f1e2d3c         |
+| ── open questions (3) ──             |
+| ? ship hub for P1?  [a][b] dfl:a ⏰3d |
+| ? run_id as fix PR? [a][b] dfl:a     |
+| ── recent decisions ──               |
+| kanban: built-in  ←Q4 ←g-02 adr:0007 |
+| D-043 project pages   who: operator  |
++--------------------------------------+
+```
+
+| tab | shows | source |
+|---|---|---|
+| **Overview** | state, goal, progress vs plan phases, running / needs-you / waiting counts, last merges | registry + `fleet` events + git (§5.7); a **paused** project renders `handoff_note_ref` *as* the Overview |
+| **Changelog** | repo `CHANGELOG.md`/fragments + merges on `main`, each linked to its commit, PR, and the authoring agent | `changelog_entries` |
+| **Questions** | open (options / default / deadline / what it blocks) then answered; **answerable in place** | `questions` (`POST …/answer`, §7.1) |
+| **Decisions** | why, sources, who, superseded-by, the ADR it was written down as, and the generation/context it was made under (D-042 → 8.9) | `decisions` + `docs/decisions/` |
+| **Reports** | agent-published HTML/markdown as cards, version history, external artifact links may be listed | `reports`/`report_versions`, rendered **sandboxed** (§9) |
+| **Knowledge** | the project's hub + clusters + recent facts | memory facade (§4.3, 8.6–8.7) |
+| **Agents** | lineage, spawn tree, costs | 8.3 + 8.8 + 8.5 filtered by `project` |
+
 ## 9. Auth
 
 - **Edge SSO + OmniRoute session, defense in depth**: console sits behind the edge proxy (Authelia-class, `<domain>`) *and* keeps OmniRoute's own `auth_token` session (`omniroute:src/app/api/auth/login/route.ts`, jose HS256 `{authenticated:true}`, httpOnly). The edge **must strip client `Authorization` before `forward_auth`** — the same lesson as the opencode path: OmniRoute carries peer-truth only in *signed internal* headers (`x-omniroute-peer-ip`, `|1` via-proxy downgrade, `omniroute:src/server/authz/peerStamp.ts`) and has **no `x-forwarded-user` external-identity handling** (r1 §3/:46), so a client-forged header reaching the proxy is exactly the failure mode to avoid.
 - **Per-host narrow keys**: node agents and spawners use a per-host API key scoped `agents:write` (create/update agents + outbox posts) — **never the `manage` key** (`omniroute:src/shared/constants/managementScopes.ts`; keys are `sha256`-hashed with 12-char prefix, r1 §3).
 - **Operator-only actions**: `steer` / `stop` / `resume` / `approve` / `answer` require an operator dashboard session, not a node key (outline §9; `requireManagementAuth`). CSRF/origin check on management mutations already applies (`omniroute:src/server/authz/pipeline.ts:437-451`).
 - **Audit**: every action → an `events` row (append-only, §4.1); MCP calls audited to `mcp_tool_audit` (`omniroute:open-sse/mcp-server/audit.ts`).
+- **Agent-authored HTML is untrusted content (D-043)**: reports are *written by agents*, so the console treats a report the way a browser treats a stranger's page — Claude-artifacts-style rendering. The report body renders in an `<iframe>` with `sandbox="allow-scripts"` and **`allow-same-origin` deliberately absent** (so the document gets an opaque origin: no console DOM, no shared `localStorage`/cookies, no same-origin request that could carry the session); `allow-top-navigation`, `allow-popups` and `allow-forms` are **never** granted, so a report cannot move the operator off the dashboard or exfiltrate by form POST. It is served with a **strict CSP** — `default-src 'none'`, plus only what a static report needs (inference: `style-src 'unsafe-inline'` to render its own styling, `img-src data:` for embedded charts) — and from a **separate origin where the deployment allows it** (a distinct subdomain of `<domain>`; serving under an app path is the weaker fallback). The report response carries **no session cookie and no auth header**, links inside a report are `rel="noopener noreferrer"`, and markdown is sanitized server-side before it reaches the iframe. Where no separate origin exists, the opaque-origin sandbox + CSP are the load-bearing controls: a report that reads an `auth_token` still has no origin allowed to send it.
 - **Privacy**: transcript bodies and task text stay on the host; only token counts, file+offset refs, and short `task_head` leave (r2 §7, §5.4). No hostname/IP/username leaves the host in a tracked artifact — fleetd config carries host ids as opaque labels.
 
 Who may call what:
@@ -510,7 +618,8 @@ Who may call what:
 | operator (phone/desktop) | `auth_token` session (§9) | all of §7, incl. steer/stop/resume/answer/approve | — |
 | node agent | per-host key `agents:write` | `POST/PATCH /api/agents`, outbox posts, `run_usage` | steer/stop/answer/approve; `manage` scopes |
 | spawner (`autoos-agent`) | per-host key `agents:write` + optional `tasks:write` | register/update, `spawn_edge`, `question`/`answer` events, `task_create` | read all projects (own project only, inference: scope key per project) |
-| any model via MCP | scoped MCP key (`read`/`write`/`admin`) | tools per §7.2 | `steer_send` without `admin` |
+| any model via MCP | scoped MCP key (`read`/`write`/`admin`) | tools per §7.2, incl. `publish_report`, `projects_list`, `project_get` | `steer_send` without `admin`; publishing into a **project its key is not scoped to** (inference: `reports:write` is project-scoped like `tasks:write`) |
+| report viewer (browser) | none — the iframe document gets an opaque origin | read the one report body it was pointed at (§9 sandbox) | cookies, `localStorage`, the console DOM, same-origin requests, anything on the parent origin |
 | browser → hub (fleetd) | `CONDUCTOR_HUB_TOKEN` | `/v1/*` read + task create/cancel | — (OmniRoute never lets the browser reach the hub, `hubProxy.ts`) |
 
 ## 10. Phased plan + data ladder (ADDENDUM 2 replaces the outline ladder)
@@ -520,11 +629,11 @@ Who may call what:
 | **P0** AutoOS only, no UI | canonical run id + parent edge + host + full `route_plan` persisted in spawner records; `X-AutoOS-Run-Id` header wired (r2 §5.1/§5.3) | **rung 0: lineage exists** | `autoos-agent ps --tree` renders a parent→child tree with reason; a worker row and its `logs/agents/<id>` share one id |
 | **P1** read-only board (fleetd, **no OmniRoute change**) | fleetd with OmniConductor-compatible hub API (§5.5) + Python node agent (§5.4); AutoOS agents appear in the *existing* Conductor panel + canvas via `CONDUCTOR_HUB_URL→fleetd` | **rung 1: states + lineage** | a spawner run shows in the canvas within 5s (poll) with correct normalized state; contract tests green against `hubProxy.ts` shapes |
 | **P2** cost | `call_logs.run_id` (+heal list+index) → usage view; costs surface (§5.3) | **rung 2: cost per run** | `GET /api/usage?group_by=agent` returns non-zero `cost_usd` for a gateway run within one retention window; non-gateway = "unknown" |
-| **P3** actions (B-module) | canvas source `fleet` + `spawned` edges + board tab + answer/steer/approve drawer + ntfy push for "needs you"; state card + context fill on detail (A3) | **rung 3: act** | a steer from the phone writes an `events` row AND is seen by the parent (`answer.json`); ntfy fires on `input_required` |
-| **P4** tasks/questions authoritative + provenance views | kanban + questions/decisions as store (inbox files become exports); memory feed (§4.3); provenance tables + views 8.6–8.9 (A2/A4) | **rung 4: durable** | a task created by `agent:<id>` and one by the operator both list with full response history (A5); "why this decision" traces a real decision to its pack |
+| **P3** actions + project space (B-module) | canvas source `fleet` + `spawned` edges + board tab + answer/steer/approve drawer + ntfy push for "needs you"; state card + context fill on detail (A3); **project pages open (D-043): portfolio home 8.10 + a project's Overview / Questions / Decisions tabs (8.11)** — these read tables that already exist by then (`projects`, `plan_phases`, `questions`, `decisions`) plus the P2 cost rollup | **rung 3: act** | a steer from the phone writes an `events` row AND is seen by the parent (`answer.json`); ntfy fires on `input_required`; the portfolio card's five facts (state, open Qs, running agents, last change, spend this week) match the stores for a real project |
+| **P4** tasks/questions authoritative + provenance + changelog/reports | kanban + questions/decisions as store (inbox files become exports); memory feed (§4.3); provenance tables + views 8.6–8.9 (A2/A4); **`projects`/`changelog_entries`/`reports` importers + publisher (§5.7) and the Changelog / Reports tabs (8.11)**; the **Knowledge** tab lands only once MEMSPEC serves the agreed §4.3 envelope and `memory_health()` | **rung 4: durable** | a task created by `agent:<id>` and one by the operator both list with full response history (A5); "why this decision" traces a real decision to its pack; an imported `CHANGELOG.md` fragment **and** a merge on `main` both render with commit/PR/authoring agent; `publish_report` twice yields v1 beside v2, rendered in the §9 sandbox |
 | **P5** upstream v4 module PR | split into reviewable PRs (DB+API, UI, MCP, i18n) per `omniroute:CONTRIBUTING.md`; target v4 `develop` SDK manifest | **rung 5: upstream** | each PR passes v4-feature + 68-locale new-key + coverage + test-policy gates (r1 §7–8) |
 
-Provenance capture (tables) can start at P0/P1 (the data already exists post-RESTART, answers §A4); its **views land after P3 (P4)** per the brief. Every phase: tests per OmniRoute gates (node:test + vitest + playwright; new `src/` file ⇒ new test, r1 §8).
+Provenance capture (tables) can start at P0/P1 (the data already exists post-RESTART, answers §A4); its **views land after P3 (P4)** per the brief. The project pages straddle the same ladder for the same reason (D-043): **Overview / Questions / Decisions with P3–P4** — the rows exist as soon as the questions/decisions store does; **Changelog / Reports at P4** — they need the §5.7 importer and the blob store; **Knowledge after MEMSPEC** — it is a read of the external facade (§4.3), so it cannot ship before the facade serves the agreed envelope and `memory_health()`. Every phase: tests per OmniRoute gates (node:test + vitest + playwright; new `src/` file ⇒ new test, r1 §8).
 
 Phase → upstream obligations (so the flag-off B-module stays upstreamable unchanged):
 
@@ -532,8 +641,8 @@ Phase → upstream obligations (so the flag-off B-module stays upstreamable unch
 |---|---|---|
 | P0/P1 | none (fleetd + AutoOS only) | hub contract tests only (§5.5) |
 | P2 | `call_logs` migration + `schemaColumns.ts:324` heal/index | fix-PR eligibility (section 12) |
-| P3 | orchestration canvas `OrchSource`/`OrchEdge` mappers + `orchestrationTypes.ts:8,45-51`, drawer `useDrawerDetail.ts:229-234`, sidebar item + nav tests (`omniroute:src/shared/constants/sidebarVisibility/sections.ts:820-888`) | `v4-feature` label → `develop` (`ROADMAP.md:89-94`) |
-| P3–P5 | `fleet`/`agents` i18n namespace in **all 68** catalogs | `check:new-key-coverage` (`ci.yml:548`) |
+| P3 | orchestration canvas `OrchSource`/`OrchEdge` mappers + `orchestrationTypes.ts:8,45-51`, drawer `useDrawerDetail.ts:229-234`, sidebar items (`Agents`, `Projects` — D-043) + nav tests (`omniroute:src/shared/constants/sidebarVisibility/sections.ts:820-888`) | `v4-feature` label → `develop` (`ROADMAP.md:89-94`) |
+| P3–P5 | `fleet`/`agents`/`projects` i18n namespace in **all 68** catalogs | `check:new-key-coverage` (`ci.yml:548`) |
 | P5 | MCP `MCP_TOOLS` + `RESERVED_MCP_NAMES` + `countUniqueMcpTools` (`omniroute:open-sse/mcp-server/server.ts:804-815,111-124`) | OpenAPI + llm.txt + env docs same PR (`check:docs-sync`, r1 §8) |
 | P5 | `changelog.d/features/<PR>-<slug>.md` fragment | `check:changelog-integrity` (r1 §10) |
 
@@ -542,17 +651,19 @@ Phase → upstream obligations (so the flag-off B-module stays upstreamable unch
 | risk | exposure | mitigation |
 |---|---|---|
 | Upstream rejection / v4-feature gate | B-module never merges upstream (`omniroute:ROADMAP.md:42-43`) | ship as B (ours, flag-off); A-shaped so it upstreams *when* the channel opens |
-| i18n burden | 68 locales, new-key CI gate demands translation in *every* locale (`omniroute:ci.yml:548`) | module ships with an `agents` namespace + `i18n:sync-ui`; upstream only at P5 |
+| i18n burden | 68 locales, new-key CI gate demands translation in *every* locale (`omniroute:ci.yml:548`) | module ships with `agents` + `projects` (D-043) namespaces + `i18n:sync-ui`; upstream only at P5 |
 | Conductor/canvas overlap | duplicate board next to existing Conductor panel (r1 §124) | P1 reuses the *existing* panel via the hub protocol; the module only adds the missing pieces (tree/kanban/cost/answer/steer) |
 | Hub-protocol drift | fleetd must match a protocol from a **closed-source external hub** (r3 open, r1 §146) | contract tests pinned to `hubProxy.ts` shapes; treat stability as an open operator question (§12) |
 | Node-agent security | per-host daemon with write scope on the operator's hosts | narrow `agents:write` key only, loopback/or edge-only reach, no transcript bodies out (§9) |
 | Claude CLI output drift | `claude agents --json` format changes break session polling | tolerate unknown fields, degrade to "unknown"; alert on parse failure |
 | `call_logs.run_id` gate | hot-table column add = migration + heal list + index, subject to feature gate | file it as the small fix-PR question (§12); cost can lag the board (P2 after P1) |
-| Privacy | transcripts / task text could leave the host | only counts + offsets + `task_head(≤120)` transit; §9 hard rule; no absolute user paths in any artifact |
+| Privacy | transcripts / task text could leave the host | only counts + offsets + `task_head(≤120)` transit; §9 hard rule; no absolute user paths in any artifact. Report bodies (D-043) are the one operator-requested exception: they are stored deliberately, gated behind management auth, and sandboxed (§9) |
+| **Agent-authored HTML (XSS)** (D-043) | an agent — careless, prompted by what it read, or compromised — publishes markup that runs against the operator's dashboard session, on the origin that holds `auth_token` and every scope (§7.2) | opaque-origin iframe (`sandbox="allow-scripts"`, never `allow-same-origin` / `allow-top-navigation` / `allow-popups` / `allow-forms`), strict CSP, no cookie/auth on the report response, separate origin where possible, server-side sanitizing for markdown (§9). A report can therefore *display*, not *act* |
+| **Import drift** (D-043) | `CHANGELOG.md`, `changelog.d/` fragments, `docs/decisions/` ADRs or the router's `QUESTIONS.md`/`DECISIONS.md` change shape (a heading, a `project:` field, a date format) and the §5.7 reader silently stops matching — a project page that looks complete but is stale is worse than an empty one | per-source parsers tested against synthetic fixtures, not the live repos (AGENTS.md §5); unknown fields tolerated, parse failures counted; a failed parse raises a visible console alert + an `events` row rather than rendering an empty tab; the repo stays the source of truth, so a re-import after a fix is idempotent |
 
 ## 12. Decisions taken + open questions (routing-00)
 
-`fleetspec-answers.md` records routing-00's answers. Written in the required question format with `answer: (x)` appended; a `Q: FLEETSPEC |` line with **no `answer:`** is a new open question needing the operator/router.
+`fleetspec-answers.md` records routing-00's answers. Written in the required question format with `answer: (x)` appended; a `Q: FLEETSPEC |` line with **no `answer:`** is a new open question needing the operator/router. The operator *additions* (A1–A5, D-042 "Context provenance", D-043 "Project pages") are direction, not questions, so they are not re-asked here — they are specified where they land (§4.3 memory envelope, §4.5 provenance, §4.6 state card, §5.7 + §8.10–8.11 project spaces). Three questions remain open below; the memory-envelope one closed on 2026-09-28.
 
 ```
 Q: FLEETSPEC | home for the console UI — upstream-shaped feature shipped flag-off in-image, or a separate app | options: (a) upstream-shaped OmniRoute feature shipped first as flag-off add-on in the autoos/omniroute image (b) separate app | default: (a) because one website, auth+cost already there, no second DB | blocks: P1–P5 UI shape | reversible: no | answer: (a)
@@ -565,13 +676,15 @@ Q: FLEETSPEC | kanban | options: (a) built-in (b) Vikunja | default: (a) because
 
 Q: FLEETSPEC | push channel for needs-you | options: (a) ntfy (b) web push | default: (a) because already in the router plan | blocks: P3 | reversible: yes | answer: (a)
 
-Q: FLEETSPEC | retention for agents | options: (a) archive done after 24h, keep 30d (b) other | default: (a) matches OmniRoute's 30d default | blocks: P0 policy | reversible: yes | answer: (a) — note A4 overrides: pack_blobs 90d, manifests/links forever
+Q: FLEETSPEC | retention for agents | options: (a) archive done after 24h, keep 30d (b) other | default: (a) matches OmniRoute's 30d default | blocks: P0 policy | reversible: yes | answer: (a) — note A4 overrides: pack_blobs 90d, manifests/links forever; and D-043 overrides for project history: projects/plan_phases/changelog_entries/decisions and every report version are kept (§4.7)
 
 Q: FLEETSPEC | open upstream contact before P1 | options: (a) after operator approves the spec (b) now | default: (a) because the public issue/discussion itself needs the operator's OK at that moment | blocks: P5 | reversible: yes | answer: (a)
 
 Q: FLEETSPEC | node-agent language | options: (a) Python (b) Node | default: (a) like the spawner; reuses autoos_context.py token math | blocks: P1 node agent | reversible: yes | answer: (a)
 
 Q: FLEETSPEC | knowledge-link entity ref | options: (a) stable id only (b) typed graph schema coupling | default: (a) because the shared memory graph is being redesigned by routing-00 — keep entity_ref opaque, no schema coupling | blocks: knowledge_links | reversible: yes | answer: (a)
+
+Q: FLEETSPEC | memory-event envelope agreement with L1-backlog | options: (a) adopt the shape proposed in 4.3 (b) L1-backlog proposes a different one | default: (a) because the console feed depends on the envelope, so the P4 feed was blocked on agreement | blocks: memory feed + hub-neighbourhood view | reversible: yes (append-only store, schema is versioned) | answer: (a) — DECIDED, agreed with L1-backlog 2026-09-28 (schema: 2). 4.3 is rewritten to exactly that shape: verbs created|updated|merged|superseded|redirected with no 'deleted' (a prune is a superseded tombstone, undoable), version_id + prev_version_id, gen on every write, separate memory.edge.<linked|unlinked> events, merged ids answered with a redirect and undone by an inverse split event, no body/secret in any event, per-subscriber cursor, health from the facade's memory_health(). Facade spec: docs/plans/2026-09-28-memory-facade-spec.md (L1-backlog). Nothing in the console is blocked on this any more.
 ```
 
 New open questions (not yet answered by routing-00):
@@ -580,8 +693,6 @@ New open questions (not yet answered by routing-00):
 Q: FLEETSPEC | is the OmniConductor hub protocol stable/public enough to implement against | options: (a) yes for P1, pin to hubProxy.ts shapes with contract tests (b) no, build a direct module now | default: (a) because the shapes are small, already zod-parsed per-field, and P1 is reversible; risk noted in section 11 (external, closed-source hub) | blocks: P1 fleetd SSE + /v1 contracts | reversible: yes
 
 Q: FLEETSPEC | ship call_logs.run_id as an upstream fix PR | options: (a) yes, file it as a field-addition fix (b) hold; join by sessionTag+time only | default: (a) because run-id-per-cost is G4 and the session_tag precedent (r1 §5) makes it a mechanical add; a call_logs column is a fix, not a feature, so it should pass the 3.8.x gate | blocks: P2 cost-per-run | reversible: yes
-
-Q: FLEETSPEC | memory-event envelope agreement with L1-backlog | options: (a) adopt the proposed shape in 4.2 (b) L1-backlog proposes a different one | default: (a) provisional — proposal sent 06:3xZ (inbox/L1-backlog.md); the console feed depends on the envelope, so block the feed (P4) on agreement | blocks: memory feed + hub-neighbourhood view | reversible: yes
 
 Q: FLEETSPEC | multi-container dnd-kit board on the pinned @dnd-kit version | options: (a) verify DndContext droppables work, then build (b) fall back to single-column lists | default: (a) because @dnd-kit/core ships droppable already (no new dep); r1 §6 could not verify it on the pinned set | blocks: P4 kanban UX | reversible: yes
 ```
