@@ -74,7 +74,8 @@ gets the rules its task touches inlined (source: briefs/common.md "Skill rules b
 agent", operator 2026-09-26T13:45Z).
 
 Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
-context cap), `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
+context cap), `python3 tools/autoos-agent.py ready` (review gate + pushed sha + inbox line),
+`python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
 full list of code-enforced rules.
 

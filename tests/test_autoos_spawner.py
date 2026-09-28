@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import shutil
@@ -6846,6 +6847,34 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertFalse(report["final"]["ok"])
         self.assertIn("sonnet", report["final"]["detail"].lower())
 
+    def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
+        # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
+        # model that is not the final checker — signed the lane off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                report = self.status("AutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY" % spelling)
+                self.assertFalse(report["ready"], report)
+                self.assertFalse(report["final"]["ok"])
+
+    def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
+        # The NAME, case-insensitive, or the vendor's full model id — not a
+        # substring of either.
+        for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                self.assertTrue(report["ready"], report)
+
+    def test_the_final_match_ignores_surrounding_space(self):
+        # A record written by hand can pad the value; padding is not a
+        # different model. Fed straight to _final_review because the line
+        # parser splits on whitespace and can never carry it.
+        for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
+            with self.subTest(reviewer=spelling):
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
+                self.assertTrue(self.agent._final_review([entry])["ok"])
+
     def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
         report = self.status(FINAL_LINE)
         self.assertFalse(report["ready"])
@@ -7008,6 +7037,292 @@ class ReviewStatusTests(unittest.TestCase):
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+
+class ReadyCommandTests(unittest.TestCase):
+    """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
+
+    Until now an orchestrator appended `ready <branch> <sha>` to autoos-L1-main's
+    inbox by hand, after recalling that the record had both reviews and that the
+    sha was pushed — and L1-main refused one that lacked reviews (inbox
+    00:31:52Z). `ready` makes the claim itself, and only when the two facts that
+    justify it hold: `review_status` says the record carries both reviews, and
+    `origin/<branch>` actually points at the sha.
+
+    Real temp git repos (a bare `origin` plus a clone, as the --isolate
+    containment tests use) and the real parser / main entry: this is a CLI
+    contract, so a test that called cmd_ready directly could pass a command nobody
+    can type.
+    """
+
+    BRANCH = "lane/work"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def make_inbox(self, content=None):
+        """An inbox file (or, for content=None, a path that does not exist yet)."""
+        path = os.path.join(tempfile.mkdtemp(), "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        if content is not None:
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        return path
+
+    def read_inbox(self, path):
+        if not os.path.exists(path):
+            return None
+        with io.open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def make_repo(self, push=True):
+        """A bare `origin` plus a clone with one commit on BRANCH.
+
+        Returns (repo_dir, sha). With push=False the branch exists only locally,
+        which is exactly the state `ready` must refuse as "not pushed".
+        """
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        origin = os.path.join(base, "origin.git")
+        repo = os.path.join(base, "work")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master"]
+        subprocess.run(git + ["init", "-q", "--bare", origin], check=True)
+        subprocess.run(git + ["clone", "-q", origin, repo], check=True,
+                       stderr=subprocess.DEVNULL)
+        with open(os.path.join(repo, "tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("lane work\n")
+        subprocess.run(git + ["-C", repo, "add", "tracked.txt"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "-m", "lane work"], check=True)
+        subprocess.run(git + ["-C", repo, "switch", "-q", "-c", self.BRANCH], check=True)
+        sha = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD"],
+                             check=True, capture_output=True,
+                             text=True).stdout.strip()
+        if push:
+            subprocess.run(git + ["-C", repo, "push", "-q", "origin",
+                                  "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        return repo, sha
+
+    def ready(self, record, repo, sha, inbox, extra=()):
+        """Run the real CLI. `repo=None` means let it default to the cwd."""
+        argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha, "--inbox", inbox]
+        if repo is not None:
+            argv += ["--repo", repo]
+        argv += ["--registry", self.registry_path, *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    READY_RECORD = (CROSS_FAMILY_LINE, FINAL_LINE)
+    NOT_PUSHED_SHA = "0" * 40
+
+    # --- the review gate ----------------------------------------------------
+
+    def test_an_unreviewed_record_is_refused_and_nothing_is_appended(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(
+            self.write_record("# Lane x", "STATUS: DONE. Gate green, shipped it."),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertIn("ready: no", out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_same_family_reviewer_is_refused(self):
+        # The case the inbox refused at 00:31:52Z: a record that LOOKS reviewed.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(
+            self.write_record(
+                "AutoOS-Review: kind=cross-family author=muse-contrib "
+                "reviewer=omniroute/muse verdict=PASS", FINAL_LINE),
+            repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("same family", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_final_reviewer_that_only_contains_sonnet_is_refused(self):
+        # REVGATE2 (HIGH): the substring match let "notsonnet" carry the final
+        # sign-off, so `ready` appended the line for a lane nobody signed off.
+        for spelling in ("notsonnet", "sonnet-ish", "mysonnet2"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 1)
+                self.assertIn("not sonnet", out)
+                self.assertEqual(self.read_inbox(inbox),
+                                 "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_a_final_reviewer_naming_sonnet_appends_the_line(self):
+        for spelling in ("Sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
+            with self.subTest(reviewer=spelling):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(
+                    self.write_record(CROSS_FAMILY_LINE,
+                                      "AutoOS-Review: kind=final reviewer=%s "
+                                      "verdict=READY" % spelling),
+                    repo, sha, inbox)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_the_review_gate_is_checked_before_the_sha(self):
+        # A record that never got its review is not "unpushed work waiting on a
+        # push": the caller has to know WHICH gate it hit, so the review report
+        # prints and the sha is never reached.
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _err = self.ready(
+            self.write_record("STATUS: DONE."), repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("kind=cross-family", out)
+        self.assertNotIn("not pushed", out)
+
+    # --- the pushed-sha gate ------------------------------------------------
+
+    def test_a_sha_that_is_not_the_tip_of_origin_is_refused(self):
+        repo, _sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD),
+                                repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_branch_absent_from_origin_is_refused_as_not_pushed(self):
+        repo, sha = self.make_repo(push=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1)
+        self.assertIn("not pushed", out)
+        self.assertIn(self.BRANCH, out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_git_failure_exits_2_not_1(self):
+        # rc 1 means "go do the work"; rc 2 means "the gate could not run". A repo
+        # with no `origin` remote is the second, and a caller that waits on 1 must
+        # not wait forever on a misconfigured checkout.
+        bad_repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bad_repo, True)
+        subprocess.run(["git", "-c", "init.defaultBranch=master", "init", "-q", bad_repo],
+                       check=True)
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                   bad_repo, self.NOT_PUSHED_SHA, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("origin", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    # --- the append ---------------------------------------------------------
+
+    def test_a_ready_lane_appends_exactly_one_line_to_the_inbox(self):
+        repo, sha = self.make_repo()
+        # No trailing newline on the existing line: an append must not join it to
+        # ours, and must not rewrite it either.
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 2, text)
+        self.assertEqual(lines[0], "2026-09-28T00:00:00Z handoff lane")
+        match = re.match(
+            r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) ready %s %s reviews: "
+            r"(.+) \| (.+)$" % (re.escape(self.BRANCH), sha), lines[1])
+        self.assertIsNotNone(match, lines[1])
+        self.assertEqual(match.group(2), "qwen3.8-flash reviewed by omniroute/muse (meta)")
+        self.assertEqual(match.group(3), "sonnet verdict READY")
+        self.assertIn(lines[1], out)
+
+    def test_a_ready_lane_creates_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        self.assertEqual(len(text.splitlines()), 1, text)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), text)
+
+    def test_the_repo_defaults_to_the_cwd(self):
+        # The orchestrator runs from its own lane checkout; --repo is the
+        # exception, not the rule.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, old_cwd)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), None, sha, inbox)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    def test_dry_run_prints_the_line_and_appends_nothing(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("2026-09-28T00:00:00Z handoff lane\n")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" ready %s %s reviews: " % (self.BRANCH, sha), out)
+        self.assertEqual(self.read_inbox(inbox), "2026-09-28T00:00:00Z handoff lane\n")
+
+    def test_dry_run_does_not_create_a_missing_inbox(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox(None)
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.read_inbox(inbox))
+
+    def test_an_unwritable_inbox_exits_2_not_1(self):
+        # A typo'd inbox is not a lane awaiting its review either.
+        repo, sha = self.make_repo()
+        inbox = os.path.join(tempfile.mkdtemp(), "no-such-dir", "L1.md")
+        self.addCleanup(shutil.rmtree, os.path.dirname(inbox), True)
+        rc, _out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("L1.md", err)
+
+    # --- the record ---------------------------------------------------------
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, _out, err = self.ready(
+            os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"),
+            repo, sha, inbox)
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_stdin_record_is_accepted_like_review_status(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        old_stdin = sys.stdin
+        sys.stdin = io.StringIO("\n".join(self.READY_RECORD) + "\n")
+        try:
+            rc, out, _ = self.ready("-", repo, sha, inbox)
+        finally:
+            sys.stdin = old_stdin
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
 
 def _reviewer_client_state():
