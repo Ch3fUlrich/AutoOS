@@ -3589,6 +3589,33 @@ class ClientExit(int):
         return obj
 
 
+class ClientMissing(Exception):
+    """A planned client's argv[0] resolves to nothing on PATH (WINSHIM)."""
+
+
+def resolve_client_executable(cmd: list) -> list:
+    """argv with argv[0] resolved by shutil.which - the one place a client name
+    becomes the file Popen starts, for every client.
+
+    WINSHIM: on Windows a client installed as a .cmd/.ps1 shim is on PATH but
+    CreateProcess only appends `.exe`, so Popen of the bare name raised
+    FileNotFoundError [WinError 2] after the spawner's own which() pre-check had
+    reported it installed. which() finds the shim, and a full-path .cmd/.bat is
+    started through cmd.exe. shell=True is not the answer: it would put argv
+    quoting and an injection surface on every spawn. On POSIX which() returns
+    what execvp would have resolved, so the child is unchanged.
+    """
+    exe = shutil.which(cmd[0])
+    if exe is None:
+        raise ClientMissing(
+            "%s is not installed: nothing named it on PATH. Install it "
+            "(catalog: ./setup.sh --only <id> -y; on Windows the shim's directory "
+            "must be on PATH), see: list" % cmd[0])
+    cmd = list(cmd)
+    cmd[0] = exe
+    return cmd
+
+
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
@@ -3615,6 +3642,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
     register_secret_env(env)
+    cmd = resolve_client_executable(cmd)  # WINSHIM: Popen starts the resolved file
     pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
@@ -4358,8 +4386,11 @@ def cmd_run(args, cfg: dict) -> int:
         attempt_start = time.time()
         run_rc = None
         try:
-            run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                                capture=capture)
+            try:
+                run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
+                                    capture=capture)
+            except ClientMissing as exc:  # vanished between the pre-check and the spawn
+                return refuse(str(exc), 3)
         finally:
             if worker_id is not None:
                 try:

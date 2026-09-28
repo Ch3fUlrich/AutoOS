@@ -9917,5 +9917,78 @@ class PsTreeTests(_WorkerRecordBase):
                          "one of the cycle is entered as a root, the other hangs under it")
 
 
+class ClientExecutableResolutionTests(unittest.TestCase):
+    """WINSHIM: run_client must start what shutil.which resolves, not the bare name.
+
+    A Windows client installed as a .cmd/.ps1 shim is on PATH but CreateProcess
+    only appends `.exe`, so Popen of the bare name raises FileNotFoundError
+    [WinError 2] while the spawner's own which() pre-check said "installed".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_run_client_hands_popen_the_resolved_cmd_shim_path(self):
+        with mock.patch.object(self.agent.shutil, "which",
+                               return_value=r"C:\x\opencode.cmd"), \
+                mock.patch.object(self.agent.subprocess, "Popen") as popen, \
+                mock.patch.object(self.agent, "_terminate_group"):
+            popen.return_value.wait.return_value = 0
+            popen.return_value.pid = 4242
+            rc = self.agent.run_client(["opencode", "run", "the task"], ".",
+                                       dict(os.environ))
+        self.assertEqual(int(rc), 0)
+        argv = popen.call_args[0][0]
+        self.assertEqual(argv[0], r"C:\x\opencode.cmd",
+                         "the resolved full path is what Popen must start")
+        self.assertEqual(argv[1:], ["run", "the task"], "the rest of argv is untouched")
+
+    def test_an_unresolvable_client_names_the_client_and_the_path(self):
+        with mock.patch.object(self.agent.shutil, "which", return_value=None), \
+                mock.patch.object(self.agent.subprocess, "Popen") as popen:
+            with self.assertRaises(self.agent.ClientMissing) as caught:
+                self.agent.run_client(["opencode", "run", "t"], ".", dict(os.environ))
+        popen.assert_not_called()
+        msg = str(caught.exception)
+        self.assertIn("opencode", msg)
+        self.assertIn("PATH", msg)
+
+    def test_on_posix_the_resolved_path_is_used_and_the_child_runs(self):
+        # A real child through a PATH shim: argv[0] must be the resolved file,
+        # and the run must still work (no behaviour change for a resolvable client).
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        # On POSIX which() takes the exact name (no PATHEXT); the .cmd shape of
+        # the Windows bug is covered by the mocked test above.
+        shim = os.path.join(d, "opencode")
+        with open(shim, "w") as fh:
+            fh.write("#!/bin/sh\necho shim-ran\nexit 0\n")
+        os.chmod(shim, 0o755)
+        real = subprocess.Popen
+        seen = {}
+
+        def spy(argv, *a, **kw):
+            seen["argv"] = list(argv)
+            return real(argv, *a, **kw)
+
+        with mock.patch.dict(os.environ,
+                             {"PATH": d + os.pathsep + os.environ.get("PATH", "")}), \
+                mock.patch.object(self.agent.subprocess, "Popen", side_effect=spy), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = self.agent.run_client(["opencode", "run", "t"], d, dict(os.environ),
+                                       capture=True)
+        self.assertEqual(seen["argv"][0], shim, seen["argv"])
+        self.assertEqual(int(rc), 0, rc.tail)
+        self.assertIn("shim-ran", rc.tail)
+
+    def test_an_absolute_argv_is_still_started_as_is(self):
+        code = "raise SystemExit(0)\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = self.agent.run_client([sys.executable, "-c", code], tmp,
+                                       dict(os.environ))
+        self.assertEqual(int(rc), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
