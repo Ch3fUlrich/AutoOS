@@ -76,7 +76,15 @@ code from state the session keeps small at every wave. Then the context cap drop
   `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and `PAUSE: → main …` are all
   orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
   wide list costs a spurious order at worst, and `hold on: → main merged` is one).
-  Elsewhere in the line a marker is
+  **An acknowledgement then exempts only an order word its own record closes — one
+  more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`, `over`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`,
+  `done`, `cleared`, `resolved`), which must follow the order word within 3 words, so
+  `→ done: PAUSE lifted` reports a stop that ended while `→ done: applied the fix. PAUSE
+  all lanes until further notice` is a fresh order (R2a5, the Sonnet review of R2a4:
+  gating the record whole on the marker lost that order), and `lesson:` is the one
+  marker that exempts a whole record because a lesson reports on the code, never to the
+  run.** Elsewhere in the line a marker is
   vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say so` is still an
   order (R2a review, MEDIUM). §1 and §3 cite that one list.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that

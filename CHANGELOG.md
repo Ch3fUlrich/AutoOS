@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — an acknowledgement exempts only the order word it closes, so an order after an ack is still an order (RESTART R2a5, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a4, HIGH, safety):
+  `pause_state` gated the PAUSE scan on `not _acknowledgement(text)` for the **whole
+  record**, so one acknowledgement at the head swallowed every order word that came
+  after it in the same line —
+  `2026-09-28T10:00:00Z → done: applied R2a4 fix. PAUSE all lanes until further notice`
+  reported `active: False`, a hard stop that held nothing — and `parse_inbox_line`'s
+  docstring claimed the reply was still scanned for PAUSE when it was not. An
+  acknowledgement now absorbs an order word **only where a closing word follows it
+  within 3 words**: the new `CLOSING_WORDS` list (`lifted`, `ended`, `over`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`,
+  `done`, `cleared`, `resolved`) sits beside `ACK_MARKERS` and `ORDER_WORDS` as §0's
+  third one-list rule, matched case-insensitively and as a whole word after trimming
+  the punctuation a writer sticks beside it (`PAUSE, lifted`). So `→ done: PAUSE
+  lifted` and `→ main: PAUSE acknowledged` stay reports, while `→ main: merged. STOP
+  all lanes` and `→ done: 12:00 noted; PAUSE all merges now` are fresh orders; the
+  gate is `_gives_order`, which keeps the R2a4 reading of an unmarked record (any
+  `ORDER_WORDS` word is an order). `lesson:` is the one marker that exempts a whole
+  record — a lesson reports on the code and never addresses the run, a rule that
+  predates this lane and is now pinned by a test. Same asymmetry as R2a4: an order
+  word whose closing word sits past the 3-word window is a **spurious** order (one
+  wasted heartbeat, then a RESUME), never a lost one.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1954 records**, 832 of them acknowledgements): pause-order records
+  **4 before and 4 after**, **0 records changed classification**, and `pause_state`
+  identical on all 7 files — the three active files' winning texts exactly 80 chars,
+  truncated as specified. The corpus had no ack record that both quoted a PAUSE and
+  left an order word unclosed, which is why every earlier lane shipped green over it
+  (AGENTS.md §5: the fixtures carry the case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `CLOSING_WORDS` list and the 3-word window in one sentence; `docs/routing.md` cites
+  the same window instead of the whole-record exemption; the `ACK_MARKERS`,
+  `parse_inbox_line` and `pause_state` docstrings say what the filter now does.
+- **Tests** (red before the code: 7 failed, 54 passed in `PauseStateTests` against
+  `git show HEAD:` of the module — the reproduced defect failing on the assertion,
+  `False is not true : {'active': False, …}`): the Sonnet line → order, the four
+  closed shapes → report, `→ done: 12:00 noted; PAUSE all merges now` → order,
+  `lesson: PAUSE handling was wrong` → report, `→ main: merged. STOP all lanes` →
+  order, the window itself (`PAUSE was lifted by the operator` closed, `PAUSE is still
+  holding every lane, and was not lifted` an order), and the §0 one-home guard that
+  `_CLOSING_WORD_RE` is built from `CLOSING_WORDS` and that every
+  `NEVER_ORDER_MARKERS` entry is a real marker. Six pre-existing marker fixtures that
+  had relied on the whole-record exemption (`→ done: PAUSE handled`,
+  `→ operator: PAUSE needs your call`, …) now write a closed order word, so each still
+  tests the marker it names.
+  `tests/test_autoos_heartbeat.py` 79 → 86; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 210 passed.
+
 ### Fixed — a speaker prefix never names an order word, so a PAUSE clause is never the speaker (RESTART R2a4, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Muse review of R2a3, HIGH, safety): the

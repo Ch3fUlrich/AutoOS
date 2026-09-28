@@ -97,7 +97,7 @@ class PauseStateTests(unittest.TestCase):
     def test_lesson_and_done_lines_that_quote_pause_are_not_a_pause(self):
         write_inbox(self.inbox,
                     "2026-09-26T14:00:00Z lesson: two PAUSE lines were ignored",
-                    "2026-09-26T14:01:00Z → done: PAUSE handled")
+                    "2026-09-26T14:01:00Z → done: PAUSE lifted")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     # RESTART spec §0: the acknowledgement markers are one list, hb.ACK_MARKERS
@@ -106,26 +106,26 @@ class PauseStateTests(unittest.TestCase):
     # marker in use.
 
     def test_marker_done_is_not_a_pause_order(self):
-        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → done: PAUSE handled")
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → done: PAUSE lifted")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_ack_is_not_a_pause_order(self):
-        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE seen, stopping")
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE noted")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_relaunched_is_not_a_pause_order(self):
         write_inbox(self.inbox,
-                    "2026-09-26T14:01:00Z L1: → relaunched: the session the PAUSE stopped")
+                    "2026-09-26T14:01:00Z L1: → relaunched: the session the PAUSE ended")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_operator_is_not_a_pause_order(self):
         write_inbox(self.inbox,
-                    "2026-09-26T14:01:00Z L1: → operator: PAUSE needs your call")
+                    "2026-09-26T14:01:00Z L1: → operator: PAUSE acknowledged, needs your call")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_marker_main_is_not_a_pause_order(self):
         write_inbox(self.inbox,
-                    "2026-09-26T14:01:00Z L1: → main: merged before the PAUSE landed")
+                    "2026-09-26T14:01:00Z L1: → main: merged before the PAUSE was lifted")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_a_plain_pause_with_no_marker_is_still_an_order(self):
@@ -395,6 +395,67 @@ class PauseStateTests(unittest.TestCase):
             self.assertIsNotNone(hb._ORDER_WORD_RE.search(word), word)
             self.assertIsNotNone(hb._ORDER_WORD_RE.search(word.lower()), word)
             self.assertIsNone(hb._ORDER_WORD_RE.search(word + "D"), word)
+    # R2a5 (the Sonnet review of R2a4, HIGH, safety): `pause_state` gated the PAUSE
+    # scan on `not _acknowledgement(text)` for the *whole record*, so an acknowledgement
+    # at the head swallowed a new order written later in the same line —
+    # `→ done: applied R2a4 fix. PAUSE all lanes until further notice` reported
+    # `active: False`. An acknowledgement now exempts an order word only while a
+    # closing word follows that word within 3 words (`→ done: PAUSE lifted`,
+    # `→ main: PAUSE acknowledged`); any other order word in the record is a fresh
+    # order. The asymmetry is the same as R2a4's: a lost order is unacceptable, a
+    # spurious one costs one heartbeat and a RESUME.
+
+    def test_an_order_after_an_acknowledgement_is_still_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z → done: applied R2a4 fix. "
+                    "PAUSE all lanes until further notice")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertIn("PAUSE all lanes", state["text"])
+
+    def test_a_closed_order_word_in_an_acknowledgement_is_not_an_order(self):
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged",
+                     "L1-main: → done: PAUSE was cleared at 12:00",
+                     "from L0 (operator): → ack: PAUSE over"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_acknowledgement_that_closes_one_pause_and_gives_another(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z → done: 12:00 noted; PAUSE all merges now")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_lesson_record_is_never_an_order_whatever_it_quotes(self):
+        # The one marker that exempts the whole record: a `lesson:` line reports on
+        # the code, it never addresses the run (the rule predates R2a5; kept).
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z lesson: PAUSE handling was wrong")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+        self.assertFalse(hb._gives_order("lesson: PAUSE handling was wrong"))
+
+    def test_a_stop_after_an_acknowledgement_is_an_order(self):
+        text = "→ main: merged. STOP all lanes"
+        self.assertTrue(hb._acknowledgement(text), text)
+        self.assertTrue(hb._gives_order(text), text)
+
+    def test_the_closing_word_must_follow_within_three_words(self):
+        self.assertFalse(hb._gives_order("→ done: PAUSE was lifted by the operator"))
+        self.assertFalse(hb._gives_order("→ done: PAUSE, cancelled"))
+        self.assertTrue(hb._gives_order("→ done: PAUSE is still holding every lane, "
+                                        "and was not lifted"))
+
+    def test_closing_words_are_the_one_list_the_exempt_check_uses(self):
+        # §0: one home beside ACK_MARKERS and ORDER_WORDS — the check is built from
+        # the list, never restated, and a closing word is a whole word.
+        self.assertIn("|".join(hb.CLOSING_WORDS), hb._CLOSING_WORD_RE.pattern)
+        for word in hb.CLOSING_WORDS:
+            self.assertIsNotNone(hb._CLOSING_WORD_RE.fullmatch(word), word)
+            self.assertIsNone(hb._CLOSING_WORD_RE.fullmatch(word + "NESS"), word)
+        for marker in hb.NEVER_ORDER_MARKERS:
+            self.assertIn(marker, hb.ACK_MARKERS, marker)
+
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a
         # continuation) is never scanned for an order, marker or no marker.

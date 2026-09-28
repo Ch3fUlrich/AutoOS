@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime
 import io
 import re
+import string
 import subprocess
 
 # Case-sensitive, whole word: operator lines write "PAUSE"/"RESUME" in caps
@@ -32,10 +33,11 @@ _RESUME_RE = re.compile(r"\bRESUME\b")
 # The acknowledgement markers: RESTART spec §0 names this list its one home, so
 # §1's `card: stale` check (lane R2b) and §3's pack cite it rather than
 # restating it. A line carrying one of these at its head reports on something
-# the session already did, so it is never an order to pause: `pause_state`
-# filters these out of the PAUSE scan. The list held only `lesson:` and `→ done`
-# until lane R2a added the other markers in use — a `→ main` reply quoting a
-# PAUSE read as a fresh stop.
+# the session already did, so it absorbs an order word the record itself closes
+# (see `CLOSING_WORDS`) — it is not a blanket exemption, and `pause_state` keeps
+# every order word the record leaves unclosed. The list held only `lesson:` and
+# `→ done` until lane R2a added the other markers in use — a `→ main` reply
+# quoting a PAUSE read as a fresh stop.
 ACK_MARKERS = ("lesson:", "→ done", "→ ack", "→ relaunched", "→ operator", "→ main")
 # the same markers, head-anchored *with a boundary*: mid-sentence a marker is
 # only vocabulary, and a marker that is merely the prefix of a longer word
@@ -56,6 +58,30 @@ _MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)(?=[:\s]|$)"
 # ruling one costs a lane running against an operator's stop.
 ORDER_WORDS = ("PAUSE", "RESUME", "STOP", "HOLD", "FREEZE", "HALT", "ABORT")
 _ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE)
+# The closing words (RESTART spec §0) — one list beside the two above, and the only
+# thing that lets an acknowledgement absorb an order word. An ack record reports on
+# what already happened, so a word from this list within `_CLOSING_WINDOW` words of
+# the order word says that order ended: `→ done: PAUSE lifted`,
+# `→ main: PAUSE acknowledged`. Anything else after the order word is a *new* order
+# wearing an ack's head — `→ done: applied R2a4 fix. PAUSE all lanes until further
+# notice` — and a lost order is the one unacceptable outcome here (R2a5, the Sonnet
+# review of R2a4: gating the whole record on the ack swallowed exactly that).
+# Case-insensitive like ORDER_WORDS, but bounded: the exemption is narrow, the order
+# is what survives.
+CLOSING_WORDS = ("lifted", "ended", "over", "cancelled", "canceled", "removed",
+                 "released", "acknowledged", "acked", "noted", "done", "cleared",
+                 "resolved")
+_CLOSING_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(CLOSING_WORDS), re.IGNORECASE)
+# How many words may stand between the order word and its closing word — enough to
+# cover the shapes the writers use ("PAUSE was cleared at 12:00"), no further.
+_CLOSING_WINDOW = 3
+# …and the one marker that exempts a whole record instead of a single order word: a
+# `lesson:` line reports on the code, it never addresses the run, so whatever order
+# word it quotes it is not an order.
+NEVER_ORDER_MARKERS = ("lesson:",)
+# Punctuation an inbox writer sticks beside a word (`PAUSE, lifted`): a closing word
+# is matched as a whole word, so each candidate is trimmed before the match.
+_WORD_TRIM = string.punctuation + "→…“”–—"
 # The speaker prefix an inbox writer puts in front of its own line, at most one
 # per record. The shapes are what the real inboxes actually contain
 # (logs/handoff-sessions/20260925/inbox, read-only survey): `→ done:` 579 times,
@@ -114,18 +140,69 @@ def _speaker_prefix(text: str) -> int | None:
     return match.end()
 
 
+def _ack_marker(text: str) -> str | None:
+    """The acknowledgement marker `text` opens with, or None when it opens with
+    nothing of the kind.
+
+    At the head of the body (after any `_HEAD_JUNK`), or at the head after one
+    `_speaker_prefix`. Anywhere else a marker is only vocabulary.
+    """
+    body = text.lstrip(_HEAD_JUNK)
+    match = _MARKER_AT_HEAD_RE.match(body)
+    if match is not None:
+        return match.group()
+    at = _speaker_prefix(body)
+    if at is None:
+        return None
+    match = _MARKER_AT_HEAD_RE.match(body[at:])
+    return match.group() if match is not None else None
+
+
 def _acknowledgement(text: str) -> bool:
     """True when `text` (a record body, timestamp already removed) opens with an
     acknowledgement marker — at its head (after any `_HEAD_JUNK`), or at the head
     after one `_speaker_prefix`. Anywhere else in the line a marker is
     only vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say
     so` is an order that happens to name `→ main` (R2a review, MEDIUM).
+
+    An acknowledgement does not exempt the record's order words wholesale — that was
+    the R2a5 bug. See `_gives_order` for what a marked record still orders.
     """
-    text = text.lstrip(_HEAD_JUNK)
-    if _MARKER_AT_HEAD_RE.match(text):
-        return True
-    at = _speaker_prefix(text)
-    return bool(at and _MARKER_AT_HEAD_RE.match(text[at:]))
+    return _ack_marker(text) is not None
+
+
+def _order_word_is_closed(text: str, at: int) -> bool:
+    """True when a `CLOSING_WORDS` word stands within `_CLOSING_WINDOW` words of the
+    order word that ends at `at` — `PAUSE lifted`, `PAUSE was cleared at 12:00`,
+    `PAUSE, cancelled`.
+    """
+    for word in text[at:].split()[:_CLOSING_WINDOW]:
+        if _CLOSING_WORD_RE.fullmatch(word.strip(_WORD_TRIM)):
+            return True
+    return False
+
+
+def _gives_order(text: str) -> bool:
+    """True when the record body `text` gives an order rather than reporting one.
+
+    A record with no acknowledgement marker at its head gives one wherever an
+    `ORDER_WORDS` word appears — the wide reading of R2a4: an order that wears its
+    own first clause as a speaker is still an order. A marked record exempts an
+    order word **only** where a closing word follows it within `_CLOSING_WINDOW`
+    words, so `→ done: PAUSE lifted` reports a stop that ended while
+    `→ done: applied R2a4 fix. PAUSE all lanes until further notice` gives a fresh
+    one (R2a5, the Sonnet review of R2a4: gating the whole record on the marker lost
+    that order, and a lost order is the one unacceptable outcome here). The one
+    marker in `NEVER_ORDER_MARKERS` (`lesson:`) exempts the whole record — a lesson
+    reports on the code and never addresses the run.
+    """
+    marker = _ack_marker(text)
+    if marker is not None:
+        if marker in NEVER_ORDER_MARKERS:
+            return False
+        return any(not _order_word_is_closed(text, match.end())
+                   for match in _ORDER_WORD_RE.finditer(text))
+    return _ORDER_WORD_RE.search(text) is not None
 
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
@@ -166,9 +243,9 @@ def parse_inbox_line(line: str):
     token is not a parseable ISO-8601 timestamp.
 
     A reply line (one that opens with an `ACK_MARKERS` marker, the shape
-    `_acknowledgement` recognises) is parsed exactly the same way - it is still
-    scanned for PAUSE/RESUME below, since an operator may write either word
-    inside a reply.
+    `_acknowledgement` recognises) is parsed exactly the same way — it is still
+    scanned for PAUSE/RESUME below, because an acknowledgement absorbs only the
+    order words the record closes (see `_gives_order`), never the record whole.
     """
     line = line.lstrip(_HEAD_JUNK).rstrip("\n").rstrip("\r")
     if not line.strip():
@@ -211,13 +288,21 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     PAUSE is active when the newest line whose text contains the word PAUSE
     is newer than the newest line containing the word RESUME, or there is no
     RESUME line at all. A line older than `since` (the session start, see
-    session_start()) and an acknowledgement line — one that opens with an
-    `ACK_MARKERS` marker, at the head of its body or at the head after one
-    `_speaker_prefix` (see `_acknowledgement`) — never counts as a PAUSE: the
-    relaunch after a pause is its resume. A prefix that names an `ORDER_WORD` is no
-    prefix at all, so `PAUSE all lanes: → main is held` is the order it reads like
-    (R2a4). Elsewhere in the line a marker is vocabulary, not an acknowledgement.
-    Lines are ordered by their own parsed timestamp, not file order, so an
+    session_start()) never counts — the relaunch after a pause is its resume. A
+    PAUSE is skipped only where the record closes it: an acknowledgement — a body
+    that opens with an `ACK_MARKERS` marker, at the head or at the head after one
+    `_speaker_prefix` (see `_acknowledgement`) — exempts that order word only when
+    a `CLOSING_WORDS` word follows it within `_CLOSING_WINDOW` words, so
+    `→ done: PAUSE lifted` and `→ main: PAUSE acknowledged` report a stop that
+    ended, while `→ done: applied the fix. PAUSE all lanes until further notice`
+    gives a fresh order and wins (R2a5, the Sonnet review of R2a4: gating the whole
+    record on the marker lost that order, and a lost order is the one unacceptable
+    outcome; see `_gives_order`). A `lesson:` record (`NEVER_ORDER_MARKERS`) is
+    never an order at all: it reports on the code. A prefix that names an
+    `ORDER_WORD` is no prefix at all, so `PAUSE all lanes: → main is held` is the
+    order it reads like (R2a4). Elsewhere in the line a marker is vocabulary, not an
+    acknowledgement. Lines are ordered by their own parsed timestamp, not file
+    order, so an
     inbox is read correctly even if a line was appended
     out of order. A missing/unreadable inbox, or one with no PAUSE line
     (win or lose to a RESUME), is `{"active": False, "at": None, "text":
@@ -242,7 +327,7 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
             newest_resume = when
         if since is not None and when < since:
             continue
-        if (_PAUSE_RE.search(text) and not _acknowledgement(text)
+        if (_PAUSE_RE.search(text) and _gives_order(text)
                 and (newest_pause is None or when > newest_pause[0])):
             newest_pause = (when, text)
     if newest_pause is None:

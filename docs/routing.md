@@ -113,7 +113,14 @@ names a marker mid-sentence still stops the run. A prefix may also never name on
 spec §0's other one-list rule, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUME`,
 `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
 is held` is an order wearing its own first clause as a speaker, not an acknowledgement
-(R2a4).
+(R2a4). An acknowledgement then exempts only an order word its own record closes: a word
+from §0's third list, `autoos_heartbeat.CLOSING_WORDS` (`lifted`, `ended`, `over`,
+`cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`, `done`,
+`cleared`, `resolved`), must follow that order word within 3 words, so `→ done: PAUSE
+lifted` reports a stop that ended while `→ done: applied the fix. PAUSE all lanes until
+further notice` is a fresh order (R2a5, the Sonnet review of R2a4) — and `lesson:` is the
+one marker that exempts a whole record, because a lesson reports on the code and never
+addresses the run.
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
