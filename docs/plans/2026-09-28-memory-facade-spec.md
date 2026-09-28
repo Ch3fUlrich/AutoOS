@@ -257,28 +257,34 @@ completes | options: (a) Omnigraph as one graph (b) console-DB graph (c) no
 facade writes until the bake-off decides | default: (a) because the engine
 exists today and the facade isolates callers from the choice | blocks: P1
 engine wiring | reversible: yes (facade-first means the engine is
-swappable).
+swappable). Decided: (a), routing-00 (D-067, 2026-09-28).
 
 Q: how long superseded versions are kept before physical cleanup | options:
 (a) kept forever (b) pruned after N days | default: (a) because D-042 keeps
 decision links forever and the event schema has no `deleted` verb | blocks:
 storage sizing | reversible: no (deletion is irreversible).
+Decided: (a), routing-00 (D-067, 2026-09-28).
 
 Q: who reviews the curator's undo log | options: (a) log-only, undo on
 demand (b) operator spot-checks weekly (c) any agent can flag a bad merge |
 default: (a) because every merge is an undoable event (§5), so review can be
 lazy | blocks: nothing | reversible: yes.
+Decided: (a), routing-00 (D-067, 2026-09-28).
 
 Q: whether `global` visibility events cross project boundaries by default |
 options: (a) yes, `global` means every project feed (b) opt-in per project |
 default: (a) because that is what the visibility flag says, and events carry
 titles only (no bodies, no persons — §5), so the exposure is small | blocks:
 feed subscription semantics | reversible: yes.
+Decided: (a), routing-00 (D-067, 2026-09-28).
 
 Q: health bounds that fail a phase gate (duplicate rate, orphan share) |
 options: (a) operator sets numbers at P3 entry (b) fixed in this spec now |
 default: (a) because only the bake-off + R1 rung produce real numbers to set
 them from | blocks: P3/P4 exit criteria | reversible: yes.
+Decided: (a), routing-00 (D-067, 2026-09-28).
+
+**Build-approval timing (Q-016, tracked separately by routing-00, not part of this spec's own §13 list):** whether to start P1 (facade skeleton) + P2 (bake-off) now versus waiting for a fuller operator review is Q-016, owned by the operator via routing-00. Default if unanswered: start P1 + P2 now, P3 migration and P4 later once the bake-off has real numbers — auto-accepts 2026-09-28T23:30Z if the operator has not answered (reversible: no real graph is touched by P1/P2). This spec does not depend on Q-016's outcome — §11's phases already sequence P1/P2 before P3/P4.
 
 ## 14. Open follow-ups / non-goals
 
