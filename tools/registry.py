@@ -196,7 +196,11 @@ COMMENT_KEYS = ("$comment", "comment")
 # unavailable_until's whole job is to hold a date (rule 7 checks the value
 # parses); version is a date by definition. Neither is a rule-5 violation.
 # monthly_cap_source is a source like any other: who set the cap, and when.
-DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source")
+DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source",
+                    # the schema's price_source asks for a DATED attribution by
+                    # name ("gateway /v1/models 2026-09-28"); rule 5 must not
+                    # fight rule-for-field honesty (SB-C2 item 4)
+                    "price_source")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"

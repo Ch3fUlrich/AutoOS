@@ -112,6 +112,34 @@ def list_rules(files, topic=None):
             out_lines.append(line)
     return out_lines
 
+# R-worker-11 (D-146, SB-C item 2; tightened by SB-C2 item 2): who is asking
+# for a transcript summary. The harness that compacts a session asks in plain
+# prose and carries no origin; a genuine cross-session message arrives wrapped
+# in a leading `<cross-session-message ... from=...>` tag. So `from=` counts
+# ONLY as an attribute of that leading wrapper tag: a `from=` in quoted text,
+# a code span or the body is text the summarise-ask talks ABOUT, not an
+# origin, and a classifier that scans the whole string lets a compaction
+# request be dressed up as a peer by embedding the marker in its body.
+# Documented residual (SB-C2, stated not fixed): a real peer message that
+# arrives WITHOUT the wrapper (a bare `from=` inbox line) classifies as
+# harness-compaction — the wrapper is the unforgeable-by-quote half, so the
+# safe miss is the comply side, which is why this direction is acceptable.
+PEER_ORIGIN = re.compile(r"^\s*<cross-session-message\b[^>]*\bfrom\s*=",
+                         re.IGNORECASE)
+
+HARNESS_COMPACTION = "harness-compaction"
+PEER = "peer"
+
+
+def classify_origin(text: str) -> str:
+    """`peer` when `text` STARTS with a `<cross-session-message ... from=...>`
+    wrapper tag, else `harness-compaction`. Only a `from=` attribute on that
+    leading tag decides: a summary request whose body merely quotes `from=`
+    is your own harness compacting you (R-worker-11), and a peer message
+    without the wrapper is the documented residual — it reads as compaction."""
+    return PEER if PEER_ORIGIN.search(text or "") else HARNESS_COMPACTION
+
+
 def main():
     parser = argparse.ArgumentParser(prog="skill-rules")
     subparsers = parser.add_subparsers(dest="cmd", required=True)

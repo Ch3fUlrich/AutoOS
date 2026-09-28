@@ -1369,6 +1369,19 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
         if route is None:
             if _native_model_name(source):
                 return _leg_is_claude(model, registry)
+            # SB-C2 item 4: a bare NAME that is no route can still be a model
+            # the registry prices — `deepseek-flash` is the bulk paid leg under
+            # DSGUARD's $25 cap, and its row (and every alias row of the same
+            # family spelling) carries the same price the spend guard bills.
+            # The refusal was right for a string the registry knows nothing
+            # about; it was wrong for one it has a priced row for. An
+            # anthropic-family row answers Claude whatever its name says.
+            row = (registry.get("models") or {}).get(combo)
+            if isinstance(row, dict):
+                if (row.get("family") or "").lower() in ("anthropic", "claude"):
+                    return True
+                if resolver.credit_leg_priced(combo, registry):
+                    return False
             return None
         # A combo route is what the gateway resolves; it falls through past a
         # rate-limited leg to the next one, so the route is a Claude spend

@@ -9899,8 +9899,13 @@ class McpIsolateForceTests(unittest.TestCase):
         self.assertNotIn("error", out)
         self.assertIn("--isolate", self.job(out)["argv"])
 
-    def test_tier_1_is_the_only_leg_that_may_stay_in_place(self):
-        out = mcp_server.spawn({"task": "t", "tier": 1, "cwd": str(ROOT)})
+    def test_tier_1_stays_in_place_only_for_a_read_only_role(self):
+        # SB-C item 1 narrowed what this used to pin: the tier-1 leg that may
+        # stand in the caller's checkout is the READ-ONLY one (role=orchestrate).
+        # A tier-1 write role now gets a clone by default — see
+        # WriteRoleIsolationTests, which holds the other half.
+        out = mcp_server.spawn({"task": "t", "card": {"role": "orchestrate"},
+                                "cwd": str(ROOT)})
         self.assertNotIn("error", out)
         job = self.job(out)
         self.assertNotIn("--isolate", job["argv"])
@@ -9911,6 +9916,151 @@ class McpIsolateForceTests(unittest.TestCase):
         src = (ROOT / "tools" / "autoos_agent_mcp.py").read_text(encoding="utf-8")
         self.assertIn("leaf_isolation_refusal", src)
         self.assertNotIn("ISOLATE_TIERS = ", src)
+
+
+class WriteRoleIsolationTests(unittest.TestCase):
+    """SB-C item 1 (SPAWNISO): a WRITE-role card never runs in the caller's own
+    worktree.
+
+    KEYDENY3 forces tiers 2-3 (and every leaf role) into an isolated clone; a
+    tier-1 write role was the leg left standing in place — and `role=implement,
+    complexity=hard` routes to tier 1, so a headless worker edits the very
+    checkout it was spawned from, the one tree holding the git-ignored key
+    files. Two changes: a write role defaults to `isolate`, and a caller that
+    explicitly asks for no isolation while standing in its own worktree is
+    refused unless it names the override. Read-only roles (review, orchestrate)
+    keep running in place.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp,
+                          AUTOOS_AGENT_MCP_DRY_RUN="1")
+        # "the caller's worktree" is the server process's cwd: pin it, so the
+        # verdict does not depend on where pytest happened to be started.
+        self.getcwd = mock.patch.object(mcp_server.os, "getcwd",
+                                        return_value=str(ROOT))
+        self.getcwd.start()
+
+    def tearDown(self):
+        self.getcwd.stop()
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def job(self, out):
+        with open(os.path.join(out["dir"], "job.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- the default: a write role gets a clone ----------------------------
+
+    def test_a_tier_1_write_role_is_isolated_by_default(self):
+        argv, route = mcp_server.build_argv({"task": "t", "tier": 1,
+                                             "cwd": str(ROOT)})
+        self.assertIn("--isolate", argv)
+        self.assertTrue(route["default_isolate"])
+
+    def test_a_hard_implement_card_routing_to_tier_1_is_isolated(self):
+        # The route, not the caller's honesty, decides the tier: this card IS
+        # tier 1 (public-strong), and it is a writer.
+        argv, route = mcp_server.build_argv(
+            {"task": "t", "card": {"role": "implement", "complexity": "hard"},
+             "cwd": str(ROOT)})
+        self.assertEqual(mcp_server.agent._tier_for_route(route["combo"]), 1)
+        self.assertIn("--isolate", argv)
+
+    def test_an_absent_isolate_is_not_a_request_to_run_in_place(self):
+        # The MCP tool used to default `isolate: False`, which would make every
+        # caller that never mentioned the flag look like it asked to edit the
+        # caller's own tree. Absent means the default applies, no refusal.
+        argv, route = mcp_server.build_argv({"task": "t", "tier": 1,
+                                             "isolate": None, "cwd": str(ROOT)})
+        self.assertIn("--isolate", argv)
+        self.assertTrue(route["default_isolate"])
+
+    # --- the refusal: asked to stand in the caller's worktree --------------
+
+    def test_a_write_role_asked_in_place_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            mcp_server.build_argv({"task": "t", "tier": 1, "isolate": False,
+                                   "cwd": str(ROOT)})
+        msg = str(ctx.exception)
+        self.assertIn(str(ROOT), msg)
+        self.assertIn("allow_shared_checkout", msg)
+
+    def test_the_override_releases_the_refusal(self):
+        # SB-C2 item 3: the writer's escape hatch is closed. The flag used to
+        # release a tier-1 write role from the shared-worktree refusal; only an
+        # orchestrator may name a shared checkout now (a leaf cannot spawn at
+        # all — KEYDENY3 — so a write card passing it is refused, not released).
+        with self.assertRaises(ValueError) as ctx:
+            mcp_server.build_argv(
+                {"task": "t", "tier": 1, "isolate": False, "cwd": str(ROOT),
+                 "allow_shared_checkout": True})
+        self.assertIn("orchestrator-only", str(ctx.exception))
+
+    def test_an_orchestrator_override_is_accepted_and_recorded(self):
+        argv, route = mcp_server.build_argv(
+            {"task": "t", "card": {"role": "orchestrate"}, "cwd": str(ROOT),
+             "allow_shared_checkout": True})
+        self.assertTrue(route["shared_checkout_override"])
+        self.assertNotIn("--isolate", argv)
+
+    def test_spawn_rejects_a_write_role_override(self):
+        out = mcp_server.spawn({"task": "t", "tier": 1, "isolate": False,
+                                "cwd": str(ROOT),
+                                "allow_shared_checkout": True})
+        self.assertEqual(out["state"], "rejected")
+        self.assertIn("orchestrator-only", out["error"])
+
+    def test_a_write_role_in_another_tree_may_stay_in_place(self):
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        argv, _ = mcp_server.build_argv({"task": "t", "tier": 1,
+                                         "isolate": False, "cwd": other})
+        self.assertNotIn("--isolate", argv)
+
+    def test_a_review_role_is_never_refused(self):
+        # Read-only: the KEYDENY3 leaf force may still hand it a clone, but the
+        # write-role refusal must not fire, or a reviewer cannot read its own tree.
+        argv, route = mcp_server.build_argv(
+            {"task": "t", "card": {"role": "review", "complexity": "hard"},
+             "isolate": False, "cwd": str(ROOT)})
+        self.assertNotIn("default_isolate", route)
+
+    def test_an_orchestrate_role_stays_in_place(self):
+        argv, route = mcp_server.build_argv(
+            {"task": "t", "card": {"role": "orchestrate"}, "cwd": str(ROOT)})
+        self.assertNotIn("--isolate", argv)
+        self.assertNotIn("default_isolate", route)
+
+    # --- the same verdict through the spawn tool ---------------------------
+
+    def test_spawn_refuses_a_write_role_in_the_callers_worktree(self):
+        out = mcp_server.spawn({"task": "t", "tier": 1, "isolate": False,
+                                "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected")
+        self.assertIn("allow_shared_checkout", out["error"])
+
+    def test_spawn_isolates_a_write_role_that_asks_for_nothing(self):
+        out = mcp_server.spawn({"task": "t", "tier": 1, "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        self.assertIn("--isolate", self.job(out)["argv"])
+        self.assertTrue(out["route"]["default_isolate"])
+        self.wait_done(out["id"])
+
+    def wait_done(self, run_id):
+        for _ in range(100):
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("working", "submitted"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
 
 
 class IsolateSourceTests(unittest.TestCase):
@@ -12207,6 +12357,55 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
                       "--dry-run", "--card", "role=review", "t", env=clean_env())
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(self.UNKNOWN_COMBO, r.stderr)
+
+    # --- SB-C2 item 4: a bare name the registry PRICES is not unknowable ------
+
+    def test_deepseek_flash_bare_name_resolves_to_a_priced_leg(self):
+        """deepseek-flash is the allowed paid bulk leg under DSGUARD's $25 cap
+        (providers.deepseek.monthly_cap_usd), and its registry row carries the
+        very price the spend guard bills. Naming it bare — no route of that id,
+        just the priced model row, reached directly or through a family alias
+        spelling that is also a row — must not read as the unknown-combo
+        refusal, in budget mode."""
+        cli = self.cli()
+        registry = self.shipped()
+        self.assertTrue(registry["policy"]["claude_budget"]["mode"] == "budget"
+                        or cli.resolver.claude_budget_of(registry)["on"],
+                        "the shipped registry must be in budget mode for this test")
+        for name in ("deepseek-flash",            # the native id, models row
+                     "deepseek-v4-flash",          # the vendor alias, own row
+                     "omniroute/deepseek-flash#low"):  # prefixed+stamped
+            with self.subTest(name=name):
+                refusal, note = cli.claude_spawn_refusal(
+                    "opencode", {}, registry, model=name)
+                self.assertIsNone(refusal, "%s: %s" % (name, refusal))
+
+    def test_a_bare_claude_family_name_without_the_word_still_refuses(self):
+        """The priced-row pass is for rows the registry can price; a Claude
+        spelling is caught by the marker check whatever the caller means, and
+        an anthropic-FAMILY row with no marker in its name still reads as
+        Claude (SB-C2 item 1's markers, on the gate side)."""
+        import copy
+        cli = self.cli()
+        registry = self.shipped()
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, registry, model="opus-5")
+        self.assertIsNotNone(refusal)
+        self.assertIn("claude_budget", refusal)
+        registry = copy.deepcopy(registry)
+        registry["models"]["mule-9"] = {"family": "anthropic",
+                                        "price_in": 3e-07, "price_out": 1.2e-06}
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, registry, model="mule-9")
+        self.assertIsNotNone(refusal, "an anthropic-family priced row read as free")
+        self.assertIn("claude_budget", refusal)
+
+    def test_a_bare_name_the_registry_carries_no_row_for_is_still_refused(self):
+        cli = self.cli()
+        refusal, _note = cli.claude_spawn_refusal(
+            "opencode", {}, self.shipped(), model="definitely-not-a-model")
+        self.assertIsNotNone(refusal)
+        self.assertIn("definitely-not-a-model", refusal)
 
     # --- item 2: the tier agent model is consulted before any client default ---
 

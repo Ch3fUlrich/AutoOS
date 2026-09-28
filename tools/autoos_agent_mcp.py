@@ -289,12 +289,49 @@ def context_info(transcript: str | None = None) -> dict:
     return data
 
 
-def build_argv(req: dict, run_id: str | None = None) -> tuple:
+READ_ONLY_CARD_ROLES = ("review", "orchestrate")
+
+
+def is_write_role(req: dict) -> bool:
+    """Whether this request's card writes — any role outside the read-only pair.
+
+    A request with no card takes the registry's default role (`implement`), which
+    is a writer: the tier alone never says what a run touches, and `role=implement,
+    complexity=hard` routes UP to tier 1 (routing.select_combo's public-strong
+    bucket), so the tier-1 leg is not always the orchestrator.
+    """
+    card = req.get("card")
+    if isinstance(card, str):
+        try:
+            card = routing.parse_card(card)
+        except (ValueError, routing.CardError):
+            card = None  # normalize() reports the bad card; this is not its job
+    return (card or {}).get("role") not in READ_ONLY_CARD_ROLES
+
+
+def worktree_of(path: str) -> str:
+    """The worktree `path` sits in, realpath'd — its git toplevel, or the
+    directory itself when it is not a repository (so a temp dir never compares
+    equal to the caller's tree).
+
+    Deliberately not `agent.isolate_source`: that falls back to the spawner's own
+    checkout for a non-repo path, which would read "somewhere else" as "my tree"."""
+    try:
+        top = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return os.path.realpath(path)
+    return os.path.realpath(top or path)
+
+
+def build_argv(req: dict, run_id: str | None = None,
+               cwd: str | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
 
     `run_id` is the canonical id this server minted for the run (FLEETP0b): it
     goes to the CLI as `--run-id`, so the run dir named here and the record,
-    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1)."""
+    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1).
+    `cwd` is where the run would start: only the tier-1 write-role rule needs it."""
     client = req.get("client") or "opencode"
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
@@ -331,6 +368,46 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
             run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card)):
         req = dict(req, isolate=True)
         route["forced_isolate"] = True
+    # SB-C item 1 (SPAWNISO): KEYDENY3 keys on the spawned tiers and the leaf
+    # flag, so the tier-1 WRITE role was still allowed to stand in the caller's
+    # own checkout — and it edits the one tree that holds the git-ignored key
+    # files (configuration/api-keys.yml, .env*). So a write role gets a clone by
+    # default, and one that explicitly asked not to is refused while it points at
+    # the caller's own worktree. The refusal, not a silent force, because asking
+    # for no isolation is a statement the caller may have a reason for — and the
+    # override flag is where it says so.
+    # SB-C2 item 3 (SPAWNISO explicit): the override flag was reachable by any
+    # tier-1 caller, and a card's role is the caller's own text. Only the
+    # orchestrator runs shared checkouts — leaves cannot spawn at all (KEYDENY3),
+    # and a tier-1 WRITE card that names the flag is refused, so the escape
+    # hatch exists only for the role that has no other tree to work in. The
+    # acceptance is recorded in the run's route (shared_checkout_override).
+    if req.get("allow_shared_checkout"):
+        if (card or {}).get("role") != "orchestrate":
+            raise ValueError(
+                "allow_shared_checkout is orchestrator-only: the card's role is "
+                "%r, not orchestrate. A write-role spawn gets a clone "
+                "(isolate, the default); leaves cannot spawn at all (KEYDENY3), "
+                "so only the tier-1 orchestrator names a shared checkout."
+                % ((card or {}).get("role") or "implement"))
+        route["shared_checkout_override"] = True
+    if run_tier == 1 and not req.get("isolate") and is_write_role(req):
+        where = cwd or req.get("cwd")
+        if (req.get("isolate") is False and where
+                and worktree_of(where) == worktree_of(os.getcwd())):
+            raise ValueError(
+                "a write-role card at tier 1 cannot run in the caller's own "
+                "worktree (%s): it edits the checkout this server sits in, where "
+                "the git-ignored key files live. Ask for isolate (the default "
+                "when you ask for nothing); the allow_shared_checkout override "
+                "is orchestrator-only (SB-C2) and never releases this." % where)
+        elif req.get("isolate") is not False:
+            # Nothing was said for a writer: give it a clone, as a spawned tier
+            # gets one. An explicit False against ANOTHER tree is honoured —
+            # this rule is about the caller's own checkout, not about where a
+            # run happens to start.
+            req = dict(req, isolate=True)
+            route["default_isolate"] = True
     if req.get("max_depth") is not None:
         try:
             req = dict(req, max_depth=int(req["max_depth"]))  # JSON callers send "2"
@@ -456,7 +533,7 @@ def spawn(req: dict) -> dict:
         # with, and nothing is created before that says yes.
         run_id = agent.mint_run_id(req.get("title"), req.get("task") or "")
         try:
-            argv, route = build_argv(req, run_id)
+            argv, route = build_argv(req, run_id, cwd=cwd)
         except (ValueError, clients.DepthError) as exc:
             return _refused(str(exc))
         if budget_note is not None:
@@ -773,10 +850,12 @@ def serve() -> None:
 
     @app.tool(name="spawn")
     def _spawn(task: str, client: str = "opencode", card: dict | None = None,
-               tier: int | None = None, model: str | None = None, isolate: bool = False,
+               tier: int | None = None, model: str | None = None,
+               isolate: bool | None = None,
                lean: bool | None = None, free: bool = False, allow_training: bool = False,
                joinable: bool = False, max_depth: int | None = None, title: str | None = None,
                cwd: str | None = None, dry_run: bool = False,
+               allow_shared_checkout: bool = False,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
@@ -788,8 +867,13 @@ def serve() -> None:
         wears a leaf (`leaf: true` in catalog/agent-harness.json — role=review or
         a trivial card), because grep/glob is fenced on the search *pattern* and
         cannot see a git-ignored key file sitting in the caller's checkout; the
-        clone holds committed files only. Only tier 1 (role=orchestrate) runs in
-        place. lean: no serena/playwright
+        clone holds committed files only. It is the DEFAULT for a write-role card
+        at tier 1 too (SB-C: `role=implement, complexity=hard` routes to tier 1),
+        and asking for `isolate=False` there is refused while `cwd` is the caller's
+        own worktree — only `role=orchestrate` runs in place (SB-C2:
+        `allow_shared_checkout=True` is orchestrator-only too — a write-role
+        card passing it is refused, and an accepted override is recorded as
+        `shared_checkout_override` on the route). lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
@@ -804,6 +888,7 @@ def serve() -> None:
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
                       "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
+                      "allow_shared_checkout": allow_shared_checkout,
                       "claude_reason": claude_reason})
 
     @app.tool(name="status")

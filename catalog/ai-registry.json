@@ -291,6 +291,7 @@
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
+      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) — reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 6e-09). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number — not an invented price.",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -2175,10 +2176,66 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
+        "id": "allow-claude-code-subscription",
+        "match": "cc/*",
+        "allow": true,
+        "reason": "Claude Code subscription seat, not a paid API. Moved up with deny-claude-paid-api (SB-C): the two Claude seats that are Claude by contract must match before the paid-API deny, no other provider wildcard may",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "allow-antigravity-signin",
+        "match": "antigravity/*",
+        "allow": true,
+        "reason": "agy free sign-in, not a paid API. Moved up with deny-claude-paid-api (SB-C) for the same reason as cc/*: it serves Claude-legitimately on a free seat",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "deny-claude-paid-api",
+        "match": "*/claude-*",
+        "allow": false,
+        "reason": "no Claude models through a paid API (too expensive). First before every provider wildcard allow on purpose (SB-C, found by FREEKEYS-1): 'opencode-zen/*' sat above this rule and matched first, so opencode-zen/claude-* was never denied by the leg rules and was usable the moment the Claude budget gate said yes (a declared final, or budget off). A leg_rule is only as strong as its position",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C item 3 2026-09-28, tests/test_autoos_resolver.py ZenClaudeLegRulesTests"
+      },
+      {
+        "id": "deny-claude-family-opus",
+        "match": "*/*opus*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude': deny-claude-paid-api (*/claude-*) only binds the claude-* prefix, and the gateway serves the same models under bare family names (opus, sonnet, haiku, fable) - the CLAUDE_MODEL_MARKERS the budget gate itself reads. Placed with deny-claude-paid-api, before every provider wildcard allow and after the cc/* and antigravity/* subscription seats, so a seat leg still matches its allow first",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-sonnet",
+        "match": "*/*sonnet*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): a third-party sonnet leg is a Claude spend no */claude-* pattern can see",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-haiku",
+        "match": "*/*haiku*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): a third-party haiku leg is a Claude spend no */claude-* pattern can see",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-fable",
+        "match": "*/*fable*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): fable is a Claude model name (models.claude-fable-5-1) and a third-party fable leg is a Claude spend",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-anthropic-paid",
+        "match": "anthropic/*",
+        "allow": false,
+        "reason": "the anthropic provider id is not one of the two Claude seats the leg rules allow - those are cc/* (Claude Code subscription) and antigravity/* (free sign-in), and both allow rows precede this rule. An anthropic/-prefixed leg is therefore paid-API Claude whatever the model half is spelled like. If anthropic is ever registered as a real seat, give it its own allow rule ABOVE this one, exactly like the two existing seats",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); seat list: briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ)"
+      },
+      {
         "id": "allow-opencode-zen-client-bound",
         "match": "opencode-zen/*",
         "allow": true,
-        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them",
+        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them. This wildcard no longer reaches a Claude spelling: deny-claude-paid-api (*/claude-*) precedes it since SB-C",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); operator direction 2026-09-27T07:3xZ (corrects the 04:5xZ 'never in gateway combos')"
       },
       {
@@ -2224,31 +2281,10 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
-        "id": "allow-claude-code-subscription",
-        "match": "cc/*",
-        "allow": true,
-        "reason": "Claude Code subscription seat, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "allow-antigravity-signin",
-        "match": "antigravity/*",
-        "allow": true,
-        "reason": "agy free sign-in, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
         "id": "allow-gpt-oss",
         "match": "*/gpt-oss-*",
         "allow": true,
         "reason": "open-weight gpt-oss is not an OpenAI paid-API model",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "deny-claude-paid-api",
-        "match": "*/claude-*",
-        "allow": false,
-        "reason": "no Claude models through a paid API (too expensive)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
