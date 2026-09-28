@@ -645,12 +645,20 @@ if it "agent-skills: the catalog entry is a tombstone and names its successors";
     # A7: the retirement moves from a function that prints a line to the catalog
     # that carries the fact. Every field an installer needed is gone with the
     # installer; the note and the successor ids are what the run prints and plans.
+    # Windows is retired too (its clone bit is gone), but it has no
+    # agent-skill-links/omnigraph-client twin, so only the four mcp-* components
+    # inherit the work there - hence a per-platform successor list.
     out="$(python3 - <<'PY'
 import json, sys
-successors = ["agent-skill-links", "omnigraph-client", "mcp-graphify",
-              "mcp-serena", "mcp-playwright", "mcp-context7"]
+successors = {
+    "catalog/linux.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+                           "mcp-serena", "mcp-playwright", "mcp-context7"],
+    "catalog/macos.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+                           "mcp-serena", "mcp-playwright", "mcp-context7"],
+    "catalog/windows.json": ["mcp-graphify", "mcp-serena", "mcp-playwright", "mcp-context7"],
+}
 problems = []
-for f in ("catalog/linux.json", "catalog/macos.json"):
+for f, want in successors.items():
     data = json.load(open(f, encoding="utf-8"))
     found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skills"]
     if len(found) != 1:
@@ -663,8 +671,8 @@ for f in ("catalog/linux.json", "catalog/macos.json"):
         problems.append(f + ": 'tombstone' is %r, expected the boolean true" % (c.get("tombstone"),))
     if not str(c.get("note") or "").strip():
         problems.append(f + ": a tombstone with no note prints an empty skip line")
-    if c.get("replaced_by") != successors:
-        problems.append("%s: replaced_by is %r, expected %r" % (f, c.get("replaced_by"), successors))
+    if c.get("replaced_by") != want:
+        problems.append("%s: replaced_by is %r, expected %r" % (f, c.get("replaced_by"), want))
     for r in c.get("replaced_by") or []:
         if r not in ids:
             problems.append("%s: replaced_by names unknown component '%s'" % (f, r))
@@ -679,17 +687,36 @@ for f in ("catalog/linux.json", "catalog/macos.json"):
     for dead in ("postInstall", "prompt", "requires", "verify"):
         if c.get(dead):
             problems.append("%s: a tombstone still carries %s (%r)" % (f, dead, c.get(dead)))
-# Windows is a later lane's work; the entry must still install there.
-win = json.load(open("catalog/windows.json", encoding="utf-8"))
-for g in win["categories"]:
-    for c in g["components"]:
-        if c.get("id") == "agent-skills" and c.get("tombstone") is True:
-            problems.append("catalog/windows.json: retired on Windows in this lane")
 print("\n".join(problems))
 sys.exit(1 if problems else 0)
 PY
 )" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
+    && catalog_validate catalog/windows.json >/dev/null 2>&1 \
     && pass || fail "agent-skills tombstone: ${out:0:400}"
+fi
+
+if it "agent-skills: the Windows installer never clones the retired repo"; then
+    # The clone went with the retirement: the MCP servers are declared by this
+    # checkout's own .mcp.json, so a Windows run must not create or update a
+    # Documents\Code\agent-skills copy. A machine that ran the old installer
+    # keeps its checkout untouched, and no code path may name its git URL.
+    # .psm1 keeps CRLF in the working copy, so strip \r BEFORE awk or the
+    # end-of-function anchor (^\}$) never matches and the "body" swallows the rest
+    # of the file (LazyVim's own git clone included).
+    fn="$(tr -d '\r' < lib/windows/AutoOS.Install.psm1 | awk '/^function Install-AutoOSAgentSkills \{/{on=1} on{print} on && /^\}$/{exit}')"
+    ok=1
+    if grep -qE "agent-skills\.git|Ch3fUlrich/agent-skills" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still names the agent-skills clone URL" >&2
+    fi
+    if grep -qE "Invoke-AutoOSProcess.*'git'|'git'.*(clone|pull)" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still runs git clone/pull" >&2
+    fi
+    # Code, not prose: a comment may still explain the retired clone, but no
+    # statement may build or write into the old Documents\Code\agent-skills path.
+    if grep -qE "(Join-Path|New-Item|Invoke-AutoOSProcess).*agent-skills" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still writes into the old clone path" >&2
+    fi
+    if (( ok )); then pass; else fail "the Windows installer still clones agent-skills"; fi
 fi
 
 if it "agent-skills: the retirement leaves no installer behind"; then

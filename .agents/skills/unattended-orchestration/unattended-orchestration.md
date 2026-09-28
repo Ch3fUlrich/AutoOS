@@ -76,8 +76,12 @@ python3 tools/autoos-agent.py run --card role=review --isolate --dry-run "..."  
 place (exit 2), and the MCP `spawn` tool forces the clone for them. The clone is
 `git clone --local` of the caller's checkout, so it holds committed files only —
 the one control that keeps a worker's whole-tree grep out of the git-ignored
-`configuration/api-keys.yml` and `.env*` sitting in your working tree. Only tier
-1 (`role=orchestrate`, your own session) runs in place.
+`configuration/api-keys.yml` and `.env*` sitting in your working tree. Only a
+read-only tier-1 run (`role=orchestrate`, your own session) stays in place: a
+WRITE-role card at tier 1 takes the clone by default too, because
+`role=implement, complexity=hard` routes up to tier 1, and asking for
+`isolate=False` there is refused while `cwd` is the caller's own worktree unless
+the call also says `allow_shared_checkout=True` (SB-C).
 
 For opencode it passes the agent's own model, runs `--standalone` (the
 background opencode service keeps the environment it started with, so a key

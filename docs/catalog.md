@@ -159,7 +159,9 @@ provisioning simply never gets that work done, and the run reports `skipped`,
 which reads like success.
 
 `replaced_by` is the catalog's answer — the ids that took the work on. The
-shipped retirement, `agent-skills` on Linux and macOS:
+shipped retirement, `agent-skills`, names only the successors that platform
+offers. On Linux and macOS six took the work on; on Windows the four `mcp-*`
+components do, because it has no `agent-skill-links` or `omnigraph-client` twin:
 
 ```jsonc
 {
@@ -167,6 +169,12 @@ shipped retirement, `agent-skills` on Linux and macOS:
   "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
   "replaced_by": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
                   "mcp-serena", "mcp-playwright", "mcp-context7"]
+}
+// catalog/windows.json:
+{
+  "id": "agent-skills", "tombstone": true,
+  "note": "its work moved to the mcp-* components",
+  "replaced_by": ["mcp-graphify", "mcp-serena", "mcp-playwright", "mcp-context7"]
 }
 ```
 
