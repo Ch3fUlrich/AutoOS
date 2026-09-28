@@ -50,6 +50,16 @@ def harness_data():
         return json.load(handle)
 
 
+def module_gates():
+    """The config keys that gate a spawn, as the generator spells them (KEYDENY3b)."""
+    return list(load_module().SPAWN_GATES)
+
+
+def module_leaf_allowed_mcp():
+    """The MCP servers a leaf role may list, pinned in code (KEYDENY3b)."""
+    return set(load_module().LEAF_ALLOWED_MCP)
+
+
 # The files a spawned leaf must never see. Fixture paths only — no real key
 # file is opened by this suite, the fence is decided on the name alone.
 KEY_PATHS = [
@@ -123,6 +133,21 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("leaf-reviewer", result.stdout)
             self.assertIn("autoos-agent", result.stdout)
+
+    def test_check_fails_when_a_leaf_role_gets_a_file_reader_server(self):
+        # KEYDENY3b item 3: the pin is enforced by `check`, not only by the
+        # test below, so an edit to the catalog cannot quietly hand a leaf a
+        # server whose tools read by URL or path. playwright is the case in
+        # point — browser_navigate takes file:// and no path fence reaches it.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["mcp"] = ["serena", "graphify", "playwright"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertIn("playwright", result.stdout)
 
     def test_check_requires_the_bash_allow_all_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -550,6 +575,55 @@ class OpencodeMergeTests(unittest.TestCase):
             for name, role in harness["roles"].items():
                 expected = "allow" if role["spawn"] else "deny"
                 self.assertEqual(doc["agent"][name]["permission"]["task"], expected, name)
+
+    def test_a_leaf_is_denied_the_spawn_gate_in_both_spellings(self):
+        # KEYDENY3b item 1: the render emits every spelling of the spawn gate,
+        # with one verdict. v2.0.16's rename map is {bash: "shell", task:
+        # "subagent"}, so `subagent` is the canonical action and `task` the
+        # legacy tool name — which is also what the `permission` OBJECT declares
+        # ("Deprecated alias for subagent"), while the rule lists the tier agents
+        # write assert the action. Which spelling a given build honours is not a
+        # thing to bet a fence on (opencode.jsonc:115: a `bash` rule matches
+        # nothing), so the render does not choose: it denies both. A leaf that
+        # can spawn hands the task to a child that carries none of its read
+        # fence — that child can open configuration/api-keys.yml and put the key
+        # in its answer.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                permission = doc["agent"][name]["permission"]
+                expected = "allow" if role["spawn"] else "deny"
+                for gate in module_gates():
+                    self.assertEqual(permission.get(gate), expected,
+                                     "%s.%s" % (name, gate))
+
+    def test_no_leaf_role_enables_a_server_that_reads_files_by_url_or_path(self):
+        # KEYDENY3b item 3: a fence is only as good as the tools it covers, and
+        # an MCP server is a whole bag of tools the path fences cannot reach (a
+        # leaf's MCP rule can only name the tool, never the resource — KEYDENY3).
+        # playwright opens file:// and any URL; context7 fetches remote docs by
+        # id/topic; a filesystem server reads any path. So the leaf set is pinned
+        # in code: serena (whose every raw-content tool is denied by name below)
+        # and graphify (graph answers only). Anything else a leaf could list is
+        # a defect, whoever added it.
+        harness = harness_data()
+        allowed = module_leaf_allowed_mcp()
+        leaves = [name for name, role in harness["roles"].items() if role["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            listed = set(harness["roles"][name]["mcp"])
+            self.assertTrue(listed <= allowed,
+                            "%s enables %s" % (name, sorted(listed - allowed)))
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name in leaves:
+                tools = doc["agent"][name]["tools"]
+                for server in ("playwright", "context7", "omnigraph", "autoos-agent"):
+                    self.assertEqual(tools.get("%s*" % server), False,
+                                     "%s may reach %s" % (name, server))
 
     def test_stale_top_level_leaf_denies_are_removed_but_user_verdicts_survive(self):
         # A config written by the old generator carries leaf denies at top

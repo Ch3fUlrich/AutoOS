@@ -182,8 +182,7 @@
       },
       "mcp": [
         "serena",
-        "graphify",
-        "context7"
+        "graphify"
       ]
     },
     "leaf-reviewer": {
@@ -200,8 +199,7 @@
       },
       "mcp": [
         "serena",
-        "graphify",
-        "context7"
+        "graphify"
       ]
     }
   }

@@ -724,14 +724,31 @@ def perms(n):
     return [(p["action"], p["resource"], p["effect"]) for p in a[n]["permissions"]]
 t1, t2, t3 = perms("t1-orchestrator"), perms("t2-worker"), perms("t3-reviewer")
 problems = []
-if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "t2-worker", "allow"):
+# KEYDENY3b: both spawn-gate spellings are fenced (v2's asserted `subagent`
+# action, the permission object's `task` key), each of them denying everything
+# first and then allowing exactly the one child — a leaf allows none.
+def gate(rules, child):
+    for action in ("subagent", "task"):
+        own = [(r, e) for a, r, e in rules if a == action]
+        if not own or own[0] != ("*", "deny"):
+            return False
+        if child is None and len(own) != 1:
+            return False
+        if child is not None and own[-1] != (child, "allow"):
+            return False
+    return True
+if not gate(t1, "t2-worker"):
     problems.append("t1")
-if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "t3-reviewer", "allow"):
+if not gate(t2, "t3-reviewer"):
     problems.append("t2")
-# The leaf's fences run past these seven, but the first seven are the shape
+if not gate(t3, None):
+    problems.append("t3-spawn-leaf")
+# The leaf's fences run past these eight, but the first eight are the shape
 # both sides agreed on; v2 names the shell action `shell` (a `bash` rule
 # matches nothing) and the full fence set is asserted below.
-if t3[:7] != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("shell", "*", "allow")]:
+if t3[:8] != [("subagent", "*", "deny"), ("task", "*", "deny"),
+              ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"),
+              ("grep", "*", "allow"), ("glob", "*", "allow"), ("shell", "*", "allow")]:
     problems.append("t3-leaf")
 if a["t3-reviewer"]["mode"] != "subagent":
     problems.append("t3-mode")
@@ -850,9 +867,14 @@ for path in ("/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"):
         problems.append("read-open-near-miss:" + path)
 if last("serena_*", "*") != "deny":
     problems.append("serena-writes-open")
-for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "autoos-agent_*"):
+for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "playwright_*", "context7_*", "autoos-agent_*"):
     if last(tool, "*") != "deny":
         problems.append(tool)
+# KEYDENY3b: a leaf must have no MCP door that reads a file by URL or path. The
+# deny is on the server pattern, so the check is a match, not a name lookup.
+for tool in ("playwright_browser_navigate", "context7_get_library_docs"):
+    if not any(e == "deny" and fnmatch.fnmatch(tool, a) for a, r, e in t3):
+        problems.append("mcp-reader-open:" + tool)
 allowed = [a for a, r, e in t3 if a.startswith("serena_") and e == "allow"]
 writers = ("create", "replace", "insert", "rename", "delete", "edit", "write", "execute")
 problems += ["serena-writer-allowed:" + a for a in allowed if any(w in a for w in writers)]

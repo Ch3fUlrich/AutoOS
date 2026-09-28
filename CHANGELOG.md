@@ -34,6 +34,27 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   leaf role in the render and dropped from `t3-reviewer`'s serena allow list. Name-only tools
   (`get_symbols_overview`, `list_dir`, `find_file`, diagnostics) stay; spawning roles keep the
   readers, because there is no path scoping and denying them there would cost every file read.
+- KEYDENY3b (2026-09-28, same lane): three holes left in that fence. **(1) the spawn gate was
+  denied in one spelling only** — v2.0.16's rename map is `{bash: shell, task: subagent,
+  apply_patch: patch}`, the `permission` object declares the alias key `task` ("Deprecated alias
+  for subagent") and the rule lists assert the action `subagent`; a leaf that can spawn hands its
+  work to a child that carries none of its read fences. `SPAWN_GATES` now renders both verdicts
+  from one `role.spawn`, `opencode.jsonc`'s tier agents carry both rules, and every opencode run
+  re-asserts them in its own overlay (which merges last), so a drifted checkout cannot re-open it.
+  **(2) `grep "sk-" .` inside a working checkout reads `configuration/api-keys.yml` straight
+  through the pattern fence**, so the guarantee moved to the directory: `--isolate` is mandatory
+  for a leaf (`LEAF_TIERS`, tier 3 — the catalog's `leaf: true` roles and `t3-reviewer`; the run
+  is refused with rc 2 before anything starts, a `--dry-run` announces the refusal), the clone
+  step is one function whose containment is now tested (a temp repo with an ignored fake key:
+  the clone carries no ignored, no untracked file), and no client is exempt from isolating, so
+  no leaf had to lose grep/glob. Tier 2 stays allowed in place — it is a spawning role and the
+  documented lane flow — and its residual pattern hole, including the native child it can launch
+  into that cwd, is written down rather than claimed closed. **(3) a leaf could list `context7`**,
+  and an MCP rule can never scope a resource, so `LEAF_ALLOWED_MCP` pins the leaf set to
+  `serena` + `graphify` in code, `check` refuses a leaf that lists anything else, `context7` is
+  out of the leaf roles and their vendored profiles, and `t3-reviewer` denies `playwright_*` and
+  `context7_*` whole (`browser_navigate` takes a `file://` path — `run_code_unsafe` was never the
+  only door).
 
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 

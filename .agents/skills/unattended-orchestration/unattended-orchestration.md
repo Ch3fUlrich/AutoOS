@@ -61,15 +61,15 @@ measured live against opencode 2.0.16 (2026-09-24):
 ```bash
 python3 tools/autoos-agent.py list                            # tiers, card fields, client matrix, depth
 python3 tools/autoos-agent.py run "Add a test for X"          # empty card -> t2-worker
-python3 tools/autoos-agent.py run --card role=review --lean "Review lib/linux/ui.sh"
+python3 tools/autoos-agent.py run --card role=review --isolate --lean "Review lib/linux/ui.sh"
 python3 tools/autoos-agent.py run --card privacy=sensitive "..."   # -> t2-worker-clean
-python3 tools/autoos-agent.py run --client qwen --card complexity=trivial "..."
+python3 tools/autoos-agent.py run --client qwen --card complexity=trivial --isolate "..."
 python3 tools/autoos-agent.py run --client claude --joinable --title d1 "..."
 python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"   # tier by hand
-python3 tools/autoos-agent.py run --tier 3 --clean "..."      # -clean twin
+python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."      # -clean twin
 python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
 python3 tools/autoos-agent.py run --tier 1 --free "..."       # no key, no gateway, no spend
-python3 tools/autoos-agent.py run --card role=review --dry-run "..."   # print the plan only
+python3 tools/autoos-agent.py run --card role=review --isolate --dry-run "..."   # print the plan only
 ```
 
 For opencode it passes the agent's own model, runs `--standalone` (the
@@ -155,6 +155,10 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   the main checkout, and a worker's writes from inside one landed in the main
   repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
   deleted for you. The clone starts from `HEAD`, so commit first.
+  **A leaf (tier 3 — a review/trivial card, `--tier 3`) is refused without it**,
+  because grep/glob is fenced on the search *pattern*: `grep "sk-" .` in a
+  working checkout reads `configuration/api-keys.yml` right through the fence,
+  while an ignored file cannot exist in a `--local` clone (KEYDENY3b).
 - **`--free`** maps every tier to opencode's own free model (default
   `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
   exercise the chain and the fences before any provider key exists. Free

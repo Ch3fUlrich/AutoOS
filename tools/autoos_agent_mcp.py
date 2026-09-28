@@ -682,7 +682,10 @@ def serve() -> None:
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
         ctx: 128k|1m, privacy: public|sensitive, spend: free-ok|credit}; omitted fields
         take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
-        isolate: private git clone on its own branch. lean: no serena/playwright
+        isolate: private git clone on its own branch; mandatory for a leaf (tier
+        3 - a role=review or complexity=trivial card), which is refused in the
+        caller's checkout because its grep/glob fence is matched on the pattern
+        and cannot see a git-ignored key file. lean: no serena/playwright
         (default on for role=review). Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is

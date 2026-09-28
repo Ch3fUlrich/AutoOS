@@ -121,6 +121,7 @@
       "model": "meta/muse-spark-1.3-contributor",
       "permission": {
         "task": "allow",
+        "subagent": "allow",
         "bash": {
           "*": "allow",
           "git merge*": "deny",
@@ -174,6 +175,7 @@
       "model": "meta/muse-spark-1.3-contributor",
       "permission": {
         "task": "allow",
+        "subagent": "allow",
         "bash": {
           "*": "allow",
           "git merge*": "deny",
@@ -227,6 +229,7 @@
       "model": "meta/muse-spark-1.3-contributor",
       "permission": {
         "task": "deny",
+        "subagent": "deny",
         "bash": {
           "*": "allow",
           "git merge*": "deny",
@@ -274,6 +277,7 @@
         }
       },
       "tools": {
+        "context7*": false,
         "playwright*": false,
         "omnigraph*": false,
         "autoos-agent*": false,
@@ -291,6 +295,7 @@
       "model": "deepseek/deepseek-flash",
       "permission": {
         "task": "deny",
+        "subagent": "deny",
         "bash": {
           "*": "allow",
           "git merge*": "deny",
@@ -338,6 +343,7 @@
         }
       },
       "tools": {
+        "context7*": false,
         "playwright*": false,
         "omnigraph*": false,
         "autoos-agent*": false,

@@ -80,7 +80,9 @@
       "model": "omniroute/t1-orchestrator#high",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "t2-worker", "effect": "allow" }
+        { "action": "subagent", "resource": "t2-worker", "effect": "allow" },
+        { "action": "task", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "t2-worker", "effect": "allow" }
       ]
     },
     "t2-worker": {
@@ -89,7 +91,9 @@
       "model": "omniroute/t2-worker",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
-        { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" }
+        { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" },
+        { "action": "task", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "t3-reviewer", "effect": "allow" }
       ]
     },
     "t3-reviewer": {
@@ -97,7 +101,15 @@
       "mode": "subagent",
       "model": "omniroute/t3-driver",
       "permissions": [
+        // KEYDENY3b: the spawn gate has two spellings in v2.0.16 — the canonical
+        // action `subagent` and the legacy tool name `task` (its rename map is
+        // {bash: shell, task: subagent, apply_patch: patch}). `subagent` is the
+        // fence; the `task` rule is insurance for a build that still matches the
+        // alias, and is not proof — see the `bash` note below, an alias rule can
+        // match nothing. A leaf that could spawn would hand the work to a child
+        // carrying none of the fences below, key file included.
         { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "*", "effect": "deny" },
         { "action": "edit", "resource": "*", "effect": "deny" },
         { "action": "write", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
@@ -174,6 +186,12 @@
         { "action": "omnigraph_branches_merge", "resource": "*", "effect": "deny" },
         { "action": "omnigraph_branches_delete", "resource": "*", "effect": "deny" },
         { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" },
+        // KEYDENY3b: an MCP rule can only name the tool (resources is ["*"]), so
+        // a server whose tools read by URL or path goes whole, not tool by tool.
+        // browser_navigate takes a file:// path — run_code_unsafe was never the
+        // only door. context7 fetches remote docs by id/topic for the same reason.
+        { "action": "playwright_*", "resource": "*", "effect": "deny" },
+        { "action": "context7_*", "resource": "*", "effect": "deny" },
         // A leaf never spawns: the spawner's MCP tools (autoos-agent_spawn and
         // friends, registered for every agent) are off here too.
         { "action": "autoos-agent_*", "resource": "*", "effect": "deny" },

@@ -7202,15 +7202,33 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
     # More than the original seven: the harness fences and the MCP write
     # tools are denies now (2026-09-24).
     Assert-True ($t3.Count -gt 7) 't3-reviewer lost its fences'
-    # subagent deny
+    # subagent deny — and the same gate's other spelling, `task` (KEYDENY3b:
+    # deny one and a leaf still spawns through the other).
     Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
-    Assert-Equal $t3[1].action 'edit'; Assert-Equal $t3[1].resource '*'; Assert-Equal $t3[1].effect 'deny'
-    Assert-Equal $t3[2].action 'write'; Assert-Equal $t3[2].resource '*'; Assert-Equal $t3[2].effect 'deny'
-    Assert-Equal $t3[3].action 'read'; Assert-Equal $t3[3].resource '*'; Assert-Equal $t3[3].effect 'allow'
-    Assert-Equal $t3[4].action 'grep'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
-    Assert-Equal $t3[5].action 'glob'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
+    Assert-Equal $t3[1].action 'task'; Assert-Equal $t3[1].resource '*'; Assert-Equal $t3[1].effect 'deny'
+    Assert-Equal $t3[2].action 'edit'; Assert-Equal $t3[2].resource '*'; Assert-Equal $t3[2].effect 'deny'
+    Assert-Equal $t3[3].action 'write'; Assert-Equal $t3[3].resource '*'; Assert-Equal $t3[3].effect 'deny'
+    Assert-Equal $t3[4].action 'read'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
+    Assert-Equal $t3[5].action 'grep'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
+    Assert-Equal $t3[6].action 'glob'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
+    # The spawn gate is asserted for t1/t2 as well, in both spellings.
+    foreach ($spec in @(
+        @{rules = $t1; child = 't2-worker';   name = 't1-orchestrator'},
+        @{rules = $t2; child = 't3-reviewer'; name = 't2-worker'})) {
+        foreach ($gate in 'subagent', 'task') {
+            $own = @(@($spec.rules) | Where-Object { $_.action -eq $gate })
+            Assert-True ($own.Count -eq 2) "$($spec.name): $gate gate incomplete"
+            Assert-Equal $own[0].resource '*'
+            Assert-Equal $own[0].effect 'deny'
+            Assert-Equal $own[-1].resource $spec.child
+            Assert-Equal $own[-1].effect 'allow'
+        }
+    }
+    $leafGates = @($t3 | Where-Object { $_.action -in 'subagent', 'task' })
+    $openGates = @($leafGates | Where-Object { $_.effect -ne 'deny' })
+    Assert-True ($leafGates.Count -eq 2 -and $openGates.Count -eq 0) 't3-reviewer can spawn'
     # v2 names the action `shell`; a `bash` rule matches nothing (2026-09-24).
-    Assert-Equal $t3[6].action 'shell'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
+    Assert-Equal $t3[7].action 'shell'; Assert-Equal $t3[7].resource '*'; Assert-Equal $t3[7].effect 'allow'
     Assert-True (@($t3 | Where-Object { $_.action -eq 'bash' }).Count -eq 0) 'bash rule is dead in opencode v2'
     # Every harness fence is a shell deny on the leaf, and MCP writers are off.
     $harnessDoc = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -7219,9 +7237,15 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
         $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer shell fence missing: $pat"
     }
-    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'autoos-agent_*')) {
+    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'playwright_*', 'context7_*', 'autoos-agent_*')) {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
+    }
+    # KEYDENY3b: a leaf has no MCP door that reads a file by URL or path, so the
+    # concrete reader tools are denied through their server pattern.
+    foreach ($reader in @('playwright_browser_navigate', 'context7_get_library_docs')) {
+        $open = @($t3 | Where-Object { $_.effect -eq 'deny' -and $reader -like $_.action })
+        Assert-True ($open.Count -gt 0) "t3-reviewer MCP file reader open: $reader"
     }
     foreach ($pat in @($fences.read_deny_all)) {
         $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })

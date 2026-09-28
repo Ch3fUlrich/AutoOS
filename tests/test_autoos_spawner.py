@@ -9086,5 +9086,252 @@ def _reviewer_client_state():
             for name in ("opencode", "gemini", "qoder", "claude")}
 
 
+# KEYDENY3b item 2: grep/glob is asserted against the *pattern*, so a leaf
+# grepping "sk-" inside a checkout that holds configuration/api-keys.yml is not
+# stopped by the fence at all. The guarantee that does hold is about the
+# directory a leaf runs in, so it is tested as one: the --isolate clone carries
+# no git-ignored file, and a leaf run without --isolate is refused.
+FAKE_KEY_TEXT = "omniroute: sk-000000000000000000000000000000000000-fake\n"
+FAKE_ENV_TEXT = "OPENAI_API_KEY=sk-000000000000-fake\n"
+
+
+def _init_checkout_with_an_ignored_key():
+    """A temp checkout that looks like a real working lane: tracked templates,
+    a git-ignored api-keys.yml and a git-ignored .env.local, both holding FAKE
+    content (no real key file is read or copied by this suite)."""
+    root = _init_git_root()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    os.makedirs(os.path.join(root, "configuration"), exist_ok=True)
+    with open(os.path.join(root, ".gitignore"), "w", encoding="utf-8") as fh:
+        fh.write("configuration/api-keys.yml\n.env.local\n")
+    for rel in ("configuration/api-keys.example.yml", ".env.example"):
+        with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+            fh.write("# template, no secret here\n")
+    subprocess.run(git + ["-C", root, "add", ".gitignore",
+                          "configuration/api-keys.example.yml", ".env.example"], check=True)
+    subprocess.run(git + ["-C", root, "commit", "-q", "-m", "templates"], check=True)
+    # The ignored secrets and one plain untracked file appear after the commit —
+    # exactly the state a leaf must not be dropped into.
+    with open(os.path.join(root, "configuration", "api-keys.yml"), "w",
+              encoding="utf-8") as fh:
+        fh.write(FAKE_KEY_TEXT)
+    with open(os.path.join(root, ".env.local"), "w", encoding="utf-8") as fh:
+        fh.write(FAKE_ENV_TEXT)
+    with open(os.path.join(root, "scratch-untracked.txt"), "w", encoding="utf-8") as fh:
+        fh.write("untracked\n")
+    return root
+
+
+class IsolateCloneCarriesNoSecretsTests(unittest.TestCase):
+    def setUp(self):
+        self.cli = load_agent()
+
+    def test_the_isolate_clone_carries_no_git_ignored_or_untracked_file(self):
+        root = _init_checkout_with_an_ignored_key()
+        self.addCleanup(shutil.rmtree, root, True)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        clone = os.path.join(tmp, "sandbox")
+        base = self.cli.isolate_clone(root, clone, "agent/keydeny3b")
+        # The tracked template is there...
+        self.assertTrue(os.path.isfile(
+            os.path.join(clone, "configuration", "api-keys.example.yml")))
+        self.assertTrue(os.path.isfile(os.path.join(clone, ".env.example")))
+        # ...the ignored secret is not.
+        self.assertFalse(os.path.exists(
+            os.path.join(clone, "configuration", "api-keys.yml")))
+        self.assertFalse(os.path.exists(os.path.join(clone, ".env.local")))
+        self.assertFalse(os.path.exists(os.path.join(clone, "scratch-untracked.txt")))
+        # The claim in git's own words: nothing ignored, nothing untracked.
+        listing = subprocess.run(
+            ["git", "-C", clone, "status", "--porcelain", "--ignored",
+             "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(listing.strip(), "", listing)
+        self.assertEqual(base, subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                                              capture_output=True, text=True,
+                                              check=True).stdout.strip())
+        # The same step still disables the push, so the clone cannot write back.
+        url = subprocess.run(["git", "-C", clone, "remote", "get-url", "--push", "origin"],
+                             capture_output=True, text=True).stdout.strip()
+        self.assertEqual(url, self.cli.ISOLATE_PUSH_DISABLED)
+
+    def test_a_leaf_grep_finds_no_key_because_the_file_is_absent(self):
+        # The fence cannot match a pattern search for "sk-"; the clone's absence
+        # of the ignored file is what makes the search come back empty.
+        root = _init_checkout_with_an_ignored_key()
+        self.addCleanup(shutil.rmtree, root, True)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        clone = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, clone, "agent/keydeny3b")
+        hits = subprocess.run(["grep", "-rl", "sk-", clone],
+                              capture_output=True, text=True).stdout
+        self.assertNotIn("api-keys.yml", hits)
+
+
+class LeafIsolationMandatoryTests(unittest.TestCase):
+    """A leaf role runs in a clone or not at all (KEYDENY3b item 2b)."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"providers": {"omniroute": {"models": {n: {} for n in
+                                                            list(routing.ALL_COMBOS)}}}}
+
+    def args(self, **overrides):
+        tier = overrides.get("tier", 2)
+        ns = argparse.Namespace(
+            tier=tier, card=None, allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False,
+            model="omniroute/t%d-worker" % tier,
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL, isolate=True,
+            auto=True, lean=False, title=None, dry_run=True, task="do it",
+            no_defer=False, read_only=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def route(self, tier):
+        return {"tier": tier, "combo": "t%d-worker" % tier, "model": "omniroute/x",
+                "reason": "stub", "privacy": "public", "review": False,
+                "resolver": False, "read_only": False, "effort": None}
+
+    def plan(self, **overrides):
+        tier = overrides.pop("tier", 2)
+        with mock.patch.object(self.cli, "resolve_route",
+                               lambda *a, **k: self.route(tier)):
+            return self.cli.build_plan(self.args(**overrides), self.cfg)
+
+    def dispatch(self, **overrides):
+        """cmd_run with the route stubbed; (rc, everything it printed)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.object(self.cli, "resolve_route",
+                                   lambda *a, **k: self.route(overrides.get("tier", 2))):
+                rc = self.cli.cmd_run(self.args(**overrides), self.cfg)
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_a_leaf_tier_without_isolate_is_refused(self):
+        # The reason and the fix both name themselves: an operator reading a
+        # refusal must not have to guess why the pattern fence is not enough.
+        for tier in self.cli.LEAF_TIERS:
+            msg = self.cli.leaf_isolation_refusal(tier, isolate=False, client="opencode")
+            self.assertIsNotNone(msg, "tier %s may run in place" % tier)
+            self.assertIn("--isolate", msg)
+            self.assertIn("ignored", msg)
+        self.assertIsNone(self.cli.leaf_isolation_refusal(3, isolate=True,
+                                                          client="opencode"))
+
+    def test_a_leaf_run_without_isolate_is_refused_before_anything_starts(self):
+        rc, text = self.dispatch(isolate=False, tier=3, dry_run=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("--isolate", text)
+
+    def test_a_dry_run_of_the_same_run_announces_the_refusal(self):
+        # Planning touches nothing, so the preview still prints its route — and
+        # says plainly that the run itself would be refused.
+        rc, text = self.dispatch(isolate=False, tier=3, dry_run=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("would be refused", text)
+
+    def test_the_same_leaf_run_with_isolate_is_not_refused(self):
+        rc, text = self.dispatch(isolate=True, tier=3, dry_run=True)
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("cannot run in the caller's checkout", text)
+
+    def test_the_top_tier_is_never_refused_for_lack_of_isolate(self):
+        rc, text = self.dispatch(isolate=False, tier=1, dry_run=False)
+        self.assertNotIn("cannot run in the caller's checkout", text)
+
+    def test_a_spawning_tier_may_still_run_in_place(self):
+        # The scope of the mandate, pinned: a leaf is a role that never spawns
+        # (catalog `leaf: true` = tier 3). Tier 2 is the suborchestrator, and the
+        # skill documents `run "<task>"` (an empty card is t2-worker) in a lane
+        # the operator owns — refusing it would break the documented flow to buy
+        # a control the operator's own session already has. What remains open is
+        # in the fence comment (lib/agent_harness.py): tier 2's own pattern hole,
+        # and the native t3 subagent it can launch into that cwd.
+        self.assertNotIn(2, self.cli.LEAF_TIERS)
+        rc, text = self.dispatch(isolate=False, tier=2, dry_run=True)
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("would be refused", text)
+
+    def test_an_isolate_leaf_run_is_planned(self):
+        for tier in self.cli.LEAF_TIERS:
+            plan = self.plan(tier=tier, isolate=True)
+            self.assertIsNotNone(plan["sandbox"], "tier %s" % tier)
+
+    def test_the_top_of_the_tree_is_not_a_leaf(self):
+        # Tier 1 is the operator's own session (a lane it owns, commits made by
+        # hand); the fence is about a spawned leaf, so a 1 run stays planned
+        # in the caller's checkout.
+        plan = self.plan(tier=1, isolate=False)
+        self.assertIsNone(plan["sandbox"])
+
+    def test_every_client_that_can_be_a_leaf_can_isolate(self):
+        # Isolation is `git clone --local` plus the cwd the child is started in,
+        # so any CLI the spawner can run headlessly can be isolated. A client
+        # that could not would have to lose grep/glob for its leaf runs instead
+        # (the brief's fallback), so pin that none is exempt — and if a future
+        # client is added that cannot run headless from a cwd, this is where the
+        # exemption would have to be argued into NO_ISOLATE_CLIENTS, loudly.
+        for name, client in clients.CLIENTS.items():
+            self.assertTrue(client.binary, name)
+            self.assertTrue(client.headless, "%s cannot be spawned on a cwd" % name)
+            self.assertNotIn(name, self.cli.NO_ISOLATE_CLIENTS,
+                             "%s may run a leaf without isolation" % name)
+
+
+class LeafSpawnGateOverlayTests(unittest.TestCase):
+    """KEYDENY3b item 1: the run's own overlay answers both gate spellings."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"providers": {"omniroute": {"models": {n: {} for n in
+                                                            list(routing.ALL_COMBOS)}}}}
+
+    def args(self, tier):
+        return argparse.Namespace(
+            tier=tier, card=None, allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False, model="omniroute/t%d" % tier,
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL, isolate=True,
+            auto=True, lean=False, title=None, dry_run=True, task="do it",
+            no_defer=False, read_only=False)
+
+    def route(self, tier):
+        return {"tier": tier, "combo": "t%d-worker" % tier, "model": "omniroute/x",
+                "privacy": "public", "review": False, "resolver": False,
+                "read_only": False, "effort": None}
+
+    def rules(self, tier):
+        with mock.patch.object(self.cli, "resolve_route", lambda *a, **k: self.route(tier)):
+            plan = self.cli.build_plan(self.args(tier), self.cfg)
+        overlay = json.loads(plan["env"]["OPENCODE_CONFIG_CONTENT"])
+        return [(r["action"], r["resource"], r["effect"]) for r in overlay["permissions"]
+                if r["action"] in ("subagent", "task")]
+
+    def test_the_leaf_agent_denies_both_spawn_spellings(self):
+        self.assertEqual(self.rules(3),
+                         [("subagent", "*", "deny"), ("task", "*", "deny")])
+
+    def test_a_spawning_tier_denies_all_then_allows_its_one_child(self):
+        for tier, child in ((1, "t2-worker"), (2, "t3-reviewer")):
+            rules = self.rules(tier)
+            for gate in ("subagent", "task"):
+                own = [r for r in rules if r[0] == gate]
+                self.assertEqual(own[0], (gate, "*", "deny"), str(rules))
+                self.assertEqual(own[-1], (gate, child, "allow"), str(rules))
+                self.assertEqual(len(own), 2, str(rules))
+
+    def test_the_gate_rules_come_after_the_outside_path_fence(self):
+        # The overlay merges last and last-match-wins, so it must not re-allow an
+        # outside path while fencing the spawn.
+        with mock.patch.object(self.cli, "resolve_route", lambda *a, **k: self.route(3)):
+            plan = self.cli.build_plan(self.args(3), self.cfg)
+        overlay = json.loads(plan["env"]["OPENCODE_CONFIG_CONTENT"])
+        actions = [r["action"] for r in overlay["permissions"]]
+        self.assertEqual(actions[0], "external_directory")
+        self.assertEqual(actions[-2:], ["subagent", "task"])
+
+
 if __name__ == "__main__":
     unittest.main()
