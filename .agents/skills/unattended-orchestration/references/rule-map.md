@@ -26,7 +26,7 @@ and every new id target exists in `SKILL.md`.
 | `R-spawn-18` | code: MCP `spawn` backgrounds via Popen (never nohup/setsid) | already enforced |
 | `R-spawn-19` | `R-coord-01` | absorbed: push before dispatch |
 | `R-spawn-20` | `R-orch-06` | absorbed: verify WIP scope |
-| `R-spawn-21` | code: `--isolate` parent-checkout writes exit 7 (LEAK) | already enforced |
+| `R-spawn-21` | code: `--isolate` parent-checkout writes exit 7 (LEAK) | enforced, but false-positives on a moved parent — lanes.md "frozen parent" |
 | `R-spawn-22` | `R-orch-04` | absorbed: feed isolated workers inline |
 | `R-spawn-23` | `R-orch-13` | absorbed: cross-family routing |
 | `R-spawn-24` | `R-coord-03` | absorbed: Claude orchestrates only |
