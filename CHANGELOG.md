@@ -126,6 +126,201 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record its own uuid, as the real transcript does; they had keyed the uuid off
   the token count, which is exactly what the dedup now collapses. 9 red before
   the change, 50 green after.
+### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
+
+- **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the
+  matcher used `fnmatch.fnmatchcase`, which binds a rule to the one casing it was
+  written in. `deny-deepseek-pro` (`*deepseek*pro*`) therefore did not match
+  `samba/DeepSeek-V4-Pro` — the same model, spelled with capitals — and matched
+  nothing else either, so the leg fell through to the *no-match = allowed*
+  default and the catch-all `deny-deepseek` never saw it. `openrouter/deepseek/
+  DeepSeek-V4-PRO` was only ever caught by the unrelated `deny-openrouter`.
+  Pattern and leg are now both casefolded before the match, first-match-wins
+  order unchanged. One matcher, so every consumer moved with it (R-orch-11):
+  `_check_leg_rules` (rule 9), the gateway renders via `gateway_legs`,
+  `autoos_resolver.usable_legs` and `probe_common._skip_reason` all import
+  `leg_denied`/`leg_rule_for` from here — none re-implements the comparison, and
+  `audit-router.py` / `sync-*.py` do not match legs at all. `resolve_leg` stays
+  case-sensitive: it is the providers catalog's own contract, not this matcher's.
+- **No verdict moves for any leg the registry names.** Swept over every route
+  leg, every `unavailable_legs` key and every provider spelling × model id
+  (1421 legs, 30 of them real): the rule that fires and its `allow` are identical
+  before and after, for the one mixed-case leg `samba/MiniMax-M3` included — the
+  fold only closes spellings that previously matched *nothing*. Kept as
+  `LegRulesTests.test_no_committed_verdict_changes_when_matching_folds_case`.
+- **`tests/test_autoos_resolver.py`** (review 2, LOW):
+  `test_only_deepseek_v41_flash_survives_of_the_deepseek_family` asserted
+  `"deepseek/deepseek-v4-flash" not in models` — a *leg* string tested against a
+  map keyed by model id, so that limb could never fail. It now asserts what
+  DSAMEND actually left behind: the bare `deepseek-v4-flash` row still exists for
+  its reseller leg and carries **no** native `direct` block.
+- Tests: `LegRulesTests.test_matching_is_case_insensitive` (was red: the three
+  Pro spellings above came back allowed); `validate` and all five
+  `render --check` surfaces unchanged.
+
+### Fixed — the native DeepSeek id is `deepseek-flash` only, and V4 Pro is denied by name (DSAMEND, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: routing-00 measured `GET /models` on
+  `api.deepseek.com` at 10:0xZ — the live catalog is exactly
+  `['deepseek-flash', 'deepseek-v4-pro']` — so the `direct` row that used to
+  hang off `models.'deepseek-v4-flash'` (`model: deepseek/deepseek-v4-flash`,
+  `base_url: https://api.deepseek.com`) was sending an **alias**, not a catalog
+  model: it answers 200 but `served=deepseek-flash`, while the v4.1 spelling is a
+  flat 400. The native `direct` block now belongs to `models.'deepseek-flash'`,
+  the only entry that names a model the vendor actually serves, and
+  `models.'deepseek-v4-flash'` keeps its reseller leg
+  (`cheaperinference/deepseek-v4-flash`) with no native row. The other
+  providers' spellings — `openrouter/deepseek/deepseek-v4.1-flash`,
+  opencode-zen's bare `deepseek-v4.1-flash` — are their ids, not ours, and were
+  left alone.
+- **`policy.leg_rules`**: a new **first** rule `deny-deepseek-pro`
+  (`match: *deepseek*pro*`, `allow: false`) makes the operator's standing "never
+  route or fall back to V4 Pro" a structural gate instead of a side effect of
+  rule order. Before this, `deepseek/deepseek-v4-pro` was denied only by the
+  catch-all `deny-deepseek`, which sits *after* `allow-deepseek-native-flash` —
+  one future allow rule (a wildcard, a BYOK exception) would have opened the
+  paid model. First in the list, no DeepSeek allow can reach it: it denies the
+  native, `openrouter/`, `cheaperinference/` and `opencode-zen/` spellings alike
+  (`source`: operator via routing-00 2026-09-28T10:0xZ; Server 719cee9).
+- **Consumers of that row** moved with it (R-orch-11: an id change is grepped
+  through every reader): `openhands/profiles/deepseek-v4-flash.json` →
+  `deepseek-flash.json` with the native model's real window (131072/32768,
+  `reasoning_effort: high`), `lib/linux/install.sh` and
+  `lib/windows/AutoOS.Install.psm1` (`_profile_for('deepseek-flash', …)`),
+  `openhands/agent-profiles/worker.json` and `catalog/agent-harness.json`
+  (`leaf-reviewer`: opencode `deepseek/deepseek-flash`, profile ref
+  `deepseek-flash`), and the two fixtures that pin those projections
+  (`tests/fixtures/legacy-models.golden.json`,
+  `tests/fixtures/agent-harness/opencode.expected.json`).
+- **Effort ladder, measured rather than assumed** (19 charged one-word calls
+  plus one rejected value, ~0.0005 USD total): the wire parameter for `models.'deepseek-flash'.effort_ladder` is
+  `reasoning_effort`, and a bad value names the accepted set — `none, minimal,
+  low, medium, high, xhigh, ultra, max` — so all four declared rungs are real
+  and the ladder needed no re-mapping. What the measurement *did* overturn is
+  the assumption behind expressing rung `none` as an omission: with no parameter
+  the model **reasons** (20 of 22 completion tokens), and it is
+  `reasoning_effort: "none"` (or `thinking: {"type": "disabled"}`) that turns
+  thinking off. Recorded on the leg, pinned by
+  `tests/test_registry.py::DeepSeekNativeEffortLadderTests`, and left as an open
+  item for the emitter (see below).
+- **`tests/`**: `DeepSeekNativeIdAndProDenialTests` (13 cases) — no render or
+  config sends a non-canonical id to the native API (registry `direct` rows,
+  route legs, the vendored profiles, and every render and committed config
+  scanned as text), `deny-deepseek-pro` exists, precedes every DeepSeek allow,
+  is the rule that answers for each pro spelling, and no pro id appears in any
+  render, `router_settings.fallbacks` stays empty and DeepSeek-free, and the
+  registry still passes `check` with the new rule. Written failing first: 8 of
+  the 13 red before the change, green after, no other case moved.
+
+
+### Added — the usage report prices the operator's DeepSeek cap (DSGUARD, 2026-09-28)
+
+- **`tools/autoos_usage.py`** (spend guard): a `paid_spend` section, asked for
+  by `--spend-since [DATE]` (bare flag: the 1st of the current month UTC) or
+  `--balance-usd N` — `autoos-agent.py usage --since 1h --spend-since
+  --balance-usd 19.99`. It bills the watched paid provider's rows at the
+  registry's per-token `price_in`/`price_out`
+  (`catalog/ai-registry.json:234-235`: 3e-07 / 1.2e-06, i.e. $0.30 in / $1.20
+  out per 1M — the data was already there, nothing was added to the registry)
+  times the factor of `providers.deepseek.windows`
+  (`catalog/ai-registry.json:1857-1955`, source
+  `https://api-docs.deepseek.com/quick_start/pricing`) **at each row's own
+  timestamp**, through `autoos_resolver.price_factor` — the same function the
+  router uses to pick a cheap hour, so the guard and the router cannot
+  disagree about what an hour costs. `WARN` at spend >= 20 USD (the operator's
+  monthly cap) or a caller-measured balance below 5 USD, in the text and in
+  `warnings`. The spend window reaches the row fetch back past `--since` (the
+  month so far versus the last hour of traffic); when the walk stops at the
+  page cap the block says `incomplete`, so a partial window reads as a floor
+  and not as a total. The threshold comparison uses the rounded, reported
+  figure: a cap missed by 1e-15 of float drift is a cap the operator believed
+  was held. Still opt-in — `usage --json` without either flag keeps the shape
+  it has always had, and no deeper paging happens for nothing.
+  `load_prices` became `price_source_name` + `prices_from_registry` +
+  `read_registry` so the price table and the windows come from one parse.
+- **`docs/routing.md`**: the two flags and what they warn about.
+- **`tests/`**: `SpendTests` in `tests/test_autoos_usage.py` (21 cases, injected
+  rows only — the gateway is never contacted, and no test reads a real key):
+  the factor math below/at/above 20 USD, the off-peak half price versus the
+  peak hour, an uncovered hour billed at full price, another provider's rows
+  excluded, an unpriced model counted as a gap rather than as free, the default
+  month-start window, a spend window deeper than `--since`, the paging cap
+  making the figure a floor, the balance floor at and above 5 USD, both warnings
+  at once, bad `--spend-since`/`--balance-usd` exiting 2 before any fetch, the
+  key never echoed, and two pins on the shipped registry (the per-token price
+  and the `price_factor` window set).
+- Lesson: the unit is the whole bug in a spend guard — the registry is USD
+  *per token*, so the off-peak factor is what a naive per-1M reading would
+  silently double or halve, and only a test that names the peak hour and its
+  complement catches it.
+- Open: only DeepSeek is guarded (the provider is a constant, `SPEND_PROVIDER`);
+  `price_cache_read` is not billed; the balance must be measured by the caller —
+  the gateway's own `GET /user/balance` is not read here.
+### Fixed — DeepSeek answers again, and the resolver's effort rung finally reaches the client (DSBACK, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `providers.deepseek.available` flips
+  `false` → `true` — operator top-up 2026-09-28T07:4xZ, the router's
+  `GET /user/balance` measured `is_available=true` at 19.99 USD, reversing the
+  402 Insufficient Balance of 2026-09-27T16:4xZ. Nothing else moved: every
+  deepseek model keeps its `effort_ladder` (`deepseek-v4-flash` keeps the empty
+  one and `reasoning: false`), the per-leg `opencode-zen/deepseek-v4.1-flash`
+  gate stays `available: false` (measured 402/429 by
+  `tools/probe-toolcalls.py`), and `providers.openrouter` stays off (DSMAX).
+- Renders regenerated by the repo's own commands and re-checked at rc 0
+  (`render <target> --check`, `tools/sync-router-tiers.py`,
+  `tools/sync-ide-models.py`): `configuration/omniroute/combos.json` (the
+  `deepseek-v4.1-flash` combo returns, `deepseek/deepseek-flash` heads
+  `t2-worker-clean`/`t3-driver-clean` and joins `t2-worker`/`t3-driver`, and it
+  leaves `omitted`), `configuration/litellm/config.yaml` (managed block back,
+  deployments re-added to those four routes), `catalog/ide-models.json`,
+  `configuration/openhands/tier-profiles.json`, `docs/models.md` and
+  `opencode.jsonc` (the `#low`/`#high`/`#max` `variants` return with the leg).
+  `fallbacks: []` stays empty — re-adding a chain is an operator call, not a
+  dead-leg verdict.
+- **`tools/autoos-agent.py`**: **`apply_effort_rung()`** / `declared_variants()`
+  (new) and one call in `_resolve_route_v2`. The rung the resolver scored used
+  to reach only the track record (`track_entry`), so `opencode run --model
+  omniroute/deepseek-v4.1-flash` was the same argv at `low` and at `max` and the
+  generated `variants` were dead weight. It is now stamped as the opencode model
+  variant that carries it (`…#high` → `settings.reasoningEffort` →
+  `reasoning_effort=high`); `none`/None emit no suffix — no reasoning param at
+  all — a rung the model declares no variant for is dropped rather than
+  invented, and an explicit `--model x#low` keeps the operator's rung. Gateway
+  clients are unchanged on purpose: an OmniRoute combo has no per-effort alias
+  (pinned in `tests/test_registry_render.py`), so their argv stays the bare
+  combo and the rung stays record-only.
+- **`tools/autoos_resolver.py`**: `_score_candidates` honours spec 4's
+  `override.effort` — normalize_v2 parsed and validated the pin, then nothing
+  read it, so a card pinning `effort=max` ran the bucket's rung. The pin
+  replaces it, clamped to the answering leg's ladder like any other wanted rung,
+  so a pin cannot invent a rung and cannot make a non-reasoning leg reason.
+- Tests: **`DeepSeekBackTests`** (`tests/test_registry.py`, new, 10 cases — the
+  flip, the source note, every ladder unchanged, the zen leg still gated,
+  `t2-worker-clean` heading with the native leg, the models-doc row, validate
+  clean), **`EffortRungPlumbingTests`** (`tests/test_autoos_spawner.py`, new, 7
+  cases — one per rung, none/None, the clamp, the explicit-variant precedence,
+  the v1 path carrying no hard-coded rung, the gateway argv staying bare) and
+  four pinned-effort cases in `PlanTests`
+  (`tests/test_autoos_resolver.py`). Stale "deepseek is unavailable" pins were
+  re-derived from the render, not loosened:
+  `tests/test_registry_render.py`, `tests/test_sync_ide_models.py`,
+  `tests/linux/33-documentation.sh`, `tests/linux/34-ai-services.sh` and
+  `tests/run-tests.ps1` (whose `apply prune` orphan example moved to
+  `t1-orchestrator-clean`); `test_autoos_spawner.py`'s provider-attribution case
+  now derives the provider from the registry instead of hard-coding a name.
+  1209 passed, 1 skipped, 150 subtests on the six suites (baseline before the
+  work: 1078 passed on four of them).
+- Docs: `docs/models.md` — the `deepseek-v4.1-flash` bullet, the three-doors
+  table, the mermaid direct legs and the funded-provider row now say what
+  answers; the effort section documents that the suffix is applied by the
+  spawner, not only chosen by a caller, and corrects the render's derivation
+  (the served head leg, not `legs[0]`).
+### Changed — four orchestration rules: L0 never executes, the ready window, the worktree-copy trap, corpus-accepted detectors (FOLD5, 2026-09-28)
+
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: 31 rules → 33. New `R-router-03` — *Route, decide, ask, verify; never run project work, cleanups or setup - hand them to the L1 coordinator* (operator 2026-09-28T10:4xZ via routing-00: a router that picks up a shovel stops routing). The Levels table's **L0** Job cell and the levels paragraph after the table name that target too — **L1 coordinator**, not "main orchestrator", which `references/main-orchestrator.md` reserves for a different level. Replaced `R-coord-01` to pin the **ready order** — merge main before spawn and CI, *not* between green CI and `ready` (L1-backlog 2026-09-28T08:52:57Z: a lane was marked `ready` on a tip CI had never tested; `mutex` and `freeze parent` survive from the old line, `2c3e4f7`). Replaced `R-worker-08`: verify on a detached copy — `git clone --no-hardlinks` **or** `git worktree add --detach` — while `cp -r` of a worktree is forbidden outright, because the copy shares the original's index: a reviewer's `cp -r` plus `git checkout` mutated it (L1-backlog/ci7, Sonnet final 08:53:30Z). New `R-worker-10`: a detector or redactor is accepted against the **real output corpus**, and every new consumer of raw data gets its own redaction test (REDACTFIX3 07:24:13Z, SPAWNFIX3d 08:18:21Z: fixtures stayed green while seven real reports and one secret went out).
+- **Every rule line is under the 200-character gate `tools/skill-rules.py check` enforces** — `R-router-03` 198, `R-coord-01` 199, `R-worker-08` 190 — so each text carries the shortest wording that still states the lesson, and each `source:` pointer keeps only the form that resolves (lane, file or sha). `check` reports `ok: 33 rules`.
+- **Muse's review of FOLD5 (FOLD5b)**: `R-worker-10` moved to the end of the worker block so the ids read in numeric order; the "`tar` only if no test reads git" clause came back into `R-worker-08` (dropping it discarded the 37-fixture lesson, which `R-tests-14` still records); the L0 hand-off target is spelled **L1 coordinator** in the rule, the Levels row and the paragraph; `R-coord-01` went back to "before spawn and CI, not between green CI and `ready`" once that wording measured 199. Two FOLD4 rows in **`references/rule-map.md`** that restate these rules were updated to the new meaning — `R-coord-01` (the ready window, `2c3e4f7`) and `R-worker-08` (`worktree add --detach`, the cp-shares-index trap, `ci7`, tar/37-fixture history kept). No id was retired or renumbered.
+
 ### Fixed — Muse's slow first byte: a 180 s response-start ceiling, and the combo probe streams (MUSETIME, 2026-09-28)
 
 - **`configuration/docker/ai-stack/compose.yml`**: the gateway gives up on a provider call whose response has not *started* within `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS`, and unset resolves to 30000 (`resolveDirectHeadersTimeoutMs` reads the env and returns 3e4 when absent — `autoos-omniroute:/app/.build/next/server/chunks/_0117s88._.js` @900, the env name @965; `directFetchWithBoundedResponseStart` is exported at @758 and its `code: "DIRECT_RESPONSE_START_TIMEOUT"` const at @47, carrying the text "Direct response did not start within 30000ms"). Muse spark-1.3's first byte runs 3-32 s at minimal/low/medium and 4-58 s straight to the provider (routing-00 09:2xZ, image `autoos/omniroute:3.8.50-autoos2`), so the `high` leg 504'd. That 504 is also what opened the breaker for the *next* call: `shouldTripProviderBreakerForResult` requires the status to be in `new Set([408,500,502,503,504])` (all three in one module: the set `_0gq2i23._.js` @54054, `isProviderBreakerFailureStatus` @54261, `shouldTripProviderBreakerForResult` @54549), so two slow legs at the apikey `failureThreshold=2` `apply.sh` pins produced the measured `503 ALL_TARGETS_SKIPPED`. compose now pins 180000, operator-overridable, documented as a commented default in `stack.env.example`. **An `ai-stack` recreate of the omniroute service is required for the env to take effect.**

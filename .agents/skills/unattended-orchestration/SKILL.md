@@ -45,7 +45,7 @@ asks before loading that level's rules.
 
 | Level | Job | Relaunches | Asks the operator |
 |---|---|---|---|
-| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator | L1, when L1's status timestamp stays quiet >25 min from its handoff (R-coord-08; source: common.md "Heartbeats never stop") | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
+| **L0** router | the operator's own session: routes intent, tracks PAUSE/resume, is the *only* path to the operator; never executes project work, cleanups or setup — hands them to the L1 coordinator (R-router-03) | L1, when L1's status timestamp stays quiet >25 min from its handoff (R-coord-08; source: common.md "Heartbeats never stop") | R-router-01 (its own rule: it researches the obvious ones, forwards the rest verbatim) |
 | **L1** coordinator | one per run: launches L2s, merges lanes into main, pushes, cleans up | L2, past its context cap (R-coord-06); or a busy L2 whose status timestamp it watches stays quiet >25 min from its handoff (R-coord-08) | never directly — appends `question: … \| options: …` to L0's inbox (`RUN/inbox/L0.md`), per R-router-01 |
 | **L2** orchestrator | one per track/plan: owns a worktree + branch, spawns and reviews L3 | L3, never resuming a no-change stop (R-orch-06) | never directly — same channel, via L1 |
 | **L3** worker / reviewer | one closed task, an explicit return contract (`docs/agent-protocol.md`) | nothing — R-worker-06 | never |
@@ -54,10 +54,11 @@ This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3`
 — the two axes are independent. *Relaunches* is a watch: each level reads the status timestamp the
 level below rewrites and relaunches — never resumes (R-orch-06) — a busy child quiet >25 min from
 its handoff (R-coord-08, the beat). **L0 only routes and relays: the level that owns a topic
-researches it, answers it and summarizes it; L0 forwards what it cannot answer** (R-router-01;
-source: work/L1-routing/FOLD4.common.md "Levels"). `references/main-orchestrator.md` names a single
-top session "L1" in an older 3-level scheme (its L1 ≈ this table's L2) — read whichever your brief
-names.
+researches it, answers it and summarizes it; L0 forwards what it cannot answer, and hands the
+work it routes to the L1 coordinator — it never executes it** (R-router-01, R-router-03; source:
+work/L1-routing/FOLD4.common.md "Levels").
+`references/main-orchestrator.md` names a single top session "L1" in an older 3-level scheme (its
+L1 ≈ this table's L2) — read whichever your brief names.
 
 ## Rules
 
@@ -94,10 +95,11 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 - R-router-01: Only L0 asks, researched, as the batched `Q:` line; others write `question:` to L0 or its parent's inbox. (why: a dialog blocks a background session; source: common.md, inbox 05:47Z)
 - R-router-02: Diagnose against host and route state before declaring failure. (why: first verdict is usually wrong; source: review-b3c1.out 2026-09-26T07:33Z)
+- R-router-03: Route, decide, ask, verify; never run project work, cleanups or setup - hand them to the L1 coordinator. (why: a router doing work stops routing; source: operator via routing-00 10:4xZ)
 
 ### coord (L1)
 
-- R-coord-01: Cut lanes from main; merge main in before spawn; lane→orch→main, no-ff, mutex, one merger; freeze parent. (why: serial merges reconcile; source: HandoffCore tests, inbox 19:55Z, 19:39Z)
+- R-coord-01: Cut lanes from main; merge main before spawn and CI, not between green CI and ready; lane→orch→main no-ff; one merger, mutex, freeze parent. (why: ready needs tested tip; source: 2c3e4f7)
 - R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
 - R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`. (why: a Claude limit stops the run; source: common.md)
 - R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
@@ -130,8 +132,9 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-worker-05: Gate on `set -o pipefail` and the 'N passed' line, never `tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out)
 - R-worker-06: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: supervisor wanting to code mis-decomposed; source: tests/test_agent_harness.py)
 - R-worker-07: Never shellcheck tests/run-tests.sh locally; run jobs over ~2 GB under systemd-run MemoryMax=2G. (why: its OOM killed every session twice; source: herdr-server.log 2026-09-26T15:25Z)
-- R-worker-08: Verify or mutate on a detached copy — `git clone --no-hardlinks`, never the worktree; `tar` only where nothing reads git. (why: an export broke 37 git fixtures; source: REVGATE.out)
+- R-worker-08: Verify on a detached copy (`git clone --no-hardlinks`, `worktree add --detach`; `tar` only if no test reads git); never cp a worktree. (why: copies share its index; source: ci7)
 - R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
+- R-worker-10: Accept a detector or redactor on the real output corpus; give each new raw-data consumer its own redaction test. (why: fixtures passed; a secret leaked; source: SPAWNFIX3d, REDACTFIX3)
 
 ## CAO quickstart
 

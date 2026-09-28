@@ -170,11 +170,17 @@
       "tool_calls": "unproven"
     },
     "deepseek-flash": {
-      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
+      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. DSAMEND (routing-00 measured GET /models at 2026-09-28T10:0xZ): the native catalog is exactly ['deepseek-flash', 'deepseek-v4-pro'], so THIS is the only id ever sent to api.deepseek.com and it now owns the `direct` block (the installers and the vendored OpenHands profile take their wire model from it); the legacy 'deepseek-v4-flash' direct row was an alias, not a catalog model. DSAMEND effort ladder, measured live with max_tokens 16 and 512 on POST /chat/completions (7 + 6 calls, ~200 completion tokens, source 'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): the wire parameter IS `reasoning_effort`, and a 422 names the accepted enum as none, minimal, low, medium, high, xhigh, ultra, max - so all four rungs below are real wire values and the ladder needs no re-mapping. Two measured behaviours matter to whoever sends them: reasoning is ON by default (omitting the parameter costs reasoning tokens - 20 of 22 completion tokens at max_tokens 512), and `reasoning_effort: 'none'` (like `thinking: {'type': 'disabled'}`) is what switches it off, returning no completion_tokens_details at all. So a caller that expresses rung 'none' by SENDING NOTHING gets rung max-equivalent behaviour, not the off switch: render_ide filters 'none' out of the ide ladder and tools/autoos-agent.py apply_effort_rung emits no suffix for it, which is correct for the legs that were measured there but is NOT off for this one. low/high/max answered 200 at 18/25/18 reasoning tokens for a one-word prompt - accepted, indistinguishable at n=1, so no rung is reordered on this evidence.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
         "tokens": 65536
+      },
+      "direct": {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek/deepseek-flash",
+        "npm": "@ai-sdk/openai",
+        "provider": "deepseek"
       },
       "effort_ladder": [
         "none",
@@ -192,16 +198,11 @@
       "tool_calls": "unproven"
     },
     "deepseek-v4-flash": {
+      "$comment": "The v4 (not v4.1) DeepSeek snapshot, reachable only through a reseller: the cheaperinference/deepseek-v4-flash leg (policy.leg_rules deny-deepseek keeps it out of every route). It has NO native direct row: DSAMEND (routing-00 measured GET /models at api.deepseek.com, 2026-09-28T10:0xZ) found the native catalog to be exactly ['deepseek-flash', 'deepseek-v4-pro'], and a chat call as 'deepseek-v4-flash' answers 200 but served=deepseek-flash — an alias, so the row that used to carry direct {provider: deepseek, model: deepseek/deepseek-v4-flash} was sending a non-canonical id to the vendor API. The native row is models.'deepseek-flash' now.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
         "tokens": 524288
-      },
-      "direct": {
-        "base_url": "https://api.deepseek.com",
-        "model": "deepseek/deepseek-v4-flash",
-        "npm": "@ai-sdk/openai",
-        "provider": "deepseek"
       },
       "display_name": "DeepSeek V4 Flash",
       "effort_ladder": [],
@@ -407,6 +408,23 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
+    "longcat-2.5-preview-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/longcat-2.5-preview-free resolves to a family. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), tool_calls stays 'unproven', and effort_ladder is empty because no ladder was probed. trains_on_prompts is unset, so it inherits providers.zen's false — and the leg is still never private-safe, because a free tier is not (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule the sibling contributor leg already carries ('OpenCode's free tier can only be used from within OpenCode', combos.json's own comment), not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "meituan",
+      "id": "longcat-2.5-preview-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "meta/muse-spark-1.3-contributor": {
       "$comment": "The OpenRouter contributor (paid) leg of the same real model as models.muse-spark; price reused from that llm-models.json entry - identical commercial arrangement, different provider path. Model-level trains_on_prompts override (PRIV2 brief, 2026-09-26): a contributor leg trains by contract - tests/run-tests.sh's own combos.json policy comment: '-contributor (trains by contract) is banned in t2-worker-clean/t3-driver-clean; t1-orchestrator-clean carries it deliberately since the 2026-09-21 contributor-only block (paid-only, trains).' registry.py's CLEAN_ROUTE_EXEMPTIONS is the one place that deliberate trade-off is allowed through.",
       "context_advertised": 1048576,
@@ -431,6 +449,23 @@
       "reasoning": true,
       "tool_calls": "unproven",
       "trains_on_prompts": true
+    },
+    "mimo-v2.6-flash-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "xiaomi",
+      "id": "mimo-v2.6-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
     },
     "minimax-m2.7": {
       "$comment": "cheaperinference resale leg inside t3-driver (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -558,6 +593,27 @@
       "output_max": 131072,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "nemotron-3-ultra-free": {
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/nemotron-3-ultra-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Numbers reused from models.'openrouter-nemotron-ultra' — the same vendor model line (nvidia/nemotron-3-ultra), different provider path — not measured on this leg, so the ladder keeps that row's conservative three rungs and tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "client_bound": "opencode",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "nemotron-3-ultra-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -1557,6 +1613,13 @@
     },
     "leg_rules": [
       {
+        "id": "deny-deepseek-pro",
+        "match": "*deepseek*pro*",
+        "allow": false,
+        "reason": "never route or fall back to DeepSeek V4 Pro: the native catalog answers ['deepseek-flash', 'deepseek-v4-pro'] and only flash is affordable for agents. First in the list on purpose - a leg_rule is only as strong as its position, so no later (or future) DeepSeek allow, wildcard allow or client-bound allow can re-open the pro model. Denies every spelling of it: native, openrouter/, cheaperinference/, opencode-zen/",
+        "source": "operator via routing-00 2026-09-28T10:0xZ; Server 719cee9"
+      },
+      {
         "id": "deny-groq",
         "match": "groq/*",
         "allow": false,
@@ -1717,6 +1780,33 @@
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
       },
       {
+        "client": "opencode",
+        "model": "opencode/longcat-2.5-preview-free",
+        "family": "meituan",
+        "leg": "opencode-zen/longcat-2.5-preview-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/nemotron-3-ultra-free",
+        "family": "nvidia",
+        "leg": "opencode-zen/nemotron-3-ultra-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/mimo-v2.6-flash-free",
+        "family": "xiaomi",
+        "leg": "opencode-zen/mimo-v2.6-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
         "client": "claude",
         "model": "haiku",
         "family": "anthropic",
@@ -1855,9 +1945,10 @@
       "trains_on_prompts": true
     },
     "deepseek": {
-      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. DeepSeek credit exhausted (402 Insufficient Balance, measured 2026-09-27T16:4xZ): providers.deepseek is off entirely (available: false, below) until topped up. Routes whose only served leg was deepseek/* (deepseek-v4.1-flash) fail closed like t1/spark; t2-worker-clean/t3-driver-clean still serve via mistral.",
+      "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. BACK ON (DSBACK): operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK); GET /user/balance measured is_available=true. This reverses the 402 Insufficient Balance of 2026-09-27T16:4xZ, when the provider was switched off entirely (available: false) until topped up and the routes whose only served leg was deepseek/* (deepseek-v4.1-flash) failed closed like t1/spark. The per-leg operator flags are NOT reversed by this: opencode-zen/deepseek-v4.1-flash keeps its own route gate (measured 402/429 by tools/probe-toolcalls.py) and openrouter stays available: false.",
       "api_base": null,
-      "available": false,
+      "available": true,
+      "source": "operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK)",
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",
       "litellm_prefix": null,
