@@ -180,7 +180,7 @@ class RegistryCapsTests(unittest.TestCase):
             self.assertEqual(ctx.cap_for("fable-1", caps), 123)
             self.assertEqual(ctx.cap_for("claude-sonnet-4-5", caps), 150000)
 
-    def test_live_registry_gives_sonnet_250k(self):
+    def test_live_registry_gives_sonnet_500k(self):
         caps, source = ctx.load_caps()
         self.assertEqual(source, "policy")
         self.assertEqual(ctx.cap_for("claude-sonnet-5", caps), 500000)
