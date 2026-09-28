@@ -815,6 +815,103 @@ Test-Case 'tombstone: the skip line without a note' {
     Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired'
 }
 
+
+# ─── the same gates through the real setup.ps1 ─────────────────────────────
+function Invoke-TombstoneSetup {
+    <#
+      .SYNOPSIS
+        Run the real setup.ps1, with -DryRun, against the fixture in a throwaway
+        tree. The module cases above prove the rules; these prove the entry point
+        applies them - a re-implementation here would pass without setup.ps1 ever
+        calling the gate (Principle 9: verify through the path production takes).
+    #>
+    param([string[]]$SetupArgs = @(), [scriptblock]$Mutate = $null)
+    $psExe = if (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' }
+             elseif (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' }
+             else { return $null }
+    # Not $env:TEMP: Linux and macOS pwsh does not define it, and Join-Path then
+    # throws on the null before the case has proved anything.
+    $tree = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-$([Guid]::NewGuid().ToString('N'))"
+    $null = New-Item -ItemType Directory -Path (Join-Path $tree 'catalog'), (Join-Path $tree 'logs'), (Join-Path $tree 'lib') -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'setup.ps1') -Destination (Join-Path $tree 'setup.ps1')
+    # $Lib is already lib\windows; the tree needs it under lib\windows.    Copy-Item -LiteralPath $Lib -Destination (Join-Path $tree 'lib') -Recurse
+    $cat = Get-AutoOSCatalog -Path $tombstoneFixture
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath (Join-Path $tree 'catalog\windows.json') -Encoding UTF8
+    # On a non-Windows host none of the special folders exist and detection hands
+    # them straight to Join-Path, which throws on $null; point them into the tree.
+    $saved = @{}
+    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        foreach ($n in @('ProgramData', 'LOCALAPPDATA', 'APPDATA', 'ProgramFiles', 'USERPROFILE', 'SystemRoot')) {
+            $saved[$n] = [Environment]::GetEnvironmentVariable($n)
+            [Environment]::SetEnvironmentVariable($n, $tree)
+        }
+    }
+    try {
+        # Local, and restored when this returns: 5.1 turns a native command's
+        # stderr into a terminating error under 'Stop', and the child warns on
+        # stderr (no winget, not elevated) on every run.
+        $ErrorActionPreference = 'Continue'
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $tree 'setup.ps1') @SetupArgs 2>&1
+        [pscustomobject]@{ Rc = $LASTEXITCODE; Out = ($out -join "`n") }
+    } finally {
+        foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Remove-Item -LiteralPath $tree -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'tombstone: setup.ps1 -ListComponents marks the retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-ListComponents', '-NoColor')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'retired-demo.*\(retired\)' `
+                 -and $r.Out -notmatch 'keep-demo.*\(retired\)') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired \(wired by keep-demo now\)' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 profile run never plans a retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Profile', 'workstation', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Kept Component' -and $r.Out -notmatch 'Retired Component') `
+        "the profile planned a tombstone: rc=$($r.Rc)"
+}
+
+Test-Case 'tombstone: setup.ps1 asks a retired id nothing and runs no post-install' {
+    # The fixture tombstone given back the prompt and the post-install step it is
+    # allowed to omit: neither may fire for something that installs nothing.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'prompt' -NotePropertyValue 'demo_url' -Force
+        $null = $t | Add-Member -NotePropertyName 'postInstall' -NotePropertyValue 'Invoke-TombstoneMustNotRun' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Out -notmatch 'A few questions' -and $r.Out -notmatch 'DEMO PROMPT' `
+                 -and $r.Out -notmatch 'Invoke-TombstoneMustNotRun' -and $r.Out -match 'skipped: retired') `
+        "a tombstone asked or ran something: $($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a retired id without a warning' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-state-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('retired-demo', 'keep-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('retired-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -notmatch 'not available on this machine' `
+                 -and $r.Out -match 'skipped: retired') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(500, $r.Out.Length)))"
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 
