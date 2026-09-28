@@ -10,10 +10,11 @@
 #   3. (re)creates the tier combos from configuration/omniroute/combos.json
 #   4. prunes the combos listed there as "retired" from the store (only those)
 #
-# Safe to re-run: providers are add-or-update, combos are replaced in place,
-# and a retired combo that is already gone is simply not found again.
-# Model refs the live catalog does not know are skipped with a warning, so a
-# renamed upstream model degrades one tier leg instead of breaking the run.
+# Safe to re-run: providers are add-or-update, a combo the store already holds
+# unchanged is left alone, and a retired combo that is already gone is simply
+# not found again. Model refs the live catalog does not know are skipped with a
+# warning, so a renamed upstream model degrades one tier leg instead of breaking
+# the run.
 #
 #   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift]
 #
@@ -246,74 +247,75 @@ omni() {
 
 gateway_up() { curl -sf -m 5 "$GATEWAY/api/health" >/dev/null 2>&1; }
 
-# ─── --drift: compare the live combos with combos.json, read-only ───────────
-# Nothing else in this script says whether the live store equals the file
-# (OR1b). The live list comes from `omniroute --output json combo list`:
-# {"combos":[{"name","models":[{"kind":"model","providerId","model"},...]}],
-#  "active":...,"error":...} — a leg ref reconstructs as providerId/model, the
-# spelling combos.json already uses (the CLI splits the leading provider/
-# segment off a plain "provider/model" token when a combo is created).
-# A combo listed in the file's "retired" ids is ignored on the live side; an
-# "omitted" id (a route the registry renders no combo for) is an extra, but the
-# reason is named so the operator sees it is an orphan apply will prune. Any
-# other live combo absent from the file is reported, never touched.
-if [[ $DRIFT -eq 1 ]]; then
-    if ! command -v omniroute >/dev/null; then
-        echo "drift: live store unreadable - the omniroute CLI is not installed"
-        exit 3
-    fi
-    if ! gateway_up; then
-        echo "drift: live store unreadable - the gateway does not answer on $GATEWAY"
-        exit 3
-    fi
-    # Same banner strip as omni_json below (the CLI prints "Loaded env" lines
-    # before the JSON document). Keep the captured stdout even on a non-zero
-    # exit: the CLI answers a refused management call with the document
-    # {"combos":[],...,"error":"HTTP 401"} AND exit 1, so the reason must come
-    # from the body, not the exit code. The body reaches python on fd 3: a
-    # herestring and the program heredoc cannot share stdin (the heredoc wins,
-    # and python would then parse its own text as JSON).
-    drift_failed=0
-    if ! drift_raw="$(cd "$HOME" && omni --output json --no-color combo list 2>/dev/null \
-            | sed -n '/^[[:space:]]*[{[]/,$p')"; then
-        drift_failed=1
-    fi
-    drift_rc=0
-    python3 - "$COMBOS_FILE" "$drift_failed" 3<<<"$drift_raw" <<'PY' || drift_rc=$?
+# omni_json: a management read through the CLI, with the "Loaded env" banners the
+# CLI prints on stdout before the JSON document stripped off (the strip the
+# resilience read below relies on). Keep the captured stdout even on a non-zero
+# exit: the CLI answers a refused management call with the document
+# {"combos":[],"error":"HTTP 401"} AND exit 1, so the reason must come from the
+# body, not the exit code — callers pass the failure flag on to live_combo_norm.
+omni_json() {
+    (cd "$HOME" && omni --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
+}
+
+# ─── The one live-combo normaliser ──────────────────────────────────────────
+# Both readers of the live store — --drift and the Combos loop — answer the same
+# question: what does the gateway hold for this name. One normaliser, never a
+# second copy of the step shape.
+# $1 is the raw `omniroute --output json --no-color combo list` document, whose
+# shape was measured on 3.8.51 on 2026-09-27 and recorded by the --drift comment
+# as it stood before this change (59aa3a9 apply.sh:252-253): {"combos":
+# [{"name","models":[{"kind":"model","providerId","model"},...]}],"active":...,
+# "error":...}. A leg ref reconstructs as providerId/model, the spelling
+# combos.json uses, because the CLI splits the leading provider/ segment off a
+# plain "provider/model" token on create.
+# That measurement names no "strategy" field, although the plain `combo list`
+# table shows one per row ([priority], tests/linux/34-ai-services.sh:418) and
+# the --drift stand-in renders it (:1205). So this prints the field when the
+# document carries it and an empty column when it does not, and every caller
+# treats an empty column as "the store does not report a strategy" — refs alone
+# decide. A caller that assumed the field is present would report every combo as
+# changed on the shape we actually measured.
+# $1 is on fd 3 because a herestring and the program heredoc cannot share stdin
+# (the heredoc wins, and python would then parse its own text as JSON).
+# Prints one line per live combo: "<name>\x1f<strategy>\x1f<ref,ref,...>", in
+# the store's order. The field separator is the unit-separator byte, not a tab:
+# bash's `read` treats tab as an IFS *whitespace* character, so a line with an
+# empty middle field has its two separators collapsed into one delimiter and the
+# refs land in the strategy variable - measured with the strategy-less live shape
+# this change had to support. A non-whitespace separator keeps an empty field
+# empty. Exit 0 on a readable document (possibly zero combos), 3 with a
+# one-line reason on stdout when the store is unreadable — the caller adds its
+# own prefix and chooses its own fallback.
+live_combo_norm() {
+    python3 - "${2:-0}" 3<<<"$1" <<'PY'
 import json, sys
 
 try:
     with open("/dev/fd/3", encoding="utf-8") as fh:
         live_doc = json.load(fh)
 except (OSError, ValueError):
-    if sys.argv[2] == "1":
-        print("drift: live store unreadable - the omniroute CLI could not reach the gateway")
+    if sys.argv[1] == "1":
+        print("live store unreadable - the omniroute CLI could not reach the gateway")
     else:
-        print("drift: live store unreadable - combo list output was not JSON")
+        print("live store unreadable - combo list output was not JSON")
     sys.exit(3)
 if not isinstance(live_doc, dict):
     # A bare JSON list is not a combo document. The old single `not isinstance
     # (...) or live_doc.get("error")` guard short-circuited the condition but
     # then called .get() on the list in the body, so --drift exited 1 with a
     # traceback instead of this reason (OR1e).
-    print("drift: live store unreadable - unexpected output")
+    print("live store unreadable - unexpected output")
     sys.exit(3)
 if live_doc.get("error"):
     # The CLI answers a refused management call as {"error": "HTTP 401"}.
     # The status is a reason, never a key, so it is safe to show.
-    print("drift: live store unreadable - %s" % live_doc["error"])
+    print("live store unreadable - %s" % live_doc["error"])
     sys.exit(3)
 
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-retired = set(data.get("retired", []))
-omitted = set(data.get("omitted", []))
-file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
-
-live_combos = {}
 for c in live_doc.get("combos") or []:
-    name = c.get("name")
-    if not name or name in retired:
+    if not isinstance(c, dict) or not c.get("name"):
         continue
+    name = c["name"]
     refs = []
     for step in c.get("models") or []:
         if isinstance(step, str):
@@ -326,7 +328,57 @@ for c in live_doc.get("combos") or []:
             if provider and not model.startswith(provider + "/"):
                 model = "%s/%s" % (provider, model)
             refs.append(model)
-    live_combos[name] = refs
+    print("%s\x1f%s\x1f%s" % (name, c.get("strategy") or "", ",".join(refs)))
+PY
+}
+
+# ─── --drift: compare the live combos with combos.json, read-only ───────────
+# Nothing else in this script says whether the live store equals the file
+# (OR1b). A combo listed in the file's "retired" ids is ignored on the live
+# side; an "omitted" id (a route the registry renders no combo for) is an
+# extra, but the reason is named so the operator sees it is an orphan apply will
+# prune. Any other live combo absent from the file is reported, never touched.
+if [[ $DRIFT -eq 1 ]]; then
+    if ! command -v omniroute >/dev/null; then
+        echo "drift: live store unreadable - the omniroute CLI is not installed"
+        exit 3
+    fi
+    if ! gateway_up; then
+        echo "drift: live store unreadable - the gateway does not answer on $GATEWAY"
+        exit 3
+    fi
+    # The same read the Combos loop makes — one CLI call, one normaliser, so the
+    # two can never disagree about what the store holds.
+    drift_failed=0
+    if ! drift_raw="$(omni_json combo list)"; then
+        drift_failed=1
+    fi
+    if ! drift_live="$(live_combo_norm "$drift_raw" "$drift_failed")"; then
+        echo "drift: $drift_live"
+        exit 3
+    fi
+    drift_rc=0
+    python3 - "$COMBOS_FILE" 3<<<"$drift_live" <<'PY' || drift_rc=$?
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+retired = set(data.get("retired", []))
+omitted = set(data.get("omitted", []))
+file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
+
+# The normalised live store, one "<name>\x1f<strategy>\x1f<refs>" line per combo
+# (unit-separated - see live_combo_norm). The strategy column is not compared
+# here: --drift reports the leg order, which is what a re-run of apply can
+# silently change.
+live_combos = {}
+for line in open("/dev/fd/3", encoding="utf-8").read().splitlines():
+    cols = line.split("\x1f")
+    if len(cols) != 3:
+        continue
+    name, _strategy, refs = cols
+    if not name or name in retired:
+        continue
+    live_combos[name] = [ref for ref in refs.split(",") if ref]
 
 rc = 0
 for name, file_refs in file_combos.items():
@@ -757,10 +809,6 @@ echo "Resilience:"
 # It runs from $HOME so it never picks up a .env in the caller's cwd.
 MAX_WAIT_MS=180000
 BREAKER_THRESHOLD=2
-omni_json() {
-    # The CLI prints "Loaded env" banners on stdout before the JSON document.
-    (cd "$HOME" && omni --output json --no-color "$@" 2>/dev/null) | sed -n '/^[[:space:]]*[{[]/,$p'
-}
 if [[ $DRY -eq 1 ]]; then
     echo "  - would set requestQueue.maxWaitMs = $MAX_WAIT_MS (omniroute api system patch-api-resilience)"
     echo "  - would set providerBreaker.apikey.failureThreshold = $BREAKER_THRESHOLD"
@@ -779,7 +827,73 @@ else
     fi
 fi
 
+# ─── What the store already holds, read once for the whole loop ─────────────
+# Creating a combo the store already has is not a no-op: `omni combo create`
+# fails on an existing name, so the retry path below deleted and re-created it.
+# A re-run against a gateway --drift reports in sync therefore announced
+# "+ <name> replaced" for every combo (measured 2026-09-28: 14 of them) and each
+# delete+create is a window in which the tier does not exist — a destructive
+# action that nobody opted into (AGENTS.md hard rule 3). AGENTS.md §4 sets the
+# bar: a second run reports the no-op, never a change. So compare with the store
+# first and leave an unchanged combo alone. Same CLI call and the same normaliser
+# as --drift, so the two can never disagree about what "in sync" means.
+# A missing CLI is not read at all — the create attempts report it. A CLI that
+# is there but cannot answer the list is the unreadable case: today's behaviour
+# for every combo, announced once.
+declare -A LIVE_COMBO_REFS=()
+declare -A LIVE_COMBO_STRATEGY=()
+live_combo_readable=0
+live_combo_reason=""
+if command -v omniroute >/dev/null; then
+    if ! gateway_up; then
+        live_combo_reason="the gateway does not answer on $GATEWAY"
+    else
+        live_combo_failed=0
+        if ! live_combo_raw="$(omni_json combo list)"; then
+            live_combo_failed=1
+        fi
+        if live_combo_rows="$(live_combo_norm "$live_combo_raw" "$live_combo_failed")"; then
+            live_combo_readable=1
+            while IFS=$'\x1f' read -r live_name live_strategy live_refs; do
+                [[ -z "$live_name" ]] && continue
+                LIVE_COMBO_REFS["$live_name"]="$live_refs"
+                LIVE_COMBO_STRATEGY["$live_name"]="$live_strategy"
+            done <<<"$live_combo_rows"
+        else
+            # The function's stdout on that path is its one-line reason; the
+            # "live store unreadable" lead is this section's own headline.
+            live_combo_reason="${live_combo_rows#live store unreadable - }"
+        fi
+    fi
+fi
+
+# A live combo is current when its legs are the same refs in the same order as
+# the ones about to be written (so after the catalog filter below — a dropped
+# leg is a change) and, when the store reports one, its strategy is the strategy
+# the file asks for. Order matters: a reordered combo serves a different first
+# leg. An empty strategy column means the live document carries no strategy
+# field, so refs alone decide.
+combo_is_current() {
+    local name="$1" strategy="$2" keep="$3" live_refs live_strategy
+    [[ -v LIVE_COMBO_REFS["$name"] ]] || return 1
+    live_refs="${LIVE_COMBO_REFS[$name]}"
+    live_strategy="${LIVE_COMBO_STRATEGY[$name]-}"
+    [[ "$live_refs" == "$keep" ]] || return 1
+    [[ -z "$live_strategy" || "$live_strategy" == "$strategy" ]]
+}
+
 echo "Combos:"
+if [[ $live_combo_readable -eq 0 ]] && command -v omniroute >/dev/null; then
+    if [[ $DRY -eq 1 ]]; then
+        echo "  ! live combo list unreadable - would replace every combo (${live_combo_reason:-unknown})"
+    else
+        echo "  ! live combo list unreadable - replacing every combo (${live_combo_reason:-unknown})"
+    fi
+fi
+combo_unchanged=0
+combo_created=0
+combo_replaced=0
+combo_failed=0
 while IFS=$'\t' read -r name strategy models; do
     [[ -z "$name" ]] && continue
     keep=""
@@ -801,7 +915,24 @@ while IFS=$'\t' read -r name strategy models; do
         continue
     fi
     if [[ $DRY -eq 1 ]]; then
-        echo "  - $name: would create [$strategy] with $keep"
+        if [[ $live_combo_readable -eq 1 ]] && combo_is_current "$name" "$strategy" "$keep"; then
+            echo "  - $name: would keep unchanged [$strategy]"
+            combo_unchanged=$((combo_unchanged + 1))
+        elif [[ $live_combo_readable -eq 1 ]] && [[ -v LIVE_COMBO_REFS["$name"] ]]; then
+            echo "  - $name: would replace [$strategy] with $keep"
+            combo_replaced=$((combo_replaced + 1))
+        else
+            echo "  - $name: would create [$strategy] with $keep"
+            combo_created=$((combo_created + 1))
+        fi
+        continue
+    fi
+    if combo_is_current "$name" "$strategy" "$keep"; then
+        echo "  = $name unchanged"
+        combo_unchanged=$((combo_unchanged + 1))
+        # Still probed: --probe asks whether every managed tier answers, and an
+        # unchanged combo is managed.
+        PROBE_COMBOS+=("$name")
         continue
     fi
     # Create first, delete only what it replaces: if the create fails the old
@@ -809,14 +940,17 @@ while IFS=$'\t' read -r name strategy models; do
     # when create reports "already exists" AND a retry still fails.
     if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
         echo "  + $name created ($strategy)"
+        combo_created=$((combo_created + 1))
         PROBE_COMBOS+=("$name")
     else
         omni combo delete "$name" --yes >/dev/null 2>&1 || true
         if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
             echo "  + $name replaced ($strategy)"
+            combo_replaced=$((combo_replaced + 1))
             PROBE_COMBOS+=("$name")
         else
             echo "  ! $name creation failed (previous version, if any, is untouched)"
+            combo_failed=$((combo_failed + 1))
         fi
     fi
 done < <(python3 - "$COMBOS_FILE" <<'PY'
@@ -826,6 +960,11 @@ for c in data.get("combos", []):
     print("%s\t%s\t%s" % (c["name"], c.get("strategy", "priority"), ",".join(c["models"])))
 PY
 )
+if [[ $DRY -eq 1 ]]; then
+    echo "Combos: $combo_unchanged would keep unchanged, $combo_created would create, $combo_replaced would replace"
+else
+    echo "Combos: $combo_unchanged unchanged, $combo_created created, $combo_replaced replaced, $combo_failed failed"
+fi
 
 # ─── Prune: delete the retired and omitted combos, and only those ───────────
 # combos.json carries two lists of ids the live store should not hold:
@@ -890,7 +1029,7 @@ if [[ $PROBE -eq 1 ]]; then
     if [[ -z "$key" || $DRY -eq 1 ]]; then
         echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
     elif (( ${#PROBE_COMBOS[@]} == 0 )); then
-        echo "Probe skipped (no combos were created)."
+        echo "Probe skipped (no combos to probe)."
     else
         echo "Probe (one tiny request per combo):"
         # The client key goes through the environment, never argv.
