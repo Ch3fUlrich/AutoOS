@@ -1757,7 +1757,7 @@ class ReviewerPolicyTests(unittest.TestCase):
 
 
 class HandoffCapsPolicyTests(unittest.TestCase):
-    """rule 12 (brief AUTHORS (S1) item 2, 2026-09-28): the hand-off cap is
+    """rule 13 (brief AUTHORS (S1) item 2, 2026-09-28): the hand-off cap is
     *derived* data, and nothing checked the derivation.
 
     ``policy.handoff_caps`` is the single source for the context cap a lane stops

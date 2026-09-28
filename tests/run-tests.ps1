@@ -4854,6 +4854,16 @@ Test-Case 'autoos_inbox: records, positions, late flags, the inbox verb, dispatc
     Assert-Equal $rc 0 "inbox unit tests failed: $out"
 }
 
+Test-Case 'autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_risk.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "risk unit tests failed: $out"
+}
+
 Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -6366,7 +6376,12 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
     $realPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $scratch = Join-Path $env:TEMP "autoos-qoder-$([Guid]::NewGuid().ToString('N'))"
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoderkey-$PID.yml"
+    # A host with qodercli set up already carries the PAT in its env (WS-OS11,
+    # 2026-09-28): the leak check below must start from an empty variable, or it
+    # fails on the host's own value, not on anything the dry run did.
+    $realPat = $env:QODER_PERSONAL_ACCESS_TOKEN
     try {
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $null
         $null = New-Item -ItemType Directory -Path $scratch -Force
         $env:USERPROFILE = $scratch
         'qoder_pat: dummy-pat' | Out-File $tmp -Encoding utf8
@@ -6385,6 +6400,7 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
         Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
     } finally {
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $realPat
         $env:USERPROFILE = $realHome
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
@@ -7179,7 +7195,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     }
 }
 
-Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
+Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $agents = ($stripped | ConvertFrom-Json).agents
@@ -7221,6 +7237,62 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
     foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'autoos-agent_*')) {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
+    }
+    foreach ($pat in @($fences.read_deny_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer read fence missing: $pat"
+    }
+    foreach ($pat in @($fences.bash_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer shell allow missing: $pat"
+    }
+    foreach ($pat in @($fences.read_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer read allow missing: $pat"
+    }
+    # KEYDENY: a fence is a decision over a path, not a list of names — last
+    # matching rule wins, so walk the rules and keep the final verdict. Fixture
+    # paths only; the suite never opens a real key file.
+    foreach ($path in @('configuration/api-keys.yml',
+                        '/home/x/.config/autoos/ai-stack/client.key',
+                        '/home/x/.config/autoos/ai-stack/manage.key')) {
+        $readVerdict = ''; $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+            if ($rule.action -eq 'shell' -and ("cat " + $path) -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
+    }
+    # KEYDENY2: a shell rule matches the whole command line, so the substring
+    # allow *api-keys.example* licensed the real key file as soon as the
+    # template's name shared a line with it (and let a copy out under an
+    # *.example* path). Fixture strings only — no key file is opened.
+    foreach ($command in @('cat configuration/api-keys.yml configuration/api-keys.example.yml',
+                           'cp configuration/api-keys.yml /tmp/api-keys.example/x',
+                           'cat /tmp/api-keys.example/stolen')) {
+        $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'shell' -and $command -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may run $command"
+    }
+    $example = 'configuration/api-keys.example.yml'
+    $readVerdict = ''; $shellVerdict = ''
+    foreach ($rule in $t3) {
+        if ($rule.action -eq 'read' -and $example -like $rule.resource) { $readVerdict = $rule.effect }
+        if ($rule.action -eq 'shell' -and ("cat " + $example) -like $rule.resource) { $shellVerdict = $rule.effect }
+    }
+    Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
+    Assert-Equal $shellVerdict 'deny' 't3-reviewer may cat the key example'
+    # A read allow is a path, not a substring: a backup named after the
+    # template stays denied.
+    foreach ($path in @('/tmp/api-keys.example.yml.bak', '/tmp/api-keys.example/stolen')) {
+        $readVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
     }
     foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
         Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"

@@ -17,12 +17,265 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   code: an author row carries no provider and no route names it, so none of the four is a
   routable leg (`test_an_orchestrator_author_is_not_a_leg_of_any_route` pins that, and
   `policy.leg_rules` `deny-claude-paid-api` still keeps Claude off a paid API).
-- **`tools/registry.py` rule 12**: `validate` checks `policy.handoff_caps` — every row's
+- **`tools/registry.py` rule 13**: `validate` checks `policy.handoff_caps` — every row's
   `cap_tokens == round(window * cap_fraction)`, and a `match: ["*"]` fallback row exists.
   `tools/autoos_context.py` reads `cap_tokens` and never recomputes it, so a row whose pair
   disagreed stated two caps at once and the lane handed off at the stale one; with no `*` row a
   model no other row names silently got that tool's hand-maintained `DEFAULT_CAPS` instead of
-  the policy. Rule 12 red first in `HandoffCapsPolicyTests`.
+  the policy. Rule 13 red first in `HandoffCapsPolicyTests`.
+### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
+
+Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
+the identity FLEETP0/FLEETP0b had just added, and router D-063 asked for one more
+carrier. All of them are in `tools/autoos-agent.py` unless named.
+
+- **HIGH — the slug is scrubbed before it is cut.** `mint_run_id` slugified the raw
+  title/task, and `RUN_ID_SLUG_CAP` is 24 characters — *shorter* than a vendor key,
+  so the cap that was supposed to keep task text out of the id kept a pasted key in
+  it whole, into the branch, the sandbox dir, the printed `run-id:` line and the
+  gateway header. The slug now comes from `slug_source`: the shared
+  `redact.Redactor` masks first, the mask token is dropped rather than slugged, and
+  only then does `slugify` cut. A title that is nothing but a key yields `task`.
+  `session_tag` — the other half of that header, cut at 40 — is scrubbed through
+  the same helper, because the cap missed the leak on both sides.
+- **D-063 — `x-omniroute-session-id` is now `<tag>/<run-id>`,** so OmniRoute threads
+  one Conversation per run (`X-AutoOS-Run-Id` rides beside it unchanged). Measured
+  read-only in the running gateway: `resolveConversationId` takes
+  `header.trim().slice(0, 128)` with **no charset check** — the limit is a length,
+  and it truncates silently, which would cut the run id off the end. `session_header_value`
+  therefore sends the tag alone when the pair would not fit, with one warning line,
+  instead of sending a value the gateway would chew.
+- **`tools/autoos_usage.py` — `--by lane` is the part before the FIRST `/`,** so an
+  old `<lane>/<title>` row and a new `<lane>/<title>/<run-id>` row group together,
+  and **`--by run`** is the part after the last `/` when `is_run_id` recognises it
+  (`(no run id)` otherwise — a tag's tail is a title slug, not a run). The run-id
+  shape is written a second time here because the spawner delegates `usage` *to* this
+  module and cannot be imported back; `test_the_run_id_shape_matches_the_one_the_spawner_mints`
+  pins the two copies, `test_every_id_the_spawner_mints_is_a_run_to_usage` checks them
+  against real mints. The key column is capped at one whole id (48), not 40.
+- **MEDIUM — the two headers go to every gateway client that can stamp a request,**
+  not to opencode alone. `omniroute run` has no header option (`omniroute run
+  --help`), so each launched CLI has to carry them itself; measured 2026-09-28 by
+  pointing the launcher at a local listener (`--remote http://127.0.0.1:<port>`)
+  and reading the headers back off the request — no gateway spend, no completion:
+  `codex` takes `-c 'model_providers.omniroute.http_headers.<name>="<value>"'`,
+  and only *before* its `exec` subcommand (after it the override replaces the
+  whole `model_providers` table and codex dies on "provider name must not be
+  empty"; a quoted key segment is dropped without a word); `gemini` takes env
+  `GEMINI_CLI_CUSTOM_HEADERS="name:value,name2:value2"`. Carriers live in
+  `tools/autoos_clients.py` (`HEADER_CLIENTS`, `gateway_header_args`,
+  `gemini_custom_headers`) and the plan's `session_tag` is set for both, so their
+  dry run prints the tag it really sends. **`qwen` cannot**: its `customHeaders`
+  exists only in a `settings.json` inside the temporary `QWEN_HOME` the launcher
+  writes and deletes, and the one env hook (`QWEN_CODE_SYSTEM_SETTINGS_PATH`) is
+  the machine-wide system file — not something one spawn may write. Those rows
+  stay `session_tag = null` (`(untagged)` / `(no run id)`), are attributable
+  host-side only, and get no `session-tag:` line, so nothing claims an
+  attribution the gateway never received. `docs/routing.md` carries the table.
+  The only gateway call the spawner makes itself is the `/api/health` probe, which
+  is not a completion and has no conversation.
+- **LOW — `_redact_value` recurses tuples, sets and frozensets** (it walked dicts and
+  lists only, so `skipped_legs` as a tuple reached the record with its key intact) and
+  **a fallthrough re-run adopts the reused clone's `agent/<suffix>` only when the suffix
+  is canonical** (`is_canonical_run_id`) — before, any branch tail became a run id
+  unvalidated. **A record whose caller's `AUTOOS_AGENT_RUN_ID` equals its own id now
+  stores no parent edge**, which is what a self-parent is.
+- **Tests** (`tests/test_autoos_spawner.py`): header value shape, the tag/run split
+  back apart, the 128-char fallback and its warning, key-shaped titles, reuse of a
+  non-canonical branch, the self-parent record, and a **parent-cycle `ps --tree` case**
+  (A↔B: both rows listed, one entered as a root, the walk returns); plus the two
+  new carriers (codex argv prefix and its position before `exec`, gemini's env value
+  re-parsed with the CLI's own split rule) and the negative that keeps `qwen` honest.
+- **Test hermeticity** (`tests/test_autoos_spawner.py`): `clean_env` now drops an
+  ambient `AUTOOS_SESSION_TAG` the way it already dropped the ambient key, and the
+  two tag classes `pop` it in `setUp`. A spawn inherits the caller's tag, so two
+  `SessionTagTests` failed only inside a lane session and passed on a bare checkout
+  — the suite measured the machine it ran on, not the code (R-worker-02).
+
+### Added - `run --run-id`, so an MCP spawn and its run share one id (FLEETP0b, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: FLEET left one open item - the MCP server's `spawn`
+  still minted `logs/agents/<id>` with its own local-time `stamp-hex6` (no slug),
+  so an MCP spawn had two ids again (FLEETSPEC §5.1 says one). `run` now takes
+  `--run-id <id>`: the caller's id is used instead of a mint, and names the same
+  four places a minted one does - `agent/<id>`, the `--isolate` clone dir,
+  `logs/workers/<id>.json`, the child's `AUTOOS_AGENT_RUN_ID` (and so the
+  `X-AutoOS-Run-Id` header). A run id is a filename, a branch and a header value,
+  so a shape that is not the canonical one is refused with exit 2 by
+  `is_canonical_run_id` (a real UTC stamp, a slug within `RUN_ID_SLUG_CAP`, a
+  6-hex tail) before any clone, record or client start. The `parent_run_id` edge
+  is unchanged and stays the caller's own `AUTOOS_AGENT_RUN_ID`: a handed-in id
+  is never read from that variable, or the child would name itself its parent.
+- **`tools/autoos_agent_mcp.py`**: `spawn` mints with the agent module's own
+  `mint_run_id` (the module it already loads via importlib for `route`), keeps the
+  collision retry, names its run dir with that id, records it in `job.json`
+  (`run_id`, beside the `id` `status()` reads) and passes it to the CLI as
+  `--run-id` - built into the argv *before* the dry-run preflight, so the CLI
+  checks the id it will actually be started with and a refusal still creates no
+  run dir. `run_job`'s environment is untouched, so the server's own
+  `AUTOOS_AGENT_RUN_ID` (when the MCP client is itself a spawned run) stays the
+  parent of everything it spawns. Its local-time mint and the `secrets` import
+  that only it used are gone.
+- **`tests/test_autoos_spawner.py`**: `McpCanonicalRunIdTests` (canonical id for
+  the run dir, `--run-id` in the argv with the task still last, `job.json`
+  carrying `run_id`, a refused spawn leaving no dir, the caller's id flowing as
+  the parent), plus `run --run-id` cases in `CanonicalRunIdTests` (one id in
+  branch + dir + child env + header, the CLI printing the id it was given, 13
+  malformed shapes refused at exit 2) and in `RunIdRecordTests` (a handed-in id
+  is parented to the caller, not to itself; a top-level one leaves no parent; a
+  malformed one is refused before `build_plan`). Red before: **8 failed**; green
+  after: **700 passed / 111 subtests** on `tests/test_autoos_spawner.py
+  tests/test_autoos_heartbeat.py`, with `test_agent_harness.py`,
+  `test_autoos_context.py`, `test_autoos_inbox.py`, `test_autoos_tokenrate.py`,
+  `test_autoos_track.py` and `test_autoos_usage.py` at 227 passed. An MCP dry-run
+  spawn end to end prints one id: its run dir, the argv and the CLI's `run-id:`
+  line agree (`20260928-102313-mcp-id-check-9362d5`).
+
+### Added - one canonical run id per spawn, its parent edge, and the route it was scored on (FLEET, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: a spawn minted **two** ids from **two** clocks and nothing tied them
+  together - the `--isolate` clone and its branch were stamped from `datetime.now()` (local time, a
+  slug of the *task*), the worker record minted a separate UTC `stamp-hex6`, and the `logs/agents/`
+  run dir a third, so a console could not say which record, clone, branch and request belonged to one
+  run (FLEETSPEC §5.1/§10 P0). `mint_run_id` mints `YYYYMMDD-HHMMSS-<slug>-<hex6>` **once, in UTC**,
+  the slug the run's title capped at 24 chars of `[a-z0-9-]` (never task text past it: a brief can
+  carry a key), and it is now the clone dir suffix, `agent/<id>`, `logs/workers/<id>.json`, the
+  child's `AUTOOS_AGENT_RUN_ID` and the `X-AutoOS-Run-Id` header sent beside
+  `x-omniroute-session-id` (a fallthrough re-run keeps the first attempt's clone, branch and id - one
+  spawn is one id). A record stores `parent_run_id` (the `AUTOOS_AGENT_RUN_ID` this spawner was
+  itself spawned with, `None` at top level), `host` (`socket.gethostname()`, in the git-ignored
+  record only - never in a committed fixture), `task_dir` (the `AUTOOS_TASK_DIR` run dir the child
+  asks back in, which links the third id) and the resolver's whole `route_plan`; `redact_record` now
+  walks nested values, because the resolver's `reason` carries whatever a probe line said.
+  `ps --tree` prints the spawn tree - children indented under the run that spawned them, an orphan
+  whose parent record is gone a top-level row marked `(parent <id> gone)`, an unvisited row still
+  emitted so a cycle never swallows a run - and `ps --json` rows carry `parent_run_id` untruncated.
+  Old records with none of these fields still list; nothing else renames.
+- **`tests/test_autoos_spawner.py`**: `CanonicalRunIdTests`, `RunIdRecordTests`, `PsTreeTests`
+  (22 cases: the id's shape, its UTC stamp and 24-char cap, no task text past the slug, one id in
+  branch + dir + record + child env, the parent inherited from the spawner's own env, `ps --tree`
+  ordering and the gone-parent row, the host (a fake one, patched in), `route_plan` persisted and
+  redacted, the header injected next to the session tag, an old record still listing). Red before:
+  **20 failed / 584 passed** on `tests/test_autoos_spawner.py tests/test_autoos_track.py`; green
+  after: **604 passed / 0**, with `test_agent_harness.py`, `test_autoos_context.py`,
+  `test_autoos_heartbeat.py`, `test_autoos_usage.py`, `test_autoos_measure.py` and
+  `test_autoos_resolver.py` at 415 passed / 1 skipped. Six pre-existing fakes of `build_plan`'s
+  output gained the `run_id` the plan now carries, `SandboxUniquenessTests` its `t2-` prefix (the
+  slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
+  `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
+  `task_dir` is what links the two ids meanwhile.
+### Changed — hand-off caps: orchestrators 500k, workers min(40% of window, 400k) (CAPD088, operator D-088, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps` and **`tools/autoos_context.py`** `DEFAULT_CAPS`:
+  Opus 500k (was 600k), Fable 500k (was 600k), Sonnet 500k (was CAPL2's interim 250k) - orchestration
+  sessions, 1M window; Muse Spark 400k (was 300k), Gemini 400k (was 200k), the 200k class 80k (was
+  150k) - worker agents. Rows key on model family as the role proxy (comment at `DEFAULT_CAPS`).
+### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
+
+`catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is
+`configuration/api-keys.yml`, and the gateway keys `~/.config/autoos/ai-stack/client.key` /
+`manage.key` were not fenced at all — a spawned leaf could `Read` and `cat` all three; they are
+now denied for read and shell everywhere (with `*api-keys.example*` allowed through the same
+deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
+allowed every `read`, carries the `read_deny_all` patterns as denies.
+
+- KEYDENY2 (2026-09-28, same lane): that shell **allow** was matched against the whole command
+  line, not a path, so `cat configuration/api-keys.yml configuration/api-keys.example.yml`,
+  `cp configuration/api-keys.yml /tmp/api-keys.example/x` and `cat /tmp/api-keys.example/stolen`
+  all resolved to `allow` — a substring allow can never fence a command line. Both shell allows
+  are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
+  the template with the read tool, and the read allow is narrowed to the exact suffix
+  `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
+
+- **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
+  was red before its fix** (72 red of 108 in `tests/test_autoos_risk.py`). The one
+  failure mode this module may not have is a diff that reads `normal` because the
+  reader never saw it; five of the six were exactly that.
+- **A rename kept only the name it moved to.** `git mv AGENTS.md docs/AGENTS.md`
+  reports one changed path, so a rule on `AGENTS.md` watched a policy file walk out
+  of the class that guards it. `changed_files` now carries `old_path`, every
+  `path_glob` is tested against both names, and the reason line says which moved:
+  `policy: AGENTS.md -> docs/AGENTS.md`.
+- **Secrets were path-only.** `**/*.key` and `**/*secret*` catch a file named for
+  what it holds and nothing else, so a key added to `notes.txt` was `normal`. Five
+  `added_regex` content rules now read the ADDED lines for the high-confidence
+  shapes (`-----BEGIN … PRIVATE KEY-----`, `AKIA…{16}`, `ghp_…{36}`, `sk-…{20,}`,
+  `xox[baprs]-`), and `**/*.pem`, `**/.env`, `**/.env.*` join the path rules. A new
+  `exclude` field on `path_glob` keeps the tracked `.env.example` templates out of
+  it — AGENTS.md rule 1 says commit those, and a rule that punished honest
+  templates is a rule that gets switched off. `tools/registry.py` rule 12 knows
+  both new fields. (Test fixtures assemble these shapes at runtime, so no tracked
+  file ever holds a literal key; the public scrub scan stays green.)
+- **`high` risk was cheaper to review than `normal`.** The RISKTIER-a registry
+  declared `review_counts.high` as 1 cross-family + the final, while operator Q-013
+  (common.md, D-060) says two diverse cheap cross-family reviews and, for high, the
+  same two *plus* the Sonnet final. `high` is now `cross_family: 2, final: true`,
+  which also agrees with the resolver's own D2 fallback constants it had been
+  overriding.
+- **`--sha HEAD` exited 2, and one commit had two audit answers.** `HEAD`, a branch
+  or a tag is not hex, so the draw raised while the diff classified perfectly; and
+  `audit()` buckets 12 hex digits, so `28ada0a` and the 40 digits of the same commit
+  could land in different buckets — a caller who learns the friendlier spelling.
+  `assess` now resolves the rev with `git rev-parse --verify <rev>^{commit}` (a tree
+  or blob is refused) and uses that hex everywhere, reporting it as `sha` /
+  `commit:` so a lane records which commit the answer is about.
+- **The diff was parsed line-and-tab, which git quotes.** `--name-status` C-quotes a
+  path containing a tab or a newline — and escapes the tab with the very character
+  the parser splits on, so the path arrived wrapped in quotes and matched no glob.
+  `changed_files` and the new `deleted_lines` read `-z` and split on NUL (a rename's
+  two paths by the arity its status declares, so a file named `A100` is never
+  mistaken for a status). The same quoting hits the `+++` header of `git diff -U0`:
+  an awkward filename left `current` unset for the file's whole body and dropped
+  every added line in it, `sudo` included. Added lines are now unquoted too.
+- **The rule table's gaps, and how much a change deletes.** `**/*.sql`,
+  `**/setup*`, `**/bootstrap*`, `**/Install*` (case-sensitive, so it is not the
+  existing `**/install*`) and `docs/**/*spec*.md` joined the globs; the generic
+  `diff_deletion` rule gained `min_deleted_lines: 200`, because a change that
+  deletes 240 lines from a file that *survives* is a large deletion and only a whole
+  file disappearing used to read as one. Corpus: `f5744611` (679 lines removed, no
+  file lost) flips `normal` → `high`; `967021cb8`, which edits
+  `stack.env.example`, stays `normal`.
+- Tests: 108 in `tests/test_autoos_risk.py` (was 82), wired into both harnesses
+  already. No CLI surface changed but the `risk` verb's output, which now leads with
+  the resolved commit.
+
+### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
+
+- **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the
+  registry's `policy.risk_rules` were data no code read. `tools/autoos_risk.py`
+  (stdlib, pure, one injectable git runner) now applies every rule to the diff at
+  `merge-base(base, sha)`: `path_glob` and `diff_deletion` (the two declared
+  shapes), plus the two the operator asked for — `added_regex`, an added line
+  matching a pattern (`\bsudo\b`, case-sensitive and deliberately textual: a test
+  that only *mentions* sudo raises the class), and `registry_policy`, which loads
+  `catalog/ai-registry.json` at both ends and compares only its `policy` object,
+  so a models-only edit is not a routing-policy edit. `audit(sha, percent)` is
+  `int(sha[:12], 16) % 100 < percent`: a property of the commit, so re-running
+  after an unlucky draw cannot shop for a friendlier bucket. Any git failure
+  raises `RiskError` (exit 2) — an unreadable diff never reads as `normal`.
+- **`tools/registry.py` rule 12** validates the new shapes, and refuses a rule
+  field its type does not read. A `paths` on a `path_glob` looks like a scope and
+  is not one; `classify()` ignores it silently, so validate says it out loud.
+  `policy.risk_rules` grows the 17 operator rules; `risk_audit_percent` (20) and
+  `review_counts` (normal 2 cross-family / high 1 + final) carry their source.
+- **`tools/autoos_resolver.py:_review_policy()`** reads the count from
+  `policy.review_counts[risk].cross_family` and the Sonnet close from `final`,
+  falling back to D2's constants when a registry predates the field — tested both
+  ways. The zero-reviewer case now genuinely means zero (the cap is checked
+  before the pick, not after).
+- **Two silent-`normal` bugs found while reviewing this** (both red before the
+  fix, `tests/test_autoos_risk.py`): a developer's `diff.noprefix=true` removes
+  the `b/` the `+++` header is read through, so *every* added line vanishes and a
+  sudo change classifies as normal; and git escapes an added line that starts
+  with a plus by doubling it, so a line of `+++++ x` in a test fixture was
+  dropped as a header. The default runner now pins `core.quotepath`,
+  `diff.noprefix`, `color.diff` and `--no-ext-diff`, and the parser tells a
+  header from content by hunk position.
+- **CLI**: `python3 tools/autoos-agent.py risk --sha <sha> [--base origin/main]
+  [--repo .] [--json]`. Wiring that class into `ready`/`review-status` is the
+  sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
+  harnesses.
 
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
