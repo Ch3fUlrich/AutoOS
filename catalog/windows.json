@@ -590,7 +590,6 @@
           "provider": "custom",
           "package": "agent-skills",
           "requires": [
-            "git",
             "nodejs"
           ],
           "postInstall": "Install-AutoOSAgentSkills",

@@ -1927,6 +1927,32 @@ Test-Case 'omnigraph-client: a rotated token opens the gate and rewrites the env
     } finally { Remove-AutoOSOmnigraphClientFixture -Ctx $ctx }
 }
 
+Test-Case 'omnigraph-client: a refused env rewrite fails the component, not skipped' {
+    # Sonnet final review (w1) 2026-09-28: Set-AutoOSOmnigraphEnv answers 'failed'
+    # when it aborts (its backup could not be born protected), and the old token
+    # then stays on disk — but the caller only tested -eq 'written', so the run
+    # fell through to "skipped: already installed and current". A refused token
+    # rotation is not a clean re-run. Stub the writer to refuse and the component
+    # must report failed like a failed bridge or wrapper.
+    $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1'
+    $mod = Get-Module AutoOS.Install
+    $saved = $null
+    try {
+        $null = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        $saved = & $mod { (Get-Item function:Set-AutoOSOmnigraphEnv).ScriptBlock }
+        & $mod { Set-Item function:script:Set-AutoOSOmnigraphEnv {
+            param([string]$BaseUrl, [string]$Token)
+            'failed'
+        } }
+        $out = Get-AutoOSConsoleCapture { $script:OmniState = Install-AutoOSOmnigraphClient }
+        Assert-Equal $script:OmniState 'failed' "a refused env rewrite reported: $out"
+        Assert-True ($out -notmatch 'already installed and current') 'the refused rewrite reported a clean skip'
+    } finally {
+        if ($saved) { & $mod { param($sb) Set-Item function:script:Set-AutoOSOmnigraphEnv $sb } -sb $saved }
+        Remove-AutoOSOmnigraphClientFixture -Ctx $ctx
+    }
+}
+
 Test-Case 'omnigraph-client: a dry run announces every step and writes nothing' {
     $ctx = New-AutoOSOmnigraphClientFixture -Token 'fixture-token-1' -DryRun $true
     try {

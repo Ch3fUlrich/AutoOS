@@ -1542,7 +1542,9 @@ function Install-AutoOSOmnigraphClient {
     }
 
     $changed = $false
-    if ((Set-AutoOSOmnigraphEnv -BaseUrl $base -Token $token) -eq 'written') { $changed = $true }
+    $envState = Set-AutoOSOmnigraphEnv -BaseUrl $base -Token $token
+    if ($envState -eq 'failed') { return 'failed' }
+    if ($envState -eq 'written') { $changed = $true }
 
     $bridge = Install-AutoOSOmnigraphBridge
     if ($bridge -eq 'failed') { return 'failed' }

@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a refused omnigraph env rewrite reports failed; agent-skills needs no git (w1 final review S1, 2026-09-28)
+
+- **`lib/windows/AutoOS.Install.psm1`** (`Install-AutoOSOmnigraphClient`): `Set-AutoOSOmnigraphEnv`
+  answers `'failed'` when it aborts — its backup could not be born protected — and the old token
+  then stays on disk, but the caller only tested `-eq 'written'`, so the run fell through to
+  "skipped: already installed and current". A refused token rotation is not a clean re-run
+  (AGENTS.md §4). It is now propagated exactly like the bridge and wrapper results beside it.
+- **`catalog/windows.json`** (`agent-skills`): dropped `"git"` from `requires`. The clone that
+  needed it was deleted in the A7b rehome; nothing in `Install-AutoOSAgentSkills` runs git.
+- **`tests/run-tests.ps1`**: a case that stubs the module-scope env writer to refuse and asserts
+  the component returns `failed`, not `skipped`, and never prints the "already installed" line.
+  Red before the fix on the state assertion.
+
 ### Fixed — the Windows token backup is born protected (w1 cross-family review S1, 2026-09-28)
 
 - **`lib/windows/AutoOS.Install.psm1`** (`Set-AutoOSOmnigraphEnv`, `Copy-AutoOSBackup`,
