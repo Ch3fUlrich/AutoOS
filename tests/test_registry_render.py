@@ -1554,6 +1554,13 @@ class FreeAiRenderTests(unittest.TestCase):
             self.assertEqual(combos[route_id]["models"][-1],
                              "free-ai/qwen7b", route_id)
 
+    def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
+        # T2FREE 2026-09-28: the stopgap leg reaches the gateway render with
+        # the provider's own spelling (model_prefix free-ai), last in order.
+        combos = {c["name"]: c for c in
+                  registry.render_omniroute(real_registry())["combos"]}
+        self.assertEqual(combos["t2-worker"]["models"][-1], "free-ai/qwen7b")
+
     def test_free_ai_never_enters_a_clean_combo(self):
         # PROV finding 11: neither spelling may appear - the rendered omniroute_id
         # (free-ai/) nor the registry leg (free_ai/).

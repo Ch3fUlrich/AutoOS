@@ -54,6 +54,11 @@ model_list:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
