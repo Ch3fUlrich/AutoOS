@@ -4422,7 +4422,8 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
             "defer_until": None}
 
 
-def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None):
+def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
+                     stop_tail=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -4438,6 +4439,10 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
 
     `args_over` (SPAWNFREE) overrides run-args fields (free, free_model, card,
     isolate); `policy` is the registry's policy section.
+
+    `stop_tail` (REVROUTE item 3) is what a stopped attempt prints; the
+    provider-state file is redirected into the same temp state dir and exposed
+    as `case.provider_state`.
     """
     agent = case.agent
     root = _init_git_root()
@@ -4454,6 +4459,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    case.provider_state = os.path.join(statedir, "provider-state.json")
+    old_provider_state = agent.PROVIDER_STATE_PATH
+    agent.PROVIDER_STATE_PATH = case.provider_state
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
     calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
@@ -4478,7 +4486,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                   encoding="utf-8") as fh:
             fh.write("work\n")
         if calls["n"] <= stops:
-            return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail=stop_tail or "Error: Rate limit exceeded\n")
         return agent.ClientExit(0, tail="done\n")
 
     args = argparse.Namespace(
@@ -4521,8 +4529,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
-        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
-            old_root, old_track, old_overlay)
+        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH,
+         agent.PROVIDER_STATE_PATH) = (
+            old_root, old_track, old_overlay, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
@@ -4551,9 +4560,11 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None):
+    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None,
+             stop_tail=None):
         return _fallthrough_run(self, route_ids, stops, clock=clock,
-                                args_over=args_over, policy=policy)
+                                args_over=args_over, policy=policy,
+                                stop_tail=stop_tail)
 
     def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
         rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
@@ -4625,6 +4636,32 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             [("r-free", "fail", "provider"),
              ("r-cheap", "fail", "provider"),
              ("r-cheap2", "fail", "provider")], out + err)
+
+    # REVROUTE (S2) item 3: the stop line often states its own reset time, and
+    # that is worth more than a track record -- it takes the provider out of the
+    # rotation until the window passes.
+    AGY_RESET_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                      "Quota resets in ~83h\n")
+
+    def test_a_provider_stop_is_offered_to_the_reset_recorder(self):
+        recorded = []
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: recorded.append(a) or None):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual([call[1] for call in recorded], ["r-free"],
+                         "one record for the stopped attempt, none for the survivor")
+        self.assertIn("resets in ~83h", recorded[0][0])
+
+    def test_a_recorded_reset_window_is_printed_as_the_providers_new_until(self):
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: ("cheap-p", "2026-10-01T17:00:00Z")):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("provider cheap-p unavailable until 2026-10-01T17:00:00Z",
+                      out + err)
 
 
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
@@ -5763,6 +5800,9 @@ class ReviewerGateTests(unittest.TestCase):
         self.tmp = tmp
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # No recorded provider stop: this fixture decides who reviews from the
+        # registry and the probes, not from an outage some earlier run saw.
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "provider-state.json")
         self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
         self.registry = _reviewer_registry()
         patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
@@ -5998,6 +6038,222 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(os.listdir(os.path.join(self.tmp, "sandboxes"))
                          if os.path.isdir(os.path.join(self.tmp, "sandboxes")) else [], [],
                          "no clone was made for a run that cannot review")
+
+
+class ProviderResetStateTests(unittest.TestCase):
+    """REVROUTE (S2) item 3: a provider stop that states its own reset time
+    ("Individual quota reached ... resets in ~83h", "cooling down (reset after
+    51s)") is recorded as an ``unavailable_until`` in the spawner's own state,
+    and the resolver reads it -- the provider is skipped until then instead of
+    being handed the next task (measured: agy RESOURCE_EXHAUSTED 429 83h,
+    L1-backlog 2026-09-27T23:22:13Z; gemini cooling 19:3xZ).
+
+    Nothing here edits ``catalog/ai-registry.json``: the registry is the
+    operator's, this file is the machine's transient observation, git-ignored
+    beside ``measured.json`` and ``track-record.jsonl``.
+    """
+
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    AGY_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                "Quota resets in ~83h")
+    COOLING_STOP = "Error: 429 cooling down (reset after 51s)"
+    NO_RESET_STOP = "Error: 429 Rate limit exceeded"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state_path = os.path.join(self.tmp, "provider-state.json")
+        self.registry = _reviewer_registry()
+
+    def state(self):
+        with io.open(self.state_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- reading the reset out of the client's own line ----------------------
+
+    def test_resets_in_hours_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.AGY_STOP), 83 * 3600)
+
+    def test_reset_after_seconds_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.COOLING_STOP), 51)
+
+    def test_a_reset_spelled_out_in_minutes_is_minutes(self):
+        self.assertEqual(
+            self.agent.parse_reset("Error: 429 quota reached, try again in 15 minutes"),
+            15 * 60)
+
+    def test_a_day_sized_reset_is_days(self):
+        self.assertEqual(self.agent.parse_reset("Error: 429 quota resets in ~2d"),
+                         2 * 86400)
+
+    def test_a_stop_that_names_no_reset_parses_to_none(self):
+        self.assertIsNone(self.agent.parse_reset(self.NO_RESET_STOP))
+        self.assertIsNone(self.agent.parse_reset(""))
+
+    # --- which provider stopped ---------------------------------------------
+
+    def test_a_provider_named_in_the_line_is_the_one_recorded(self):
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: No active credentials for provider: sambanova. Quota resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_a_provider_named_by_its_gateway_alias_is_the_same_provider(self):
+        # The gateway spells a provider its own way (providers.<id>.omniroute_id);
+        # an error line quoting that spelling is the same provider, not a new one.
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.registry["providers"]["sambanova"]["omniroute_id"] = "samba"
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: no active credentials for provider: samba, resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_an_unnamed_stop_is_attributed_to_the_first_servable_leg(self):
+        # The gateway works down a route's legs in order, so the one that took
+        # the traffic is the first that is up right now.
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "muse_api")
+        self.registry["providers"]["muse_api"] = {"id": "muse_api", "available": False}
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "free-p")
+
+    def test_a_stop_with_no_legs_to_choose_from_is_attributed_to_nothing(self):
+        self.assertIsNone(self.agent.stop_provider_id(self.AGY_STOP, self.registry, []))
+
+    # --- the state file ------------------------------------------------------
+
+    def test_a_stop_with_a_reset_records_the_provider_unavailable_until_then(self):
+        # r-cheap's only leg is cheap-p/cheap-model, and the stop line names no
+        # provider, so the leg that took the traffic is what gets the window.
+        recorded = self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "83h after 2026-09-28T12:00Z -- the window the client "
+                         "itself stated, kept to the second it was told")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
+        self.assertEqual(entry["combo"], "r-cheap")
+        self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
+        self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",
+                                                       self.registry, now=self.NOW,
+                                                       path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_an_implausible_reset_is_not_recorded(self):
+        # A client printing "resets in ~400d" must not take a provider out of
+        # rotation for a year; that is an operator edit to the registry, not a
+        # spawner observation.
+        self.assertIsNone(self.agent.record_reset_stop(
+            "Error: 429 quota resets in ~400d", "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_a_later_stop_for_the_same_provider_extends_its_window(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+
+    def test_an_expired_record_is_pruned_when_the_next_stop_is_written(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"])
+        later = self.NOW + datetime.timedelta(hours=1)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=later, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"],
+                         "the 51s window expired and went; the 83h one is there")
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-02T00:00:00Z")
+
+    def test_a_missing_or_corrupt_state_file_is_not_a_failure(self):
+        agent = self.agent
+        self.assertEqual(agent.load_provider_state(os.path.join(self.tmp, "none.json")), {})
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.load_provider_state(self.state_path), {})
+
+    # --- the resolver reads it ----------------------------------------------
+
+    def test_apply_marks_the_provider_down_for_the_resolver(self):
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2099-01-01T00:00:00Z"}}})
+        provider = merged["providers"]["muse_api"]
+        self.assertIs(provider["available"], False)
+        self.assertEqual(provider["unavailable_until"], "2099-01-01T00:00:00Z")
+        self.assertIsNot(merged["providers"]["muse_api"], self.registry["providers"]["muse_api"],
+                         "the loaded registry is copied, never mutated in place")
+
+    def test_apply_never_shortens_an_operators_outage(self):
+        self.registry["providers"]["muse_api"] = {
+            "id": "muse_api", "tier": "paid", "trains_on_prompts": True,
+            "available": False, "unavailable_until": "2099-06-01T00:00:00Z"}
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                           "2026-10-01T17:00:00Z"}}})
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"],
+                          "2099-06-01T00:00:00Z")
+
+    def test_apply_ignores_a_provider_that_is_not_in_the_registry(self):
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"no-such-p": {"unavailable_until":
+                                                           "2099-01-01T00:00:00Z"}}})
+        self.assertNotIn("no-such-p", merged["providers"])
+
+    def test_a_window_that_passed_leaves_the_provider_servable_again(self):
+        # R-gateway-12: the record comes back on its own, no hand-edit needed.
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2000-01-01T00:00:00Z"}}})
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(), self.NOW)
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_two_recorded_stops_queue_the_review_instead_of_skipping_it(self):
+        # Item 3 feeding item 2: both reviewer providers stopped with a stated
+        # reset, so the review waits for the earliest one -- it is NOT run by a
+        # same-family model and called independent. High risk, so the
+        # first-pass-only fallback is out on its own rule and the queue is what
+        # the two windows leave behind.
+        state = {"providers": {
+            "muse_api": {"unavailable_until": "2026-10-01T23:00:00Z"},
+            "gem_api": {"unavailable_until": "2026-09-28T14:00:00Z"}}}
+        merged = self.agent.apply_provider_state(self.registry, state)
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(),
+                                       self.NOW, risk="high")
+        self.assertEqual(review["state"], "queued")
+        self.assertEqual(review["retry_at"], "2026-09-28T14:00:00Z")
+        self.assertTrue([s for s in review["skipped"] if s["waiting"]], review)
+
+    def test_load_live_registry_reads_the_registry_and_the_state_together(self):
+        reg_path = os.path.join(self.tmp, "registry.json")
+        with io.open(reg_path, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        live = self.agent.load_live_registry(reg_path, state_path=self.state_path,
+                                              now=self.NOW)
+        self.assertEqual(live["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+        self.assertIs(live["providers"]["cheap-p"]["available"], False)
+
+
+def _reviewer_client_state():
+    return {name: {"installed": True, "signed_in": True, "reason": ""}
+            for name in ("opencode", "gemini", "qoder", "claude")}
 
 
 if __name__ == "__main__":

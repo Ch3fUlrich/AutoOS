@@ -263,6 +263,17 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   a signed-out client or a same-family-only list needs a human, and exit 9 would loop forever.
 - An author that resolves to no family fails closed: guessing a family would let a model review its
   own work.
+- **Where a down provider comes from (REVROUTE, S2 item 3).** Most of these windows are only knowable
+  from the client that hit them: a stop line that states its own reset ("Individual quota reached …
+  resets in ~83h", "cooling down (reset after 51s)") is recorded by the spawner in
+  `logs/routing/provider-state.json` — git-ignored, transient, the machine's observation beside
+  `measured.json`, never a registry edit. The provider is the one the line names (or, when it names
+  none, the first leg of the route that ran that is still up), the window is the one it stated, a
+  window over 7 days is refused as the operator's call, and a later stop for the same provider keeps
+  the later window. Every *routing* read (`route`, `run`, the reviewer walk) merges that file into the
+  registry as the provider's `unavailable_until` — `unavailable_now` already skips it and lets it
+  expire on its own, so nothing is ever hand-undone. The renders and `registry.py validate` keep
+  reading the plain registry: a dated observation must not move a drift gate.
 
 ## 6. Interfaces
 

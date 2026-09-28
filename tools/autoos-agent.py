@@ -128,6 +128,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -160,6 +161,11 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # run's gate contradicts the recorded status of its route's legs.
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
 MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+# REVROUTE (S2) item 3: the spawner's own transient note about which provider
+# just told it a reset time. Git-ignored beside measured.json - the registry is
+# the operator's file, this one is the machine's observation, and a record whose
+# window has passed stops mattering on its own (registry.unavailable_now).
+PROVIDER_STATE_PATH = os.path.join(ROOT, "logs", "routing", "provider-state.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
 # `route`'s default orchestrator model (spec 6.1): a registry model id billed
 # for verification cost when the caller does not pin one.
@@ -836,7 +842,7 @@ def resolve_review_plan(card: dict, now=None) -> dict | None:
         return None
     now = now or datetime.datetime.now(datetime.timezone.utc)
     return resolver.reviewer_for(
-        card["author"], load_registry(REGISTRY_PATH),
+        card["author"], load_live_registry(),
         measure_mod.client_state(clients), now,
         risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
 
@@ -937,7 +943,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     own; it only turns whatever route plan() already picked into a combo/tier.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
-    registry = load_registry(REGISTRY_PATH)
+    registry = load_live_registry()
     if exclude_routes:
         # A copy, so the shared load_registry() cache (and the caller's own
         # reference) never loses the routes a previous attempt needs recorded.
@@ -1426,7 +1432,7 @@ def cmd_route(args) -> int:
         return refuse(str(exc))
     repo = args.repo or ROOT
     try:
-        registry = load_registry(REGISTRY_PATH)
+        registry = load_live_registry()
         overlay = load_overlay(MEASURED_OVERLAY_PATH)
     except (OSError, ValueError) as exc:
         return refuse("cannot load routing data: %s" % exc)
@@ -1593,6 +1599,203 @@ def provider_stop(tail: str) -> str | None:
                 marker in low for marker in PROVIDER_STOP_MARKERS):
             return clean
     return None
+
+
+# --- REVROUTE (S2) item 3: a stop that states its own reset time -------------
+#
+# A 429 that says "resets in ~83h" is worth more than a track record: the client
+# is the only witness to the window, and handing the same provider the next task
+# for three days wastes every one of them. So the spawner records the window in
+# its own state file and every ROUTING read (route, run, the reviewer walk)
+# merges it into the registry as the provider's `unavailable_until` -- which
+# `registry.unavailable_now` already knows how to skip and how to let expire.
+# Renders and `registry.py validate` never read it: they stay clock-free.
+
+# A client printing "resets in ~400d" must not bench a provider for a year on
+# the spawner's authority; a window this long is an operator edit to the
+# registry, with the evidence quoted next to it.
+MAX_AUTO_RESET_SECONDS = 7 * 86400
+
+_RESET_RE = re.compile(
+    r"(?:resets? in|reset after|try again in|retry after)\s*~?\s*(\d+)\s*([a-z]+)")
+_RESET_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+                "m": 60, "min": 60, "minute": 60, "minutes": 60,
+                "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "d": 86400, "day": 86400, "days": 86400}
+
+# "provider: sambanova. ..." - the gateway names the connection it tried. The
+# class stops at a comma or period so the sentence's own punctuation is not part
+# of the id.
+_STOP_PROVIDER_RE = re.compile(r"provider:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def parse_reset(text: str) -> int | None:
+    """The seconds a stop line counts itself out for, or None if it names none.
+
+    Reads the reset the client states ("resets in ~83h", "reset after 51s",
+    "try again in 15 minutes"), not a guess: a plain "Rate limit exceeded"
+    without a window returns None and records nothing. An unknown unit reads as
+    no window rather than as seconds.
+    """
+    m = _RESET_RE.search((text or "").lower())
+    if not m:
+        return None
+    unit = _RESET_UNITS.get(m.group(2))
+    return int(m.group(1)) * unit if unit else None
+
+
+def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
+    """Which provider took the stop, as the registry's own id, or None.
+
+    A line that names its provider wins -- including the gateway's spelling of
+    it (providers.<id>.omniroute_id), which is the same connection, not a new
+    one. Otherwise the gateway works down a route's legs in order, so the one
+    that took the traffic is the first leg whose provider is up right now; a
+    line that names nothing and has no live leg to choose from is attributed to
+    no provider (recording a guess would bench the wrong one).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    providers = registry.get("providers") or {}
+    m = _STOP_PROVIDER_RE.search(line or "")
+    if m:
+        named = m.group(1)
+        for pid, provider in providers.items():
+            if pid == named or (isinstance(provider, dict)
+                                and provider.get("omniroute_id") == named):
+                return pid
+        return None
+    for leg in legs or []:
+        pid = str(leg).partition("/")[0]
+        provider = providers.get(pid)
+        if isinstance(provider, dict) and not unavailable_now(provider, now):
+            return pid
+    return None
+
+
+def load_provider_state(path: str) -> dict:
+    """The spawner's provider-stop state; a missing or broken file reads as empty.
+
+    A record of a transient outage is never worth failing a run over, so this
+    cannot raise: unreadable JSON is an empty state, and the next stop rewrites
+    the file.
+    """
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _iso_zulu(moment) -> str:
+    return moment.astimezone(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+
+
+def _until_is_expired(entry, now) -> bool:
+    """True when `entry`'s window already passed (so it says nothing anymore)."""
+    until = (entry or {}).get("unavailable_until")
+    parsed = _parse_iso(until)
+    return parsed is not None and now >= parsed
+
+
+def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
+                      path: str | None = None):
+    """Record a stopped provider's own reset window; returns (provider, until) or None.
+
+    Nothing is recorded when the line states no window, when the window is
+    implausible (MAX_AUTO_RESET_SECONDS), or when no provider can be named for
+    it. A second stop for the same provider keeps the LATER window, and entries
+    whose window already passed are dropped on the way in, so the file cannot
+    grow into a list of historical outages. Writes atomically (mkstemp in the
+    target directory, then os.replace) - a reader mid-run must never see a
+    half-written state.
+    """
+    seconds = parse_reset(stop_line)
+    if seconds is None or seconds > MAX_AUTO_RESET_SECONDS:
+        return None
+    legs = ((registry.get("routes") or {}).get(combo) or {}).get("legs") or []
+    provider_id = stop_provider_id(stop_line or "", registry, legs, now)
+    if provider_id is None:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    path = path or PROVIDER_STATE_PATH
+    until = _iso_zulu(now + datetime.timedelta(seconds=seconds))
+    state = load_provider_state(path)
+    providers = {pid: entry for pid, entry in (state.get("providers") or {}).items()
+                 if isinstance(entry, dict) and not _until_is_expired(entry, now)}
+    previous = providers.get(provider_id) or {}
+    if _parse_iso(previous.get("unavailable_until")) and \
+            _parse_iso(until) < _parse_iso(previous.get("unavailable_until")):
+        until = previous["unavailable_until"]
+    providers[provider_id] = {"unavailable_until": until, "combo": combo,
+                              "reason": stop_line, "recorded_at": _iso_zulu(now)}
+    directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".provider-state-")
+        try:
+            with io.open(fd, "w", encoding="utf-8") as fh:
+                json.dump({"$comment": "providers a real run reported as stopped, "
+                                       "with the reset that run was told; transient "
+                                       "state, not the operator's registry",
+                           "providers": providers}, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except OSError as exc:
+        print("autoos-agent: could not record the provider stop: %s" % exc,
+              file=sys.stderr)
+        return None
+    return provider_id, until
+
+
+def apply_provider_state(registry: dict, state: dict, now=None) -> dict:
+    """`registry` with the recorded windows applied as providers' `unavailable_until`.
+
+    Returns a copy - the shared `load_registry()` object is never mutated. An
+    entry for a provider the registry does not know is ignored (the state file
+    follows the registry, not the other way round), and a provider the operator
+    already benched for LONGER keeps the operator's date: a machine observation
+    must never shorten an outage someone wrote on purpose. A window that has
+    passed is applied as it is and self-heals in `unavailable_now`.
+    """
+    merged = dict(registry)
+    providers = dict(registry.get("providers") or {})
+    merged["providers"] = providers
+    for pid, entry in (state.get("providers") or {}).items():
+        if not isinstance(entry, dict) or pid not in providers:
+            continue
+        until = entry.get("unavailable_until")
+        parsed = _parse_iso(until)
+        if parsed is None:
+            continue
+        current = providers[pid].get("unavailable_until")
+        if _parse_iso(current) is not None and _parse_iso(current) >= parsed:
+            continue
+        provider = dict(providers[pid])
+        provider["available"] = False
+        provider["unavailable_until"] = until
+        providers[pid] = provider
+    return merged
+
+
+def load_live_registry(reg_path: str | None = None, state_path: str | None = None,
+                       now=None) -> dict:
+    """The registry as it stands for the routing decisions RIGHT NOW.
+
+    The catalog plus the spawner's recorded provider stops. Use this wherever
+    `route`/`run`/the reviewer walk ask "who is up"; keep plain
+    `load_registry()` for the privacy and capability reads (which a provider
+    outage does not change) and in the renders (which must not move with the
+    date). With no state recorded this is the cached registry, unchanged.
+    """
+    registry = load_registry(reg_path or REGISTRY_PATH)
+    state = load_provider_state(state_path or PROVIDER_STATE_PATH)
+    if not (state.get("providers") or {}):
+        return registry
+    return apply_provider_state(registry, state, now)
 
 
 def _porcelain_path_is_logs(p: str) -> bool:
@@ -2780,6 +2983,14 @@ def cmd_run(args, cfg: dict) -> int:
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
         # a promo client whose tail is a provider stop does not get a false probe.
         stop = provider_stop(client_tail)
+        if stop is not None:
+            # REVROUTE (S2) item 3: when the stop line states its own reset,
+            # that window becomes the provider's unavailable_until for every
+            # later routing read - the next task goes elsewhere until then.
+            recorded = record_reset_stop(stop, plan["route"].get("combo"),
+                                         load_live_registry())
+            if recorded:
+                print("provider %s unavailable until %s" % recorded)
         if stop is not None and rc in (0, 3, 6):
             print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
             rc = 8
