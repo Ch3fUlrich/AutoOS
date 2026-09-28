@@ -39,6 +39,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
   `task_dir` is what links the two ids meanwhile.
 
+### Added — `token-rate`: orchestrator tokens per merged change (RESTART R5a, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (new, stdlib, read-only): the §5 metric the
+  before/after cap comparison needs. Its numerator iterates **every** usage
+  record of the orchestrator's Claude Code transcripts and weights them
+  `input + output + cache_creation + 0.1 * cache_read` (`CACHE_READ_WEIGHT`);
+  the naive unweighted sum is printed beside it as a labelled diagnostic.
+  `tools/autoos_context.py` `fill_from_transcript` is deliberately not reused —
+  it keeps only the last usage record, which is a *snapshot*, and a rate needs
+  the sum over all of them. The denominator is first-parent merges into `main`
+  in the same window (by committer date) whose subject names the orchestrator's
+  branch prefix, so numerator and denominator are the same actor; sessions are
+  selected by the record's `cwd` on whole path segments, which keeps
+  `/home/s/code/AutoOS` and `/home/s/code/AutoOS-lanes/...` apart. The output
+  states the known bias: it rewards shorter sessions and prices the
+  orchestrator only.
+- **`tools/autoos-agent.py`**: a `token-rate` verb forwards to it, the way
+  `usage` forwards to `autoos_usage` — the metric needs no gateway.
+- **`tests/test_autoos_tokenrate.py`** (new, 27 cases, wired into
+  `tests/linux/33-documentation.sh`): fixtures reproduce the real transcript
+  record key-for-key (including `usage.iterations`, which must *not* be summed
+  twice) against a throwaway projects dir and a temp git repo. Covers the four
+  summed fields, the all-records-vs-last-record regression guard, the
+  half-open window, cwd scoping, merge attribution by prefix, and the
+  zero-merge window printing `n/a` instead of dividing. 27 red before the tool
+  existed, green after.
+
+### Changed — `token-rate` reports the in-session subagent share (RESTART R5a follow-up, router D-045, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: an `isSidechain` record — a turn of an
+  in-session subagent the orchestrator spawned — is orchestrator cost, so D-045
+  keeps it in the numerator and reports how big that part is instead of
+  filtering it out. Four new labelled lines in the text report and four keys in
+  `--json` (`subagent_records`, `subagent_weighted`, `subagent_naive`,
+  `subagent_share_pct`, the share over the *weighted* numerator, `n/a`/None when
+  the numerator is empty). The split is a view onto the same records:
+  `weighted` still includes `subagent_weighted`, so the R5a before-numbers are
+  unchanged — re-measured over the same 48 h window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`), L1-routing 5,462 records /
+  148,504,022.4 weighted / 28 merges, L1-backlog 4,907 / 138,537,540.9 / 34,
+  L1-main 2,959 / 104,906,139.8 / 76 — every row reproduced the R5a report to
+  the token. The measured caveat the operator has to decide: this client writes
+  sidechain usage records to `<project>/<session>/subagents/*.jsonl`, one level
+  below what `discover_transcripts` scans, so all three rows print `0.0%` while
+  those files hold 4,283 / 7,153 / 417 in-window records (26.5 % / 47.3 % /
+  4.6 % of their numerator *if* discovery reached them). Widening discovery is a
+  before-number change and therefore an operator call, not a metric-reporting
+  one.
+- **`tests/test_autoos_tokenrate.py`**: `SidechainTests` (new, 6 cases) plus
+  three report/CLI assertions, on fixtures that mix `isSidechain` true and false
+  records in one transcript — the flag parses, the sidechain turn is *not*
+  dropped from the numerator, the split is exact, the share is over weighted,
+  and an empty numerator prints `n/a` rather than dividing. 10 red before the
+  change (9 new cases + the `--json` key test), 36 green after.
 ### Fixed — the REST temp files are removed on every exit path, and the gateway's reason survives to the log (MUSEFIX, 2026-09-28)
 
 - **`configuration/omniroute/apply.sh`**: `omni_rest` writes the manage key into a `mktemp` curl `--config` file and the response into a second `mktemp` — a `GET /api/providers` answer is every provider's live `apiKey` — and both were removed only by the statement *after* the call. A run interrupted while a call was in flight therefore left a 0600 file holding the key in `/tmp` on the user's machine, which is what an onboarding run a user gets impatient with looks like. The removal is now trapped for the duration of the call (`trap 'rm -f -- "$cfg" "$out"' INT TERM EXIT`, cleared immediately after — the script sets no trap of its own, so clearing restores "no trap") in the shape `ai-stack.sh` uses for its edge-webhook header file. Measured against the interrupt case, with two temp files live mid-call: before the trap, a `SIGTERM` to the run's process group — the shape of Ctrl-C — killed it at rc 143 with **both files on disk**; with the trap, nothing survives, in either signal shape (a `SIGTERM` aimed at only the script's pid is cleaned up too, by the call's own shell finishing behind it). Outside a call the script still has no trap, so Ctrl-C keeps the default disposition there, exactly as in `ai-stack.sh`.
@@ -49,6 +103,142 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`configuration/omniroute/apply.sh`**: a live run printed `! meta-api registration failed - register it in the dashboard` and threw the CLI's stderr away (`>/dev/null 2>&1`), so the reason never reached the log (routing-00 04:5xZ). The failure path now prints the CLI's own words through `print_cli_error` — ANSI stripped, three lines at 200 chars, every secret replaced by `[REDACTED]` by `redact_secrets`, whose *quoted* bash pattern substitution matters: a key containing `*` or `?` is stripped literally instead of being read as a glob. The reason itself: `catalog/ai-registry.json` gives `meta_api` the `omniroute_id` `meta-api` and an `api_base` of its own, and `meta-api` is not one of the built-ins `omniroute providers available` knows (352 ids and aliases, measured against omniroute 3.8.51) — so `providers add meta-api` had nothing to attach a credential to. Such a provider now reaches the gateway as a **provider node**: `builtin_provider` reads the CLI's catalog once per run and caches it, `ensure_provider_node` GETs `/api/provider-nodes` first and POSTs what `createProviderNodeSchema` asks for — name and prefix, an `apiType` for `type: "openai-compatible"`, and a `baseUrl` that the schema requires only of the `vibeproxy-openai` preset but apply always sends, because a node without the endpoint the registry names routes nowhere (omniroute `src/shared/validation/schemas/provider.ts:307-385`; the CLI's own `post-api-provider-nodes` sends *no* body at all, `bin/cli/api-commands/provider-nodes.mjs:18-25`, so this has to be the REST call) — then binds the key to the node the gateway reports back. The created node is read from the list rather than trusted from the POST response, and a prefix that collides with a built-in is the gateway's own refusal (`reservedProviderPrefixes.ts`), which is why an id is only ever a node when the catalog says it is not a built-in. The manage key travels in a private `mktemp` curl `--config` file (0600) and the body on stdin — never argv, where `ps` reads it for the lifetime of the call. Idempotency is measured against the gateway, not against `providers list`: a node-bound connection's provider is the node's `<type>-<uuid>` id (`src/lib/db/providers/nodes.ts:61-71`), which the existing hex-id scan can never match, so `provider_connection_exists` reads `GET /api/providers` (`{"connections":[…],"total":N}`, measured live 2026-09-28) and the second run prints `= meta-api already registered` — reading only the id and the name, never the `apiKey` every row carries. `--dry-run` prints both plan lines and calls nothing.
 - **`tests/linux/34-ai-services.sh`**: five bash cases on a fake `omniroute` + fake `curl` in a sandbox directory (`_node_sandbox`) that reproduce the measured contract — the CLI's real `providers list` column shape, its `.env` banner before the JSON, the gateway's `{"nodes":[…]}` and `{"connections":[…]}` bodies: the redacted stderr (a key with glob characters, asserted absent from the output *and* from every recorded argv), node-create-then-connection-add for a non-built-in, a second run reporting `already registered` with exactly one node row, `--dry-run` creating and adding nothing, and an unreadable catalog treated as all-built-in (never a node created on a guess). Built-ins keep the byte-identical call they made before. The pwsh twin runs the real `apply.ps1` in a child shell against a loopback stand-in gateway (`Start-AutoOSNodeGateway`, a `TcpListener` job) and pins the same contract in text for Windows, where the stand-in CLI needs `sh`. Red before: `--filter apply` 40 passed / **5 failed**, `-Filter 'keeps the provider-node path'` 0 / **1 failed** (`no provider-node request`). Green after: 45 / 0 and the wider `--filter 'svc:,apply,combo,routing,registry'` 130 / 0 on bash; `-Filter apply.ps1` 53 / 0 on pwsh. shellcheck clean at `-S style` on both touched `.sh`; PSScriptAnalyzer reports nothing new on `apply.ps1` beyond the categories the suite already excludes.
+### Fixed - parsed `uv` output is read colour-free (GFX, 2026-09-28)
+
+- **`lib/linux/install.sh`**: new **`uv_plain()`** (`NO_COLOR=1 uv --color never "$@"`),
+  and the two uv calls whose *output* is parsed now go through it -
+  `graphify_mcp_link_prepare`'s `uv tool dir` and `graphify_installed_version`'s
+  `uv tool list`. uv colourises stdout on `FORCE_COLOR`/`CLICOLOR_FORCE` with no tty
+  at all, and measured on uv 0.12.18 that wraps the answers in escapes
+  (`\e[36m/home/u/.local/share/uv/tools\e[39m`, `\e[1mgraphifyy v0.9.63\e[0m`). The
+  link classifier prefix-matches the path, so on such a host uv's OWN shim at
+  `~/.local/bin/graphify-mcp` was classified `blocked` ("yours to move"), the graphify
+  step returned 1, and every `setup.sh --profile ai-coding|workstation --dry-run`
+  exited 1 once the pinned tool had been installed once - measured here:
+  `FORCE_COLOR=3 bash setup.sh --only mcp-graphify --dry-run` rc 1 before, rc 0 and the
+  plan byte-identical to the plain run after. The version read failed the same quiet
+  way: nothing parsed, so the pin "installed" on every run. `uv tool install` is
+  deliberately *not* routed through the helper - its output is for the user, and only
+  its exit code is read.
+- Tests (`tests/linux/18-mcp-wiring.sh`): the five per-driver uv stubs collapse into
+  one **`gfy_uv()`** that mirrors the measured contract - argv recording, the tools
+  dir, the `<dist> v<ver>` line, the writes `tool install` performs, and colourisation
+  on uv's own precedence (`--color never` beats `NO_COLOR` beats `FORCE_COLOR` beats a
+  tty), so a caller reproduces a coloured host with `FORCE_COLOR=3 <driver> …`. Four
+  new cases: uv's own link is still `uv` when `tool dir` is coloured, the user's own
+  link is still `blocked` then (colour must not become a rubber stamp), the pinned
+  tool stays `skipped` with rc 0 and no reinstall, and the version parser reads the
+  catalog pin out of a coloured `tool list`; plus a grep guard that no `$(uv …)` /
+  `< <(uv …)` in `lib/linux` bypasses the helper. 5 red on a scratch copy with only
+  the two callsites reverted, green here: 41 passed / 0 failed with and without
+  `FORCE_COLOR=3`, 46 passed / 0 failed for `--filter='dry run'` both ways,
+  `shellcheck -S warning` clean.
+
+### Changed — the user-scope `homelab` MCP entry is never removed, only reported (NOHL, 2026-09-28)
+
+Operator decision 2026-09-28 06:2xZ (via L0): the homelab MCP switch is **not** to
+be done now — the server-side homelab MCP is not finished, so no step may take the
+user-scope `homelab` entry away. It is the entry the homelab server will be
+configured through, not a leftover to clean up.
+
+- **`lib/linux/install.sh`**: `remove_stale_homelab_mcp_entry` is gone and
+  `report_stale_homelab_mcp_entry` replaces it. The whole removal path went with
+  it — the `backup_file` call, `claude mcp remove homelab --scope user`, the
+  post-removal re-check, the `has_cmd claude` precondition and the dry-run
+  branch (a check that writes nothing has no separate dry-run behaviour to
+  announce, so dry and live now print the same line). What is left: classify the
+  config with `homelab_user_entry` (kept — it is what the report is about), and
+  when it says `agent-skills`, print one muted line naming the retired tree and
+  saying the entry is left in place. No backup, no `claude` call, no file write,
+  no recorded failure. `none` and `other` say nothing at all: a line on every run
+  about an absent entry, or about a server the user wrote themselves, is noise —
+  and the old `other` branch ended in `claude mcp remove homelab --scope user`,
+  which is now an order AutoOS must not give. The `$SYS_HOME` guard stays: a
+  config outside the home this run configures belongs to another session (setup
+  under sudo reads root's), and reporting on it would describe a file the run was
+  never pointed at.
+- **`install_omnigraph_client`**: calls the report where it called the removal,
+  still before the URL/token/npm gates and still exactly once; the case that
+  guards against an orphan or a second caller now pins the new name.
+- Tests (`tests/linux/18-mcp-wiring.sh`): the removal cases are replaced by
+  report cases. A recognised stale entry leaves the config byte-identical with no
+  backup file, no `claude` invocation and no `backup_file` attempt (both stubs
+  record, so the absence is proven, not assumed) and prints the line; a second run
+  prints the same line again, because nothing changed in between — the old shape
+  converged to *skipped* precisely because the first run had mutated the machine;
+  dry and live are identical; an unrecognised entry, an absent entry and a
+  project-scope entry each get no line and an untouched file; a config outside this
+  run's home is not reported on. One case greps `lib/` for `mcp remove homelab` and
+  for the old helper name, so the removal cannot come back under a new caller.
+- Docs: `docs/catalog.md`, the A4b row and spec §C/D14 of
+  `docs/plans/2026-09-27-omnigraph-mcp-catalog-{plan,spec}.md` say the removal is
+  deferred by operator decision rather than done. `homelab_user_entry` still
+  recognises the shape, and `docs/omnigraph.md` never described this duty, so
+  neither needed a change.
+
+### Changed — the `agent-skills` step is a tombstone; its twelve duties have homes (A7b, Linux/macOS, 2026-09-28)
+
+- **`catalog/linux.json`, `catalog/macos.json`**: new `agent-skill-links`
+  component (`provider: custom`, `postInstall: install_agent_skill_links`,
+  profiles `workstation` + `ai-coding`). It carries no `requires` — linking a
+  directory of markdown needs neither git nor nodejs, and naming them would drag
+  both into a skills-only run — and no `prompt`, which was never its question.
+  `agent-skills` keeps its id (a saved selection, a state file and
+  `--only agent-skills` all still resolve) and loses the `omnigraph_url` prompt
+  and the `git`/`nodejs` requires it no longer spends.
+- **`lib/linux/install.sh`** (`install_agent_skill_links`,
+  `agent_skill_link_dests`, `agent_skill_links_current`): the skills-linking duty
+  moved here and now goes through `link_skill_dirs` for every destination,
+  replacing the step's own hand-rolled loop. Two behaviour differences, both
+  intended: only a directory holding a `SKILL.md` is a skill (the old loop linked
+  any child directory), and a dangling link this checkout created is *repaired*
+  where the old loop left it — a moved checkout used to mean silently no skills
+  in Antigravity and Claude Code. Nothing is ever *copied* any more: the loop's
+  `ln -snf … || cp -r …` fallback would have written a second, unversioned copy of
+  the skills into the user's home if `ln` failed, and no test ever reached it.
+  `agent_skill_link_dests` is the one home for the destination list, so the
+  writer and the detection gate cannot disagree about what "done" covers, and
+  `~/.codex/skills` is created only where codex is installed or its home exists.
+  `~/.openhands/skills` stays owned by `setup_openhands_config`.
+- **`lib/linux/install.sh`** (`install_omnigraph_client`): took the wiring duties
+  that named this checkout's servers — approve the `.mcp.json` project servers
+  (`omnigraph`, `autoos-agent`), warn about a shadowing user-scope `omnigraph`
+  instead of ever writing one, write Antigravity's `omnigraph` entry (its config
+  has no project scope) and report — never remove — the retired tree's user-scope
+  `homelab` entry (that removal was deferred, see the NOHL entry below).
+  The first, second and fourth run **before** the URL/token/npm gates, because a
+  machine that never answered the prompt still wants a clean, working Claude Code;
+  the entry that *carries* the URL and token stays behind them, which is A3's
+  "nothing configured, write nothing" rule. Its refusal to touch a file the run
+  could not back up is recorded under the id being installed, so the summary
+  cannot read "done" over a change that never happened.
+- **Removed from the step that used to do all of this**: the four
+  `install_mcp_*` calls (each is a catalog postInstall with its own profile and
+  `requires`; a second caller double-ran them and counted one broken wiring
+  twice), the retired-clone hint (the clone is a detection fallback in
+  `autoos_skills_source`, not something to advertise) and `omnigraph_readiness`
+  together with its caller — the check that can name a missing token, a rejected
+  token or a missing graph is `tools/check-omnigraph.py`, which the healthchecks
+  already call; an installer guessing at Docker state across a machine it cannot
+  see was the weaker copy of that. The "restart Claude Code and Antigravity" line
+  moved with the work it describes. `docs/catalog.md` follows in the same change.
+- **Detection**: `custom_is_installed` gains `agent-skill-links` (delegating to
+  `agent_skill_links_current`, the same function the postInstall asks) and the
+  retired `agent-skills` id now reports done whatever is on disk, because there
+  is never work left under it. A destination that is itself a symlink — the old
+  whole-directory layout, which AGENTS.md section 8 says is left with one warning
+  — counts as settled: it is a directory of the user's, `link_skill_dirs` will not
+  write through it, and holding it against the machine would re-plan the component
+  every run and then report it *installed* having done nothing.
+- Tests (`tests/linux/18-mcp-wiring.sh`, `13-end-to-end-dry-run-only.sh`,
+  `14-state-verify-and-undo.sh`, `38-omnigraph-client.sh`): the linking cases
+  moved to the new component and gained second-run, keep-yours, dry-run,
+  moved-checkout and one-destination-list assertions; the omnigraph-client block
+  asserts the approvals, the warning-only rule, the homelab report and the
+  blank-URL machine that still gets the repo-scope duties and writes no bridge
+  config; one case fails the suite if any installer calls an `mcp-*` postInstall
+  from another component; and the Antigravity merge is now proven on a real
+  `mcp_config.json` that already holds the user's own server.
 ### Fixed - the raw provider-stop line stops being recorded (REDACTFIX3, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: `record_reset_stop` stored the stop line it is
@@ -114,6 +304,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   suite `2060 passed, 4 skipped, 4596 subtests passed`, exit 0.
 
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
+
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
 - **`tests/test_autoos_spawner.py`**: **`LeakStrictnessTests`** (new, 8 cases) drives the real `parent_snapshot`/`parent_leak` against real temp repositories across the exemption boundary — a sibling worktree's own branch moving is exempt; a worktree added mid-run is not; a worktree inside the sandbox is not; a commit on a branch created during the run is a leak either way HEAD then goes. `IsolateContainmentTests` gains four fake-worker modes for the evasions (decoy branch, backdated committer date, `switch -c` + ff back, commit on a new branch) and the three flipped expectations above. 13 red before the fix, 417 green after on the file; `python3 -m pytest -q tests/` 1831 passed, 4 skipped.

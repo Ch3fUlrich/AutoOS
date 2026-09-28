@@ -81,7 +81,7 @@ Mechanical rules already in code — the interface R-coord-09 mandates, and what
 worker, `route` prints the resolver's pick for a task card, `ready` appends the ready line only
 after `review-status` and the pushed sha check out, `heartbeat` reports pause/unpushed/context
 fill, `ps` lists every live worker, `usage` the spend by provider and lane, `context` this
-session's fill, `list` the tiers and who may spawn whom. Also in code:
+session's fill, `token-rate` orchestrator tokens per merged change (RESTART spec §5), `list` the tiers and who may spawn whom. Also in code:
 `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until) and
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the full
 list of code-enforced rules.
