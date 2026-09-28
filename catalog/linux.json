@@ -641,7 +641,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "light"
+            "light",
+            "server"
           ],
           "prompt": "omnigraph_url",
           "homepage": "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp",
