@@ -255,6 +255,41 @@ if [[ "${1:-} ${2:-}" == "providers list" ]]; then
     cat "$d/providers.txt"
     exit 0
 fi
+# `omniroute models <provider>` is what makes the gateway enumerate a freshly
+# registered provider's models into /v1/models. The stand-in catalog is
+# gw/v1/models (served by the static gateway): its baseline is catalog.base,
+# plus the models of every provider this process has enumerated, read from
+# provider_models.tsv ("<provider>\t<model id>" lines). Nothing is served
+# until a caller writes catalog.base, so every other test here keeps the old
+# "no catalog to validate against" behaviour.
+if [[ "${1:-}" == "models" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    [[ -n "${2:-}" ]] && printf '%s\n' "$2" >>"$d/enumerated"
+    [[ -f "$d/gw/v1/models" ]] || exit 0
+    python3 - "$d" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+ids = []
+base = os.path.join(d, "catalog.base")
+if os.path.exists(base):
+    ids += [l.strip() for l in open(base, encoding="utf-8") if l.strip()]
+pairs = []
+table = os.path.join(d, "provider_models.tsv")
+if os.path.exists(table):
+    for line in open(table, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 2:
+            pairs.append(parts)
+enum = set()
+seen = os.path.join(d, "enumerated")
+if os.path.exists(seen):
+    enum = {l.strip() for l in open(seen, encoding="utf-8") if l.strip()}
+ids += [m for p, m in pairs if p in enum]
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": i} for i in dict.fromkeys(ids)]}, fh)
+PY
+    exit 0
+fi
 printf '%s\n' "$*" >>"$d/calls.log"
 exit 0
 SH
@@ -427,6 +462,99 @@ if it "svc: apply registers meta-api once and reports it as already registered o
     grep -q '^providers add meta-api' "$d/calls.log" && { ok=0; echo "a run re-added a live connection" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "meta-api registration is not idempotent"; fi
+fi
+
+# ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
+# On a fresh machine free-ai/qwen7b only appeared in t3-driver-free-only on the
+# SECOND apply run. The first run registered the connection, then read
+# /v1/models — which the gateway had not enumerated for a provider it had just
+# added — so the leg failed the catalog check and was dropped as "catalog does
+# not know". Reading the catalog is only meaningful after the enumeration the
+# CLI performs when asked for a provider's models, so apply must refresh
+# between registering and writing combos.
+# The sandbox catalog: catalog.base holds every combos.json ref EXCEPT the new
+# provider's, and the stand-in serves it as /v1/models until `omniroute models
+# <provider>` is called — that call rebuilds the document from catalog.base
+# plus provider_models.tsv, exactly as the gateway learns a fresh provider's
+# models on demand. A run that skips the refresh cannot see the leg.
+if it "apply: one run registers a provider, refreshes the catalog, and writes its leg into the combos"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    printf 'free_ai: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d" "$ROOT" <<'PY'
+import json, os, sys
+d, root = sys.argv[1], sys.argv[2]
+path = os.path.join(root, "configuration", "omniroute", "combos.json")
+combos = json.load(open(path, encoding="utf-8"))
+refs = {ref for c in combos["combos"] for ref in c["models"]}
+fresh = sorted(r for r in refs if r.startswith("free-ai/"))
+base = sorted(refs - set(fresh))
+os.makedirs(os.path.join(d, "gw", "v1"), exist_ok=True)
+with open(os.path.join(d, "catalog.base"), "w", encoding="utf-8") as fh:
+    fh.write("".join(r + "\n" for r in base))
+with open(os.path.join(d, "provider_models.tsv"), "w", encoding="utf-8") as fh:
+    fh.write("".join("free-ai\t%s\n" % r for r in fresh))
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": r} for r in base]}, fh)
+PY
+    out="$(_prune_apply "$d")"
+    ok=1
+    # The leg is in the combo the FIRST run writes.
+    grep -qx 'combo create t3-driver-free-only --strategy priority --models free-ai/qwen7b' \
+        "$d/calls.log" \
+        || { ok=0; echo "created: [$(grep '^combo create t3-driver-free-only' "$d/calls.log")]" >&2; }
+    [[ "$out" != *"catalog does not know free-ai"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
+    # The refresh is what put it there, and it happened before any combo write.
+    [[ "$out" == *"  + free-ai registered"* ]] || { ok=0; echo "register: $out" >&2; }
+    [[ "$out" == *"  + free-ai enumerated"* ]] || { ok=0; echo "refresh: $out" >&2; }
+    refresh_line="$(grep -nx 'models free-ai' "$d/calls.log" | cut -d: -f1 | head -1)"
+    combo_line="$(grep -nx 'combo create .*' "$d/calls.log" | cut -d: -f1 | head -1)"
+    [[ -n "$refresh_line" && -n "$combo_line" && $refresh_line -lt $combo_line ]] \
+        || { ok=0; echo "order: refresh=$refresh_line first-combo=$combo_line" >&2; }
+    [[ "$out" != *"could not read /v1/models"* ]] || { ok=0; echo "no catalog read: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a freshly registered provider's leg needed a second run"; fi
+fi
+
+# ─── MUSEAPI review F1: apply.sh raises apply.ps1's duplicate key_name guard ─
+# Two connections from one api-keys.yml entry (the shape that would follow if
+# meta and meta_api both said key_name: meta) means one of them silently gets no
+# key. apply.ps1 throws; apply.sh must not quietly register whichever row it
+# reads second. A synthesized registry, so the real catalog is untouched.
+if it "svc: apply refuses a registry where two providers claim one api-keys.yml name"; then
+    reg="$(mktemp)"
+    cat >"$reg" <<'JSON'
+{"providers": {
+   "meta":     {"omniroute_id": "meta",     "key_name": "meta"},
+   "meta_api": {"omniroute_id": "meta-api", "key_name": "meta"}},
+ "routes": {},
+ "models": {}}
+JSON
+    keys="$(mktemp)"
+    printf 'meta: not-a-real-key-123\n' >"$keys"
+    rc=0
+    out="$(AUTOOS_REGISTRY_FILE="$reg" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)" || rc=$?
+    rm -f "$reg" "$keys"
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc, out: $out" >&2; }
+    [[ "$out" == *"is claimed by both meta and meta-api"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" != *"would register"* ]] || { ok=0; echo "registered anyway: $out" >&2; }
+    if (( ok )); then pass; else fail "apply.sh accepted a duplicated key_name"; fi
+fi
+
+if it "svc: apply --dry-run plans the catalog refresh for the provider it would register"; then
+    keys="$(mktemp)"
+    printf 'free_ai: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"  - free-ai: would register (key from free_ai)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"would refresh free-ai's models (omniroute models free-ai)"* ]] \
+        || { ok=0; echo "refresh plan: $out" >&2; }
+    [[ "$out" != *"nothing new registered"* ]] || { ok=0; echo "claimed a current catalog: $out" >&2; }
+    if (( ok )); then pass; else fail "the dry run does not plan the catalog refresh"; fi
 fi
 
 # ─── apply.sh --drift: live combos vs combos.json ───────────────────────────

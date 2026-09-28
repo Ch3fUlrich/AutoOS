@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Apply the AutoOS router configuration to OmniRoute:
 #   1. registers every provider key found in configuration/api-keys.yml
-#   2. (re)creates the tier combos from configuration/omniroute/combos.json
-#   3. prunes the combos listed there as "retired" from the store (only those)
+#   2. refreshes the gateway's model catalog for what it just registered
+#      (omniroute models <provider>), so one run is enough on a fresh machine
+#   3. (re)creates the tier combos from configuration/omniroute/combos.json
+#   4. prunes the combos listed there as "retired" from the store (only those)
 #
 # Safe to re-run: providers are add-or-update, combos are replaced in place,
 # and a retired combo that is already gone is simply not found again.
@@ -132,6 +134,9 @@ def leg_is_unavailable(leg, route):
 # Every leg any route lists, grouped by the provider id it resolves to - used
 # only to find a provider none of whose legs can ever be served.
 legs_by_provider = {}
+# key_name -> omniroute_id, to catch two connections claiming one api-keys.yml
+# entry (the guard apply.ps1 has; see below).
+by_key_name = {}
 for route in routes.values():
     if not isinstance(route, dict):
         continue
@@ -160,17 +165,32 @@ for name, entry in providers.items():
     # print "no key in api-keys.yml" and never register the connection.
     # api-keys.yml keys are lower-cased when parsed above, so match that.
     key_name = (entry.get("key_name") or name).lower()
+    claimed = by_key_name.get(key_name)
+    if claimed is not None and claimed != provider_id:
+        # MUSEAPI review F1: the same guard apply.ps1 raises. Two connections
+        # from one api-keys.yml name means one of them silently never gets a
+        # key, so the registry - not the operator with a half-configured
+        # gateway - has to say so.
+        print("ERR\tapi-keys.yml name '%s' is claimed by both %s and %s - "
+              "give one of them its own key entry" % (key_name, claimed, provider_id))
+        continue
+    by_key_name[key_name] = provider_id
     print("ROW\t%s\t%s\t%s" % (key_name, provider_id, data_json))
 PY
 )" || { echo "apply.sh: cannot read $REGISTRY_FILE" >&2; exit 1; }
 PROVIDER_MAP=()
 PROVIDER_SKIPPED=()
+REGISTERED_NOW=()
 declare -A PROVIDER_DATA=()
 while IFS=$'\t' read -r tag a b c; do
     [[ -z "$tag" ]] && continue
     if [[ "$tag" == SKIP ]]; then
         PROVIDER_SKIPPED+=("$a")
         continue
+    fi
+    if [[ "$tag" == ERR ]]; then
+        echo "apply.sh: $a" >&2
+        exit 1
     fi
     key_name="$a" provider_id="$b" data_json="$c"
     PROVIDER_MAP+=("$key_name:$provider_id")
@@ -343,6 +363,9 @@ register_provider() {
     fi
     if [[ $DRY -eq 1 ]]; then
         echo "  - $provider_id: would register (key from $key_name)"
+        # The catalog step below plans from this list too: a dry run has to say
+        # it would refresh what it would just have registered.
+        REGISTERED_NOW+=("$provider_id")
         return 0
     fi
     local var="AUTOOS_KEY_${key_name^^}"
@@ -355,6 +378,7 @@ register_provider() {
     if ( export "$var=$value"; omni providers add "$provider_id" \
             --credential-env "$var" "${data_args[@]}" --yes ) >/dev/null 2>&1; then
         echo "  + $provider_id registered"
+        REGISTERED_NOW+=("$provider_id")
     else
         echo "  ! $provider_id registration failed — register it in the dashboard"
     fi
@@ -383,6 +407,31 @@ for entry in "${PROVIDER_MAP[@]}"; do
     fi
     register_provider "${entry%%:*}" "${entry#*:}"
 done
+
+# ─── Refresh the gateway's model catalog ────────────────────────────────────
+# Registering a connection does not by itself put that provider's models in
+# /v1/models: the gateway enumerates a provider when it is asked for its models.
+# Reading the catalog before that gave a freshly registered provider no entries
+# to validate against, so its leg was dropped as "catalog does not know" and
+# only appeared on the SECOND apply run (L0 2026-09-27T19:07:39Z, free-ai/qwen7b
+# on a fresh machine). Order is therefore register -> refresh -> read -> combos.
+echo "Catalog:"
+if [[ $DRY -eq 1 ]]; then
+    for provider_id in "${REGISTERED_NOW[@]:-}"; do
+        [[ -z "$provider_id" ]] && continue
+        echo "  - would refresh $provider_id's models (omniroute models $provider_id)"
+    done
+elif [[ ${#REGISTERED_NOW[@]} -eq 0 ]]; then
+    echo "  = nothing new registered - the catalog is already current"
+else
+    for provider_id in "${REGISTERED_NOW[@]:-}"; do
+        if omni models "$provider_id" >/dev/null 2>&1; then
+            echo "  + $provider_id enumerated"
+        else
+            echo "  ! $provider_id could not be enumerated - its legs may be dropped below"
+        fi
+    done
+fi
 
 # ─── (Re)create combos ──────────────────────────────────────────────────────
 live_ids=""
