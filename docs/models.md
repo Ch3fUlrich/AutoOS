@@ -60,11 +60,11 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
 | `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` |
-| `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
+| `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
-| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → deepseek `deepseek-flash` → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
-| `t3-driver-clean` | cheap | 128k | deepseek `deepseek-flash` → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → deepseek `deepseek-flash` → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
+| `t3-driver-clean` | cheap | 128k | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t3-driver-free-only` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → free_ai `qwen7b` |
 | `t3-driver-paid` | cheap | 131,072 | (none) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
@@ -386,7 +386,8 @@ for a combo when you need fallback routing.
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
 tier, no Meta/openrouter *contributor* tiers, no Kilo Free. Assumption:
 **any big free model may train on prompts**, so `*-clean` chains use **paid
-legs only** (deepseek/openrouter/zen/mistral direct). Cheap-inference is paid (own key, own
+legs only** (deepseek/openrouter/zen direct; mistral direct left the
+`*-clean` chains 2026-09-28 — see the plan-limits note below). Cheap-inference is paid (own key, own
 billing) but is a third-party reseller pool — `*-clean` stays direct-paid
 only, no reseller legs. Contributor tiers are paid but train by
 contract ($0.10 pricing is the tell) — they stay in `t1-orchestrator`, never `*-clean`.
@@ -548,7 +549,7 @@ flag = free tier tracked in-catalog (verify current terms in-dashboard):
 |---|---|---|---|
 | `gemini` | `gemini` | yes | Explorer: Flash pooled |
 | `groq` | `groq` | yes | Looper: per-model 200K TPD caps |
-| `mistral` | `mistral` | yes | Biggest pool (~1B/mo); 2 RPM |
+| `mistral` | `mistral` | yes | Keyed account — the **plan**, not the vendor page, sets the caps; see the measured row below |
 | `deepseek` | `ds` | yes | Planner: 5M signup, 30-day expiry |
 | `moonshot` / `kimi` | `moonshot` | — | Kimi direct; coding keys via `kimi-coding-apikey` |
 | `openrouter` | `openrouter` | yes | Contributor $0.10 + `:free` pool ($10 → 1000 RPD) |
@@ -563,6 +564,29 @@ flag = free tier tracked in-catalog (verify current terms in-dashboard):
 | `cerebras` | `cerebras` | trial | $5 credit + card only — not a free leg |
 
 Check more any time: `omniroute providers available --search <text>`.
+
+**Mistral plan limits, measured 2026-09-28 (MISTRALFIX).** A direct request to
+`api.mistral.ai` with our own key, reading the `x-ratelimit-*` headers per model,
+shows what *this plan* answers — the vendor's published ladder does not:
+
+| model | status | req/min | tokens/min |
+|---|---|---|---|
+| `mistral-small-latest` | 429 | 0 | — |
+| `devstral-latest` | 429 | 0 | — |
+| `mistral-medium-latest` | 429 | 0 | — |
+| `magistral-medium-latest` | 429 | 0 | — |
+| `mistral-large-latest` | 403 | — | — |
+| `codestral-latest` / `mistral-code-latest` | 200 | 125 | 625000 |
+| `open-mistral-nemo` / `ministral-8b-latest` | 200 | 188 | 625000 |
+
+The gateway's own 7-day log agrees on the first row: `mistral/mistral-small-latest`
+failed 51 of 51 calls. The two models this registry carries a record for are
+recorded on `providers.mistral.limits` (that table is the one home for the
+numbers); a leg at `rpm: 0` — or flagged `plan_available: false`, the 403 shape —
+is skipped by `tools/registry.py plan_dead_reasons()` with the reason
+`plan: 0 rpm`, so a fallback chain can no longer end on a model that cannot
+answer. `mistral-small-latest` was consequently removed from every route that
+listed it.
 
 ## Connect each app (key = `AUTOOS_OMNIROUTE_KEY`)
 
@@ -636,28 +660,25 @@ flowchart TB
         T2CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
         T2CB["2 · openrouter deepseek/deepseek-v4.1-flash\nPAID · UNAVAILABLE (DSMAX)"]
         T2CC["3 · zen deepseek-v4.1-flash\nPAID · UNAVAILABLE"]
-        T2CD["4 · mistral mistral-small-latest\nPAID direct"]
-        T2CA --> T2CB --> T2CC --> T2CD
+        T2CA --> T2CB --> T2CC
     end
 
     subgraph t3["t3-driver · cheap-driver · cheapest capable loop"]
         direction TB
-        T3A["1 · mistral mistral-code-latest\nFREE 1B/mo pool, 2 RPM · same key bills past it"]
+        T3A["1 · mistral mistral-code-latest\nPAID direct · measured 125 rpm / 625k tpm on this plan (MISTRALFIX 2026-09-28)"]
         T3B["2 · groq qwen3.8-27b\nFREE 200K TPD · UNAVAILABLE (deny-groq)"]
         T3C["3 · cerebras qwen-3.8-27b\nPAID $10 credit overflow · UNAVAILABLE"]
         T3D["4 · cheaperinference glm-5.2 / minimax-m2.7 (glm-4.5-air DENIED)\nPAID $15 partner pool · own key"]
-        T3E["5 · mistral mistral-small-latest\nPAID direct"]
-        T3F["6 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T3G["7 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
-        T3A --> T3B --> T3C --> T3D --> T3E --> T3F --> T3G
+        T3F["5 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
+        T3G["6 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
+        T3A --> T3B --> T3C --> T3D --> T3F --> T3G
     end
 
     subgraph t3c["t3-driver-clean · paid legs only, no training"]
         direction TB
         T3CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T3CB["2 · mistral mistral-small-latest\nPAID direct"]
-        T3CC["3 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
-        T3CA --> T3CB --> T3CC
+        T3CC["2 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
+        T3CA --> T3CC
     end
 
     subgraph freeonly["*-free-only · zero spend, never degrade to paid"]

@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — Mistral plan limits are measured and gate the route; no route routes into a dead leg (MISTRALFIX, 2026-09-28)
+
+- **`catalog/ai-registry.json:providers.mistral.limits`**: the plan itself, not the
+  provider's uptime, is what killed `mistral-small-latest` — a direct probe
+  (2026-09-28T10:5xZ, `x-ratelimit` headers on `api.mistral.ai`) returns 429 at
+  **0 req/min** for it while `mistral-code-latest` serves 125 rpm / 625k tpm on the
+  same key. The measured rows now live in the registry's one home for plan caps
+  (`rpm`/`tpm`/`source`), and the bare-spelling models that were never registered
+  (`devstral-latest`, `mistral-medium-latest`, `magistral-medium-latest`,
+  `codestral-latest`, `open-mistral-nemo`, `ministral-8b-latest`, and
+  `mistral-large-latest` at 403) are recorded in the provider `$comment` only —
+  rule 10 rejects a limits key that does not resolve to a model of that provider.
+  The gateway agrees: `mistral-small-latest` failed 51/51 calls over 7 days.
+- **`tools/registry.py:plan_dead_reasons()`** (new, alongside
+  `provider_plan_limits()`): a leg is plan-dead when its row says `rpm: 0` or
+  `plan_available: false`; no row is never a deny. `plan_available` joined
+  `$defs.provider_limits` in the schema and `_LIMITS_ENTRY_KEYS`, so rule 10 now
+  rejects a non-boolean (a string would read as available).
+- **`tools/autoos_resolver.py:usable_legs()`** had no plan gate at all — only a
+  request-size `tpm` check — so a 0-rpm leg survived every filter and got served.
+  `plan_dead_reasons` now runs immediately after the availability hard check,
+  naming the reason `"plan: 0 rpm"`. The stale "rpm/rpd/tpd are data only" claims
+  in that module are corrected: `rpm` gates, but only for its zero.
+- **`routes.t3-driver` / `t2-worker-clean` / `t3-driver-clean`**: `mistral/
+  mistral-small-latest` is out of all three (13→12, 4→3, 3→2 legs). The `-clean`
+  twins do not need marking unavailable — after DSBACK they head on native
+  `deepseek/deepseek-flash`, which is live and plan-ungated, so each keeps a
+  serving leg. `t3-driver` keeps its paid `mistral/mistral-code-latest` leg.
+- **Invariant, `tests/test_registry.py:MistralPlanLimitsTests`**: every route that
+  serves traffic (`servable_route_ids`) keeps at least one leg that is
+  gateway-servable *and* plan-alive, over the real registry — the check that would
+  have caught this on the day the leg was added. A route with zero servable legs
+  renders no combo and so serves nothing, which is why `t1-orchestrator-clean` is
+  correctly outside the rule rather than exempt from it.
+- **Renders** re-derived from the registry: `sync-router-tiers.py` rewrote the
+  litellm managed block, `docs/models.md`'s managed block plus its mermaid chains
+  and provider table, `configuration/omniroute/combos.json` by minimal hand-edit
+  of the three leg arrays (its hand-written `$comment` is an intentional equality
+  exception and stays); `validate` and all five `render --check` surfaces pass.
+- **Stale pins re-derived, not loosened (R-worker-01)**: `RuleThreePrivacyTests`
+  read the live head leg from the registry instead of hard-coding mistral-small,
+  and three resolver tests that called it "the proven leg" now use
+  `test_autoos_resolver.py:clean_head_leg()`; `PlanLimitsGateTests` seeds the dead
+  plan inline so the gate is tested without `measured.json`.
+
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the
