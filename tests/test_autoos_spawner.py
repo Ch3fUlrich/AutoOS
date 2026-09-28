@@ -62,6 +62,15 @@ def tearDownModule():
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 
+SHIPPED_REGISTRY = json.loads(
+    (ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+
+
+def r_leg_is_claude(leg):
+    """The shipped registry's own Claude predicate, for CLI-level assertions."""
+    return bool(leg) and resolver.is_claude_leg(leg, SHIPPED_REGISTRY)
+
+
 def clean_env(**extra):
     # An ambient AUTOOS_SESSION_TAG is the lane's own tag: a spawn run from a
     # lane session takes it instead of deriving one from ROOT, so every
@@ -75,6 +84,27 @@ def clean_env(**extra):
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
     env.update(extra)
     return env
+
+
+def claude_env(**extra):
+    """`clean_env` plus the orchestrator's Claude declaration.
+
+    CLAUDEBUDGET-b item 1/3(d): with the shipped `claude_budget` on, spawning
+    `--client claude` is refused -- Claude is held for finals and for the work the
+    orchestrator declares. The tests below that only want to look at the *claude
+    client's own shape* (its argv, `--joinable`, `--lean`'s mcp config, the
+    sandbox containment path) are not tests of the budget, so they declare the run
+    the way an orchestrator would. The budget's own tests
+    (ClaudeBudgetSpawnTests/ClaudeBudgetMcpSpawnTests) deliberately leave it unset:
+    that refusal is what they measure.
+
+    CLAUDEBUDGET-d item 2: the same declaration covers `--client agy`. What spends
+    the allowance is the model that answers, and agy answers with
+    `clients.AGY_DEFAULT_MODEL` = a Claude model when the caller names no --model,
+    so naming that client was never a claim that the run is free.
+    """
+    return clean_env(AUTOOS_CLAUDE_CRITICAL="test: the claude client's own argv",
+                     **extra)
 
 
 def run_agent(*args, env=None):
@@ -412,12 +442,13 @@ class ClientCommandTests(unittest.TestCase):
             self.assertEqual(cmd[-1], "task", name)
 
     def test_claude_is_headless_print_on_its_own_login(self):
-        r = plan_of("--client", "claude", "t")
+        r = plan_of("--client", "claude", "t", env=claude_env())
         self.assertIn("would run: claude -p --permission-mode acceptEdits t", r.stdout)
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", r.stdout)
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t",
+                    env=claude_env())
         self.assertIn("claude --bg --remote-control d1 --strict-mcp-config --mcp-config "
                       "'{\"mcpServers\":{}}' --name d1", r.stdout)
 
@@ -441,7 +472,7 @@ class ClientCommandTests(unittest.TestCase):
         # go BEFORE -p. Item 2: with no caller model it gets the measured
         # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
         # own default Gemini whose quota is out until ~2026-10-01.
-        r = plan_of("--client", "agy", "t")
+        r = plan_of("--client", "agy", "t", env=claude_env())
         self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
 
@@ -502,8 +533,14 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("qodercli -p --permission-mode dont_ask", r.stdout)
         self.assertNotIn("bypass_permissions", r.stdout)
 
-    def test_qoder_explicit_model_is_kept(self):
-        r = plan_of("--client", "qoder", "--model", "Efficient", "t")
+    def test_a_declared_qoder_explicit_model_is_kept(self):
+        # CLAUDEBUDGET-g item A: "Efficient" is a qoder-native name no registry row
+        # carries, and under the shipped budget an unpriceable caller-named model is
+        # a refusal. This test measures the argv, so it declares the run the way an
+        # orchestrator would (the suite's `claude_env` convention) -- the declared
+        # path only; the undeclared refusal is
+        # `ClaudeBudgetLastMileTests.test_an_undeclared_claude_model_on_qoder_is_refused`.
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t", env=claude_env())
         self.assertIn("--model Efficient", r.stdout)
         self.assertNotIn("Qwen3.8-Flash", r.stdout)
 
@@ -672,7 +709,8 @@ class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
     def test_joinable_keeps_an_explicit_model(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "--model", "opus", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1",
+                    "--model", "opus", "t", env=claude_env())
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
@@ -710,7 +748,7 @@ class DepthTests(unittest.TestCase):
         self.assertIn("depth: 1/%d" % clients.DEFAULT_MAX_DEPTH, r.stdout)
 
     def test_spawn_past_the_max_is_refused(self):
-        r = plan_of("--client", "agy", "t", env=clean_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
+        r = plan_of("--client", "agy", "t", env=claude_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
         self.assertEqual(r.returncode, 4)
         self.assertIn("depth", r.stderr)
 
@@ -751,7 +789,7 @@ class LeanTests(unittest.TestCase):
         self.assertIn("lean: no serena, playwright, context7", r.stdout)
 
     def test_lean_claude_uses_a_strict_empty_mcp_config(self):
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertIn("--strict-mcp-config", r.stdout)
 
     def test_lean_is_refused_where_it_cannot_be_applied(self):
@@ -822,7 +860,7 @@ class LeanTests(unittest.TestCase):
         r = plan_of("--lean", "--card", "role=review", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
 
@@ -904,7 +942,8 @@ class SignInProbeTests(unittest.TestCase):
     def test_run_refuses_a_signed_out_agy_fast_and_never_starts_the_task(self):
         d, env = self.stub(self.SIGNED_OUT)
         start = time.time()
-        r = run_agent("run", "--client", "agy", "Reply with exactly: ack", env=env)
+        r = run_agent("run", "--client", "agy", "Reply with exactly: ack",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("agy is installed but not signed in", r.stderr)
         self.assertIn("Please sign in", r.stderr)
@@ -913,7 +952,8 @@ class SignInProbeTests(unittest.TestCase):
 
     def test_run_goes_ahead_when_agy_is_signed_in(self):
         d, env = self.stub(self.SIGNED_IN)
-        r = run_agent("run", "--client", "agy", "t", env=env)
+        r = run_agent("run", "--client", "agy", "t",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # AGYFIX item 1+2 (measured 2026-09-27): the working form is
         # `agy --model <m> -p <task>`, and with no caller model the spawner
@@ -3223,9 +3263,12 @@ class SessionTagTests(unittest.TestCase):
     def test_a_client_that_carries_no_header_prints_no_session_tag(self):
         # qwen has no header hook at all (autoos_clients.py), and claude never
         # reaches the gateway: neither may claim a tag it cannot send.
-        for client in ("qwen", "claude"):
+        # CLAUDEBUDGET: the claude leg asks through claude_env(). With the shipped
+        # budget on, an undeclared `--client claude` is refused before it prints
+        # any tag at all, and this test measures the tag, not the gate.
+        for client, env in (("qwen", clean_env()), ("claude", claude_env())):
             r = run_agent("run", "--dry-run", "--client", client, "--tier", "2",
-                          "t", env=clean_env())
+                          "t", env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn("session-tag:", r.stdout, client)
 
@@ -3291,8 +3334,8 @@ class HeadlessRefusalTests(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(stub)
         os.chmod(path, 0o755)
-        env = clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
-                        AUTOOS_STATE_DIR=d)
+        env = claude_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                         AUTOOS_STATE_DIR=d)
         r = run_agent("run", "--client", "agy", "t", env=env)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("autoos-agent: HEADLESS-REFUSAL:", r.stderr)
@@ -3785,8 +3828,13 @@ class RawTailClassificationTests(unittest.TestCase):
 
     def _run_verdict(self, exit_obj):
         fake_plan = {
-            "agent": "t2-worker", "client": "qoder", "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"], "env": {},
+            "agent": "t2-worker", "client": "qoder",
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: the argv a real qoder launch carries (build_command
+            # always names a model), because the last-mile gate now prices the plan
+            # it reads instead of falling back to a value the plan does not carry.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"], "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
                       "card": None},
@@ -3877,7 +3925,8 @@ class CardV2Tests(unittest.TestCase):
 
     def test_the_v2_tables_are_the_documented_ones(self):
         self.assertEqual(routing.CARD_V2_VALUES, {
-            "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+            "kind": ("implement", "debug", "review", "plan", "bulk", "research",
+                     "final"),
             "risk": ("normal", "high"),
             "spec": ("exact", "partial", "vague"),
             "privacy": ("public", "sensitive"),
@@ -3887,12 +3936,33 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
-            "author": None,
+            "author": None, "critical": False,
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
         self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
         self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+
+    def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
+        """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
+        `critical=true` names blocking work -- the two card states that may
+        still spend Claude in budget mode. `critical` is a boolean like
+        `deferrable`, and both are v2-only fields."""
+        self.assertIs(self.norm({"kind": "final"})["kind"], "final")
+        self.assertIs(self.norm({"critical": True})["critical"], True)
+        self.assertIs(self.norm({"critical": "true"})["critical"], True)
+        self.assertIs(self.norm({})["critical"], False)
+        for bad in ("yes", "1", "maybe"):
+            with self.assertRaises(routing.CardError, msg=bad):
+                routing.normalize_v2({"critical": bad})
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2({"kind": "final-review"})
+
+    def test_a_dotted_card_string_carries_final_and_critical(self):
+        out = routing.normalize_v2(routing.parse_card(
+            "kind=final,critical=true,paths=README.md"))
+        self.assertEqual(out["kind"], "final")
+        self.assertTrue(out["critical"])
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})
@@ -4359,8 +4429,11 @@ class RouteCliTests(unittest.TestCase):
         fake_plan = {
             "agent": "t2-worker",
             "client": "qoder",
-            "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"],
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: a real qoder argv names its model (see the fixture in
+            # RawTailClassificationTests._run_verdict); the gate prices the plan.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"],
             "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
@@ -5291,6 +5364,13 @@ class IsolateContainmentTests(unittest.TestCase):
             env["AUTOOS_STATE_DIR"] = statedir
             env["AUTOOS_FAKE_ROOT"] = root
             env["AUTOOS_FAKE_MODE"] = mode
+            # CLAUDEBUDGET-d item 2: agy's own default model IS Claude, so these
+            # spawns are Claude spends and the budget gate holds them -- the same
+            # `claude_env` convention as the claude-client tests above. These
+            # tests measure containment, not the budget, so the harness declares
+            # the run the way an orchestrator would; ClaudeBudgetSpawnTests
+            # measures the refusal itself and leaves this out.
+            env["AUTOOS_CLAUDE_CRITICAL"] = "test: agy containment harness"
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
                 # SPAWNCAP (S2): the real registry declares headless agy with
@@ -5922,6 +6002,11 @@ class IsolateContainmentTests(unittest.TestCase):
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
             env["AUTOOS_FAKE_ROOT"] = root
+            # CLAUDEBUDGET-b: this Namespace spawns client "claude", which the
+            # shipped budget holds for finals. The test measures the joinable
+            # sandbox's containment, so it carries the orchestrator's
+            # declaration; without it cmd_run refuses before it gets that far.
+            env[agent.resolver.CLAUDE_CRITICAL_ENV] = "test: joinable containment"
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True):
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -6006,12 +6091,18 @@ def _fallthrough_registry(route_ids, policy=None):
 
 
 def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
-                      track_record, client_state, overlay_missing_at=None):
+                      track_record, client_state, client="opencode", env=None,
+                      overlay_missing_at=None):
     """route_plan_for stand-in: the first route id still in `registry`.
 
     `_resolve_route_v2` drops the excluded ids before calling, so the second
     attempt sees only the routes that have not been tried yet. No routes left
-    is the resolver's own input_required."""
+    is the resolver's own input_required. `client`/`env` (CLAUDEBUDGET-b item 3)
+    are the Claude gate's two inputs and `overlay_missing_at` (OVERLAYHOME) is
+    the no-overlay report's; this stub plans without the resolver, so it
+    takes them and ignores them -- but it must take them, because `run` now
+    passes them and a stub that silently dropped them would let the real gate
+    drift from what a spawn actually sees."""
     routes = list((registry.get("routes") or {}).keys())
     if not routes:
         return {"route": None, "state": "input_required",
@@ -10087,3 +10178,920 @@ class OverlayHomeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeBudgetSpawnTests(unittest.TestCase):
+    """CLAUDEBUDGET-b item 3(d) + item 1: the spawn-time half of the budget.
+
+    The resolver holds Claude *legs*; nothing stopped a caller from simply
+    naming the client (`--client claude`) or from exporting
+    AUTOOS_CLAUDE_CRITICAL in a worker and passing it down the tree. These are
+    the tests for the two things that close that: one gate at every spawn path,
+    and a spawner that strips its own Claude declaration from every child.
+    """
+
+    # A v1 card, deliberately: this gate belongs to the spawn path, not to the
+    # resolver, and a resolver card cannot plan at all in a checkout with no
+    # measured overlay -- an unrelated environment fact would decide these tests.
+    CARD = "role=implement"
+    CRITICAL = "CI is red on main and only this run can close it"
+
+    def run_(self, *args, env=None):
+        return run_agent("run", *args, "--dry-run", "--card", self.CARD,
+                         "reply with exactly: ack", env=env or clean_env())
+
+    def test_run_client_claude_is_refused_in_budget_mode(self):
+        r = self.run_("--client", "claude")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+
+    def test_the_refusal_is_a_route_refusal_code(self):
+        # Item 3: a refused spawn exits with an existing refusal code, not a new
+        # one callers would have to learn: 2 is "card or route refused".
+        r = self.run_("--client", "claude")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_cards_own_critical_field_does_not_unlock_the_claude_client(self):
+        # The whole point of item 1: the card is written by the worker that wants
+        # the model, so it cannot be the thing that authorises the spend.
+        r = run_agent("run", "--client", "claude", "--dry-run",
+                      "--card", self.CARD + ",critical=true", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_spawn(self):
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude-budget:", r.stderr)
+
+    def test_the_declaration_reason_is_cited_on_the_allowed_spawn(self):
+        # Item 1: the allowed path has to say *why*, in the declared words, or a
+        # DONE line citing Claude is indistinguishable from a violated policy.
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertIn(self.CRITICAL, r.stderr)
+
+    def test_a_non_claude_spawn_is_never_gated(self):
+        r = self.run_("--client", "opencode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude_budget", r.stderr + r.stdout)
+
+    def test_the_refusal_comes_before_any_planning(self):
+        # Nothing is burned by a refusal: no route line, no depth line, no clone.
+        r = self.run_("--client", "claude")
+        self.assertNotIn("would run:", r.stdout)
+        self.assertNotIn("route:", r.stdout)
+
+    def test_the_spawner_strips_claude_env_from_a_child(self):
+        # Item 1: the declaration is this process's, never a worker's to pass on.
+        r = self.run_("--client", "opencode",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL,
+                                    AUTOOS_CLAUDE_OTHER="x"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        env_line = [line for line in r.stdout.splitlines()
+                    if line.startswith("env: ")]
+        self.assertTrue(env_line, r.stdout)
+        self.assertNotIn("AUTOOS_CLAUDE", env_line[0])
+
+    def test_strip_claude_env_drops_the_whole_namespace(self):
+        # The prefix, not one key: an `AUTOOS_CLAUDE_*` added later is stripped
+        # by the same rule, and a second declaration name is exactly how a
+        # worker gets one the spawner forgot to remove.
+        cli = load_agent()
+        out = cli.strip_claude_env({"AUTOOS_CLAUDE_CRITICAL": "x",
+                                   "AUTOOS_CLAUDE_WHATEVER": "y",
+                                   "AUTOOS_AGENT_DEPTH": "1",
+                                   "PATH": "/bin"})
+        self.assertEqual(out, {"AUTOOS_AGENT_DEPTH": "1", "PATH": "/bin"})
+
+    # CLAUDEBUDGET-d item 2: the gate reads the model that will actually answer,
+    # not only the client's name. Naming a non-Claude client was never a claim
+    # that the run is free -- `--client opencode --model sonnet` and `agy`'s own
+    # default model are both Claude spends, and they used to walk straight past
+    # `claude_spawn_refusal`.
+
+    def test_run_named_client_with_a_claude_model_is_refused(self):
+        for model in ("sonnet", "openrouter/anthropic/claude-opus-4-6",
+                      "claude-sonnet-5", "opus"):
+            r = run_agent("run", "--client", "opencode", "--model", model,
+                          "--dry-run", "--card", self.CARD, "t",
+                          env=clean_env())
+            self.assertNotEqual(r.returncode, 0, "%s: %s%s" % (model, r.stdout, r.stderr))
+            self.assertIn("claude_budget", r.stderr, model)
+
+    def test_agy_default_model_is_a_claude_spend(self):
+        # agy answers with clients.AGY_DEFAULT_MODEL when the caller names none,
+        # and that model IS Claude -- the client-name-only gate saw "agy" and
+        # waved it through. CLAUDEBUDGET-f item 6: this is the CLI path, not a
+        # unit call. The old version used a `role=implement` card, which the
+        # capability check (SPAWNCAP: agy declares shell=false, write=false)
+        # refuses before the budget gate is reached -- so it tested the wrong
+        # door and stayed green even if the budget gate vanished. A read-only
+        # card asks for no capability, and the run gets to the budget gate.
+        r = run_agent("run", "--client", "agy", "--dry-run",
+                      "--card", "role=review", "reply with exactly: ack",
+                      env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("claude-opus", r.stderr)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_defaulted_client(self):
+        cli = load_agent()
+        refusal, note = cli.claude_spawn_refusal(
+            "agy", {cli.resolver.CLAUDE_CRITICAL_ENV: self.CRITICAL},
+            self.shipped_budget())
+        self.assertIsNone(refusal, refusal)
+        self.assertIn(self.CRITICAL, note)
+
+    def shipped_budget(self):
+        # The operator's shipped registry, budget and all: this is the gate as the
+        # host runs it, not a fixture that flatters the code under test.
+        import json
+        import pathlib
+        path = pathlib.Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_named_client_on_a_non_claude_model_is_never_gated(self):
+        # qoder's own default is Qwen3.8-Flash: the name check must not become a
+        # blanket refusal of every client that CAN take a Claude model.
+        # CLAUDEBUDGET-f item 6: assert the door is OPEN, not only that the
+        # budget said nothing -- a run that died at some other check would have
+        # satisfied a `NotIn claude_budget` and hidden the regression.
+        r = run_agent("run", "--client", "qoder", "--dry-run", "--card",
+                      self.CARD, "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
+        self.assertNotIn("claude_budget", r.stderr, r.stdout + r.stderr)
+
+    def test_an_unknown_effective_model_fails_closed(self):
+        # When the gate cannot tell what the client will answer with, and the
+        # budget is on, the answer is "no" -- a clear "no" that says how to ask.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "budget",
+                                                 "weekly_share_left": 0.1,
+                                                 "budget_below": 0.25}},
+                    "clients": {"codex": {"id": "codex"}}, "routes": {}, "models": {}}
+        refusal, note = cli.claude_spawn_refusal("codex", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("--model", refusal)
+
+    def test_the_model_gate_is_inert_when_the_budget_is_off(self):
+        # Non-budget mode unchanged: the same Claude models route as they did.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "normal",
+                                                 "weekly_share_left": 0.9,
+                                                 "budget_below": 0.25}},
+                    "clients": {}, "routes": {}, "models": {}}
+        for client, model in (("opencode", "sonnet"), ("agy", None),
+                              ("codex", None)):
+            refusal, note = cli.claude_spawn_refusal(client, {}, registry,
+                                                     model=model)
+            self.assertIsNone(refusal, "%s/%s: %s" % (client, model, refusal))
+
+    def test_effective_model_prefers_the_callers_model(self):
+        cli = load_agent()
+        self.assertEqual(cli.effective_spawn_model("agy", model="deepseek-v3"),
+                         ("deepseek-v3", "--model"))
+        # ...and the client's configured default when it names none.
+        model, source = cli.effective_spawn_model("agy")
+        self.assertEqual(model, cli.clients.AGY_DEFAULT_MODEL)
+        self.assertIn("AGY_DEFAULT_MODEL", source)
+
+    def test_the_plan_sees_the_client_that_would_run(self):
+        # Item 3(d): route_plan_for must pass the client. Under the shipped
+        # budget, a card planned for client `claude` is held by the *client*
+        # rule, which only appears in the plan if the client reached the
+        # resolver; the same card planned for opencode never mentions it.
+        claude = run_agent("route", "--client", "claude", "--card",
+                           "kind=implement,mode=balanced,risk=normal,"
+                           "paths=README.md")
+        opencode = run_agent("route", "--client", "opencode", "--card",
+                             "kind=implement,mode=balanced,risk=normal,"
+                             "paths=README.md")
+        blob = lambda r: (r.stdout or "") + (r.stderr or "")
+        self.assertIn("client claude held for finals", blob(claude),
+                      blob(claude))
+        self.assertNotIn("client claude held for finals", blob(opencode))
+
+
+class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
+    """Item 3(e): the MCP `spawn` tool is a spawn path too."""
+
+    def test_spawn_refuses_the_claude_client_in_budget_mode(self):
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "card": {"role": "implement"}, "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("claude_budget", out.get("error", ""))
+
+    def test_spawn_refuses_before_starting_anything(self):
+        # No run dir, no child: the gate is checked ahead of the launch, so a
+        # refused Claude spawn cannot leave a working record behind.
+        before = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "dry_run": True})
+        self.assertIn("claude_budget", out.get("error", ""))
+        after = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        self.assertEqual(before, after)
+
+    def test_spawn_allows_claude_with_the_orchestrator_declaration(self):
+        os.environ["AUTOOS_CLAUDE_CRITICAL"] = self.CRITICAL = "critical path"
+        try:
+            out = mcp_server.spawn({"client": "claude", "task": "t",
+                                    "dry_run": True})
+        finally:
+            del os.environ["AUTOOS_CLAUDE_CRITICAL"]
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
+
+    # CLAUDEBUDGET-d item 2/3: the tool call names the model, so the tool call is
+    # where the orchestrator declares it -- `claude_reason` per spawn, instead of
+    # an AUTOOS_CLAUDE_CRITICAL the whole server inherits for every later caller.
+
+    def test_spawn_refuses_a_claude_model_on_a_non_claude_client(self):
+        for model in ("opus", "sonnet", "openrouter/anthropic/claude-opus-4-6"):
+            out = mcp_server.spawn({"client": "opencode", "model": model,
+                                    "task": "t", "card": {"role": "implement"},
+                                    "dry_run": True})
+            self.assertEqual(out.get("state"), "rejected", "%s: %s" % (model, out))
+            self.assertIn("claude_budget", out.get("error", ""), model)
+
+    def test_spawn_per_call_reason_unlocks_that_one_spawn(self):
+        reason = "final review of L1-routing@deadbeef"
+        out = mcp_server.spawn({"client": "claude", "model": "sonnet",
+                                "task": "t", "claude_reason": reason,
+                                "dry_run": True})
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
+        # The reason is part of the record, not only of the decision: the plan
+        # the caller reads back has to cite what let the spend happen.
+        self.assertIn(reason, str(out.get("route", {})), out)
+
+    def test_a_card_cannot_supply_the_spawn_reason(self):
+        # `claude_reason` is a request field the orchestrator sends; a card is
+        # the worker's own text, so the same spelling inside a card buys nothing:
+        # the spawn is still refused (a card field the router does not accept is
+        # refused outright, which is the same outcome for the worker).
+        out = mcp_server.spawn({"client": "opencode", "model": "opus", "task": "t",
+                                "card": {"role": "implement",
+                                         "claude_reason": "trust me"},
+                                "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+
+
+class ClaudeBudgetSameModelTests(unittest.TestCase):
+    """CLAUDEBUDGET-f items 1/2/3/5: the gate judges the model the run launches.
+
+    One resolution, in the runner's own precedence order (an explicit --model,
+    then the tier agent's model for a client that goes through the gateway, then
+    the client's own default, then the card's combo), and that value is what both
+    the gate and the argv carry. Two extra doors HEAD had: a combo the registry
+    does not carry was priced as *free* for a caller-named value (1/5), and a
+    `--free`/`--model` string short-circuited the resolution before the tier was
+    ever consulted (3) -- so the gate could read one model while the run answered
+    with another.
+    """
+
+    UNKNOWN_COMBO = "omniroute/not-a-route-at-all"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.real_cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def cli(self):
+        return self.agent
+
+    def shipped(self, **row):
+        """A deep copy of the shipped registry, optionally with a clients row."""
+        import copy
+        registry = copy.deepcopy(SHIPPED_REGISTRY)
+        for name, value in row.items():
+            registry.setdefault("clients", {}).setdefault(name, {}).update(value)
+        return registry
+
+    def off(self, registry):
+        import copy
+        off = copy.deepcopy(registry)
+        off["policy"]["claude_budget"] = {"mode": "normal",
+                                          "weekly_share_left": 0.9,
+                                          "budget_below": 0.25}
+        return off
+
+    # --- item 1: an unknown combo is not free, it is unknowable ----------------
+
+    def test_an_unknown_combo_named_by_the_caller_is_refused(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, self.shipped(),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+        # The message names the value it could not price, or the operator cannot
+        # tell a typo from a policy change.
+        self.assertIn(self.UNKNOWN_COMBO, refusal)
+
+    def test_an_unknown_combo_is_not_refused_outside_budget_mode(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {},
+                                                 self.off(self.shipped()),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNone(refusal, note)
+
+    def test_an_unknown_combo_on_the_cli_is_refused(self):
+        r = run_agent("run", "--client", "opencode", "--model", self.UNKNOWN_COMBO,
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.UNKNOWN_COMBO, r.stderr)
+
+    # --- item 2: the tier agent model is consulted before any client default ---
+
+    def claude_tier_cfg(self):
+        """opencode.jsonc whose t2-worker agent answers on an all-Claude route."""
+        import copy
+        cfg = copy.deepcopy(self.real_cfg)
+        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        return cfg
+
+    def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
+        cli = self.cli()
+        # An operator-written clients row is the client's *default*, and a tier
+        # replaces it -- reading the row first is what let a Claude tier agent
+        # walk past the gate wearing a free model's name.
+        registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
+        model, source = cli.effective_spawn_model(
+            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
+        self.assertEqual(model, "omniroute/opus-4-6")
+        self.assertIn("t2-worker", source)
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
+                                                 cfg=self.claude_tier_cfg(), tier=2)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+
+    def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
+        # The same fixture through `cmd_run`: the budget's own refusal, not a
+        # route error further down, and it names the Claude model the tier agent
+        # carries. The live registry on this host is the shipped one (budget ON).
+        cli = self.agent
+        out, err = io.StringIO(), io.StringIO()
+        env = clean_env()
+        env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_run(self.args(tier=2, card=None), self.claude_tier_cfg())
+        self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("claude_budget", err.getvalue())
+        self.assertIn("opus-4-6", err.getvalue())
+
+    # --- item 5: a mutated registry clients row is refused, not assumed free ---
+
+    def test_a_typo_in_the_registry_clients_row_is_refused(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "Qwen3.8-Flas"})
+        model, source = cli.effective_spawn_model("qoder", registry=registry)
+        self.assertEqual((model, source), ("Qwen3.8-Flas", "registry clients row"))
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("Qwen3.8-Flas", refusal)
+
+    def test_a_registry_row_the_registry_can_price_still_runs(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "deepseek-v4.1-flash"})
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNone(refusal, note)
+
+    # --- item 3: one resolution, so the gate input IS the launch model ---------
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="role=review", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.cli().DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def launch_model(self, **overrides):
+        """The `--model` value build_plan actually hands the client."""
+        plan = self.agent.build_plan(self.args(**overrides), self.real_cfg)
+        cmd = plan["cmd"]
+        return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
+
+    def gate_model(self, **overrides):
+        cli = self.agent
+        return cli.effective_spawn_model(
+            overrides.get("client", "opencode"), model=overrides.get("model"),
+            card=overrides.get("card"), registry=SHIPPED_REGISTRY,
+            cfg=self.real_cfg, tier=overrides.get("tier"),
+            free=bool(overrides.get("free")),
+            free_model=overrides.get("free_model", cli.DEFAULT_FREE_MODEL),
+            clean=bool(overrides.get("clean")))[0]
+
+    COMBINATIONS = (
+        dict(client="opencode", tier=1),
+        dict(client="opencode", tier=2, clean=True),
+        dict(client="opencode", tier=3),
+        dict(client="opencode", card="role=implement,complexity=hard"),
+        dict(client="opencode", free=True),
+        dict(client="opencode", free=True, tier=2),
+        dict(client="opencode", model="omniroute/t1-orchestrator", tier=2),
+        dict(client="qwen", tier=1),
+        dict(client="qwen", card="role=implement"),
+        dict(client="qoder", tier=2),
+        dict(client="qoder", card="role=review"),
+        dict(client="qoder", model="Efficient", tier=2),
+    )
+
+    def test_a_v2_card_is_not_refused_for_the_client_it_can_price(self):
+        # A v2 card names no combo — the resolver routes it and holds its own
+        # Claude legs — so the spawn gate prices it at the client's configured
+        # default. A gateway client this config says nothing about stays
+        # unpriced, and unpriced under a budget is a refusal, not a free pass.
+        cli = self.agent
+        registry = self.shipped()
+        card = {"kind": "review", "paths": "tools/registry.py"}
+        self.assertIsNone(cli.claude_spawn_refusal("opencode", {}, registry,
+                                                  cfg=self.real_cfg, card=card)[0])
+        self.assertIsNotNone(cli.claude_spawn_refusal("codex", {}, registry,
+                                                     cfg=self.real_cfg, card=card)[0])
+
+    def test_the_gate_reads_the_model_the_launch_carries(self):
+        self.agent = load_agent()
+        for case in self.COMBINATIONS:
+            with self.subTest(**case):
+                gate = self.gate_model(**case)
+                launch = self.launch_model(**case)
+                # Both sides compared as the route/model id the client receives:
+                # a gateway argv carries the bare combo, the gate may spell it
+                # `omniroute/<combo>#<effort>`.
+                norm = lambda v: (v or "").partition("#")[0].replace("omniroute/", "", 1)
+                self.assertEqual(norm(gate), norm(launch),
+                                 "gate %r vs launch %r for %s" % (gate, launch, case))
+
+    def test_a_free_spawn_is_priced_at_the_free_model_not_the_tier(self):
+        # --free replaces the route with the promo model in build_plan, so the
+        # gate must price THAT, and a tier behind it changes nothing.
+        cli = self.agent = load_agent()
+        free = cli.DEFAULT_FREE_MODEL
+        self.assertEqual(self.gate_model(client="opencode", free=True, tier=3), free)
+        self.assertEqual(self.launch_model(client="opencode", free=True, tier=3), free)
+
+
+class ClaudeBudgetLastMileTests(unittest.TestCase):
+    """CLAUDEBUDGET-g item A/B/C: the gate that decides is the one on the FINAL plan.
+
+    The spawn gate reads what the *flags* imply, and `build_plan` then rewrites the
+    model in three places the flags never mention: the reviewer resolution
+    (`reviewer_run_override`), the resolver-routed v2 combo, and the free/clean
+    handling. A gate that proves an earlier resolution is a gate on a value the
+    run will not use. These tests hold the last-mile gate -- one shared helper,
+    run on the final plan immediately before the launch, in `cmd_run` and in the
+    MCP spawn path's preflight -- to be the authority, with the early gate kept
+    only for the fast message.
+    """
+
+    V2_CARD = "kind=review,author=qwen,paths=tools/registry.py"
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track.jsonl")
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        # Budget ON: this is the state the gate exists for.
+        self.registry["policy"]["claude_budget"] = {
+            "mode": "budget", "weekly_share_left": 0.1, "budget_below": 0.25}
+        # One all-Claude route, spelled the way the shipped registry spells Claude:
+        # provider id `cc`, which is Claude whatever the model row says.
+        self.registry["providers"]["cc"] = {"id": "cc", "tier": "paid",
+                                            "trains_on_prompts": False}
+        self.registry["models"]["opus"] = {
+            "id": "opus", "family": "anthropic", "reasoning": True,
+            "effort_ladder": [], "tool_calls": "proven", "price_in": 1e-5,
+            "price_out": 5e-5, "output_max": 100000,
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        for rid in ("claude-route", "claude-route-clean"):
+            self.registry["routes"][rid] = {"id": rid, "class": "smart",
+                                            "legs": ["cc/opus"]}
+        # The reviewer list HEAD picks for an author outside the Claude family:
+        # the Claude reviewer first, so `reviewer_run_override` swaps the model.
+        # The fixture's own rows stay behind it -- the author's family (`qwen`) is
+        # resolved through them, and dropping them fails the walk before the
+        # spawner ever reaches the model.
+        self.registry["policy"]["reviewers"] = [
+            {"client": "opencode", "model": "omniroute/claude-route",
+             "family": "anthropic", "leg": "cc/opus", "paid": True, "source": "test"}
+        ] + self.registry["policy"]["reviewers"]
+        patch = mock.patch.object(self.agent, "load_registry",
+                                 lambda path=None: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        state = mock.patch.object(
+            self.agent.measure_mod, "client_state",
+            lambda *a, **k: {n: {"installed": True, "signed_in": True, "reason": ""}
+                             for n in ("opencode", "gemini", "qoder", "claude")})
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        names = (list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse",
+                                             "claude-route", "claude-route-clean"])
+        return {"model": "omniroute/r-cheap",
+                "agents": {a: {"model": "omniroute/r-cheap"}
+                           for a in self.agent.TIERS.values()},
+                "providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card=self.V2_CARD, allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False, model=None, free=False,
+            free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def plan(self, **overrides):
+        return self.agent.build_plan(self.args(**overrides), self.cfg())
+
+    def last_mile(self, args, plan, env=None):
+        return self.agent.claude_plan_refusal(args, plan, env=env if env is not None
+                                              else {}, registry=self.registry,
+                                              cfg=self.cfg())
+
+    def off(self):
+        import copy
+        off = copy.deepcopy(self.registry)
+        off["policy"]["claude_budget"] = {"mode": "normal", "weekly_share_left": 0.9,
+                                          "budget_below": 0.25}
+        return off
+
+    # --- item A: the reviewer resolution is a post-gate model swap -------------
+
+    def test_the_early_gate_does_not_see_the_reviewer_override(self):
+        # The hole, stated: reading the card's flags prices the route the router
+        # chose, not the reviewer the run actually starts on.
+        cli = self.agent
+        args = self.args()
+        early = cli.claude_spawn_refusal("opencode", {}, self.registry, cfg=self.cfg(),
+                                         card=args.card)
+        self.assertIsNone(early[0], early[0])
+
+    def test_a_reviewer_override_to_a_claude_model_is_refused(self):
+        plan = self.plan()
+        cmd = plan["cmd"]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "omniroute/claude-route",
+                         "the fixture must reproduce the swap: the reviewer's model "
+                         "is what the argv carries")
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+        self.assertIn("claude-route", refusal)
+
+    def test_cmd_run_refuses_the_reviewer_override_before_launching(self):
+        # The gate is in the CLI's own launch path, not only in a helper a caller
+        # may or may not call: a dry run prints no `would run:` line.
+        out, err = io.StringIO(), io.StringIO()
+        env = clean_env()
+        env.pop("AUTOOS_CLAUDE_CRITICAL", None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(), self.cfg())
+        self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("claude_budget", err.getvalue())
+        self.assertNotIn("would run:", out.getvalue())
+
+    def test_the_declaration_unlocks_the_overridden_reviewer_model(self):
+        # The gate is a budget, not a ban: what the orchestrator declares runs.
+        refusal, note = self.last_mile(self.args(), self.plan(),
+                                       env={self.agent.resolver.CLAUDE_CRITICAL_ENV:
+                                            "final review of this diff"})
+        self.assertIsNone(refusal, refusal)
+        self.assertIn("final review of this diff", note)
+
+    # --- item A: a resolver-routed v2 combo is priced by its legs --------------
+
+    def test_the_last_mile_prices_the_v2_route_legs_not_the_client_default(self):
+        # `_resolve_route_v2` replaces the card's combo with the resolver's route;
+        # the early gate reads the client default and never sees it. This is the
+        # final plan that route produces.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "model": "omniroute/claude-route",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/claude-route", "--title", "t", "x"],
+                "route": {"combo": "claude-route", "resolver": True}, "env": {}}
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    # --- item A: an unknown model for a Claude-capable client fails closed -----
+
+    def test_an_unknown_native_model_is_refused_on_the_cli(self):
+        # `--model Efficient` on qoder is a string no registry row describes, and
+        # qoder answers with whatever the caller names, on the operator's own
+        # account. HEAD priced it by name, saw no Claude marker, and allowed it.
+        r = run_agent("run", "--client", "qoder", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("Efficient", r.stderr)
+        self.assertIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+
+    def test_an_unknown_native_model_is_refused_on_agy_too(self):
+        r = run_agent("run", "--client", "agy", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_a_declared_unknown_native_model_keeps_its_argv(self):
+        r = run_agent("run", "--client", "qoder", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--model Efficient", r.stdout)
+
+    def test_a_known_non_claude_leg_is_never_refused(self):
+        # A provider/model the registry can read stays free: fail-closed on the
+        # unknown is not fail-closed on everything.
+        r = run_agent("run", "--client", "qoder", "--model", "qwen/qwen3.8-flash",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude_budget", r.stderr)
+
+    def test_the_client_compiled_default_is_priced_by_name(self):
+        # qoder's default is Qwen3.8-Flash, a name no registry row carries. It is
+        # code this host reviewed, not a caller's string, so the name decides and
+        # the run is not refused -- otherwise every qoder worker benches.
+        r = run_agent("run", "--client", "qoder", "--dry-run", "--card", "role=review",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
+
+    # --- item A: the joint free/clean cases agree with the argv ----------------
+
+    def test_free_plus_a_claude_model_is_refused(self):
+        # --free replaces the argv model with the promo model, but a caller that
+        # names Claude alongside it is refused, not quietly re-priced.
+        r = run_agent("run", "--client", "opencode", "--free", "--model", "opus",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_a_plain_free_spawn_passes_the_last_mile_gate(self):
+        # The promo model is what the argv carries, so the promo model is what the
+        # gate prices -- and it is not Claude.
+        plan = self.plan(free=True, card="role=review")
+        self.assertEqual(plan["cmd"][plan["cmd"].index("--model") + 1],
+                         self.agent.DEFAULT_FREE_MODEL)
+        self.assertIsNone(self.last_mile(self.args(free=True, card="role=review"),
+                                        plan)[0])
+
+    def test_a_clean_plan_with_a_claude_model_is_refused(self):
+        # --clean rewrites the spelling (`<route>-clean`) between the resolution
+        # the early gate read and the argv the client receives. The last-mile gate
+        # prices what the launch carries, so the clean variant of a Claude route is
+        # a Claude spend even though no earlier value named one.
+        args = self.args(tier=2, clean=True, model="omniroute/claude-route", card=None)
+        plan = self.agent.build_plan(args, self.cfg())
+        argv = plan["cmd"][plan["cmd"].index("--model") + 1]
+        self.assertEqual(argv, "omniroute/claude-route-clean")
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route-clean", refusal)
+
+    # --- item A: the MCP spawn path reaches the same gate ----------------------
+
+    def test_the_mcp_spawn_path_reports_the_last_mile_refusal(self):
+        out = mcp_server.spawn({"client": "qoder", "model": "Efficient", "task": "t",
+                                "card": {"role": "review"}, "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("claude_budget", out.get("error", ""))
+        self.assertIn("Efficient", out.get("error", ""))
+
+    # --- item B: a refused card is a routing error, budget or not --------------
+
+    def test_a_bad_card_outside_budget_mode_is_the_ordinary_routing_error(self):
+        # HEAD answered a card the router refuses with a `claude_budget:` refusal,
+        # which is a different door, hides the next steps, and changes behavior
+        # for every non-budget host.
+        cli = self.agent
+        with self.assertRaises(ValueError) as got:
+            cli.claude_spawn_refusal("opencode", {}, self.off(), card="role=bogus")
+        self.assertNotIn("claude_budget", str(got.exception))
+        self.assertIn("role", str(got.exception))
+
+    def test_a_bad_card_in_budget_mode_is_labelled_a_routing_error(self):
+        cli = self.agent
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, self.registry,
+                                                 card="role=bogus")
+        self.assertIsNotNone(refusal)
+        self.assertIn("routing error", refusal)
+
+    def test_the_cli_still_prints_the_router_words_for_a_bad_card(self):
+        r = run_agent("run", "--dry-run", "--card", "role=bogus", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("expected one of", r.stderr)
+        self.assertNotIn("cannot read the Claude budget", r.stderr)
+
+    # --- item C: one normaliser for the gate and the launch --------------------
+
+    def test_one_normaliser_reads_prefix_and_effort_spelling(self):
+        cli = self.agent
+        for spelling in ("omniroute/opus-4-6", "opus-4-6", "omniroute/opus-4-6#high",
+                         "opus-4-6#high", "  omniroute/opus-4-6  "):
+            self.assertEqual(cli.model_route_id(spelling), "opus-4-6", spelling)
+        self.assertEqual(cli.model_route_id("google/gemini-3.8-flash"),
+                         "google/gemini-3.8-flash")
+        self.assertEqual(cli.model_route_id(None), "")
+
+    def test_the_gate_matches_the_argv_through_the_normaliser(self):
+        # The launch spells `omniroute/<combo>#<effort>`, the resolution may name
+        # the bare combo. One normaliser decides they are one value -- with two
+        # spellings an already-priced route reads as a caller's unknown model.
+        args = self.args(tier=2, card=None)
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "model": "omniroute/r-cheap#high",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap#high", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
+        self.assertTrue(pairs, pairs)
+        self.assertNotIn("--model", [source for _, source in pairs], pairs)
+        self.assertIsNone(self.last_mile(args, plan)[0])
+
+    # --- CLAUDEBUDGET-h item 1: an unpriceable plan refuses, it does not pass ---
+
+    def test_a_plan_that_names_no_readable_model_is_refused(self):
+        # Muse#high finding 3: nothing in this plan says what the client answers
+        # with — no argv token, no route combo, no agent the config can read. HEAD
+        # fell back to the early resolution, which is the value this gate exists to
+        # replace, and launched. Under a budget, "unpriceable" is the spend side.
+        plan = {"client": "opencode", "agent": "no-such-agent",
+                "cmd": ["opencode", "run", "--standalone", "--title", "t", "x"],
+                "route": {}, "env": {}}
+        self.assertEqual([("", "no model in the final plan")],
+                         self.agent.plan_launch_models(plan, self.args(), self.cfg(),
+                                                       self.registry))
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, "an unpriced plan must not launch: %s" % note)
+        self.assertIn("claude_budget", refusal)
+        self.assertIn("no model", refusal)
+
+    def test_a_bad_card_at_the_last_mile_is_a_routing_error_not_a_budget_label(self):
+        # Finding 5: `plan_launch_models` swallowed the router's ValueError and
+        # priced the argv strictly, so a card the router refuses left as a
+        # `claude_budget:` refusal — wrong door, next steps hidden.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(card="role=bogus")
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, "a refused card must not launch")
+        self.assertTrue(refusal.startswith("routing error:"), refusal)
+        self.assertIn("expected one of", refusal)
+        self.assertFalse(refusal.startswith("claude_budget"), refusal)
+
+    def test_a_bad_card_outside_budget_mode_still_launches_the_ordinary_error(self):
+        # Out of budget the last-mile gate has no opinion and stays out of the way:
+        # the router's own ValueError is cmd_run's business (its CLI words are
+        # asserted by test_the_cli_still_prints_the_router_words_for_a_bad_card).
+        cli = self.agent
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = cli.claude_plan_refusal(self.args(card="role=bogus"), plan,
+                                                env={}, registry=self.off(),
+                                                cfg=self.cfg())
+        self.assertIsNone(refusal, refusal)
+        self.assertIsNone(note)
+
+    # --- CLAUDEBUDGET-h item 2: price the model each client really receives -----
+
+    def test_a_clients_row_that_names_claude_is_refused_behind_a_free_argv(self):
+        # Finding 2: the registry clients row is a model this host resolves and
+        # hands the client (`effective_spawn_model` reads it first), and an
+        # operator swapping it to a Claude model was never priced, because the
+        # gate read the argv token and stopped there.
+        self.registry["clients"]["qoder"] = {"id": "qoder", "default_model": "cc/opus",
+                                             "capabilities": {"shell": True,
+                                                              "write": True}}
+        plan = {"client": "qoder", "agent": "qoder",
+                "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                        "--model", "Qwen3.8-Flash", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = self.last_mile(self.args(client="qoder"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("cc/opus", refusal)
+        self.assertIn("clients row", refusal)
+
+    def test_the_config_overlay_the_launcher_injects_is_priced_too(self):
+        # Finding 4, and it is not hypothetical: `free_overlay` is written into the
+        # child's OPENCODE_CONFIG_CONTENT (build_plan), where it OVERRIDES the jsonc
+        # and the argv for opencode. A model named there is a model the process
+        # receives, and a `--model` scan never saw it.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"},
+                "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
+                    {"model": "omniroute/claude-route",
+                     "agents": {"t2-worker": {"model": "omniroute/claude-route"}}})}}
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_that_names_its_model_with_another_flag_is_priced(self):
+        # Finding 4: the flag is not the gate's to assume. This row says qwen's
+        # model arrives as `-m`, and the gate follows the row — which is what makes
+        # the row, not a literal scan, the authority.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertIn("qwen", table)
+        with mock.patch.dict(table, {"qwen": (("flag", "-m"),)}):
+            plan = {"client": "qwen", "agent": "qwen",
+                    "cmd": ["omniroute", "run", "qwen", "--model", "omniroute/r-cheap",
+                            "--", "-m", "omniroute/claude-route", "-p", "x"],
+                    "route": {"combo": "r-cheap"}, "env": {}}
+            pairs = self.agent.plan_launch_models(plan, self.args(client="qwen"),
+                                                 self.cfg(), self.registry)
+            self.assertIn("omniroute/claude-route", [v for v, _ in pairs], pairs)
+            self.assertNotIn("omniroute/r-cheap", [v for v, _ in pairs], pairs)
+            refusal, note = self.last_mile(self.args(client="qwen"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_the_table_does_not_describe_is_refused_not_the_early_value(self):
+        # A client with no row has no readable model input, so nothing here can say
+        # the run is free — and falling back to the early resolution is exactly the
+        # fail-open finding 4 names. The argv spelling a free model is not evidence
+        # from a process nobody describes.
+        plan = {"client": "mystery", "agent": "mystery",
+                "cmd": ["mystery", "--model", "omniroute/r-cheap", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(client="mystery")
+        pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
+        self.assertEqual([("", "no model in the final plan")], pairs, pairs)
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("mystery", refusal)
+
+    def test_the_table_covers_every_client_the_adapter_can_build(self):
+        # One home, and it cannot drift: every client `clients.CLIENTS` can build a
+        # command for has a model-input row, or the gate would bench it as
+        # unpriceable. Derived from the same table that builds the argv.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertEqual(sorted(self.agent.clients.CLIENTS), sorted(table),
+                         "MODEL_INPUT rows vs CLIENTS rows")
+
+    def test_every_flag_row_names_the_flag_the_builder_actually_emits(self):
+        # The coverage test above proves each client HAS a row; it says nothing
+        # about the token a row names. A builder renaming its model flag
+        # (`--model` -> `--m`) keeps the gate scanning a flag that never reaches
+        # the argv, so the plan prices no model and every run of that client
+        # benches as unpriceable -- refused loudly, but pointing nowhere. So build
+        # the argv from the code that builds it, and read it back through the very
+        # extractor the gate uses (`_argv_flag_values`): if either side moves, this
+        # fails.
+        sentinel = "omniroute/drift-sentinel"
+        clients_mod = self.agent.clients
+        cfg = self.cfg()
+        # declared_models() prefixes the provider id, so the row is the bare id.
+        cfg["providers"]["omniroute"]["models"]["drift-sentinel"] = {}
+        for name, entries in sorted(clients_mod.MODEL_INPUT.items()):
+            flags = [key for entry in entries
+                     for (kind, key) in [entry if len(entry) == 2 else (entry[0], "")]
+                     if kind == "flag"]
+            self.assertTrue(flags, "%s: MODEL_INPUT row names no flag" % name)
+            if name == "opencode":
+                # opencode's argv is the CLI's own, not the adapter's (build_command
+                # says so), so the drift guard reads build_plan's product instead.
+                argv = self.agent.build_plan(
+                    self.args(client="opencode", model=sentinel), cfg)["cmd"]
+            else:
+                argv = clients_mod.build_command(clients_mod.CLIENTS[name], "x", None,
+                                                 "edit", model=sentinel)
+            for flag in flags:
+                self.assertEqual([sentinel],
+                                 self.agent._argv_flag_values(argv, flag),
+                                 "%s: MODEL_INPUT says %s carries the model, the "
+                                 "builder disagrees: %r" % (name, flag, argv))
+
+    # --- CLAUDEBUDGET-h item 4: the undeclared Claude path refuses on its own ---
+
+    def test_an_undeclared_claude_model_on_qoder_is_refused(self):
+        # The declared path keeps its argv (test_a_declared_qoder_explicit_model_is_
+        # kept); this is the other half, with NO AUTOOS_CLAUDE_CRITICAL in the
+        # environment: a caller naming a Claude model on an own-account client is
+        # refused whatever the client is.
+        env = {k: v for k, v in clean_env().items()
+               if not k.startswith(self.agent.CLAUDE_ENV_PREFIX)}
+        self.assertNotIn(self.agent.resolver.CLAUDE_CRITICAL_ENV, env)
+        r = run_agent("run", "--client", "qoder", "--model", "opus", "--dry-run",
+                      "--card", "role=review", "t", env=env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("opus", r.stderr)
+        self.assertNotIn("would run:", r.stdout)

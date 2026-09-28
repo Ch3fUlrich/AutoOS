@@ -1365,7 +1365,8 @@
           "implement": 0,
           "plan": 3,
           "research": 0,
-          "review": 0
+          "review": 0,
+          "final": 0
         },
         "spec": {
           "exact": 0,
@@ -2123,7 +2124,19 @@
         "first_pass_only": true,
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
       }
-    ]
+    ],
+    "claude_budget": {
+      "$comment": [
+        "D-102 CLAUDEBUDGET (S2) item 1: the one home for the weekly Claude allowance. Budget mode is ON when mode == 'budget' OR weekly_share_left < budget_below, and registry.claude_budget() is the only reader of that rule.",
+        "While it is ON, tools/autoos_resolver.py holds every Claude leg (provider cc, the anthropic family, the client 'claude') for finals: kind=final keeps Claude, an implement/review/research/bulk/debug/plan card does not. Deferrable work waits for free/off-peak capacity (plan state 'deferred' with wait_until) instead of falling back to Claude; only a card marked critical=true may still spend it, and the plan reason names that override so the DONE line can cite it.",
+        "weekly_share_left is the operator's own estimate of the Claude share left this week, not a gateway measurement -- there is no Claude usage endpoint here, so a human updates it (or sets mode back to 'normal' when the week rolls over). null means 'not recorded' and leaves mode as the only signal.",
+        "R-coord-03 said this in prose; D-102 makes it data, so an orchestrator that forgets the rule cannot route a writer onto Claude."
+      ],
+      "mode": "budget",
+      "weekly_share_left": 0.1,
+      "budget_below": 0.25,
+      "source": "operator D-102 2026-09-28"
+    }
   },
   "providers": {
     "SambaNova": {
