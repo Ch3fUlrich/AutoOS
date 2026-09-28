@@ -1942,6 +1942,37 @@ Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code
     Pass
 }
 
+Test-Case 'agent-skills is never cloned' {
+    # SPEC-OMNI D14: the clone is the defect this lane removes. Asserted on the
+    # installer's own body, so a re-clone anywhere else in the function still
+    # fails, and on the whole module, so the retired URL cannot come back.
+    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
+    Assert-True ($fn.Length -gt 0) 'Install-AutoOSAgentSkills is gone from the source'
+    Assert-True ($fn -notmatch "'clone'") 'Install-AutoOSAgentSkills still runs a clone'
+    Assert-True ($fn -notmatch "'git'") 'Install-AutoOSAgentSkills still shells out to git'
+    Assert-True ($fn -notmatch 'agent-skills\.git') 'the retired repository is still named'
+    Assert-True ($fn -notmatch 'Ch3fUlrich') 'a live clone target of the retired tree is still there'
+    Assert-True ($installSource -notmatch 'Ch3fUlrich') 'lib/ still names the retired clone repository'
+    Pass
+}
+
+Test-Case 'agent-skills: the Windows catalog entry is a tombstone with its successors' {
+    # A7: the same retirement Linux and macOS carry. Windows has no
+    # agent-skill-links/omnigraph-client twin, so the four mcp-* components are
+    # the whole successor set - naming others would make the plan promise work
+    # this platform does not ship.
+    $e = @($winCatalog.categories.components | Where-Object { $_.id -eq 'agent-skills' })[0]
+    Assert-True ($e.tombstone -eq $true) "the entry is not tombstoned: [$($e.tombstone)]"
+    Assert-True ([string]$e.note -match 'mcp-\*') "the note does not say where the work went: [$($e.note)]"
+    Assert-Equal (@($e.replaced_by) -join ',') 'mcp-graphify,mcp-serena,mcp-playwright,mcp-context7'
+    # A tombstone carries no installer hooks; one left behind is work the plan
+    # would still try to run.
+    foreach ($dead in @('postInstall', 'prompt', 'requires', 'verify')) {
+        Assert-True (-not $e.PSObject.Properties[$dead]) "a tombstone still carries $dead"
+    }
+    Pass
+}
+
 Test-Case 'vendored .agents/skills wins as skills source' {
     if ($installSource -notmatch 'Join-Path \$script:RepoRoot ''\.agents\\skills''') {
         throw 'Get-AutoOSSkillsSource does not prefer the vendored skills dir'

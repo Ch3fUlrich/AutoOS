@@ -79,6 +79,59 @@ Three items from the SB-C brief:
   every leg the registry names: no committed verdict changed
   (`tests/test_autoos_resolver.py ZenClaudeLegRulesTests`).
 
+### Changed — `agent-skills` is a tombstone on Windows too; its installer no longer clones (SPEC-OMNI A7, D-066, 2026-09-28)
+
+A7 retired `agent-skills` on Linux and macOS and left Windows live — its entry
+cloned a second repository and its installer did the MCP wiring. This lane
+finishes the retirement on Windows. The native Windows twins
+(`agent-skill-links`, `omnigraph-client`) are deliberately *not* added (D-066:
+the Windows path is frozen to fixes), so the four `mcp-*` components are the
+whole successor set there.
+
+- **`catalog/windows.json`**: `agent-skills` is `"tombstone": true` with the
+  note *its work moved to the mcp-\* components* and `replaced_by` naming the
+  four ids that took it (`mcp-graphify`, `mcp-serena`, `mcp-playwright`,
+  `mcp-context7` — the only successors this platform ships; naming
+  `agent-skill-links`/`omnigraph-client` would promise work Windows does not
+  have). `postInstall`, `prompt`, `requires` and `profiles` go with the live
+  row.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` no longer
+  clones `Documents\Code\agent-skills` (nor pulls it): the servers it wires are
+  declared by this checkout's own `.mcp.json`, so the project-scope pins now
+  read `$script:RepoRoot`. `Write-AutoOSOmnigraphReadiness`'s parameter is
+  renamed `-AgentSkillsDir` → `-RepoRoot` to match. The MCP wiring, the
+  `omnigraph`/`autoos-agent` project pins, the Antigravity config merge and the
+  repo/user skill links are unchanged, as is the retargeting of links into the
+  retired clone (a machine that ran the old installer keeps its checkout — this
+  never deletes it). The function is now reachable only from tests: no catalog
+  entry carries it as `postInstall`.
+- **Tests**: `tests/linux/18-mcp-wiring.sh`'s tombstone case becomes
+  per-platform (Windows expects the four-successor set) and validates
+  `catalog/windows.json`; a new case proves the Windows installer names no clone
+  URL, runs no `git clone`/`pull` and writes nothing into the retired path.
+  `tests/run-tests.ps1` gains the matching pwsh cases (`agent-skills is never
+  cloned`, asserted on the installer body and the whole module; and the Windows
+  catalog entry carries the flag, the note and exactly the four successors with
+  no installer hooks).
+- **`docs/catalog.md`**: the `replaced_by` example now shows both shapes and says
+  why Windows names four.
+- **Open, recorded rather than hidden**: with the row retired, the
+  `omnigraph_url` prompt in `catalog/windows.json` is owned by no component, so
+  a Windows run never asks it and `Set-AutoOSAntigravityMcp` falls back to
+  `localhost:8080`. Fixing that belongs to the parked w1 lane (which adds the
+  Windows `omnigraph-client` twin), not to this frozen-path lane.
+
+Verified: `bash tests/run-tests.sh --filter catalog` 69 passed / 0 failed;
+`AUTOOS_TEST_PARTS=18 bash tests/run-tests.sh --filter agent-skills` 21 passed /
+0 failed, and the schema case validates `catalog/windows.json`. pwsh 7.6 on this
+Linux host ran too: `-Filter agent-skills` 23 passed / 2 failed and
+`-Filter catalog,tombstone` 319 passed / 2 failed — all four failures reproduce
+at the branch point, so none is new (two backup-record cases, the Linux-only
+`powershell`-on-PATH `--CheckCatalog` case, and an unrelated usb case). The real
+gate is still one `powershell -File tests\run-tests.ps1` on a Windows
+workstation, where the Windows PowerShell 5.1 code paths these cases cover
+actually run.
+
 ### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
 
 Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated
