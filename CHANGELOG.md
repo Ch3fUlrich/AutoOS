@@ -13,13 +13,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
   `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
   Linux, with the same rules: a user's own entry is never touched.
-- **Opt-in retarget, default off**: a machine set up before 2026-09-25 still has
-  *live* links into `agent-skills\skills\<name>`, which the link rule treats as the
-  user's. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=1` passes `-RetargetRetiredClone`
-  to `Sync-AutoOSSkillDirs`, which moves only a link in exactly that shape for the
-  same skill name, records each old target in `<dir>.autoos-backup-<stamp>` first,
-  and never touches the target. Whether it becomes the default is the operator's
-  call.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has *live* links
+  into `agent-skills/skills/<name>`, which the link rule treats as the user's.
+  Setup now moves only a link in exactly that shape for the same skill name,
+  records each old target in `<dir>.autoos-backup-<stamp>` first, and never
+  touches the target. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone`. Linux/macOS: `install_agent_skill_links` passes
+  `retarget` to `link_skill_dirs`, and detection (`agent_skill_links_current`)
+  counts such a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0`
+  opts out. A second run is `skipped` and writes no second record.
 
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 

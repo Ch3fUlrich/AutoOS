@@ -4831,6 +4831,8 @@ agent_skill_links_current() {
             s_dir="${s_dir%/}"
             name="${s_dir##*/}"
             [[ -e "$dest/$name" ]] || return 1
+            # A live link into the retired clone is work setup still does (Q-018).
+            retired_skill_link "$dest/$name" "$name" && return 1
         done
     done < <(agent_skill_link_dests "$repo_root")
     return 0
@@ -4863,7 +4865,7 @@ install_agent_skill_links() {
         return 0
     fi
     while IFS= read -r dest; do
-        link_skill_dirs "$skills_source" "$dest" ||
+        link_skill_dirs "$skills_source" "$dest" retarget ||
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-agent-skill-links}"
     done < <(agent_skill_link_dests "$repo_root")
     if (( AUTOOS_DRY_RUN )); then
@@ -5594,7 +5596,20 @@ phys_path() {
     fi
 }
 
-# link_skill_dirs SRC_DIR DEST_DIR
+# retired_skill_link LINK NAME: true when LINK is a live symlink in the exact
+# shape the retired agent-skills installer made for skill NAME
+# (.../agent-skills/skills/NAME) and setup has not been told to leave those
+# alone (AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0). A path suffix, not a known
+# clone location, which is why every move is recorded.
+retired_skill_link() {
+    local link="$1" name="$2" raw
+    [[ "${AUTOOS_RETARGET_RETIRED_SKILL_LINKS:-1}" != 0 ]] || return 1
+    [[ -L "$link" && -e "$link" ]] || return 1
+    raw="$(readlink -- "$link")"
+    [[ "${raw%/}" == */agent-skills/skills/"$name" ]]
+}
+
+# link_skill_dirs SRC_DIR DEST_DIR [retarget]
 # Mirrors every skill in SRC_DIR (a direct child holding a SKILL.md) into
 # DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
 # so a user's skills sit beside ours and are never touched:
@@ -5610,8 +5625,13 @@ phys_path() {
 # A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
 # written through - that would create links inside the repo or a clone - it
 # is left with one warning that names the fix. Returns 0 unless a link failed.
+#
+# A third argument "retarget" adds one recognised shape (operator Q-018,
+# 2026-09-28): a LIVE link into the retired agent-skills clone, see
+# retired_skill_link. Each old target is appended to DEST_DIR.autoos-backup-<stamp>
+# first, then the link (never its target) is replaced.
 link_skill_dirs() {
-    local src="${1%/}" dest="${2%/}"
+    local src="${1%/}" dest="${2%/}" retarget="${3:-}" record=""
     [[ "$src" == /* ]] || src="$PWD/$src"
     [[ "$dest" == /* ]] || dest="$PWD/$dest"
 
@@ -5660,6 +5680,18 @@ link_skill_dirs() {
                     ui_ok "repointed $name (was $raw)"
                 else
                     ui_warn "could not repoint $t - left as it was"
+                    failed=1
+                fi
+            elif [[ "$retarget" == retarget ]] && retired_skill_link "$t" "$name"; then
+                if [[ -z "$record" ]]; then
+                    record="$dest.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+                    local n=0 base="$record"
+                    while [[ -e "$record" ]]; do n=$((n + 1)); record="$base-$n"; done
+                fi
+                if printf '%s -> %s\n' "$t" "$raw" >>"$record" && ln -sfn "$src/$name" "$t" 2>/dev/null; then
+                    ui_ok "retargeted $name from the retired agent-skills clone (was $raw; recorded in $record)"
+                else
+                    ui_warn "could not retarget $t - left as it was"
                     failed=1
                 fi
             else

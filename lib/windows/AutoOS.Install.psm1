@@ -2519,7 +2519,8 @@ function Sync-AutoOSSkillDirs {
         <Destination>.autoos-backup-<stamp>, and the target itself is never touched.
         The shape is a path suffix, not a known clone location: a link a user made
         on purpose to their own ...\agent-skills\skills\<same name> checkout would
-        be moved too. That is why it is opt-in, and why every move is recorded.
+        be moved too. That is why every move is recorded, and why setup can be
+        told not to (AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0).
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
@@ -2600,7 +2601,7 @@ function Sync-AutoOSSkillDirs {
                     Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
                 } else { $ok = $false }
             } elseif ($RetargetRetiredClone -and $have -and $have.Replace('\', '/').EndsWith('/agent-skills/skills/' + $skill.Name, $comparison)) {
-                # Opt-in only: a LIVE link into the retired agent-skills clone, in the
+                # Only when asked: a LIVE link into the retired agent-skills clone, in the
                 # exact shape the pre-2026-09-25 installer made for this skill. The
                 # old target is recorded before the link goes, and never touched.
                 if (-not $record) {
@@ -2647,8 +2648,9 @@ function Sync-AutoOSAgentSkillTargets {
         Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
         never touched, and a second run is a no-op.
 
-        AUTOOS_RETARGET_RETIRED_SKILL_LINKS=1 passes -RetargetRetiredClone to
-        every destination (see Sync-AutoOSSkillDirs). Off unless set.
+        Every destination gets -RetargetRetiredClone (see Sync-AutoOSSkillDirs):
+        setup moves recognised links into the retired agent-skills clone
+        (operator Q-018, 2026-09-28). AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
 
         ~/.codex/skills is only written when codex is actually there (its
         command is on PATH or its ~/.codex directory exists): creating the
@@ -2657,7 +2659,7 @@ function Sync-AutoOSAgentSkillTargets {
         convention directory, not one vendor's.
     #>
     param([Parameter(Mandatory)][string]$Source)
-    $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -eq '1'
+    $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -ne '0'
     $dests = @(
         (Join-Path $HOME '.agents\skills'),
         (Join-Path $HOME '.claude\skills'),

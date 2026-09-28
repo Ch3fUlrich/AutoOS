@@ -5779,6 +5779,45 @@ Test-Case 'retired agent-skills links: kept by default, retargeted with a backup
     Pass
 }
 
+Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by default; =0 keeps it (Q-018)' {
+    # Operator Q-018 (2026-09-28): setup moves recognised links into the retired
+    # clone, with a backup record. AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $saved = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    foreach ($case in @(@{ Env = $null; Moved = $true }, @{ Env = '0'; Moved = $false })) {
+        $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+        $repo = Join-Path $scratch 'repo'
+        $homeDir = Join-Path $scratch 'home'
+        $claude = Join-Path $homeDir '.claude\skills'
+        $old = Join-Path $scratch 'Code\agent-skills\skills\alpha'
+        try {
+            New-TestSkillRepo -Repo $repo
+            $null = New-Item -ItemType Directory -Path $old, $claude -Force
+            $null = New-Item -ItemType Junction -Path (Join-Path $claude 'alpha') -Target $old
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $case.Env
+            $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+            if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+            $want = if ($case.Moved) { Join-Path $repo '.agents\skills\alpha' } else { $old }
+            $want = [IO.Path]::GetFullPath($want).TrimEnd('\', '/')
+            $got = Get-TestLinkTarget -Path (Join-Path $claude 'alpha')
+            if ($got -ne $want) { throw "env=[$($case.Env)]: alpha points at [$got], expected [$want]" }
+            if (-not (Test-Path -LiteralPath $old)) { throw 'the old target was deleted' }
+            $records = @(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*')
+            if ($case.Moved -and $records.Count -ne 1) { throw "expected one backup record, found $($records.Count)" }
+            if (-not $case.Moved -and $records.Count) { throw 'opt-out run wrote a backup record' }
+            if ($case.Moved) {
+                $null = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+                if (@(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*').Count -ne 1) { throw 'a second run wrote another backup record' }
+            }
+        } finally {
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $saved
+            foreach ($d in @($claude, (Join-Path $homeDir '.gemini\config\skills'), (Join-Path $homeDir '.agents\skills'))) { Remove-TestDirLinks -Directory $d }
+            Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Pass
+}
+
 Test-Case 'agent-skills targets: links into ~/.codex\skills when codex dir exists' {
     Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"

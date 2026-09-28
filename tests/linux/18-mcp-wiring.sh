@@ -1484,6 +1484,46 @@ if it "agent-skill-links: a moved checkout leaves a dangling link and detection 
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
+if it "agent-skill-links: a live link into the retired agent-skills clone is retargeted with a backup record; =0 keeps it (Q-018)"; then
+    # Operator Q-018 (2026-09-28): setup moves links in the exact shape the
+    # retired installer made (<clone>/agent-skills/skills/<name>), records each
+    # old target first, never touches the target. =0 opts out.
+    problems=""
+    for mode in default optout; do
+        tmp="$(mktemp -d)"
+        oh_skill_repo "$tmp/repo"
+        old="$tmp/Documents/code/agent-skills/skills/alpha"
+        mkdir -p "$old" "$tmp/home/.claude/skills"
+        ln -s "$old" "$tmp/home/.claude/skills/alpha"
+        env_val=""; [[ "$mode" == optout ]] && env_val=0
+        (
+            export AUTOOS_RETARGET_RETIRED_SKILL_LINKS="$env_val"
+            [[ -z "$env_val" ]] && unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+            if [[ "$mode" == default ]]; then
+                asl_gate "$tmp/home" "$tmp/repo" && echo "[default: a retired-clone link was detected as installed]"
+            fi
+            asl_run "$tmp/home" "$tmp/repo" >/dev/null
+            got="$(readlink "$tmp/home/.claude/skills/alpha")"
+            records=("$tmp"/home/.claude/skills.autoos-backup-*)
+            if [[ "$mode" == default ]]; then
+                [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[default: alpha points at $got]"
+                [[ -f "${records[0]}" ]] && grep -qF "$old" "${records[0]}" || echo "[default: no backup record naming the old target]"
+                asl_gate "$tmp/home" "$tmp/repo" || echo "[default: not installed after the retarget]"
+                asl_run "$tmp/home" "$tmp/repo" >/dev/null
+                n=$(ls -d "$tmp"/home/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
+                [[ "$n" == 1 ]] || echo "[default: second run left $n backup records]"
+            else
+                [[ "$got" == "$old" ]] || echo "[optout: alpha was moved to $got]"
+                [[ ! -e "${records[0]}" ]] || echo "[optout: a backup record was written]"
+            fi
+            [[ -d "$old" ]] || echo "[$mode: the old target was deleted]"
+        ) >"$tmp/out" 2>&1
+        problems+="$(grep '^\[' "$tmp/out")"
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
 if it "agent-skill-links: the linker and detection read one destination list"; then
     # One fact, one home: the gate must check exactly what the writer writes, or
     # a machine is told it is finished while a client directory is still empty.
