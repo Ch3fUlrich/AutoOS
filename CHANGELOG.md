@@ -146,6 +146,13 @@ carrier. All of them are in `tools/autoos-agent.py` unless named.
   slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
   `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
   `task_dir` is what links the two ids meanwhile.
+### Changed — hand-off caps: orchestrators 500k, workers min(40% of window, 400k) (CAPD088, operator D-088, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps` and **`tools/autoos_context.py`** `DEFAULT_CAPS`:
+  Opus 500k (was 600k), Fable 500k (was 600k), Sonnet 500k (was CAPL2's interim 250k) - orchestration
+  sessions, 1M window; Muse Spark 400k (was 300k), Gemini 400k (was 200k), the 200k class 80k (was
+  150k) - worker agents. Rows key on model family as the role proxy (comment at `DEFAULT_CAPS`).
+
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
 - **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
