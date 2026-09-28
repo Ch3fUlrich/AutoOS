@@ -1896,7 +1896,8 @@ def cmd_heartbeat(args) -> int:
     data, rc = heartbeat_state(args.inbox, args.transcript, args.repos, args.cap)
     if args.json:
         print(json.dumps({k: data[k] for k in
-                          ("pause", "repos", "context", "over_cap", "exit_code")}))
+                          ("pause", "repos", "context", "over_cap", "exit_code",
+                           "overlay")}))
         return rc
     pause = data["pause"]
     if pause["active"]:
