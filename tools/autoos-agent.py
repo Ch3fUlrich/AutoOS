@@ -901,25 +901,28 @@ def reviewer_family(spelling, registry):
     ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
     spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
     keeps its ``family`` honest against ``models``. Then the registry's own model
-    ids, whole and after a client/provider prefix.
+    ids, whole and after a client/provider prefix. The answer is in
+    ``resolver.family_key`` form, so a record's "Meta" and the registry's "meta"
+    are one family wherever it is compared (REVFIX S2).
 
-    Unknown returns None rather than a guess. ``author_family`` deliberately
-    reads an unknown *author* as a bare family name -- cross-family to everyone is
-    the safe answer for who wrote a diff -- but an invented *reviewer* name would
-    differ from every author family the same way, and that would read as an
-    independent review that never happened.
+    Unknown returns None rather than a guess. An invented *reviewer* name would
+    differ from every author family and read as an independent review that never
+    happened -- which is also why ``author_family`` no longer guesses at an
+    unknown *author* (REVFIX S2: both halves must be known before they may
+    disagree).
     """
     if not isinstance(spelling, str) or not spelling.strip():
         return None
     name = spelling.strip()
+    key = resolver.family_key(name)
     for entry in ((registry.get("policy") or {}).get("reviewers") or []):
-        if entry.get("model") == name:
-            return entry.get("family")
+        if isinstance(entry, dict) and resolver.family_key(entry.get("model")) == key:
+            return resolver.family_key(entry.get("family"))
     models = registry.get("models") or {}
-    for candidate in (name, name.rpartition("/")[2]):
-        entry = models.get(candidate)
+    for candidate in (key, key.rpartition("/")[2]):
+        entry = resolver.ci_value(models, candidate)
         if isinstance(entry, dict):
-            return entry.get("family")
+            return resolver.family_key(entry.get("family"))
     return None
 
 
@@ -947,9 +950,12 @@ def _cross_family_review(entries, registry):
             continue
         author, why = resolver.author_family(entry.get("author") or "", registry)
         if author is None:
+            # REVFIX S2: an author the registry cannot place is NOT treated as a
+            # family of its own. "Who wrote this" unanswered is not evidence that
+            # the reviewer is someone else, so the check fails and says so.
             reasons.append("author: %s" % why)
             continue
-        if author == family:
+        if author == resolver.family_key(family):
             reasons.append("%s is the same family as the author (%s)" % (reviewer, family))
             continue
         ok, reason = _review_entry_verdict(entry)
@@ -1850,15 +1856,96 @@ def load_provider_state(path: str) -> dict:
     """The spawner's provider-stop state; a missing or broken file reads as empty.
 
     A record of a transient outage is never worth failing a run over, so this
-    cannot raise: unreadable JSON is an empty state, and the next stop rewrites
-    the file.
+    cannot raise: an unreadable file is an empty state (silently -- there is
+    nothing to have said), and unparseable JSON is named on stderr and reads as
+    empty too, because the shape that follows cannot be trusted. What the file
+    SAYS once it parses is checked by `_validated_provider_entries`.
     """
     try:
         with io.open(path, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
+            text = fh.read()
+    except OSError:
         return {}
-    return state if isinstance(state, dict) else {}
+    try:
+        state = json.loads(text)
+    except ValueError as exc:
+        _provider_state_warning("it is not JSON (%s)" % exc)
+        return {}
+    if not isinstance(state, dict):
+        _provider_state_warning("the file is a %s, not an object"
+                                % type(state).__name__)
+        return {}
+    return state
+
+
+def _provider_state_warning(why: str) -> None:
+    """One line on stderr about the provider-state file. Never an exception.
+
+    One per call, however many rows were bad: the caller is a routing read that
+    has already decided to ignore the file, and a page per row would bury the
+    rest of the run's output.
+    """
+    print("autoos-agent: ignoring the provider-state file: %s" % why,
+          file=sys.stderr)
+
+
+def _iso_utc(text):
+    """An ISO instant as an aware UTC datetime, or None.
+
+    `_parse_iso` accepts a naive value; a naive instant in a state file is
+    someone's local wall clock, and comparing it to an aware `now` would raise
+    TypeError. It is read as UTC -- the shape the writer emits (`_iso_zulu`) and
+    registry check rule 7 enforce.
+    """
+    parsed = _parse_iso(text)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _validated_provider_entries(state, now=None):
+    """``(rows, reasons_ignored)`` for a loaded provider-state file.
+
+    REVFIX S1/S3. The file is this tool's own, but it lives in logs/ where a
+    person fixes things by hand and where an older build may already have
+    written it, so no part of its shape is trusted: ``providers`` must be an
+    object, every row an object, and every row's ``unavailable_until`` a
+    parseable ISO instant no more than MAX_AUTO_RESET_SECONDS ahead -- the cap
+    the WRITER already applies, enforced on the way in as well or a single row
+    ("2099-01-01") benches a provider forever on the spawner's authority.
+
+    Every failure is a reason in the second half of the tuple, never an
+    exception: a routing read must go on with the registry as it is.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, reasons = {}, []
+    raw = state.get("providers") if isinstance(state, dict) else None
+    if raw is None:
+        return rows, reasons
+    if not isinstance(raw, dict):
+        return rows, ['its "providers" section is a %s, not an object of '
+                      "provider rows" % type(raw).__name__]
+    cap = now + datetime.timedelta(seconds=MAX_AUTO_RESET_SECONDS)
+    for pid, entry in raw.items():
+        if not isinstance(entry, dict):
+            reasons.append("%s is a %s, not an object" % (pid, type(entry).__name__))
+            continue
+        until = entry.get("unavailable_until")
+        parsed = _iso_utc(until)
+        if parsed is None:
+            reasons.append("%s carries no parseable ISO unavailable_until (%r)"
+                           % (pid, until))
+            continue
+        if parsed > cap:
+            reasons.append("%s claims a reset %s, past the %d-day window a machine "
+                           "observation may assert (an operator's own registry edit "
+                           "is how a longer outage is declared)"
+                           % (pid, until, MAX_AUTO_RESET_SECONDS // 86400))
+            continue
+        rows[pid] = entry
+    return rows, reasons
 
 
 def _iso_zulu(moment) -> str:
@@ -1869,7 +1956,7 @@ def _iso_zulu(moment) -> str:
 def _until_is_expired(entry, now) -> bool:
     """True when `entry`'s window already passed (so it says nothing anymore)."""
     until = (entry or {}).get("unavailable_until")
-    parsed = _parse_iso(until)
+    parsed = _iso_utc(until)
     return parsed is not None and now >= parsed
 
 
@@ -1896,11 +1983,17 @@ def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
     path = path or PROVIDER_STATE_PATH
     until = _iso_zulu(now + datetime.timedelta(seconds=seconds))
     state = load_provider_state(path)
-    providers = {pid: entry for pid, entry in (state.get("providers") or {}).items()
-                 if isinstance(entry, dict) and not _until_is_expired(entry, now)}
+    kept, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        # REVFIX S1: the writer is not poisoned by what it is reading. The bad
+        # rows are named and dropped, and the file that comes back is the shape
+        # the reader expects.
+        _provider_state_warning("; ".join(ignored))
+    providers = {pid: entry for pid, entry in kept.items()
+                 if not _until_is_expired(entry, now)}
     previous = providers.get(provider_id) or {}
-    if _parse_iso(previous.get("unavailable_until")) and \
-            _parse_iso(until) < _parse_iso(previous.get("unavailable_until")):
+    previous_until = _iso_utc(previous.get("unavailable_until"))
+    if previous_until is not None and _iso_utc(until) < previous_until:
         until = previous["unavailable_until"]
     providers[provider_id] = {"unavailable_until": until, "combo": combo,
                               "reason": stop_line, "recorded_at": _iso_zulu(now)}
@@ -1928,29 +2021,36 @@ def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
 def apply_provider_state(registry: dict, state: dict, now=None) -> dict:
     """`registry` with the recorded windows applied as providers' `unavailable_until`.
 
-    Returns a copy - the shared `load_registry()` object is never mutated. An
-    entry for a provider the registry does not know is ignored (the state file
-    follows the registry, not the other way round), and a provider the operator
-    already benched for LONGER keeps the operator's date: a machine observation
-    must never shorten an outage someone wrote on purpose. A window that has
-    passed is applied as it is and self-heals in `unavailable_now`.
+    Returns a copy - the shared `load_registry()` object is never mutated. The
+    state is validated first (`_validated_provider_entries`): a row that is
+    missing, mis-shaped or beyond the cap is ignored with one warning and the
+    registry stands as it is, because this runs on the routing path of every
+    `route`/`run` and a broken outage record must not take the router down with
+    it (REVFIX S1/S3). An entry for a provider the registry does not know is
+    ignored (the state file follows the registry, not the other way round), and a
+    provider the operator already benched for LONGER keeps the operator's date: a
+    machine observation must never shorten an outage someone wrote on purpose, and
+    the cap is on the machine's word, not the operator's. A window that has passed
+    is applied as it is and self-heals in `unavailable_now`.
     """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        _provider_state_warning("; ".join(ignored))
     merged = dict(registry)
     providers = dict(registry.get("providers") or {})
     merged["providers"] = providers
-    for pid, entry in (state.get("providers") or {}).items():
-        if not isinstance(entry, dict) or pid not in providers:
+    for pid, entry in rows.items():
+        provider = providers.get(pid)
+        if not isinstance(provider, dict):
             continue
-        until = entry.get("unavailable_until")
-        parsed = _parse_iso(until)
-        if parsed is None:
+        parsed = _iso_utc(entry.get("unavailable_until"))
+        current = _iso_utc(provider.get("unavailable_until"))
+        if current is not None and current >= parsed:
             continue
-        current = providers[pid].get("unavailable_until")
-        if _parse_iso(current) is not None and _parse_iso(current) >= parsed:
-            continue
-        provider = dict(providers[pid])
+        provider = dict(provider)
         provider["available"] = False
-        provider["unavailable_until"] = until
+        provider["unavailable_until"] = entry["unavailable_until"]
         providers[pid] = provider
     return merged
 

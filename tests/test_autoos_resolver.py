@@ -2707,11 +2707,73 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertEqual(self.pick("qwen3.8-flash")["author_family"], "qwen")
         self.assertEqual(self.pick("haiku")["author_family"], "anthropic")
 
-    def test_an_unknown_author_family_still_gets_the_first_reviewer(self):
-        # An author nobody has heard of is cross-family to everything, so the
-        # list's head wins rather than the card failing -- the family rule is a
-        # floor, not an allowlist.
-        self.assertEqual(self.pick("who-knows")["reviewer"]["family"], "meta")
+    def test_an_unknown_author_fails_closed_instead_of_being_a_family(self):
+        # REVFIX S2. The old reading was "a family nobody registered is
+        # cross-family to every reviewer, so the list's head wins". That made
+        # the rule unenforceable: a typo'd or unregistered author ("who-knows",
+        # "qwen3.8-flsh") always cleared it, so the gate passed exactly the
+        # records nobody had checked. Not knowing who wrote the diff is not
+        # proof that the reviewer is someone else.
+        result = self.pick("who-knows")
+        self.assertIsNone(result["reviewer"])
+        self.assertIsNone(result["author_family"])
+        self.assertEqual(result["state"], "unresolved")
+        self.assertIn("who-knows", result["reason"])
+        self.assertIn("family", result["reason"])
+
+    def test_a_family_name_the_registry_knows_is_still_accepted(self):
+        # Failing closed on the unknown must not break the ordinary shorthand --
+        # "qwen" and "meta" are families this registry's own models and
+        # reviewers declare, so they name an author just as well as an id.
+        self.assertEqual(self.pick("qwen")["author_family"], "qwen")
+        self.assertEqual(self.pick("meta")["author_family"], "meta")
+
+    # --- REVFIX S2: case and spelling are not the family --------------------
+
+    def test_the_author_family_is_compared_without_case(self):
+        # Meta markets the model as "Meta Muse"; a card authored by it and
+        # reviewed by the registry's "meta" reviewer is a self-review, and used
+        # to read as an independent one.
+        result = self.pick("Meta")
+        self.assertEqual(result["author_family"], "meta")
+        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertIn("same family as author (meta)", result["skipped"][0]["reasons"][0])
+
+    def test_a_reviewer_entry_family_is_compared_without_case(self):
+        reg = self.registry()
+        reg["policy"]["reviewers"][0]["family"] = "Meta"
+        result = r.reviewer_for("muse-spark-1.3-contributor", reg, self.state(),
+                                self.NOW, risk="normal", privacy="public")
+        self.assertEqual(result["reviewer"]["family"], "google",
+                         "an operator's capitalization is the same family")
+
+    def test_an_author_spelled_as_a_model_id_ignores_case(self):
+        self.assertEqual(self.pick("MUSE-SPARK-1.3-CONTRIBUTOR")["author_family"],
+                         "meta")
+
+    def test_an_author_spelled_as_a_leg_ignores_case(self):
+        self.assertEqual(self.pick("META_API/muse-spark-1.3-contributor")
+                         ["author_family"], "meta")
+
+    def test_an_author_spelled_as_a_route_id_uses_its_first_leg(self):
+        # A card often names the ROUTE it ran ("spark-1.3-contributor"), not a
+        # model. The legs are a priority order, so the head is the one that took
+        # the traffic -- the same reading stop_provider_id gives a 429 line.
+        reg = self.registry()
+        reg["routes"] = {"spark-1.3-contributor": {
+            "id": "spark-1.3-contributor",
+            "legs": ["meta_api/muse-spark-1.3-contributor",
+                     "gemini/gemini-3.8-flash"]}}
+        self.assertEqual(r.author_family("spark-1.3-contributor", reg),
+                         ("meta", None))
+
+    def test_a_route_author_fails_closed_when_no_leg_resolves(self):
+        reg = self.registry()
+        reg["routes"] = {"nowhere": {"id": "nowhere", "legs": ["no_p/no_m"]}}
+        family, why = r.author_family("nowhere", reg)
+        self.assertIsNone(family)
+        self.assertIn("nowhere", why)
+
 
     def test_a_missing_family_on_the_author_model_is_not_guessed(self):
         # A model with no family cannot be checked against the rule; claiming
@@ -2848,8 +2910,11 @@ class ReviewerSelectionTests(unittest.TestCase):
     def test_a_missing_reviewers_list_is_reported_not_crashed(self):
         reg = self.registry()
         del reg["policy"]["reviewers"]
-        result = r.reviewer_for("qwen", reg, self.state(), self.NOW,
-                                risk="normal", privacy="public")
+        # A model id, not a bare family: with the reviewer list gone "qwen" is
+        # nowhere the registry can place either, and this test is about the
+        # missing LIST, not about author resolution (REVFIX S2).
+        result = r.reviewer_for("muse-spark-1.3-contributor", reg, self.state(),
+                                self.NOW, risk="normal", privacy="public")
         self.assertIsNone(result["reviewer"])
         self.assertIn("policy.reviewers", result["reason"])
 

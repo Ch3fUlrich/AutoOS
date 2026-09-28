@@ -1200,7 +1200,9 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
         survivors, bucket_name, card, features, client_state, registry,
         overlay, track_record, orchestrator_model, mode, client, now)
 
-    chosen_family = _model_family(chosen["leg"], registry)
+    # Compared in family_key form: two legs of one family spelled two ways
+    # ("meta", "Meta") are one pair of eyes, not two distinct reviewers.
+    chosen_family = family_key(_model_family(chosen["leg"], registry))
     ranked = sorted(
         (s for s in pool if s["route"] != chosen["route"]),
         key=lambda s: s["expected_cost"])
@@ -1208,7 +1210,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     picked = []
     excluded = {chosen_family}
     for score in ranked:
-        family = _model_family(score["leg"], registry)
+        family = family_key(_model_family(score["leg"], registry))
         if family in excluded:
             continue
         picked.append(score["route"])
@@ -1263,52 +1265,167 @@ def _is_temporary(reasons):
         for reason in reasons)
 
 
+def family_key(value):
+    """The comparison form of a family (or any registry spelling): trimmed, casefolded.
+
+    A vendor markets "Meta Muse" while the registry says ``meta``, and a lane
+    record quotes whichever the writer saw. Two names are the same family when
+    these agree, so EVERY family comparison goes through here. A non-string or a
+    blank is its own key (None), never a match for a real name.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().casefold()
+
+
+def ci_key(mapping, name):
+    """The key of `mapping` equal to `name` ignoring case, or None.
+
+    An exact hit short-circuits: ids are compared as written first, so a registry
+    that ever carries two ids differing only in case keeps its own precedence.
+    """
+    if not isinstance(mapping, dict):
+        return None
+    if name in mapping:
+        return name
+    key = family_key(name)
+    if key is None:
+        return None
+    for candidate in mapping:
+        if isinstance(candidate, str) and family_key(candidate) == key:
+            return candidate
+    return None
+
+
+def ci_value(mapping, name):
+    """`mapping[name]`, or the value under the key that differs only in case."""
+    key = ci_key(mapping, name)
+    return None if key is None else mapping[key]
+
+
+def _ci_leg_model_id(leg, registry):
+    """The models key a ``provider/model`` leg names, ignoring case; else None.
+
+    `resolve_leg` is the authority and matches exactly; this is only the retry
+    for a spelling a person typed from a client's UI, and it returns None rather
+    than inventing a leg the registry does not have.
+    """
+    prefix, sep, model_id = (leg or "").partition("/")
+    if not sep:
+        return None
+    wanted = family_key(prefix)
+    if wanted is None:
+        return None
+    providers = registry.get("providers") or {}
+    provider_id = ci_key(providers, prefix)
+    if provider_id is None:
+        for pid, provider in providers.items():
+            alias = provider.get("omniroute_id") if isinstance(provider, dict) else None
+            if family_key(alias) == wanted:
+                provider_id = pid
+                break
+    if provider_id is None:
+        return None
+    return ci_key(registry.get("models") or {}, model_id)
+
+
+def registry_families(registry):
+    """Every family name the registry itself uses, in comparison form.
+
+    The two places an operator states a family -- ``models.*.family`` and
+    ``policy.reviewers[].family``. It answers the one question the author
+    spelling cannot settle on its own: is this bare word real shorthand for a
+    family ("qwen"), or a model nobody registered ("qwen3.8-flsh")?
+    """
+    families = set()
+    for table in (list((registry.get("models") or {}).values()),
+                  list((registry.get("policy") or {}).get("reviewers") or [])):
+        for entry in table:
+            if isinstance(entry, dict):
+                key = family_key(entry.get("family"))
+                if key:
+                    families.add(key)
+    return families
+
+
 def author_family(author, registry):
     """``(family, why_not)`` for the model that wrote the card.
 
-    An author is accepted in any of the three spellings a caller has to hand:
-    a registry model id (``muse-spark-1.3-contributor``), a leg
-    (``meta_api/muse-spark-1.3-contributor``), or a bare family name
-    (``qwen``). A name that matches no model is taken as a family -- an author
-    from a family nobody registered is cross-family to every reviewer, which is
-    the safe reading of the rule. A model that IS registered but carries no
-    ``family`` fails closed instead: guessing a family here would let an author
-    review its own work, which is the whole thing this rule exists to stop.
+    An author is accepted in any of the spellings a caller has to hand, and case
+    is not part of any of them: a registry model id
+    (``muse-spark-1.3-contributor``), a leg
+    (``meta_api/muse-spark-1.3-contributor``), a route id (whose head leg is the
+    one that took the traffic), one of the operator's reviewer spellings
+    (``omniroute/spark-1.3-contributor``), or a bare family name the registry
+    already uses (``qwen``).
+
+    REVFIX (S2): a name that resolves none of those ways has NO family, and the
+    caller fails closed. It used to be read as a family of its own -- "an author
+    from a family nobody registered is cross-family to every reviewer" -- which
+    made the rule unenforceable, because a typo or an invented model name is
+    cross-family to every reviewer too and so always passed. Not knowing who
+    wrote the diff is not evidence that the reviewer is someone else. A model
+    that IS registered but carries no ``family`` still fails closed for the same
+    reason.
     """
     models = registry.get("models") or {}
     if not isinstance(author, str) or not author.strip():
         return None, "author is empty"
     name = author.strip()
 
-    entry = models.get(name)
-    if isinstance(entry, dict):
-        family = entry.get("family")
-        if family:
-            return family, None
+    entry = ci_value(models, name)
+    if entry is not None:
+        if not isinstance(entry, dict):
+            return None, "models.%s is not an object" % name
+        key = family_key(entry.get("family"))
+        if key:
+            return key, None
         return None, "models.%s carries no family" % name
 
-    try:
-        _provider_id, model_id = resolve_leg(name, registry)
-    except ValueError:
-        model_id = None
-    if model_id is None and "/" in name:
-        # A client's own spelling ("<client>/<model>"), e.g. opencode's
-        # "opencode/nemotron-3-ultra-free": the model half is the registry id.
-        model_id = name.rpartition("/")[2] if name.rpartition("/")[2] in models else None
-    if model_id is not None:
-        family = (models.get(model_id) or {}).get("family")
-        if family:
-            return family, None
-        return None, "models.%s carries no family" % model_id
-    for entry in ((registry.get("policy") or {}).get("reviewers") or []):
+    if "/" in name:
+        try:
+            _provider_id, model_id = resolve_leg(name, registry)
+        except ValueError:
+            model_id = _ci_leg_model_id(name, registry)
+        if model_id is None:
+            # A client's own spelling ("<client>/<model>"), e.g. opencode's
+            # "opencode/nemotron-3-ultra-free": the model half is the registry id.
+            model_id = ci_key(models, name.rpartition("/")[2])
+        if model_id is not None:
+            return author_family(model_id, registry)
+    else:
+        route = ci_value(registry.get("routes") or {}, name)
+        if isinstance(route, dict):
+            # Legs are a priority order; the first one the registry can place IS
+            # the model that ran, the same reading stop_provider_id gives a 429.
+            whys = []
+            for leg in route.get("legs") or []:
+                # Only real ``provider/model`` legs: a bare name here would come
+                # back through this branch as a route and could cycle.
+                if not isinstance(leg, str) or "/" not in leg:
+                    continue
+                family, why_not = author_family(leg, registry)
+                if family:
+                    return family, None
+                whys.append(why_not)
+            return None, ("routes.%s names no leg with a family (%s)"
+                          % (name, "; ".join(whys) or "no legs"))
+
+    for candidate in ((registry.get("policy") or {}).get("reviewers") or []):
         # A client's own model string (qoder's ``qwen3.8-flash``, claude's
         # ``haiku``) is a reviewer spelling, not a registry id, and the operator
         # already stated its family there -- check rule 11 keeps it honest. Read
-        # it before falling back to the name-as-family guess: ``haiku`` taken as
-        # a family name looks cross-family to every anthropic reviewer.
-        if entry.get("model") == name and entry.get("family"):
-            return entry["family"], None
-    return name, None
+        # it before the bare-family shorthand: ``haiku`` taken as a family name
+        # looks cross-family to every anthropic reviewer.
+        if (isinstance(candidate, dict)
+                and family_key(candidate.get("model")) == family_key(name)
+                and family_key(candidate.get("family"))):
+            return family_key(candidate.get("family")), None
+
+    if family_key(name) in registry_families(registry):
+        return family_key(name), None
+    return None, ("author %s is not a model, leg, route or reviewer the registry "
+                  "knows, and not a family it declares" % name)
 
 
 def _reviewer_rejections(entry, family, registry, client_state, now, risk,
@@ -1324,7 +1441,10 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     reviewer_family = entry.get("family")
     if not reviewer_family:
         reasons.append("no family: cannot check the different-family rule")
-    elif reviewer_family == family:
+    elif family_key(reviewer_family) == family:
+        # `family` is already in comparison form (author_family normalized it);
+        # the entry's is normalized here so an operator's "Meta" is the registry's
+        # "meta" and a self-review cannot be spelled into independence.
         reasons.append("same family as author (%s)" % family)
 
     # Haiku's fixed role (operator 2026-09-27): a fallback FIRST pass only. At

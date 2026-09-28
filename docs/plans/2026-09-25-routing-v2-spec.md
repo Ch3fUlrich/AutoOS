@@ -273,7 +273,13 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   the later window. Every *routing* read (`route`, `run`, the reviewer walk) merges that file into the
   registry as the provider's `unavailable_until` — `unavailable_now` already skips it and lets it
   expire on its own, so nothing is ever hand-undone. The renders and `registry.py validate` keep
-  reading the plain registry: a dated observation must not move a drift gate.
+  reading the plain registry: a dated observation must not move a drift gate. The read side trusts
+  none of the file's shape (REVFIX S1/S3): `providers` must be an object of objects, each carrying a
+  parseable ISO `unavailable_until` no more than `MAX_AUTO_RESET_SECONDS` ahead — the cap the writer
+  already applied, or one hand-edited row ("2099-01-01") would bench a provider forever on the
+  spawner's authority. Anything else is ignored with one stderr warning and the registry stands: this
+  runs on the routing path of every `route`/`run`, and a record of a transient outage is never worth
+  failing one over.
 - **Ready is read off the record, not off a claim (REVROUTE, S2 item 5).** A lane is ready when its
   record carries two review entries: one `kind=cross-family` — a reviewer whose registry `family`
   differs from the author's — and one `kind=final` naming the Sonnet sign-off. They are two
@@ -282,10 +288,12 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   the sign-off either. An entry is one line in the record's markdown
   (`AutoOS-Review: kind=… author=… reviewer=… verdict=…`) and `run` prints the same line, unfilled, as
   `record-line:` — a gate nobody can write to is a gate nobody passes. Families resolve against the
-  registry (`policy.reviewers` first, then `models`), and a reviewer spelling nothing resolves is
-  refused rather than guessed: `author_family` reads an unknown *author* as a bare family name
-  (cross-family to everyone is the safe answer for who wrote a diff), but the same reading of an
-  unknown *reviewer* would certify a review that never happened.
+  registry (`policy.reviewers` first, then `models`, then a leg, a route id, or a family name the
+  registry already declares) and compare in case-folded, trimmed form, because "Meta" and `meta` are
+  one family (REVFIX S2). A name that resolves none of those ways has no family and the check FAILS:
+  neither half is guessed. An unknown *reviewer* spelling certified a review that never happened, and
+  reading an unknown *author* as a bare family name — the old "cross-family to everyone is the safe
+  answer" — certified independence for any typo, so both now refuse with the reason named.
 
 ## 6. Interfaces
 

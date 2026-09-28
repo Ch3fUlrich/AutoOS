@@ -118,12 +118,12 @@ def parse_card(text: str) -> dict:
 
 
 def _check_author(value) -> str:
-    """A card's author: a model id, a leg, or a bare family name.
+    """A card's author: a model id, a leg, a route id, or a bare family name.
 
     Deliberately not validated against the registry here -- autoos_routing is
     the card-shape module and has no registry loaded, and
-    ``autoos_resolver.author_family()`` is the one place that resolves the three
-    spellings (and fails closed on a registered model with no family).
+    ``autoos_resolver.author_family()`` is the one place that resolves those
+    spellings (and fails closed on a name it cannot place, REVFIX S2).
     """
     if not isinstance(value, str) or not value.strip():
         raise CardError("card author=%r: expected a non-empty model id, leg or "

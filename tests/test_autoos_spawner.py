@@ -6194,15 +6194,107 @@ class ProviderResetStateTests(unittest.TestCase):
             fh.write("{ not json")
         self.assertEqual(agent.load_provider_state(self.state_path), {})
 
+    # --- REVFIX S1: the file's SHAPE is not trusted -------------------------
+    #
+    # The state is written by this tool, but it lives in logs/ where a person
+    # fixes things by hand and where an older or buggier build may already have
+    # written something. A record of a transient outage is never worth failing a
+    # run over: a shape the reader did not expect is ignored with one warning,
+    # it must never raise into `route`/`run`/the reviewer walk.
+
+    def capture(self, fn, *a, **kw):
+        """fn(...)'s return value plus everything it wrote to stderr."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = fn(*a, **kw)
+        return result, err.getvalue()
+
+    def test_providers_spelled_as_a_list_is_ignored_with_a_warning(self):
+        # The exact shape REVFIX S1 reproduced: [{"providers": [...]}] used to
+        # raise AttributeError out of apply_provider_state and kill the run.
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": [{"muse_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}]})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "nothing was applied: %r" % (merged["providers"]["muse_api"],))
+        self.assertEqual(merged["providers"], self.registry["providers"],
+                         "an unreadable file changes no provider")
+        self.assertIn("provider-state", err)
+
+    def test_a_state_that_is_not_an_object_at_all_is_ignored_with_a_warning(self):
+        for bad in ({"providers": "down"}, {"providers": 7}, {"providers": [1, 2]}):
+            merged, err = self.capture(self.agent.apply_provider_state, self.registry, bad)
+            self.assertNotIn("available", merged["providers"]["muse_api"], str(bad))
+            self.assertIn("provider-state", err, str(bad))
+
+    def test_an_entry_that_is_not_an_object_is_ignored_with_a_warning(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": "down",
+                           "gem_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "a string entry is not a record")
+        self.assertIs(merged["providers"]["gem_api"]["available"], False,
+                      "the well-shaped sibling is still applied")
+        self.assertEqual(err.count("provider-state"), 1,
+                         "one warning for the whole file, not one per row: %r" % err)
+
+    def test_a_record_stop_over_a_malformed_state_file_rewrites_it_cleanly(self):
+        # The writer cannot be poisoned by what it is reading either: the bad
+        # rows go and the file that comes back is the shape the reader expects.
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            json.dump({"providers": [{"muse_api": "the old wrong shape"}]}, fh)
+        recorded, err = self.capture(
+            self.agent.record_reset_stop, self.AGY_STOP, "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path)
+        self.assertIn("provider-state", err)
+        self.assertEqual(recorded[0], "cheap-p")
+        providers = self.state()["providers"]
+        self.assertIsInstance(providers, dict)
+        self.assertEqual(list(providers), ["cheap-p"],
+                          "the malformed row was dropped, not carried forward")
+
+    # --- REVFIX S3: the read side honours the same cap the writer does ------
+
+    def test_a_window_beyond_the_cap_is_ignored_on_read(self):
+        # The write side refuses to RECORD a 400-day reset; a file that already
+        # says one (an old build, a hand edit) must not bench a provider for a
+        # year either -- 7 days is the most the spawner's word can cost.
+        far = (self.NOW + datetime.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": far}}}, now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+        self.assertIn("7", err, "the warning names the cap it applied")
+
+    def test_an_unparsable_window_is_ignored_on_read(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": "next tuesday"}}},
+            now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+
+    def test_a_window_inside_the_cap_is_still_applied(self):
+        inside = (self.NOW + datetime.timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": inside}}}, now=self.NOW)
+        self.assertIs(merged["providers"]["muse_api"]["available"], False)
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"], inside)
+        self.assertEqual(err, "", "a well-shaped record is not worth a warning")
+
     # --- the resolver reads it ----------------------------------------------
 
     def test_apply_marks_the_provider_down_for_the_resolver(self):
         merged = self.agent.apply_provider_state(
             self.registry, {"providers": {"muse_api": {"unavailable_until":
-                                                            "2099-01-01T00:00:00Z"}}})
+                                                            "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
         provider = merged["providers"]["muse_api"]
         self.assertIs(provider["available"], False)
-        self.assertEqual(provider["unavailable_until"], "2099-01-01T00:00:00Z")
+        self.assertEqual(provider["unavailable_until"], "2026-10-01T23:00:00Z")
         self.assertIsNot(merged["providers"]["muse_api"], self.registry["providers"]["muse_api"],
                          "the loaded registry is copied, never mutated in place")
 
@@ -6212,15 +6304,21 @@ class ProviderResetStateTests(unittest.TestCase):
             "available": False, "unavailable_until": "2099-06-01T00:00:00Z"}
         merged = self.agent.apply_provider_state(
             self.registry, {"providers": {"muse_api": {"unavailable_until":
-                                                           "2026-10-01T17:00:00Z"}}})
+                                                           "2026-10-01T17:00:00Z"}}},
+            now=self.NOW)
+        # The cap is on what the STATE file may say, not on what the operator
+        # wrote: a 2099 date in the registry stays exactly as long as it reads.
         self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"],
                           "2099-06-01T00:00:00Z")
 
     def test_apply_ignores_a_provider_that_is_not_in_the_registry(self):
-        merged = self.agent.apply_provider_state(
-            self.registry, {"providers": {"no-such-p": {"unavailable_until":
-                                                           "2099-01-01T00:00:00Z"}}})
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"no-such-p": {"unavailable_until": "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
         self.assertNotIn("no-such-p", merged["providers"])
+        self.assertEqual(err, "", "a well-shaped row for an unknown provider is not "
+                                  "a malformed file")
 
     def test_a_window_that_passed_leaves_the_provider_servable_again(self):
         # R-gateway-12: the record comes back on its own, no hand-edit needed.
@@ -6401,14 +6499,64 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertIn("same family", report["cross_family"]["detail"])
 
     def test_an_unknown_reviewer_is_not_guessed_into_a_family(self):
-        # author_family() takes an unknown AUTHOR name as a bare family (the
-        # safe reading of who wrote it). A REVIEWER must be known: an invented
-        # spelling would otherwise differ from every author family and read as
-        # an independent review that never happened.
+        # A REVIEWER must be known: an invented spelling would otherwise differ
+        # from every author family and read as an independent review that never
+        # happened. (REVFIX S2: an unknown AUTHOR is refused for the same reason
+        # — see test_an_unknown_author_fails_the_cross_family_check.)
         report = self.status("AutoOS-Review: kind=cross-family author=qwen "
                              "reviewer=not-a-model-anywhere verdict=PASS\n" + FINAL_LINE)
         self.assertFalse(report["ready"])
         self.assertIn("not-a-model-anywhere", report["cross_family"]["detail"])
+
+    # --- REVFIX S2: the family comparison is a comparison, not a string match -
+
+    def test_an_author_spelled_with_the_vendors_capitalization_is_the_same_family(self):
+        # Meta markets its model as "Meta Muse"; a record quoting that spelling
+        # used to compare unequal to the registry's "meta" and pass as an
+        # independent review of itself.
+        report = self.status("AutoOS-Review: kind=cross-family author=Meta "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_a_family_capitalized_on_the_registry_side_is_the_same_family(self):
+        # Normalizing both sides, not just the author's: an operator who writes
+        # "Meta" in policy.reviewers means the family the models call "meta".
+        for entry in self.registry["policy"]["reviewers"]:
+            if entry["model"] == "omniroute/muse":
+                entry["family"] = "Meta"
+        report = self.status("AutoOS-Review: kind=cross-family author=muse-contrib "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_author_fails_the_cross_family_check(self):
+        # REVFIX S2: author_family used to hand back an unresolved name as if it
+        # were a family, so ANY typo ("qwen3.8-flsh", a model nobody registered)
+        # differed from every reviewer and the lane went ready. Not knowing who
+        # wrote the diff is not proof of independence.
+        report = self.status("AutoOS-Review: kind=cross-family author=who-knows "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("who-knows", report["cross_family"]["detail"])
+
+    def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
+        # The record quotes what the client was run with, not a registry id:
+        # "omniroute/spark-1.3-contributor" is the operator's reviewer spelling
+        # whose family the registry states.
+        report = self.status("AutoOS-Review: kind=cross-family "
+                             "author=omniroute/muse reviewer=gem-flash verdict=PASS\n"
+                             + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "google")
+
+    def test_a_bare_family_name_the_registry_knows_is_still_a_family(self):
+        # Fail-closed on the unknown must not break the ordinary shorthand:
+        # "qwen" is a family the fixture's reviewers declare, so it resolves.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
 
     def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
         # "Reviewed, said FIX-FIRST" and "never reviewed" need different next
@@ -6470,6 +6618,34 @@ class ReviewStatusTests(unittest.TestCase):
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
         self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
+
+    def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
+        # REVFIX S2 measured against the real catalog, not a fixture: the
+        # operator's reviewer spelling resolves through the registry to the
+        # family it declares, and the vendor's capitalization of that family is
+        # the same family.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        self.assertEqual(self.agent.resolver.author_family(
+            "omniroute/spark-1.3-contributor", real)[0], "meta")
+        self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        # The self-review that used to pass: Meta's own model, Meta's reviewer.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+        # An author the registry cannot place is not an independent review.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=gpt-next-week "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
 
 
 def _reviewer_client_state():
