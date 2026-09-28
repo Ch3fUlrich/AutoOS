@@ -31,7 +31,7 @@ The operator is also moving the central Omnigraph server off the coding machine
 | D10/D11 | Images are built by **Forgejo CI on a LAN runner** (`<ci-runner>`) and pushed to `<registry>`, project `autoos`: private, robot accounts, git-SHA tags, never `latest`. GitHub CI must pass without LAN access. |
 | D12 | **Serena:** already `uvx` stdio and pinned in the catalog, so the job is to verify it. The central SSE container is dropped on the deployment side, not here. |
 | D13 | **graphify:** move from pinned `uv run` to **`uv tool install 'graphifyy[mcp]==<pin>'`** (idempotent), so that `graphify-mcp` is on PATH on Linux and Windows. |
-| D14 | homelab MCP is not an AutoOS component. AutoOS only removes stale entries it recognises (see §C). |
+| D14 | homelab MCP is not an AutoOS component. AutoOS only removes stale entries it recognises (see §C). **Removal deferred 2026-09-28 by operator decision:** nothing removes it; a recognised leftover is only reported (§C). |
 | D15 | playwright / context7: verify only. |
 | D18 | Every Linux and Windows machine gets a working client set through the catalog, using uv or npm, not Docker. |
 
@@ -68,6 +68,9 @@ Targets:
 - the rc-file token line that reads from the retired agent-skills tree;
 - the `graphify-mcp` symlink into agent-skills;
 - a user-scope `homelab` MCP entry whose `PYTHONPATH` points into agent-skills;
+  **not removed** (operator decision 2026-09-28 — the server-side homelab MCP is
+  not finished): the entry is named by a muted report line and left in place until
+  that server replaces it.
 - the `agent-skills` catalog entry, which becomes a **tombstone**: the id stays known so state files
   resolve, and it installs nothing.
 
