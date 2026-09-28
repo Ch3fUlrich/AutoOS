@@ -7473,6 +7473,12 @@ class ReviewStatusTests(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         return path
 
+    def real_registry(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            return json.load(fh)
+
     # --- what counts -------------------------------------------------------
 
     def test_a_record_with_both_entries_is_ready(self):
@@ -7639,10 +7645,7 @@ class ReviewStatusTests(unittest.TestCase):
     # --- reality, not the fixture -----------------------------------------
 
     def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
-        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
-                     encoding="utf-8") as fh:
-            real = json.load(fh)
+        real = self.real_registry()
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
@@ -7659,10 +7662,7 @@ class ReviewStatusTests(unittest.TestCase):
         # operator's reviewer spelling resolves through the registry to the
         # family it declares, and the vendor's capitalization of that family is
         # the same family.
-        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
-                     encoding="utf-8") as fh:
-            real = json.load(fh)
+        real = self.real_registry()
         self.assertEqual(self.agent.resolver.author_family(
             "omniroute/spark-1.3-contributor", real)[0], "meta")
         self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
@@ -7681,6 +7681,26 @@ class ReviewStatusTests(unittest.TestCase):
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+    def test_the_real_registry_resolves_the_free_zen_reviewers(self):
+        # REVFREE, source: L2-general 2026-09-28T08:12:44Z. The free opencode Zen
+        # models it ran as cross-family reviewers all day were unknown to
+        # `reviewer_family`, so every record naming one read as "X is not a known
+        # reviewer" and the lane could never be called ready — the gate refused
+        # work that had in fact been reviewed.
+        real = self.real_registry()
+        for spelling, family in (("opencode/longcat-2.5-preview-free", "meituan"),
+                                 ("opencode/nemotron-3-ultra-free", "nvidia"),
+                                 ("opencode/mimo-v2.6-flash-free", "xiaomi")):
+            with self.subTest(reviewer=spelling):
+                self.assertEqual(self.agent.reviewer_family(spelling, real), family)
+                # A qwen-authored record reviewed by any of them is cross-family
+                # and complete: family != qwen, and the Sonnet final stands.
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                     "reviewer=%s verdict=PASS\n" % spelling) + FINAL_LINE, real)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                self.assertEqual(report["cross_family"]["family"], family)
 
 
 class ReadyCommandTests(unittest.TestCase):

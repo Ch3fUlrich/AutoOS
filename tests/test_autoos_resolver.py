@@ -2993,6 +2993,48 @@ class ReviewerSelectionTests(unittest.TestCase):
     def test_explain_is_empty_when_the_head_of_the_list_was_usable(self):
         self.assertEqual(r.reviewer_explain_lines(self.pick("qwen")), [])
 
+    # --- REVFREE: the free Zen reviewers, on the real registry --------------
+
+    FREE_ZEN_MODELS = ["opencode/longcat-2.5-preview-free",
+                       "opencode/nemotron-3-ultra-free",
+                       "opencode/mimo-v2.6-flash-free"]
+
+    def real_registry(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def all_clients_up(self):
+        return {c: {"installed": True, "signed_in": True, "reason": ""}
+                for c in ("opencode", "gemini", "qoder", "claude")}
+
+    def test_a_free_zen_reviewer_never_stands_alone_at_high_risk(self):
+        # Their quality is unmeasured (L2-general 2026-09-28T08:12:44Z), so they
+        # may take a normal-risk first pass but must never close a high-risk
+        # review: with ONLY them on the list, a high-risk card resolves to
+        # nothing and says why, while the same card at normal risk is served.
+        reg = self.real_registry()
+        reg["policy"]["reviewers"] = [e for e in reg["policy"]["reviewers"]
+                                      if e["model"] in self.FREE_ZEN_MODELS]
+        self.assertEqual([e["model"] for e in reg["policy"]["reviewers"]],
+                         self.FREE_ZEN_MODELS)
+        # The author is a registry model id, not the reviewer-list spelling
+        # "qwen3.8-flash": with the list sliced down to the three, only a model
+        # id still places the author's family (REVFIX S2 fails closed on an
+        # unplaceable author, and that is not what this test is about).
+        author = "qwen/qwen3.8-flash"
+
+        normal = r.reviewer_for(author, reg, self.all_clients_up(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertEqual(normal["reviewer"]["model"], self.FREE_ZEN_MODELS[0], normal)
+
+        high = r.reviewer_for(author, reg, self.all_clients_up(), self.NOW,
+                              risk="high", privacy="public")
+        self.assertIsNone(high["reviewer"], high)
+        self.assertEqual(high["state"], "unresolved", high)
+        for skipped in high["skipped"]:
+            self.assertIn("first-pass", skipped["reasons"][0], skipped)
+
 
 class PlanReviewCardTests(unittest.TestCase):
     """plan() wires the walk into the route_plan: a review card with an author
