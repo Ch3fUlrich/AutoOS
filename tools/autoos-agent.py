@@ -2822,7 +2822,8 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                             DEFAULT_ORCHESTRATOR_MODEL, now, registry, overlay,
                             track_record, client_state,
                             getattr(args, "client", None) or "opencode",
-                            os.environ, overlay_missing_at=overlay_missing_at)
+                            os.environ, overlay_missing_at=overlay_missing_at,
+                            credit_guards=plan_credit_guards(registry))
 
     if result["state"] == "input_required":
         raise RouteInputRequired(result["reason"])
@@ -3353,6 +3354,80 @@ def load_measured_overlay() -> tuple:
     return overlay_mod.load(MEASURED_OVERLAY_PATH, LEGACY_OVERLAY_PATH), missing
 
 
+# FREEKEYS-2 (brief item 2): the credit guard's per-process cache. `plan` is
+# called once per candidate route and a `run` re-plans on every fall-through, so
+# without this the refuse-at-100 % check would page the gateway's call log again
+# for every one of them. One read, one answer, for the life of the process.
+CREDIT_GUARD_CACHE: dict = {}
+
+
+def _credit_guards_unreadable(registry: dict, why: str) -> dict:
+    """Every `credit` grant refuses, because nobody can say what it has spent.
+
+    The half of the guard that must not be optimistic (brief FREEKEYS-2 item 2):
+    a usage read that fails leaves the resolver with no spend figure, and "no
+    figure" is not "$0 left" — it is the state that let a $10 grant drain
+    invisibly before. Returning `refuse` per grant drops only the credit legs of
+    a route, so a card with a free leg still plans; returning `{}` would drop
+    nothing and let the grant spend past its cap.
+
+    `why` is an exception *type name*, never its message: a gateway error text
+    can carry the URL and a key-file error the home path, and this note is
+    printed into the plan, the run log and `route --explain` (AGENTS.md rule 1).
+    """
+    out = {}
+    for provider in usage_mod.credit_guard_providers(registry):
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, provider)
+            warn = usage_mod.spend_warn_usd(registry, provider)
+        except ValueError:
+            pass  # a grant with no cap cannot be judged, only refused
+        out[provider] = {"provider": provider, "state": "refuse", "spend_usd": 0.0,
+                         "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                         "note": "credit grant unreadable (%s): no spend data, so "
+                                 "the leg is refused until the gateway answers" % why}
+    return out
+
+
+def plan_credit_guards(registry: dict, now=None, fetch=None,
+                       env: dict | None = None) -> dict:
+    """The `{provider: guard}` map `autoos_resolver.usable_legs` refuses a credit
+    leg with (brief FREEKEYS-2 item 2): this month's spend per `credit` provider
+    against its own `monthly_cap_usd`, read from the gateway's call log.
+
+    Cheap by design — one usage read per process (`CREDIT_GUARD_CACHE`), and a
+    host with no `credit` provider in the registry makes no call at all. The
+    figure is built by `autoos_usage.credit_guards`, the same reader the `usage`
+    report prints, so what blocks a leg and what the ledger shows are never two
+    numbers. A read that fails (gateway down, key missing or unauthorised, an
+    unparseable page) returns `_credit_guards_unreadable`, not an empty map.
+
+    `fetch`/`env`/`now` are injectable so a test can drive this without a
+    gateway, a key or the clock; the callers pass none of them.
+    """
+    if "guards" in CREDIT_GUARD_CACHE:
+        return CREDIT_GUARD_CACHE["guards"]
+    providers = usage_mod.credit_guard_providers(registry)
+    if not providers:
+        CREDIT_GUARD_CACHE["guards"] = {}
+        return CREDIT_GUARD_CACHE["guards"]
+    env = os.environ if env is None else env
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = usage_mod.month_start(now)
+    gateway = (env.get("AUTOOS_OMNIROUTE_URL")
+               or usage_mod.DEFAULT_GATEWAY).rstrip("/")
+    fetch = fetch or usage_mod.urllib_fetch
+    try:
+        key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
+        rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
+        guards = usage_mod.credit_guards(registry, rows, cutoff)
+    except (usage_mod.UsageError, OSError, ValueError) as exc:
+        guards = _credit_guards_unreadable(registry, type(exc).__name__)
+    CREDIT_GUARD_CACHE["guards"] = guards
+    return guards
+
+
 def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    registry: dict, overlay: dict, track_record: list,
                    client_state: dict, client: str = "opencode",
@@ -3435,7 +3510,8 @@ def cmd_route(args) -> int:
                                 args.orchestrator_model, now, registry, overlay,
                                 track_record, client_state,
                                 getattr(args, "client", None) or "opencode",
-                                os.environ, overlay_missing_at=overlay_missing_at)
+                                os.environ, overlay_missing_at=overlay_missing_at,
+                                credit_guards=plan_credit_guards(registry))
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:

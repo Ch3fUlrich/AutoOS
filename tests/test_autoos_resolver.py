@@ -4087,6 +4087,100 @@ class ZenClaudeLegRulesTests(unittest.TestCase):
                               "%s re-opens Claude before deny-claude-paid-api"
                               % rule["id"])
 
+class ComboFallthroughTests(unittest.TestCase):
+    """FREEKEYS-2 (brief item 4): a forced 429 on a combo's head leg must land
+    the request on a DIFFERENT provider, and it must land on a leg an agentic
+    card can actually use.
+
+    The fall-through itself is OmniRoute's `priority` combo strategy — the
+    gateway walks the combo's model list and retries the next entry on a 429, so
+    the spawner never reacts to one (tools/autoos_routing.py). That makes the
+    *rendered combo list* the thing under test: an ordered leg list whose
+    neighbours share one provider is a combo that 429s into the same 429. No
+    gateway is called here — `fake_priority_walk` mirrors the documented strategy
+    against a status table this test supplies.
+    """
+
+    ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker",
+              "t2-worker-free-only", "t3-driver", "t3-driver-free-only")
+
+    @classmethod
+    def setUpClass(cls):
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            cls.reg = json.load(fh)
+        cls.combos = {c["name"]: c
+                      for c in registry_tool.render_omniroute(cls.reg)["combos"]}
+
+    def leg_for_ref(self, route_id, ref):
+        """The registry leg that rendered to this combo ref (a gateway ref is the
+        leg's model_prefix rewritten, so map back through the route's own legs)."""
+        for leg in self.reg["routes"][route_id]["legs"]:
+            if registry_tool.gateway_ref(leg, self.reg) == ref:
+                return leg
+        raise AssertionError("%s renders %s from no leg" % (route_id, ref))
+
+    @staticmethod
+    def fake_priority_walk(models, statuses):
+        """OmniRoute's priority strategy: try each model in order and take the
+        first that does not answer 429. None when every leg failed."""
+        for ref in models:
+            if statuses.get(ref.split("/", 1)[0], 200) != 429:
+                return ref
+        return None
+
+    def test_a_429_on_the_head_falls_through_to_another_provider(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            head = combo["models"][0]
+            chosen = self.fake_priority_walk(
+                combo["models"], {head.split("/", 1)[0]: 429})
+            self.assertIsNotNone(chosen, "%s: every leg 429s" % route_id)
+            self.assertNotEqual(chosen.split("/", 1)[0], head.split("/", 1)[0],
+                                "%s: the fall-through stayed on %s"
+                                % (route_id, head.split("/", 1)[0]))
+
+    def test_two_consecutive_provider_failures_still_leave_a_third(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            prefixes = []
+            for ref in combo["models"]:
+                prefix = ref.split("/", 1)[0]
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
+            self.assertGreaterEqual(len(prefixes), 3,
+                                    "%s: %s has no third provider to fall to"
+                                    % (route_id, combo["models"]))
+            statuses = {prefix: 429 for prefix in prefixes[:2]}
+            chosen = self.fake_priority_walk(combo["models"], statuses)
+            self.assertIsNotNone(chosen, route_id)
+            self.assertNotIn(chosen.split("/", 1)[0], statuses, route_id)
+
+    def test_the_fall_through_lands_on_a_leg_an_agentic_card_can_use(self):
+        # A combo that falls through to a leg whose tool_calls is unproven (or to
+        # an unpriced credit leg) falls to a leg the resolver refuses to plan, so
+        # an agentic run landing there has no answer behind the fallback.
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            usable = []
+            for ref in combo["models"]:
+                provider_id, model_id = registry_tool.resolve_leg(
+                    self.leg_for_ref(route_id, ref), self.reg)
+                model = self.reg["models"][model_id]
+                if model.get("tool_calls") != "proven":
+                    continue
+                if (self.reg["providers"][provider_id] or {}).get("tier") == "credit":
+                    try:
+                        if not (float(model.get("price_in")) > 0.0
+                                and float(model.get("price_out")) > 0.0):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                usable.append(ref)
+            self.assertGreaterEqual(
+                len(usable), 2, "%s: only %s of %s is usable by an agentic card"
+                % (route_id, usable, combo["models"]))
+
 if __name__ == "__main__":
     unittest.main()
 
