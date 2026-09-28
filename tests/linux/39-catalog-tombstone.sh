@@ -807,20 +807,43 @@ if it "catalog tombstone: the interactive menu never hands a retired id to the p
     # presses space used to get a plan with the skip row and none of the work that
     # replaced it. Nothing about this is reachable without a terminal, so the case
     # opens one; where the host has no script(1) it is a skip, never a pass.
+    #
+    # Keystrokes go through a FIFO this shell holds open (fd 8), and only after the
+    # render loop's own output is seen — not piped in blind up front. A pipe that
+    # closes (EOF) the instant printf finishes can race setup.sh still sourcing its
+    # libraries before the read loop is up, and CI does not guarantee the same pty
+    # buffering a bare-metal kernel gives locally (CI run 36402165598: rc=124,
+    # killed after 90s still blocked on the very first read; the footer text in the
+    # capture proved the loop was reached but never got a byte).
     if ! command -v script >/dev/null 2>&1; then skip "no script(1) to open a pty"
     else
         tree="$(tombstone_tree)"
-        # Park the cursor on the row the fixture places fourth, tick it, confirm
-        # the menu, then accept the plan. Counted from the catalog, so a row added
-        # in front of it moves the keystrokes with it rather than breaking them.
         catalog_load "$TOMBSTONE_FIXTURE" x64 0
         keys=""
         for ((j = 0; j < "$(catalog_index_of replaced-demo)"; j++)); do keys+="j"; done
-        out="$(printf '%s \ny\n' "$keys" | HOME="$tree/home" timeout 90 script -qec \
-              "bash '$tree/setup.sh' --profile custom --no-color --dry-run" /dev/null 2>&1)"; rc=$?
+        fifo="$tree/keys.fifo" capture="$tree/capture.txt"
+        mkfifo "$fifo"; : > "$capture"
+        timeout 90 script -qec "bash '$tree/setup.sh' --profile custom --no-color --dry-run" /dev/null \
+            <"$fifo" >"$capture" 2>&1 &
+        pty_pid=$!
+        # Launch first, then open the write end: opening a FIFO for writing blocks
+        # until a reader exists, and script is the reader — it blocks in its own
+        # open of the read end until we do. fd 8 stays open either way, so script's
+        # stdin cannot EOF until the exec 8>&- below.
+        exec 8>"$fifo"
+        ready=0
+        for ((i = 0; i < 300; i++)); do
+            grep -q "Choose what to install" "$capture" 2>/dev/null && { ready=1; break; }
+            kill -0 "$pty_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        if (( ready )); then printf '%s \n' "$keys" >&8; fi
+        exec 8>&-        # EOF now, only once the reader is proven ready (or dead)
+        wait "$pty_pid"; rc=$?
+        out="$(cat "$capture")"
         plain="$(printf '%s' "$out" | tr -d '\r' | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g')"
         rm -rf "$tree"
-        if [[ "$plain" != *"Choose what to install"* ]]; then
+        if (( ! ready )) || [[ "$plain" != *"Choose what to install"* ]]; then
             # The terminal was opened but nothing drew the menu in it — a host
             # limitation, not a verdict on the code.
             skip "the pty run never reached the menu (rc=$rc): $(printf '%s\n' "$plain" | tail -2)"
