@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — affected-tests finds a heredoc opened inside a quoted command substitution (AFFFIX2, 2026-09-28)
+
+Fast-follow on `review-afffix.md` (HIGH), failing test written first.
+
+- **`tools/affected-tests.py`** (`_code_view`, `masked_lines`): the quote state reset on every line, so the suites' dominant idiom — `out="$(python3 - 2>&1 <<'PY'` … `PY` … `)"` — never registered as a heredoc: the opening `"` blanked the rest of the line, `<<'PY'` included, and the body was read as code. A header-shaped line in one would then start a case that does not exist and cut the case holding it, hiding its mentions. `_code_view` now takes and returns the open contexts (quoted string, `$( … )`, backticks, with a paren depth so a `( … )` group inside a substitution does not close it) and `masked_lines` carries them across lines the way `masked_lines` already carries a pending heredoc. bash parses a substitution's contents as code even while an outer `"` is open, and it is the *body* that is data, so the state is frozen while a body is being read. Measured here: 64 such openers in `tests/linux/*.sh`, 0 registered before, 64 after, and the same 3,012 cases with the same bodies — every file's context stack ends empty, so the phantom that was latent under AFFFIX is now latent under a shape the suites actually use.
+- **`tests/test_affected_tests.py`**: the repro (a `if it "phantom"` line inside a substitution heredoc whose body precedes a real id mention) at fixture, `regions()` and real-repo level, plus the 64-opener count as a measurement test (`>= 60`, so a small edit to the suites does not break it) and a nested-`( … )` guard.
+
 ### Fixed — affected-tests reads a heredoc body as data and stops an id at its own edge (AFFFIX, 2026-09-28)
 
 Fast-follow on the AFFTESTS review (`logs/handoff-sessions/20260925/work/L1-routing/review-afftests.md`): findings F1 (HIGH, latent) and F2 (two LOW precision items), each with the failing test written first.

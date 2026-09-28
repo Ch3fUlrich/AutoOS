@@ -26,7 +26,12 @@ A shell or Pester block runs from its header to the next header or the next
 one case only and the header's own words count as a mention. A heredoc
 (`<<EOS` ... `EOS`) or PowerShell here-string (`@'` ... `'@`) body is data, not
 code: the suites write whole fake scripts into scratch files that way, and a
-header-shaped line in one neither starts a case nor ends the case holding it.
+header-shaped line in one neither starts a case nor ends the case holding it. The
+heredoc may open inside a double-quoted command substitution
+(`out="$(python3 - <<'PY'` ... `PY` ... `)"`) - the suites' dominant shape - which
+is why the quote and substitution state is carried across lines rather than reset
+by each one: bash reads a substitution's contents as code even while an outer `"`
+is still open.
 
 Outputs
     --format filter       one comma-separated string for run-tests.sh --filter /
@@ -128,34 +133,80 @@ def _line_starts(text: str):
     return starts
 
 
-def _code_view(line: str) -> str:
+def _code_view(line: str, frames=()):
     """The line with quoted content and the trailing comment blanked out.
 
     Same length, same offsets, so a match found in it is still the right place in
     the original: `echo "<<"` and `# see <<EOF` must not read as heredocs.
+
+    `frames` is the lexical state carried in from the previous line - a list of
+    open contexts, innermost last, each one `("q", quote_char)` or
+    `("sub", delimiter, paren_depth)`. It is returned updated, because a quote
+    really does span lines: the suites' dominant idiom is
+
+        out="$(python3 - 2>&1 <<'PY'
+        ...
+        PY
+        )"
+
+    and bash parses a command substitution's contents as code even while the outer
+    `"` is still open. Blanking from that `"` to the end of the line - what a
+    line-by-line reset does - hides the `<<'PY'`, so the body is read as code and a
+    header-shaped line in it starts a case that does not exist (review AFFFIX2).
     """
-    out, quote, index = list(line), "", 0
-    while index < len(line):
+    stack = [tuple(f) for f in frames]
+    out, index, size = list(line), 0, len(line)
+    while index < size:
         ch = line[index]
-        if quote:
+        frame = stack[-1] if stack else None
+        if frame and frame[0] == "q":
+            quote = frame[1]
             out[index] = " "
             if ch == quote:
-                quote = ""
-            elif quote == '"' and ch == "\\" and index + 1 < len(line):
-                out[index + 1] = " "
-                index += 1
+                stack.pop()
+            elif quote == '"':
+                if ch == "\\" and index + 1 < size:
+                    out[index + 1] = " "
+                    index += 1
+                elif ch == "$" and index + 1 < size and line[index + 1] == "(":
+                    # The substitution is code, not string data.
+                    out[index], out[index + 1] = "$", "("
+                    stack.append(("sub", "(", 1))
+                    index += 1
+                elif ch == "`":
+                    out[index] = "`"
+                    stack.append(("sub", "`", 0))
             index += 1
             continue
+        if ch == "#" and (not index or line[index - 1] in " \t"):
+            return "".join(out[:index]), stack       # the rest is a comment
         if ch in "'\"":
             out[index] = " "
-            quote = ch
-        elif ch == "#" and (not index or line[index - 1] in " \t"):
-            return "".join(out[:index] + [" "] * (len(line) - index))
-        elif ch == "\\" and index + 1 < len(line):
+            stack.append(("q", ch))
+        elif ch == "\\" and index + 1 < size:
             out[index + 1] = " "
             index += 1
+        elif ch == "`":
+            # A backtick closes the substitution it opened; anywhere else it starts
+            # one, whose contents are code too.
+            if frame and frame[0] == "sub" and frame[1] == "`":
+                stack.pop()
+            else:
+                stack.append(("sub", "`", 0))
+        elif ch == "$" and index + 1 < size and line[index + 1] == "(":
+            stack.append(("sub", "(", 1))
+            index += 1
+        elif ch == "(" and frame and frame[0] == "sub" and frame[1] == "(":
+            stack[-1] = ("sub", "(", frame[2] + 1)
+        elif ch == ")" and frame and frame[0] == "sub" and frame[1] == "(":
+            # `( ... )` grouping inside the substitution is balanced against itself;
+            # only the depth-1 `)` closes the `$( `.
+            if frame[2] > 1:
+                stack[-1] = ("sub", "(", frame[2] - 1)
+            else:
+                stack.pop()
         index += 1
-    return "".join(out)
+    return "".join(out), stack
 
 
 def _heredoc_opener(line: str, at: int):
@@ -203,8 +254,11 @@ def masked_lines(text: str, syntax: str):
 
     sh: each heredoc body, from the line after the opener through the line
     carrying its delimiter; a line may open two heredocs, so openers queue and
-    each delimiter closes only the body it ends. ps1: each here-string body,
-    closed by the delimiter at column 0 - PowerShell lets nothing precede it.
+    each delimiter closes only the body it ends. The lexical state - which quotes
+    and command substitutions are still open - is carried across lines, and frozen
+    while a body is being read, since body text is not shell.
+    ps1: each here-string body, closed by the delimiter at column 0 - PowerShell
+    lets nothing precede it.
     """
     lines = text.split("\n")
     masked = set()
@@ -219,7 +273,7 @@ def masked_lines(text: str, syntax: str):
                 continue
             open_quote = _ps_opener(line)
         return masked
-    pending = []
+    pending, frames = [], []
     for index, raw in enumerate(lines):
         line = raw.rstrip("\r")
         if pending:
@@ -228,7 +282,7 @@ def masked_lines(text: str, syntax: str):
             if head.rstrip() == pending[0][0]:
                 del pending[0]
             continue
-        view = _code_view(line)
+        view, frames = _code_view(line, frames)
         for match in SHELL_OPENER.finditer(view):
             opener = _heredoc_opener(line, match.end())
             if opener:

@@ -23,6 +23,7 @@ Run directly:
 import copy
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,19 @@ if it "phantom opus-4-6 is not a real case"; then
     assert_eq "x" "x"
 EOS
     grep -q 'opus-4-6' "$tmp/fake.sh"
+fi
+
+# The repo's dominant idiom (review AFFFIX2): a heredoc opened *inside* a
+# double-quoted command substitution. bash parses a substitution's contents as
+# code, so `<<'PY'` opens a heredoc even though the outer `"` is still open —
+# and the body is data, exactly like a plain heredoc's.
+if it "the substitution heredoc case whose mention follows the body"; then
+    out="$(python3 - 2>&1 <<'PY'
+if it "phantom inside the substitution heredoc"; then
+    print("opus-4-6")
+PY
+)"
+    assert_contains "$out" "opus-4-6"
 fi
 
 # A longer id that merely starts with the queried one is a different entry.
@@ -155,6 +169,8 @@ def test_module_level_opus_route():
 # The names the fixture cases above carry, spelled once.
 HEREDOC_SH_CASE = "the heredoc case that greps only after the closing delimiter"
 PHANTOM_SH_CASE = "phantom opus-4-6 is not a real case"
+SUB_HEREDOC_SH_CASE = "the substitution heredoc case whose mention follows the body"
+SUB_PHANTOM_SH_CASE = "phantom inside the substitution heredoc"
 HEREDOC_PS_CASE = "the here-string case that asserts after the closing quote"
 PHANTOM_PS_CASE = "phantom SambaNova is not a real case"
 LONGER_ID_CASE = "the t1-orchestrator-clean route drops the dead leg"
@@ -194,6 +210,41 @@ SH_READ_TEXT = '''\
 if it "the case that reads from a here-string"; then
     read -r a b <<<"$out"
     assert_eq "z" "muse-spark"
+fi
+'''
+
+# The 64 openers this shape accounts for in tests/linux (review AFFFIX2): a
+# heredoc whose `<<` sits inside a double-quoted `$( … )`.
+SH_SUBSTITUTION_TEXT = '''\
+if it "the case whose heredoc opens inside a substitution"; then
+    report="$(python3 - "$cfg" 2>&1 <<'PY'
+if it "phantom in the substitution body"; then
+    describe "phantom group"
+PY
+)"
+    assert_eq "z" "muse-spark"
+fi
+
+if it "the case after it"; then
+    assert_eq "y" "y"
+fi
+'''
+
+# The unquoted and nested shapes of the same idiom, which the line-spanning state
+# must also survive: a `( … )` group inside a `$( … )` must not be read as closing
+# the substitution.
+SH_SUBSTITUTION_NESTED_TEXT = '''\
+if it "the case with a paren group inside the substitution"; then
+    out="$(if ( has_parens ); then python3 - <<'PY'
+data line
+PY
+fi
+)"
+    assert_eq "z" "muse-spark"
+fi
+
+if it "the case after it"; then
+    assert_eq "y" "y"
 fi
 '''
 
@@ -351,6 +402,18 @@ class FixtureTests(unittest.TestCase):
         terms = filter_terms(self.tool("opus-4-6", "--format", "filter").stdout)
         self.assertTrue(any(t in HEREDOC_SH_CASE for t in terms),
                         "filter %r cannot select %r" % (terms, HEREDOC_SH_CASE))
+
+    def test_a_heredoc_opened_inside_a_quoted_substitution_is_data_too(self):
+        # Review AFFFIX2: `out="$(python3 - <<'PY'` never registered, because the
+        # opening `"` blanked the rest of the line including `<<'PY'`. So the
+        # phantom `if it` inside the body became a real case and the mention after
+        # `PY\n)"` was credited to it, hiding the case that actually greps.
+        hit = affected_in("sh", self.root, ["opus-4-6"])
+        self.assertIn(SUB_HEREDOC_SH_CASE, hit)
+        self.assertNotIn(SUB_PHANTOM_SH_CASE, hit)
+        terms = filter_terms(self.tool("opus-4-6", "--format", "filter").stdout)
+        self.assertTrue(any(t in SUB_HEREDOC_SH_CASE for t in terms),
+                        "filter %r cannot select %r" % (terms, SUB_HEREDOC_SH_CASE))
 
     def test_a_here_string_body_never_ends_the_pester_case_that_contains_it(self):
         hit = affected_in("ps1", self.root, ["SambaNova"])
@@ -512,6 +575,32 @@ class DiffTests(unittest.TestCase):
 class RealRepoTests(unittest.TestCase):
     """The tool must work on this repository, not only on the fixture."""
 
+    # A heredoc opened inside a command substitution: the shape the suites use
+    # dozens of times (`out="$(python3 - <<'PY'`). The gap excludes `<` and newline,
+    # so what it lands on is the line's first `<<` and that is an opener.
+    SUB_HEREDOC = re.compile(r"""\$\([^<\n]*<<-?['"]?[A-Za-z_]""")
+
+    def test_every_heredoc_the_real_suites_open_in_a_substitution_registers(self):
+        # Review AFFFIX2: this idiom is the dominant one in tests/linux, and the
+        # per-line quote reset hid every one of its bodies, so a header-shaped line
+        # in a Python body cut the case above it. Measured rather than asserted per
+        # file, so the count says how much of the suite the shape covers.
+        openers, missed = 0, []
+        for path in sorted((ROOT / "tests" / "linux").glob("*.sh")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            lines = text.split("\n")
+            masked = at.masked_lines(text, "sh")
+            for index, line in enumerate(lines):
+                if self.SUB_HEREDOC.search(line):
+                    openers += 1
+                    if index + 1 not in masked:
+                        missed.append("%s:%d %s" % (path.name, index + 1, line.strip()))
+        self.assertGreaterEqual(openers, 60,
+                                "the suite no longer uses the idiom this test measures")
+        self.assertEqual(missed, [],
+                         "%d of %d substitution heredocs are not read as data"
+                         % (len(missed), openers))
+
     def test_a_known_route_id_finds_the_real_shell_and_pester_cases(self):
         result = run_tool(["t1-orchestrator", "--format", "filter"])
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -590,6 +679,21 @@ class RegionSyntaxTests(unittest.TestCase):
         blocks = self.blocks(SH_READ_TEXT, "sh")
         self.assertEqual(list(blocks), ["the case that reads from a here-string"])
         self.assertIn("muse-spark", blocks["the case that reads from a here-string"])
+
+    def test_a_heredoc_inside_a_quoted_command_substitution_bodies_the_outer_case(self):
+        # bash parses a `$( … )` substitution's contents as code even when an outer
+        # `"` is open, so the `<<'PY'` on that line opens a real heredoc and its
+        # body is data - not code, despite the still-unbalanced `"`.
+        blocks = self.blocks(SH_SUBSTITUTION_TEXT, "sh")
+        outer = "the case whose heredoc opens inside a substitution"
+        self.assertEqual(list(blocks), [outer, "the case after it"])
+        self.assertIn("muse-spark", blocks[outer])
+
+    def test_a_paren_group_inside_a_substitution_does_not_close_the_substitution(self):
+        blocks = self.blocks(SH_SUBSTITUTION_NESTED_TEXT, "sh")
+        outer = "the case with a paren group inside the substitution"
+        self.assertEqual(list(blocks), [outer, "the case after it"])
+        self.assertIn("muse-spark", blocks[outer])
 
     def test_an_interpolating_here_string_hides_its_fake_case(self):
         blocks = self.blocks(PS_TEXT, "ps1")
