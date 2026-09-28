@@ -307,12 +307,17 @@ if [[ -n "$__parts_env" ]]; then
     done
     printf '%sparts: %s%s\n' "$DIM" "$__parts_env" "$RESET"
 fi
+# __part_selected <part path>: prints 1 when the part is in the selection (or
+# there is none), else 0 - the value PART_SELECTED takes while it is sourced.
+__part_selected() {
+    local n="${1##*/}"
+    n="${n:0:2}"
+    if [[ -z "$__selected" || "$__selected" == *" $n "* ]]; then echo 1; else echo 0; fi
+}
 # shellcheck source=/dev/null
-for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh; do
-    __n="${__part##*/}"; __n="${__n:0:2}"
-    if [[ -z "$__selected" || "$__selected" == *" $__n "* ]]; then PART_SELECTED=1; else PART_SELECTED=0; fi
-    . "$__part"
-done
+# One line on purpose: tests/linux/01 stubs the parts out by rewriting the line
+# that starts `for __part in`, so the whole loop must live on it.
+for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh; do PART_SELECTED="$(__part_selected "$__part")"; . "$__part"; done
 PART_SELECTED=1
 
 # ─── Summary ────────────────────────────────────────────────────────────────
