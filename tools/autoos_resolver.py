@@ -1155,6 +1155,12 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
     leg. Every ``route_id`` here already survived ``filter_routes``, so
     ``usable_legs`` is never empty for it; a caller that passes one that did
     not gets a ValueError naming it, the same fail-closed shape as before.
+
+    Spec 4's ``override.effort`` replaces the bucket's rung on the leg that
+    would answer (DSBACK: it was parsed, validated and then dropped, so a card
+    pinning ``effort=max`` silently ran the bucket's rung). It is clamped to
+    that leg's ladder exactly like a bucket-derived rung, so a pin cannot
+    invent a rung the model lacks and cannot make a non-reasoning leg reason.
     """
     out = []
     for route_id in route_ids:
@@ -1168,6 +1174,9 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
         model = registry["models"][model_id]
         eff = effort(bucket_name, card["kind"], route["class"],
                     model["effort_ladder"], model["reasoning"])
+        pinned = (card.get("override") or {}).get("effort")
+        if pinned:
+            eff = _clamp(pinned, model["effort_ladder"])
         score = dict(score_route(route_id, bucket_name, eff, features, registry,
                                  track_record, orchestrator_model, mode,
                                  leg=leg))

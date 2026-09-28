@@ -56,6 +56,16 @@ config dir. Heartbeats print `usage --since 1h --by provider,lane`.
 registry's per-token `price_in`/`price_out`; the JSON names its source and how
 many models it had no price for, so a 0 row reads as free or unknown. Off by
 default — `--json` readers get the same shape as before.
+`--spend-since [DATE]` (bare: the 1st of the current month UTC) and
+`--balance-usd N` add a `paid_spend` block for the one provider the operator
+budgets in dollars — DeepSeek. It costs each of that provider's rows at the
+registry's per-token price times the factor in `providers.deepseek.windows` at
+the row's own timestamp (`autoos_resolver.price_factor`, the same function the
+router uses to pick a cheap hour), reaches the row fetch back as far as that
+date even when `--since` is an hour, and prints `WARN` at 20 USD of spend
+(the monthly cap) or when `--balance-usd` — a balance the caller measured at
+the gateway — is below 5 USD. A window that hit the paging cap says
+`incomplete`: the figure is a floor, not a total.
 
 Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
 <position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).

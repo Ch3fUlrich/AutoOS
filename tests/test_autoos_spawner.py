@@ -8020,13 +8020,20 @@ class GatewayCooldownStopTests(unittest.TestCase):
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # t2-worker-clean has no gemini leg; naming a model the route does not
         # serve falls back to the first servable leg, as an unnamed stop does.
-        self.assertEqual(
-            self.agent.stop_provider_id(
-                "Error: [429] All credentials for model gemini-3.8-flash are "
-                "cooling down (reset after 37s)",
-                self.registry,
-                self.registry["routes"]["t2-worker-clean"]["legs"]),
-            "zen")
+        # The fallback leg is registry data, so the expectation is read from it
+        # rather than pinned to one provider's name (DSBACK 2026-09-28 moved it
+        # from opencode-zen/… to deepseek/deepseek-flash).
+        legs = self.registry["routes"]["t2-worker-clean"]["legs"]
+        named = self.agent.stop_provider_id(
+            "Error: [429] All credentials for model gemini-3.8-flash are "
+            "cooling down (reset after 37s)", self.registry, legs)
+        unnamed = self.agent.stop_provider_id(
+            "Error: [429] All credentials are cooling down (reset after 37s)",
+            self.registry, legs)
+        self.assertEqual(named, "deepseek")
+        self.assertEqual(named, unnamed,
+                         "an unmatched model name must attribute exactly as an "
+                         "unnamed stop does, to the route's first live leg")
 
     def test_a_cooldown_that_states_no_window_records_no_bench(self):
         # No window, no record: a permanent-looking bench on a guess is worse
@@ -8236,6 +8243,12 @@ class ReviewStatusTests(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         return path
 
+    def real_registry(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            return json.load(fh)
+
     # --- what counts -------------------------------------------------------
 
     def test_a_record_with_both_entries_is_ready(self):
@@ -8441,10 +8454,7 @@ class ReviewStatusTests(unittest.TestCase):
     # --- reality, not the fixture -----------------------------------------
 
     def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
-        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
-                     encoding="utf-8") as fh:
-            real = json.load(fh)
+        real = self.real_registry()
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
@@ -8468,10 +8478,7 @@ class ReviewStatusTests(unittest.TestCase):
         # operator's reviewer spelling resolves through the registry to the
         # family it declares, and the vendor's capitalization of that family is
         # the same family.
-        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
-                     encoding="utf-8") as fh:
-            real = json.load(fh)
+        real = self.real_registry()
         self.assertEqual(self.agent.resolver.author_family(
             "omniroute/spark-1.3-contributor", real)[0], "meta")
         self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
@@ -8490,6 +8497,26 @@ class ReviewStatusTests(unittest.TestCase):
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+    def test_the_real_registry_resolves_the_free_zen_reviewers(self):
+        # REVFREE, source: L2-general 2026-09-28T08:12:44Z. The free opencode Zen
+        # models it ran as cross-family reviewers all day were unknown to
+        # `reviewer_family`, so every record naming one read as "X is not a known
+        # reviewer" and the lane could never be called ready — the gate refused
+        # work that had in fact been reviewed.
+        real = self.real_registry()
+        for spelling, family in (("opencode/longcat-2.5-preview-free", "meituan"),
+                                 ("opencode/nemotron-3-ultra-free", "nvidia"),
+                                 ("opencode/mimo-v2.6-flash-free", "xiaomi")):
+            with self.subTest(reviewer=spelling):
+                self.assertEqual(self.agent.reviewer_family(spelling, real), family)
+                # A qwen-authored record reviewed by any of them is cross-family
+                # and complete: family != qwen, and the Sonnet final stands.
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                     "reviewer=%s verdict=PASS\n" % spelling) + FINAL_LINE, real)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                self.assertEqual(report["cross_family"]["family"], family)
 
 
 class ReadyCommandTests(unittest.TestCase):
@@ -8910,6 +8937,162 @@ class CIRunStatusTests(unittest.TestCase):
         (_c, _s, _e), seen = self.read(
             self.proc('{"conclusion": "success", "headSha": "a"}'))
         self.assertLessEqual(seen["kw"].get("timeout", 10 ** 9), 120)
+
+
+class EffortRungPlumbingTests(unittest.TestCase):
+    """DSBACK item 3: the effort rung the resolver picks (spec 5.5) must reach
+    the client that can honour it — and nowhere it cannot.
+
+    Measured at the DSBACK flip: deepseek-v4.1-flash answers again with the
+    [none, low, high, max] ladder, but the rung only ever landed in the track
+    record (track_entry stamps route["effort"]); build_plan handed the bare
+    combo to `opencode run --model`, so a card the resolver scored at `max`
+    sent the same request as one scored at `low`, and the low/high/max
+    variants generated into opencode.jsonc were dead weight.
+
+    The one client-side mechanism that exists is opencode's model variant:
+    `--model omniroute/deepseek-v4.1-flash#high` selects the variant entry
+    whose `settings.reasoningEffort` the OpenAI-compatible protocol sends as
+    `reasoning_effort`. So `none` — and a non-reasoning leg's None — means NO
+    `#variant` at all: the base model entry carries no reasoning settings
+    (pinned in tests/test_sync_ide_models.py). An OmniRoute combo cannot carry
+    a per-effort alias (pinned in tests/test_registry_render.py), so a gateway
+    client takes the bare combo and the rung is not delivered there — said
+    out loud rather than half-implemented.
+    """
+
+    RUNGS = ("low", "high", "max")
+    COMBO = "deepseek-v4.1-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        patch = mock.patch.object(self.agent.measure_mod, "client_state",
+                                  lambda *a, **k: {})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,paths=tools/registry.py", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def plan_of_resolver(self, rung, combo=COMBO, **overrides):
+        """route["model"] for a resolver plan whose scored effort is `rung`."""
+        plan = {"route": combo, "state": "ready", "reason": "stub",
+                "bucket": "S2", "effort": rung, "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(plan)):
+            return self.agent._resolve_route_v2(
+                self.args(**overrides), {"kind": "review", "paths": "tools/registry.py"},
+                self.cfg, None)
+
+    def argv_model(self, rung, combo=COMBO, **overrides):
+        """The `--model` value build_plan actually hands the client."""
+        plan = {"route": combo, "state": "ready", "reason": "stub",
+                "bucket": "S2", "effort": rung, "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(plan)):
+            built = self.agent.build_plan(self.args(**overrides), self.cfg)
+        cmd = built["cmd"]
+        return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
+
+    def variants_of(self, model):
+        base, _, _ = model.partition("#")
+        provider, _, mid = base.partition("/")
+        return {v["id"]: v for v in ((self.cfg["providers"].get(provider, {})
+                                        .get("models", {}).get(mid, {})
+                                        or {}).get("variants") or [])}
+
+    # --- one test per rung -------------------------------------------------
+
+    def test_low_high_and_max_reach_deepseek_as_reasoning_effort(self):
+        for rung in self.RUNGS:
+            with self.subTest(rung=rung):
+                self.assertEqual(self.argv_model(rung),
+                                 "omniroute/%s#%s" % (self.COMBO, rung))
+                # the variant the suffix selects carries exactly that rung,
+                # and nothing else: settings.reasoningEffort -> reasoning_effort
+                variant = self.variants_of("omniroute/" + self.COMBO)[rung]
+                self.assertEqual(variant["settings"], {"reasoningEffort": rung})
+
+    def test_a_none_rung_sends_no_reasoning_param_at_all(self):
+        # "none" is a rung the resolver can return (deepseek's ladder carries
+        # it; _clamp prefers the lower rung on a tie), and a non-reasoning leg
+        # returns None. Both must emit a bare model: no #variant, so opencode
+        # sends no reasoning_effort field.
+        for rung in ("none", None):
+            with self.subTest(rung=rung):
+                self.assertEqual(self.argv_model(rung), "omniroute/" + self.COMBO)
+                self.assertNotIn("#", self.argv_model(rung))
+        self.assertNotIn("none", self.variants_of("omniroute/" + self.COMBO))
+
+    def test_the_rung_is_also_kept_on_the_record(self):
+        # stamping the argv must not cost the track record its rung
+        route = self.plan_of_resolver("max")
+        self.assertEqual(route["effort"], "max")
+        self.assertEqual(self.agent.track_entry(
+            {"client": "opencode", "route": route, "model": route["model"]}, 0, 1.0)["effort"],
+            "max")
+
+    # --- never invent a rung the answering config cannot honour -------------
+
+    def test_a_model_without_the_rung_declared_gets_no_invented_variant(self):
+        # t3-driver's served head leg has an empty ladder, so the render
+        # declares no variants for it — a resolver rung must not bolt a #high
+        # onto a model whose config has no such variant (PROVFIX3 finding 8 is
+        # exactly this class of forwarded effort the leg rejects).
+        self.assertEqual(self.plan_of_resolver("high", combo="t3-driver")["model"],
+                         "omniroute/t3-driver")
+        self.assertEqual(self.variants_of("omniroute/t3-driver"), {})
+
+    def test_an_explicit_model_variant_wins_over_the_resolvers_rung(self):
+        # --model omniroute/deepseek-v4.1-flash#low is an operator choice; the
+        # resolver's rung describes the card, not the override. Two suffixes
+        # would be an unresolvable model id.
+        route = self._explicit_route("omniroute/%s#low" % self.COMBO, "high")
+        self.assertEqual(route["model"], "omniroute/%s#low" % self.COMBO)
+
+    def _explicit_route(self, model, rung):
+        plan = {"route": self.COMBO, "state": "ready", "reason": "stub",
+                "bucket": "S2", "effort": rung, "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(plan)):
+            return self.agent.resolve_route_unchecked(
+                self.args(model=model), self.cfg,
+                self.agent.clients.CLIENTS["opencode"])
+
+    # --- the rung comes from the resolver, never from the spawner -----------
+
+    def test_a_v1_card_plan_carries_no_rung_at_all(self):
+        # the v1/--tier paths compute no bucket/effort (no resolver), so the
+        # spawner must not fall back to some default effort of its own.
+        ns = self.args(card="role=review")
+        plan = self.agent.build_plan(ns, self.cfg)
+        cmd = plan["cmd"]
+        model = cmd[cmd.index("--model") + 1]
+        self.assertEqual(model, "omniroute/t3-driver")
+        self.assertNotIn("#", model)
+
+    def test_a_gateway_client_takes_the_bare_combo(self):
+        # an omniroute combo cannot carry a per-effort alias, so for the
+        # gateway clients the rung is not deliverable — the argv must stay the
+        # plain combo rather than a #high the gateway would read as part of
+        # the combo name.
+        cmd = self._gateway_plan("high")["cmd"]
+        self.assertEqual(cmd[cmd.index("--model") + 1], self.COMBO)
+
+    def _gateway_plan(self, rung):
+        plan = {"route": self.COMBO, "state": "ready", "reason": "stub",
+                "bucket": "S2", "effort": rung, "defer_until": None}
+        with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: dict(plan)):
+            return self.agent.build_plan(self.args(client="qwen"), self.cfg)
 
 
 def _reviewer_client_state():
