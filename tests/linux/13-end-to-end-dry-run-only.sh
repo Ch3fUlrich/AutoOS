@@ -25,9 +25,44 @@ fi
 if it "a dry run creates none of the files its installers would"; then
     marker="$SYS_HOME/.autoos-omnigraph.env"
     had_marker=0; [[ -e "$marker" ]] && had_marker=1
-    bash setup.sh --only agent-skills --dry-run --yes --no-color >/dev/null 2>&1
+    bash setup.sh --only omnigraph-client --dry-run --yes --no-color >/dev/null 2>&1
     now_marker=0; [[ -e "$marker" ]] && now_marker=1
     assert_eq "$now_marker" "$had_marker"
+fi
+
+if it "the retired agent-skills step plans no work of its own"; then
+    # A7b: agent-skills' duties moved to agent-skill-links, omnigraph-client and
+    # the mcp-* components. The retired id must still run (its postInstall is
+    # the retirement notice) and must plan nothing: these three phrases are the
+    # work it used to do, and none of them belongs to the other components this
+    # selection pulls in (git, nodejs).
+    out="$(bash setup.sh --only agent-skills --dry-run --yes --no-color 2>&1)"; rc=$?
+    problems=""
+    (( rc == 0 )) || problems+="[exit $rc] "
+    [[ "$out" == *"agent-skills is retired"* ]] || problems+="[no retirement notice in the run] "
+    for gone in 'would link skills from' 'would approve project MCP server' \
+                'omnigraph image, network and token' 'would write'; do
+        if grep -qF -- "$gone" <<<"$out"; then problems+="[$gone is still planned] "; fi
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "the ai-coding plan carries the agent-skill-links and omnigraph-client homes"; then
+    # The machine this suite runs on has the retired clone or does not; either
+    # way the plan must never send anyone to fetch it, and the two components
+    # that inherited agent-skills' work must both be in the profile that used to
+    # carry agent-skills alone.
+    out="$(bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"; rc=$?
+    problems=""
+    (( rc == 0 )) || problems+="[exit $rc] "
+    for want in 'agent-skill-links' 'omnigraph-client'; do
+        grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$out" || problems+="[$want is not in the ai-coding plan] "
+    done
+    grep -qiE 'git clone' <<<"$out" && problems+="[a clone step is planned] "
+    # The retired clone is never a skills source any more: the checkout is.
+    grep -qE 'link skills from .*(Documents|\.autoos)/.*agent-skills' <<<"$out" \
+        && problems+="[the retired clone is still named as the skills source] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "two consecutive dry runs produce the same plan"; then

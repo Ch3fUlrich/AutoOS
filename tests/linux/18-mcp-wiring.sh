@@ -207,9 +207,10 @@ print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH
 fi
 
 # The omnigraph_url answer decides where every client's bridge points.
-# install_agent_skills honoured it; the Zed writer hardcoded localhost:8080, so
+# The omnigraph step honoured it; the Zed writer hardcoded localhost:8080, so
 # a machine with a remote omnigraph got Zed pointed at nothing. One helper,
-# omnigraph_base_url, now derives it for both.
+# omnigraph_base_url, now derives it for both (SPEC-OMNI A7b: the omnigraph half
+# of the retired agent-skills step is install_omnigraph_client's).
 # zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
 zed_omni_url() {
     local scratch out
@@ -268,8 +269,8 @@ if it "zed: the omnigraph entry defaults to localhost:8080"; then
     helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
     [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
     [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
-        || { ok=0; echo "the helper is not called by both install_agent_skills and route_zed_to_proxy" >&2; }
-    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_agent_skills"; fi
+        || { ok=0; echo "the helper is not called by both install_omnigraph_client and route_zed_to_proxy" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_omnigraph_client"; fi
 fi
 
 if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
@@ -367,30 +368,45 @@ if it "the omnigraph env file is announced, not written, in a dry run"; then
     assert_eq "$left|$([[ "$out" == *"would write"* ]] && echo announced)" "0|announced"
 fi
 
+# omni_client_spec <tmp> [url]: run install_omnigraph_client with the client's
+# own write steps stubbed and print the spec it hands Antigravity on stdout.
+# A7b: the Antigravity omnigraph entry is the omnigraph-client component's work —
+# it carries the resolved URL and token, so it lives after that component's gates.
+# mcp_package is stubbed so no scratch AUTOOS_ROOT needs the harness catalog, and
+# every filesystem-writing helper is stubbed so the real checkout is never touched.
+omni_client_spec() {
+    local tmp="$1" url="${2:-https://graph.example.invalid}"
+    (
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        OMNIGRAPH_TOKEN="dummy-token-1234"
+        unset OMNIGRAPH_GRAPH_ID
+        AUTOOS_ANSWERS=([omnigraph_url]="$url")
+        mkdir -p "$AUTOOS_ROOT"
+        write_omnigraph_env() { :; }
+        omnigraph_install_bridge() { :; }
+        omnigraph_install_wrapper() { :; }
+        omnigraph_retire_rc_token_lines() { :; }
+        report_stale_homelab_mcp_entry() { :; }
+        enable_project_mcp_server() { :; }
+        mcp_has_server() { return 1; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s\n' "$2" >&3; }
+        install_omnigraph_client >/dev/null 2>&1
+    ) 3>&1
+}
+
 if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)"; then
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/Documents/code/agent-skills"
-    spec="$( (
-        SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
-        unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }; install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }; install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
-        write_omnigraph_env() { :; }
-        register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s\n' "$2" >&3; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        install_agent_skills >/dev/null 2>&1
-    ) 3>&1 )"
+    spec="$(omni_client_spec "$tmp")"
     rm -rf "$tmp"
     got="$(printf '%s' "$spec" | python3 -c "import json,sys;e=json.load(sys.stdin)['env'];print(e.get('OMNIGRAPH_GRAPH_ID'),'OMNIGRAPH_TOKEN' in e)" 2>&1)"
-    assert_eq "$got" "autoos False"
+    assert_eq "$got" "autoos True"
 fi
 
 # The omnigraph_url answer is user input. install_agent_skills used to splice it
 # into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
-# Python code in the answer broke the literal or ran (`' + os.system(...) + '`).
+# Python code in the answer broke the literal or ran (`' + os.system(...)`).
 # It travels in the environment now (like the Zed writer's OMNI_BASE) and must
 # arrive byte for byte. Every marker file below is what a payload would create.
 if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
@@ -405,22 +421,9 @@ if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; 
     i=0
     for url in "${payloads[@]}"; do
         i=$((i + 1))
-        (
-            # AUTOOS_ROOT is an empty scratch dir: the repo's own .claude/skills
-            # links are never touched.
-            SYS_HOME="$scratch/home$i"; AUTOOS_ROOT="$scratch/root$i"; AUTOOS_DRY_RUN=0
-            mkdir -p "$SYS_HOME/Documents/code/agent-skills" "$AUTOOS_ROOT"
-            unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_TOKEN
-            AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$url"
-            clone_or_update() { :; }
-            install_mcp_graphify() { :; }; install_mcp_serena() { :; }
-            install_mcp_playwright() { :; }; install_mcp_context7() { :; }
-            mcp_has_server() { return 1; }; enable_project_mcp_server() { :; }
-            write_omnigraph_env() { :; }
-            register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s' "$2" >"$scratch/spec-$i.json"; return 0; }
-            omnigraph_readiness() { return 0; }
-            install_agent_skills >/dev/null 2>&1
-        )
+        # AUTOOS_ROOT is an empty scratch dir inside the sandbox: neither the real
+        # checkout's .claude/skills nor its settings.local.json can be reached.
+        omni_client_spec "$scratch/home$i" "$url" >"$scratch/spec-$i.json"
         if [[ ! -s "$scratch/spec-$i.json" ]]; then
             ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2
         else
@@ -472,134 +475,196 @@ if it "register_antigravity_mcp_server is idempotent and creates backup"; then
     else fail "backup was not created before edit"; fi
 fi
 
-if it "agent-skills links skills to Antigravity and Claude Code"; then
-    tmp="$(mktemp -d)"
-    # Create skill in repo's .agents/skills (new location)
-    mkdir -p "$tmp/.agents/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/.agents/skills/test-skill/SKILL.md"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        install_agent_skills >/dev/null 2>&1
-    )
-    ok=1
-    [[ -e "$tmp/.gemini/config/skills/test-skill/SKILL.md" ]] || ok=0
-    [[ -e "$tmp/.claude/skills/test-skill/SKILL.md" ]] || ok=0
-    rm -rf "$tmp"
-    if (( ok )); then pass; else fail "skills were not linked to Antigravity or Claude Code"; fi
-fi
+# The skills-link cases (Antigravity, Claude Code, project .claude/skills,
+# ~/.agents/skills, ~/.codex/skills) all live together in the "skill targets"
+# section below, where the scratch repo helper is defined — A7b moved that whole
+# duty out of the retired agent-skills step into install_agent_skill_links, and
+# one writer deserves one block.
 
-if it "repo skills link into project .claude/skills and win as skills source"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/.agents/skills/demo-skill"
-    printf -- '---\nname: demo-skill\ndescription: demo\n---\n' >"$tmp/.agents/skills/demo-skill/SKILL.md"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills/old-skill"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        install_agent_skills >/dev/null 2>&1
-    )
-    ok=1
-    [[ -e "$tmp/.claude/skills/demo-skill/SKILL.md" ]] || ok=0
-    [[ "$(AUTOOS_ROOT="$tmp" autoos_skills_source)" == "$tmp/.agents/skills" ]] || ok=0
-    rm -rf "$tmp"
-    if (( ok )); then pass; else fail "vendored skills did not win or were not linked"; fi
-fi
-
-if it "install_agent_skills records a refused project-server approval for the summary"; then
+if it "omnigraph-client records a refused project-server approval for the summary"; then
     # A post-install step that refuses to touch a user's file (no backup, no
     # write) must still be counted: setup.sh folds autoos_record_failure ids
     # into its failed count and exit code, so the summary cannot read "done"
     # over a change that never happened. Both project servers approved here map
     # to one id, and the recorder is idempotent.
     tmp="$(mktemp -d)"; ok=1
-    mkdir -p "$tmp/Documents/code/agent-skills/.claude" "$tmp/root/.claude"
-    printf '{}\n' >"$tmp/Documents/code/agent-skills/.mcp.json"
-    printf '{}\n' >"$tmp/root/.mcp.json"
-    printf '{"theme":"mine"}\n' >"$tmp/Documents/code/agent-skills/.claude/settings.local.json"
-    printf '{"theme":"mine"}\n' >"$tmp/root/.claude/settings.local.json"
+    mkdir -p "$tmp/repo/.claude"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    printf '{"theme":"mine"}\n' >"$tmp/repo/.claude/settings.local.json"
     out="$( (
-        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }; install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }; install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/repo"; AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        OMNIGRAPH_TOKEN="dummy-token-1234"
+        AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
         write_omnigraph_env() { :; }
+        omnigraph_install_bridge() { :; }
+        omnigraph_install_wrapper() { :; }
+        omnigraph_retire_rc_token_lines() { :; }
+        report_stale_homelab_mcp_entry() { :; }
         register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
+        mcp_has_server() { return 1; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        has_cmd() { [[ "$1" == npm ]]; }
         backup_file() { return 1; }
-        install_agent_skills >/dev/null 2>&1
+        install_omnigraph_client >/dev/null 2>&1
         printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
     ) 2>&1 )"
-    [[ "$out" == *"recorded: agent-skills"* ]] || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
-    [[ "$out" != *"agent-skills agent-skills"* ]] || { ok=0; echo "the id was recorded twice" >&2; }
+    [[ "$out" == *"recorded: omnigraph-client"* ]] || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
+    [[ "$out" != *"omnigraph-client omnigraph-client"* ]] || { ok=0; echo "the id was recorded twice" >&2; }
     rm -rf "$tmp"
-    if (( ok )); then pass; else fail "install_agent_skills did not record a refused project-server approval"; fi
+    if (( ok )); then pass; else fail "install_omnigraph_client did not record a refused project-server approval"; fi
 fi
 
-# install_agent_skills calls four catalog postInstalls directly, and
-# route_detected_clis_to_gateway calls Claude Code's — bare, those non-zero
-# returns reached setup.sh's `set -euo pipefail` and ended the run. Each now
-# records its own component id instead, so the summary and the exit code see it
-# while the step finishes its remaining work. The Playwright double below records
-# its id itself the way the real function does, so this also proves the recorder
-# keeps one line for one broken wiring.
-if it "install_agent_skills: a failing mcp sub-step is recorded for the summary and the step carries on"; then
-    tmp="$(mktemp -d)"; ok=1
-    mkdir -p "$tmp/Documents/code/agent-skills" "$tmp/root"
-    out="$( (
-        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/root"; AUTOOS_DRY_RUN=0
+# omni_client_run <tmp>: install_omnigraph_client on a scratch home, with every
+# filesystem-writing helper stubbed to a marker file in <tmp>/log so the caller
+# sees the DECISIONS, not the bytes. OMNI_HAS_USER_SCOPE=0 makes Claude Code
+# report an omnigraph entry at user scope; OMNI_URL='' answers the prompt blank.
+omni_client_run() {
+    local tmp="$1"
+    (
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
         AUTOOS_EXTRA_FAILURES=()
-        clone_or_update() { :; }
-        write_omnigraph_env() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        mcp_has_server() { : >"$tmp/mark_later"; return 1; }
-        install_mcp_graphify() { : >"$tmp/mark_graphify"; return 0; }
-        install_mcp_serena() { : >"$tmp/mark_serena"; return 1; }
-        install_mcp_playwright() { : >"$tmp/mark_playwright"; autoos_record_failure mcp-playwright; return 1; }
-        install_mcp_context7() { : >"$tmp/mark_context7"; return 1; }
-        install_agent_skills >/dev/null 2>&1
-        step_rc=$?
-        printf 'agent_skills_rc=%s\n' "$step_rc"
-        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
-    ) 2>&1 )"
-    for mark in serena playwright context7 later; do
-        [[ -e "$tmp/mark_$mark" ]] \
-            || { ok=0; echo "the step never reached mark_$mark (a failing sub-step stopped the run)" >&2; }
-    done
-    [[ "$out" == *"recorded:"*"mcp-serena"* && "$out" == *"recorded:"*"mcp-playwright"* && "$out" == *"recorded:"*"mcp-context7"* ]] \
-        || { ok=0; echo "a failing sub-step was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
-    [[ "$(printf '%s\n' "$out" | grep '^recorded:' | grep -o 'mcp-playwright' | wc -l | tr -d ' ')" == "1" ]] \
-        || { ok=0; echo "mcp-playwright was counted twice: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
-    [[ "$out" == *"agent_skills_rc=0"* ]] \
-        || { ok=0; echo "install_agent_skills propagated a non-zero code (it must not: the fold reports it)" >&2; }
+        OMNIGRAPH_TOKEN="dummy-token-1234"
+        AUTOOS_ANSWERS=([omnigraph_url]="${OMNI_URL-https://graph.example.invalid}")
+        mkdir -p "$tmp/repo" "$tmp/log"
+        write_omnigraph_env() { printf 'env %s %s\n' "$1" "$2" >>"$tmp/log/env"; }
+        omnigraph_install_bridge() { : >>"$tmp/log/bridge"; }
+        omnigraph_install_wrapper() { : >>"$tmp/log/wrapper"; }
+        omnigraph_retire_rc_token_lines() { : >>"$tmp/log/retire"; }
+        report_stale_homelab_mcp_entry() { : >>"$tmp/log/homelab"; }
+        register_mcp_server() { printf 'claude %s %s\n' "$1" "$2" >>"$tmp/log/claude"; }
+        register_antigravity_mcp_server() { printf 'agy %s\n' "$1" >>"$tmp/log/agy"; }
+        enable_project_mcp_server() { printf 'project %s %s\n' "$1" "$2" >>"$tmp/log/project"; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        mcp_has_server() { return "${OMNI_HAS_USER_SCOPE:-1}"; }
+        install_omnigraph_client 2>&1
+        printf 'state=%s recorded=[%s]\n' "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )
+}
+
+if it "omnigraph-client approves both project servers of this checkout"; then
+    # A tracked .mcp.json cannot approve itself, and the repo the plan pins
+    # servers for is the checkout being installed, not a clone elsewhere.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
+    out="$(omni_client_run "$tmp")"
+    problems=""
+    [[ "$(cat "$tmp/log/project" 2>/dev/null | tr '\n' '|')" == "project $tmp/repo omnigraph|project $tmp/repo autoos-agent|" ]] \
+        || problems+="[approved servers: $(cat "$tmp/log/project" 2>/dev/null || echo none)] "
+    [[ ! -e "$tmp/repo/.claude/settings.local.json" ]] || problems+="[the scratch repo was written to by the real helper] "
     rm -rf "$tmp"
-    if (( ok )); then pass; else fail "a failing mcp sub-step did not become a recorded failure"; fi
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client names a missing .mcp.json instead of approving nothing"; then
+    tmp="$(mktemp -d)"
+    out="$(OMNI_URL='https://graph.example.invalid' omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *".mcp.json"* ]] || problems+="[nothing named the missing file: $(tail -n 3 <<<"$out")] "
+    [[ ! -e "$tmp/log/project" ]] || problems+="[a server was approved with no .mcp.json to pin it in] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client only warns about a user-scope omnigraph, it never registers one"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    out="$(OMNI_HAS_USER_SCOPE=0 omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *"user-scope"* && "$out" == *"claude mcp remove omnigraph"* ]] \
+        || problems+="[the shadowing entry was not called out: $(tail -n 4 <<<"$out")] "
+    [[ ! -e "$tmp/log/claude" ]] || problems+="[a user-scope omnigraph was registered anyway] "
+    [[ "$out" != *"recorded: omnigraph-client"* ]] || problems+="[naming a user's own entry is not a failure] "
+    # And with no such entry, nothing is complained about.
+    out="$(omni_client_run "$tmp")"
+    [[ "$out" == *"user-scope"* ]] && problems+="[warned about a user-scope entry that does not exist] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client reports the retired homelab entry as part of the wiring"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    omni_client_run "$tmp" >/dev/null
+    problems=""
+    [[ -e "$tmp/log/homelab" ]] || problems+="[report_stale_homelab_mcp_entry never ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client: with no server configured it still reports but writes no bridge config"; then
+    # The four repo-scope duties (approve the project servers, name a shadowing
+    # user entry, report the retired homelab one) do not depend on a URL, so a
+    # machine that skipped the prompt still gets them. The entry that CARRIES
+    # the URL and token stays behind the gate: A3's "nothing configured, write
+    # nothing" invariant, which also keeps a guessed host out of a public repo.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    out="$(OMNI_URL='' omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *"state=skipped"* ]] || problems+="[no server configured, yet the step reported work: $(tail -n 3 <<<"$out")] "
+    [[ -e "$tmp/log/project" ]] || problems+="[the project servers were not approved on a blank-URL machine] "
+    [[ -e "$tmp/log/homelab" ]] || problems+="[the retired entry was not reported on a blank-URL machine] "
+    for absent in env agy bridge wrapper; do
+        [[ ! -e "$tmp/log/$absent" ]] || problems+="[a $absent artifact was written with no server configured] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# The four mcp-* servers are catalog postInstalls in their own right (each with
+# its own profile and requires), so nothing calls them from another component —
+# a second caller would double-run them and record one broken wiring twice.
+# run_post_install contains a non-zero step, so each keeps failing on its own.
+if it "no installer calls the mcp-* postInstalls from another component"; then
+    ok=1
+    for fn in install_agent_skills install_agent_skill_links install_omnigraph_client; do
+        body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+        for sub in install_mcp_graphify install_mcp_serena install_mcp_playwright install_mcp_context7; do
+            if grep -q "^[[:space:]]*$sub" <<<"$body"; then
+                ok=0; echo "$fn calls $sub (it belongs to the $sub component)" >&2
+            fi
+        done
+    done
+    if (( ok )); then pass; else fail "an mcp-* postInstall is still called from another component"; fi
+fi
+
+if it "agent-skills is retired: its step says where the work went and does nothing else"; then
+    tmp="$(mktemp -d)"
+    # A repo that *has* skills to link: were the retired step still doing the
+    # work, its output would show up in the checks below.
+    mkdir -p "$tmp/repo/.agents/skills/alpha"
+    printf -- '---\nname: alpha\ndescription: demo\n---\n' >"$tmp/repo/.agents/skills/alpha/SKILL.md"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
+    mkdir -p "$tmp/home"
+    out="$( (
+        SYS_HOME="$tmp/home"; AUTOOS_ROOT="$tmp/repo"; AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        install_agent_skills 2>&1
+        printf 'rc=%s state=%s recorded=[%s]\n' "$?" "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) )"
+    problems=""
+    [[ "$out" == *"agent-skills is retired"* ]] || problems+="[nothing named the retirement: $(tail -n 3 <<<"$out")] "
+    for home in agent-skill-links omnigraph-client 'mcp-*'; do
+        [[ "$out" == *"$home"* ]] || problems+="[the retirement line does not name $home] "
+    done
+    [[ "$out" == *"rc=0"* ]] || problems+="[the retired step returned non-zero: $out] "
+    [[ "$out" == *"state=skipped"* ]] || problems+="[the retired step did not report skipped] "
+    # Nothing left to do means nothing on disk: no client dir, no recorded failure.
+    [[ ! -e "$tmp/home/.gemini" ]] || problems+="[the retired step still links into ~/.gemini] "
+    [[ ! -e "$tmp/home/.claude" ]] || problems+="[the retired step still links into ~/.claude] "
+    [[ ! -e "$tmp/home/.agents" ]] || problems+="[the retired step still links into ~/.agents] "
+    [[ "$out" == *"recorded=[]"* ]] || problems+="[the retired step recorded a failure: $out] "
+    [[ ! -e "$tmp/repo/.claude/skills" ]] || problems+="[the retired step still wrote the repo's .claude/skills] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded for the summary"; then
@@ -967,48 +1032,28 @@ if it "a refused agent harness records OpenCode under the id being installed, on
     fi
 fi
 
-if it "custom_is_installed detects agent-skills via .agents/skills + .mcp.json (new location)"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/.agents/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/.agents/skills/test-skill/SKILL.md"
-    cp "$tmp/../../.mcp.json" "$tmp/.mcp.json" 2>/dev/null || printf '{"mcpServers":{}}\n' >"$tmp/.mcp.json"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"
-        custom_is_installed agent-skills
-    )
-    rc_new=$?
+if it "custom_is_installed: the retired agent-skills id reports done whatever is on disk"; then
+    # A7b: agent-skills has no work left, so "installed" is always true — it is
+    # the answer to "is there anything this component would write?". Answering
+    # false instead would have setup.sh report the retired id as *installed* on
+    # every run, and the plan would claim work that never happened. The skills
+    # links now have a gate of their own (the agent-skill-links cases below).
+    tmp="$(mktemp -d)"; ok=1
+    probe() { ( SYS_HOME="$1" AUTOOS_ROOT="$2" custom_is_installed agent-skills ); }
+    # Nothing on the machine at all.
+    probe "$tmp/empty" "$tmp/empty" || { ok=0; echo "an empty machine was not detected" >&2; }
+    # A checkout with vendored skills and .mcp.json (the old new location).
+    mkdir -p "$tmp/repo/.agents/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/repo/.agents/skills/test-skill/SKILL.md"
+    printf '{"mcpServers":{}}\n' >"$tmp/repo/.mcp.json"
+    probe "$tmp/home1" "$tmp/repo" || { ok=0; echo "a vendored checkout was not detected" >&2; }
+    # The retired external clone (the old fallback location).
+    mkdir -p "$tmp/home2/Documents/code/agent-skills/skills/test-skill"
+    printf -- '---\nname: test-skill\ndescription: test\n---\n' \
+        >"$tmp/home2/Documents/code/agent-skills/skills/test-skill/SKILL.md"
+    probe "$tmp/home2" "$tmp/nowhere" || { ok=0; echo "the retired-clone machine was not detected" >&2; }
     rm -rf "$tmp"
-    if [[ $rc_new -eq 0 ]]; then pass
-    else fail "rc_new=$rc_new (new location not detected)"; fi
-fi
-
-if it "custom_is_installed falls back to old clone path for agent-skills"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/Documents/code/agent-skills/skills/test-skill/SKILL.md"
-    (
-        SYS_HOME="$tmp"
-        # No AUTOOS_ROOT set, no .agents/skills in home
-        custom_is_installed agent-skills
-    )
-    rc_old=$?
-    rm -rf "$tmp"
-    if [[ $rc_old -eq 0 ]]; then pass
-    else fail "rc_old=$rc_old (old clone fallback not detected)"; fi
-fi
-
-if it "custom_is_installed does not detect agent-skills when neither location exists"; then
-    tmp="$(mktemp -d)"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_ROOT="$tmp"  # Point to temp dir without .agents/skills
-        custom_is_installed agent-skills
-    )
-    rc_none=$?
-    rm -rf "$tmp"
-    if [[ $rc_none -ne 0 ]]; then pass
-    else fail "rc_none=$rc_none (should not detect when neither location exists)"; fi
+    if (( ok )); then pass; else fail "the retired id does not always report done"; fi
 fi
 
 if it "custom_is_installed detects a populated native CAO home"; then
@@ -1135,133 +1180,107 @@ if it "setup_wsl_agent_home does not falsely relocate a CAO home whose path cont
     if (( ok )); then pass; else fail "a single quote in the CAO path caused a false relocation"; fi
 fi
 
-# ─── User-scope skill targets: ~/.agents/skills and ~/.codex/skills ──
+# ─── Skill targets: the agent-skill-links component ─────────────────────────
+# A7b moved this duty out of the retired agent-skills step: linking this
+# checkout's .agents/skills into every client's skills directory is its own
+# component, install_agent_skill_links. One hermetic runner for the whole block —
+# scratch SYS_HOME and AUTOOS_ROOT, codex present or absent on request, and the
+# repo's own keys file never consulted.
+# asl_run <home> <repo> [dry] [codex] -> the step's output plus its state line.
+asl_run() {
+    local home="$1" repo="$2" dry="${3:-0}" codex="${4:-0}"
+    (
+        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN="$dry"
+        AUTOOS_KEYS_FILE="$home/no-keys.yml"
+        AUTOOS_EXTRA_FAILURES=()
+        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
+        install_agent_skill_links 2>&1
+        printf 'state=%s recorded=[%s]\n' "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )
+}
 
-# oh_skill_repo creates a scratch AUTOOS_ROOT with two skills.
-# Reused from the openhands tests above.
+# asl_gate <home> <repo> [codex]: detection's verdict for the id. Detection is
+# the gate setup.sh runs, so every case that cares about "already in place"
+# asks it, not the writer's private helper.
+asl_gate() {
+    local home="$1" repo="$2" codex="${3:-0}"
+    (
+        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN=0
+        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
+        custom_is_installed agent-skill-links
+    )
+}
 
-if it "install_agent_skills does NOT clone agent-skills repo (no clone_or_update)"; then
+if it "agent-skill-links: does NOT clone the retired agent-skills repo"; then
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    # Create old clone to verify it's left alone
-    mkdir -p "$tmp/Documents/code/agent-skills/skills/old-skill"
-    printf 'old clone\n' >"$tmp/Documents/code/agent-skills/skills/old-skill/README.md"
+    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
+    printf 'old clone\n' >"$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md"
     clone_flag="$tmp/clone_flag"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
+    out="$( (
+        SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
         clone_or_update() { echo called >"$clone_flag"; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills >/dev/null 2>&1
-    )
+        install_agent_skill_links 2>&1
+    ) )"
     problems=""
-    [[ ! -f "$clone_flag" ]] || problems+="[clone_or_update was called (should not clone)] "
-    # Old clone should be left alone
-    [[ -f "$tmp/Documents/code/agent-skills/skills/old-skill/README.md" ]] || problems+="[old clone was modified] "
+    [[ ! -f "$clone_flag" ]] || problems+="[clone_or_update was called (nothing may clone)] "
+    [[ -f "$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md" ]] \
+        || problems+="[the retired clone was modified] "
+    # Proof the step really ran (and from the checkout, not a clone): a step that
+    # does not exist fails no assertion above.
+    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] \
+        || problems+="[nothing was linked, so nothing was proven about cloning]"
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills uses repo's .agents/skills and .mcp.json (not clone)"; then
+if it "agent-skill-links: links every skill into Antigravity, Claude Code, the project dir and ~/.agents"; then
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    # Ensure repo has .mcp.json
-    cp "$tmp/../../.mcp.json" "$tmp/repo/.mcp.json" 2>/dev/null || printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
-    enabled_flag="$tmp/enabled_servers"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { printf '%s\n' "$2" >>"$enabled_flag"; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills >/dev/null 2>&1
-    )
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
     problems=""
-    # Should enable omnigraph and autoos-agent from repo's .mcp.json
-    grep -q '^omnigraph$' "$enabled_flag" 2>/dev/null || problems+="[omnigraph not enabled from repo .mcp.json] "
-    grep -q '^autoos-agent$' "$enabled_flag" 2>/dev/null || problems+="[autoos-agent not enabled from repo .mcp.json] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "install_agent_skills links repo skills into ~/.agents/skills"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }  # no codex installed
-        install_agent_skills >/dev/null 2>&1
-    )
-    problems=""
-    dest="$tmp/.agents/skills"
-    [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "
+    for dest in "$tmp/home/.gemini/config/skills" "$tmp/home/.claude/skills" "$tmp/repo/.claude/skills"; do
+        for n in alpha beta; do
+            [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through $dest] "
+        done
+    done
+    dest="$tmp/home/.agents/skills"
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
     for n in alpha beta; do
         [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
-            || problems+="[$n not linked into $dest] "
+            || problems+="[$n not linked into $dest (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
         [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
     done
-    [[ ! -e "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "
-    [[ ! -d "$tmp/.codex/skills" ]] || problems+="[.codex/skills was created even though codex is not present] "
+    [[ ! -e "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked into $dest] "
+    [[ ! -d "$tmp/home/.codex/skills" ]] || problems+="[.codex/skills was created even though codex is not present] "
+    [[ "$out" == *"state="* ]] || problems+="[the step printed no state line: $(tail -n 2 <<<"$out")] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills links into ~/.codex/skills when codex is installed"; then
+if it "agent-skill-links: the vendored .agents/skills wins over the retired clone"; then
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { [[ "$1" == "codex" ]] && return 0; return 1; }
-        install_agent_skills >/dev/null 2>&1
-    )
+    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
+    printf -- '---\nname: old-skill\ndescription: demo\n---\n' \
+        >"$tmp/home/Documents/code/agent-skills/skills/old-skill/SKILL.md"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
     problems=""
-    dest="$tmp/.codex/skills"
-    [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "
+    [[ -f "$tmp/home/.claude/skills/alpha/SKILL.md" ]] || problems+="[the repo skills did not link] "
+    [[ ! -e "$tmp/home/.claude/skills/old-skill" ]] || problems+="[the retired clone's skill was linked too] "
+    [[ "$(AUTOOS_ROOT="$tmp/repo" autoos_skills_source)" == "$tmp/repo/.agents/skills" ]] \
+        || problems+="[autoos_skills_source did not name the vendored dir] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: links into ~/.codex/skills when codex is installed"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
+    problems=""
+    dest="$tmp/home/.codex/skills"
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
     for n in alpha beta; do
         [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
             || problems+="[$n not linked into $dest] "
@@ -1271,136 +1290,222 @@ if it "install_agent_skills links into ~/.codex/skills when codex is installed";
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills creates no ~/.codex when codex is absent"; then
-    # Creating a directory for a tool the machine does not have is worse
-    # than doing nothing: without ~/.codex and without codex on PATH the
-    # installer must leave ~/.codex alone (only ~/.agents/skills is shared).
+if it "agent-skill-links: creates no ~/.codex when codex is absent"; then
+    # Creating a directory for a tool the machine does not have is worse than
+    # doing nothing: ~/.codex is only touched when it already exists or codex
+    # is on PATH (and the gate must not count a dest it never writes).
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills >/dev/null 2>&1
-    )
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 0)"
     problems=""
-    [[ -e "$tmp/.codex" ]] && problems+="[~/.codex was created without codex] "
-    [[ -L "$tmp/.agents/skills/alpha" ]] || problems+="[~/.agents/skills not linked, so the run did not reach the step] "
+    [[ -e "$tmp/home/.codex" ]] && problems+="[~/.codex was created without codex] "
+    [[ -L "$tmp/home/.agents/skills/alpha" ]] || problems+="[~/.agents/skills not linked, so the run did not reach the step] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills: second run reports skipped for ~/.agents/skills"; then
+if it "agent-skill-links: second run reports skipped and touches nothing"; then
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills"
-    run_install() {
-        (
-            SYS_HOME="$tmp"
-            AUTOOS_DRY_RUN=0
-            AUTOOS_ROOT="$tmp/repo"
-            clone_or_update() { :; }
-            install_mcp_graphify() { :; }
-            install_mcp_serena() { :; }
-            install_mcp_playwright() { :; }
-            install_mcp_context7() { :; }
-            mcp_has_server() { return 1; }
-            enable_project_mcp_server() { :; }
-            register_antigravity_mcp_server() { :; }
-            omnigraph_readiness() { return 0; }
-            answer() { echo ""; }
-            has_cmd() { return 1; }
-            install_agent_skills 2>&1
-        )
-    }
-    run_install >/dev/null
-    dest="$tmp/.agents/skills"
-    before="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
-    out="$(run_install)"
-    after="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    mkdir -p "$tmp/home/.codex"
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    dest="$tmp/home/.agents/skills"
+    before="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
+    problems=""
+    # Detection is asked with the same codex answer as the run it gates.
+    asl_gate "$tmp/home" "$tmp/repo" 1 || problems+="[detection still says not installed] "
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
+    after="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
     problems=""
     [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed] "
-    # Match skill-name-specific lines, not the "Agent skills linked to Antigravity" line
     grep -Eq '(^|[^[:alnum:]])(linked|repointed) (alpha|beta)\b' <<<"$out" && problems+="[second run printed a linked/repointed line] "
-    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
+    grep -qi 'skills linked' <<<"$out" && problems+="[second run claimed to link skills: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"state=skipped"* ]] || problems+="[second run did not report skipped: $(tail -n 3 <<<"$out")] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills: keeps a user's own skill in ~/.agents/skills"; then
+if it "agent-skill-links: keeps a user's own skill in ~/.agents/skills"; then
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills" "$tmp/.agents/skills/alpha" "$tmp/.agents/skills/mine"
-    printf 'my own alpha\n' >"$tmp/.agents/skills/alpha/SKILL.md"
-    printf 'my own skill\n'  >"$tmp/.agents/skills/mine/SKILL.md"
-    snap() { ( cd "$tmp/.agents/skills" && find alpha mine -type f -exec sha256sum {} + | sort; ls -A ) ; }
+    mkdir -p "$tmp/home/.agents/skills/alpha" "$tmp/home/.agents/skills/mine"
+    printf 'my own alpha\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$tmp/home/.agents/skills/mine/SKILL.md"
+    snap() { ( cd "$tmp/home/.agents/skills" && find alpha mine -type f -exec sha256sum {} + | sort; ls -A ); }
     before="$(snap)"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills >/dev/null 2>&1
-    )
+    asl_run "$tmp/home" "$tmp/repo" >/dev/null
     after="$(snap)"
     problems=""
-    [[ -d "$tmp/.agents/skills/alpha" && ! -L "$tmp/.agents/skills/alpha" ]] \
+    [[ -d "$tmp/home/.agents/skills/alpha" && ! -L "$tmp/home/.agents/skills/alpha" ]] \
         || problems+="[the user's own alpha is no longer a real directory] "
-    [[ "$(readlink "$tmp/.agents/skills/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] \
+    [[ "$(readlink "$tmp/home/.agents/skills/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] \
         || problems+="[beta was not linked next to the user's skills] "
     [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed] "
+    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a user's own dir is counted as missing work]"
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills: dry-run links nothing into ~/.agents/skills"; then
+if it "agent-skill-links: a whole-directory skills symlink of yours is settled, not missing work"; then
+    # AGENTS.md 8: a whole-dir symlink from the old layout is left with ONE
+    # warning. Writing through it would put our links inside a directory of yours,
+    # and counting it as missing work would make every later run report the
+    # component as installed while it in fact did nothing.
     tmp="$(mktemp -d)"
     oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/Documents/code/agent-skills/skills"
-    (
-        SYS_HOME="$tmp"
-        AUTOOS_DRY_RUN=1
-        AUTOOS_ROOT="$tmp/repo"
-        clone_or_update() { :; }
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills 2>&1
-    ) >/dev/null
+    for n in alpha beta; do
+        mkdir -p "$tmp/yours/$n"
+        printf -- '---\nname: %s\ndescription: mine\n---\n' "$n" >"$tmp/yours/$n/SKILL.md"
+    done
+    mkdir -p "$tmp/home/.agents"
+    ln -s "$tmp/yours" "$tmp/home/.agents/skills"
+    before="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
+    after="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
     problems=""
-    [[ ! -e "$tmp/.agents/skills" ]] || problems+="[dry run created $tmp/.agents/skills] "
-    [[ ! -e "$tmp/.codex/skills" ]] || problems+="[dry run created $tmp/.codex/skills] "
+    [[ "$before" == "$after" ]] || problems+="[AutoOS wrote through the user's whole-directory symlink] "
+    [[ "$out" == *"is a symlink"* ]] || problems+="[nothing warned about it: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"recorded=[]"* ]] || problems+="[a directory of yours being kept is recorded as a failure] "
+    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a destination that is yours counts as missing work] "
+    # One refused directory is not a reason to stop the other clients.
+    [[ -L "$tmp/home/.claude/skills/alpha" ]] || problems+="[the other client dirs were not linked] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: a dry run links nothing and says so"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    out="$(asl_run "$tmp/home" "$tmp/repo" 1 1)"
+    problems=""
+    [[ ! -e "$tmp/home/.gemini" ]] || problems+="[dry run created $tmp/home/.gemini] "
+    [[ ! -e "$tmp/home/.claude" ]] || problems+="[dry run created $tmp/home/.claude] "
+    [[ ! -e "$tmp/home/.agents" ]] || problems+="[dry run created $tmp/home/.agents] "
+    [[ ! -e "$tmp/home/.codex/skills" ]] || problems+="[dry run created $tmp/home/.codex/skills] "
+    [[ ! -e "$tmp/repo/.claude/skills" ]] || problems+="[dry run wrote into the checkout] "
+    [[ "$out" == *"would link"* ]] || problems+="[the dry run made no announcement: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"state=skipped"* ]] || problems+="[a dry run reported installed work: $(tail -n 3 <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: detection says installed only when every client dir is filled"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    ok=1
+    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "an empty machine was detected as installed" >&2; }
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "a fully linked machine was not detected" >&2; }
+    # A missing skill in ONE client dir is still missing work: that client would
+    # see no skills at all.
+    rm -f "$tmp/home/.claude/skills/beta"
+    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "a client dir missing a skill was detected as installed" >&2; }
+    ln -sfn "$tmp/repo/.agents/skills/beta" "$tmp/home/.claude/skills/beta"
+    # A dest that is not ours at all (the user's own directory) is settled work.
+    rm -rf "$tmp/home/.agents/skills/alpha"
+    mkdir -p "$tmp/home/.agents/skills/alpha"
+    printf -- '---\nname: alpha\ndescription: mine\n---\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
+    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "the user's own skill dir counted as missing work" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "detection disagrees with what the linker writes"; fi
+fi
+
+if it "agent-skill-links: a moved checkout leaves a dangling link and detection notices"; then
+    # The repair rule lives in link_skill_dirs (repoint only our own dangling
+    # link). Detection has to reach it: a gate that calls a dangling link
+    # "installed" would skip the moved-checkout repair forever.
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    mv "$tmp/repo" "$tmp/repo-moved"
+    problems=""
+    asl_gate "$tmp/home" "$tmp/repo-moved" 1 && problems+="[a dangling AutoOS link was detected as installed] "
+    out="$(asl_run "$tmp/home" "$tmp/repo-moved" 0 1)"
+    problems=""
+    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.agents link was not repointed] "
+    [[ -f "$tmp/home/.gemini/config/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.gemini link was not repointed] "
+    [[ "$out" == *"repointed"* ]] || problems+="[the repair was not announced: $(tail -n 3 <<<"$out")] "
+    asl_gate "$tmp/home" "$tmp/repo-moved" 1 || problems+="[still not installed after the repair]"
+    rm -rf "$tmp" "$tmp/repo-moved"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: the linker and detection read one destination list"; then
+    # One fact, one home: the gate must check exactly what the writer writes, or
+    # a machine is told it is finished while a client directory is still empty.
+    # .codex/skills is the conditional entry, so it must appear in the list too.
+    linker="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    gate="$(awk '/^agent_skill_links_current\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    dests="$(awk '/^agent_skill_link_dests\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    ok=1
+    grep -q 'agent_skill_link_dests' <<<"$linker" || { ok=0; echo "install_agent_skill_links does not read agent_skill_link_dests" >&2; }
+    grep -q 'agent_skill_link_dests' <<<"$gate"   || { ok=0; echo "agent_skill_links_current does not read agent_skill_link_dests" >&2; }
+    for body in "$linker" "$gate"; do
+        grep -q '\.gemini/config/skills' <<<"$body" && { ok=0; echo "a destination is hardcoded outside the list" >&2; }
+    done
+    for want in '.gemini/config/skills' '.claude/skills' '.agents/skills' '.codex/skills'; do
+        grep -qF -- "$want" <<<"$dests" || { ok=0; echo "the destination list does not name $want" >&2; }
+    done
+    if (( ok )); then pass; else fail "the skill destinations have more than one home"; fi
+fi
+
+if it "agent-skill-links: linux and macos carry the component and the catalogs still validate"; then
+    out="$(python3 - <<'PY'
+import json, sys
+want = {
+    "id": "agent-skill-links", "provider": "custom", "package": "agent-skill-links",
+    "postInstall": "install_agent_skill_links",
+    "profiles": ["workstation", "ai-coding"],
+}
+problems = []
+for f in ("catalog/linux.json", "catalog/macos.json"):
+    data = json.load(open(f, encoding="utf-8"))
+    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skill-links"]
+    if len(found) != 1:
+        problems.append(f + ": " + str(len(found)) + " entries"); continue
+    c = found[0]
+    for k, v in want.items():
+        if c.get(k) != v:
+            problems.append("%s: %s is %r, expected %r" % (f, k, c.get(k), v))
+    # Linking a directory of markdown needs no package manager: `requires` here
+    # would drag git and nodejs into a skills-only run.
+    if c.get("requires"):
+        problems.append(f + ": the skill links require nothing — git and nodejs are not their business")
+    if c.get("homepage") != "https://github.com/Ch3fUlrich/AutoOS":
+        problems.append(f + ": homepage is not the repo the skills live in")
+    if c.get("prompt"):
+        problems.append(f + ": the skill links ask no question — omnigraph_url belongs to the omnigraph components")
+    if len(c.get("description", "")) > 70:
+        problems.append(f + ": description longer than 70 chars")
+# Windows is another lane's work; the id must not appear there yet.
+win = json.load(open("catalog/windows.json", encoding="utf-8"))
+if any(c.get("id") == "agent-skill-links" for g in win["categories"] for c in g["components"]):
+    problems.append("catalog/windows.json: the component is not built on Windows in this lane")
+# The retired step must stop asking a question it no longer answers.
+for f in ("catalog/linux.json", "catalog/macos.json"):
+    data = json.load(open(f, encoding="utf-8"))
+    for g in data["categories"]:
+        for c in g["components"]:
+            if c.get("id") == "agent-skills" and c.get("prompt"):
+                problems.append(f + ": retired agent-skills still carries a prompt")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+)" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
+    && pass || fail "catalog entry: ${out:0:400}"
+fi
+
+if it "the rehomed postInstalls name functions that exist"; then
+    # postInstall is not schema-validated: run_post_install only warns when the
+    # named function is missing, so a typo silently installs nothing.
+    ok=1
+    for fn in install_agent_skill_links install_omnigraph_client install_agent_skills; do
+        declare -F "$fn" >/dev/null || { ok=0; echo "$fn is not defined in lib/linux/install.sh" >&2; }
+    done
+    if (( ok )); then pass; else fail "a catalogued postInstall names no function"; fi
 fi
 
 # ─── keys-file lookup order (autoos_api_keys_conf) ──────────────────────────
@@ -2151,34 +2256,14 @@ oh_clone_only() {
         >"$home/Documents/code/agent-skills/skills/gamma/SKILL.md"
 }
 
-oh_agent_skills_run() {
-    local home="$1" repo="$2"
-    (
-        SYS_HOME="$home"
-        AUTOOS_DRY_RUN=0
-        AUTOOS_ROOT="$repo"
-        install_mcp_graphify() { :; }
-        install_mcp_serena() { :; }
-        install_mcp_playwright() { :; }
-        install_mcp_context7() { :; }
-        mcp_has_server() { return 1; }
-        enable_project_mcp_server() { :; }
-        register_antigravity_mcp_server() { :; }
-        omnigraph_readiness() { return 0; }
-        answer() { echo ""; }
-        has_cmd() { return 1; }
-        install_agent_skills
-    )
-}
-
-if it "install_agent_skills links the retired clone's skills into every client dir"; then
+if it "agent-skill-links links the retired clone's skills into every client dir"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/repo"
     printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
-    oh_clone_only "$tmp"
-    oh_agent_skills_run "$tmp" "$tmp/repo" >/dev/null 2>&1
+    oh_clone_only "$tmp/home"
+    asl_run "$tmp/home" "$tmp/repo" >/dev/null
     problems=""
-    for dest in "$tmp/.claude/skills" "$tmp/.gemini/config/skills" "$tmp/.agents/skills"; do
+    for dest in "$tmp/home/.claude/skills" "$tmp/home/.gemini/config/skills" "$tmp/home/.agents/skills"; do
         [[ -L "$dest/gamma" && "$(readlink "$dest/gamma")" == *"/agent-skills/skills/gamma" ]] \
             || problems+="[gamma not linked from the clone into $dest] "
     done
@@ -2186,16 +2271,18 @@ if it "install_agent_skills links the retired clone's skills into every client d
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "install_agent_skills names it when there is no skills source at all"; then
+if it "agent-skill-links names it when there is no skills source at all"; then
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/repo"
     printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
-    out="$(oh_agent_skills_run "$tmp" "$tmp/repo" 2>&1)"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
     problems=""
     [[ "$out" == *"no skills to link"* ]] \
         || problems+="[nothing named the missing skills source — $(tail -n 2 <<<"$out")] "
-    [[ ! -d "$tmp/.claude/skills" ]] || problems+="[an empty ~/.claude/skills was created for nothing] "
-    [[ ! -d "$tmp/.gemini/config/skills" ]] || problems+="[an empty ~/.gemini/config/skills was created for nothing] "
+    [[ ! -d "$tmp/home/.claude/skills" ]] || problems+="[an empty ~/.claude/skills was created for nothing] "
+    [[ ! -d "$tmp/home/.gemini/config/skills" ]] || problems+="[an empty ~/.gemini/config/skills was created for nothing] "
+    [[ ! -d "$tmp/repo/.claude/skills" ]] || problems+="[an empty project .claude/skills was created for nothing] "
+    asl_gate "$tmp/home" "$tmp/repo" && problems+="[a machine with no skills source is detected as done] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
@@ -2274,10 +2361,11 @@ if it "graphify registers once: the second run says skipped and already configur
 fi
 
 # ─── A4b: a user-scope homelab entry that points into the retired clone ─────
-# homelab is not an AutoOS component (spec D14): the only thing done here is
-# removing an entry AutoOS can recognise as its own leftover — a user-scope
-# entry whose PYTHONPATH or args name the retired agent-skills tree. Read, back
-# up once, remove through claude's own CLI, report. Anything else is the user's.
+# homelab is not an AutoOS component (spec D14), and the operator deferred its
+# MCP switch (2026-09-28): NO step may remove the user-scope 'homelab' entry. All
+# that is done is report a recognised leftover of the retired tree — an entry whose
+# PYTHONPATH or args name agent-skills — and leave it exactly where it is. No
+# backup, no claude call, no file write, no recorded failure.
 #
 # hl_cfg_write <tmp> <json mcpServers block>: write a Claude user config.
 hl_cfg_write() {
@@ -2286,73 +2374,84 @@ hl_cfg_write() {
     printf '{"mcpServers":%s,"firstTimeRun":true}\n' "$body" >"$tmp/.claude.json"
 }
 
-# hl_remove_run <tmp> <dry>: remove_stale_homelab_mcp_entry with a fake claude that
-# records its argv and, for `mcp remove <name> --scope user`, drops that key from
-# the top-level mcpServers the way the CLI does.
-hl_remove_run() {
-    local tmp="$1" dry="$2"
+# hl_report_run <tmp> <dry>: the report-only check on a scratch home, with a claude
+# stub that records its argv (the check must never reach it) and a backup_file stub
+# that records the attempt (the check must never make one).
+hl_report_run() {
+    local tmp="$1" dry="${2:-0}"
     (
         SYS_HOME="$tmp" HOME="$tmp" AUTOOS_DRY_RUN="$dry"
         unset CLAUDE_CONFIG_DIR
         claude() {
             printf 'claude %s\n' "$*" >>"$tmp/claude.log"
-            if [[ "${1:-} ${2:-}" == "mcp remove" ]]; then
-                python3 - "$tmp/.claude.json" "${3:-}" <<'PY'
-import json, sys
-path, name = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as fh:
-    data = json.load(fh)
-data.get("mcpServers", {}).pop(name, None)
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2)
-PY
-            fi
             return 0
         }
-        remove_stale_homelab_mcp_entry 2>&1
+        backup_file() {
+            printf 'backup %s\n' "$1" >>"$tmp/backup.log"
+            return 1
+        }
+        report_stale_homelab_mcp_entry 2>&1
     )
 }
 
-if it "homelab: an agent-skills PYTHONPATH entry is backed up and removed"; then
+# hl_untouched <tmp> <before>: the user config is byte-for-byte what it was.
+hl_untouched() {
+    local tmp="$1" before="$2"
+    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || return 1
+    [[ -s "$tmp/claude.log" ]] && return 1
+    [[ -s "$tmp/backup.log" ]] && return 1
+    compgen -G "$tmp/.claude.json.autoos-backup-*" >/dev/null && return 1
+    return 0
+}
+
+if it "homelab: the removal code path is gone from lib/"; then
+    # Operator decision 2026-09-28: the entry is never removed. A leftover
+    # `claude mcp remove homelab` or a dead remove_* helper would still be
+    # reachable by hand, so the whole path must go, not just its caller.
+    problems=""
+    grep -q 'mcp remove homelab' lib/linux/install.sh \
+        && problems+="[lib/ still runs claude mcp remove homelab] "
+    grep -q 'remove_stale_homelab_mcp_entry' lib/linux/install.sh \
+        && problems+="[the removing helper is still there under its old name] "
+    grep -q 'report_stale_homelab_mcp_entry' lib/linux/install.sh \
+        || problems+="[nothing reports the recognised leftover] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a recognised stale entry is reported and left exactly as it was"; then
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     hl_cfg_write "$tmp" '{"homelab":{"type":"stdio","command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}},"serena":{"command":"uvx" }}'
-    out="$(hl_remove_run "$tmp" 0)"
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$out" == *"removed"* ]] || problems+="[nothing said removed: $out] "
-    grep -qxF 'claude mcp remove homelab --scope user' "$tmp/claude.log" \
-        || problems+="[claude got: $(tr '\n' '|' <"$tmp/claude.log")] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
-        || problems+="[the user config was rewritten with no backup] "
-    kept="$(python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1], encoding='utf-8'))
-print(','.join(sorted(d.get('mcpServers', {})) + ['firstTimeRun' if 'firstTimeRun' in d else 'LOST']))
-" "$tmp/.claude.json" 2>/dev/null || echo unreadable)"
-    [[ "$kept" == "serena,firstTimeRun" ]] \
-        || problems+="[the config lost or kept the wrong keys: $kept] "
+    [[ "$out" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[nothing named the retired tree: $out] "
+    [[ "$out" == *"left in place"* ]] \
+        || problems+="[nothing said it stays: $out] "
+    [[ "$out" != *"removed"* ]] || problems+="[claimed a removal: $out] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[the user config, claude or a backup was touched: $(cat "$tmp/claude.log" "$tmp/backup.log" 2>/dev/null | tr '\n' '|')$(ls "$tmp")]"
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: the second run reports skipped and writes no second backup"; then
-    if ! has_cmd python3; then skip "python3 not found"; else
+if it "homelab: the report is the same in a dry run and a live run, and writes nothing"; then
+    # Read-only by construction, so there is no third behaviour to announce.
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
-    first="$(hl_remove_run "$tmp" 0)"
-    second="$(hl_remove_run "$tmp" 0)"
-    n_backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
-    n_removes="$(grep -c 'mcp remove' "$tmp/claude.log" || true)"
+    before="$(cat "$tmp/.claude.json")"
+    dry="$(hl_report_run "$tmp" 1)"
+    live="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$first" == *"removed"* ]] || problems+="[the first run did not remove: $first] "
-    [[ "$second" == *"skipped"* ]] || problems+="[the second run did not say skipped: $second] "
-    [[ "$second" != *"removed"* ]] || problems+="[the second run removed again: $second] "
-    [[ "$n_backups" == "1" ]] || problems+="[$n_backups backups, expected 1] "
-    [[ "$n_removes" == "1" ]] || problems+="[$n_removes remove calls, expected 1] "
+    [[ "$dry" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[the dry run said nothing: $dry] "
+    [[ "$live" == "$dry" ]] || problems+="[dry and live differ: [$dry] vs [$live]] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[a run wrote to the config or the disk] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-    fi
 fi
 
 if it "homelab: an agent-skills path in the args is recognised just like PYTHONPATH"; then
@@ -2364,39 +2463,60 @@ if it "homelab: an agent-skills path in the args is recognised just like PYTHONP
     rm -rf "$tmp"
 fi
 
-if it "homelab: an entry that is not an agent-skills leftover is left alone"; then
-    # The user's own homelab server: same name, nothing in it AutoOS recognises.
-    # Removing it would delete a working server the operator installed by hand.
+if it "homelab: a second run reports it again — nothing changed in between"; then
+    # The old shape converged to "skipped" because the first run fixed the
+    # machine. A report that stays put on a still-stale entry is the point: the
+    # line must not silently age out just because a run already said it.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"homelab":{"command":"docker","args":["run","-i","--rm","homelab-mcp:latest"],"env":{"HOMELAB_CONFIG":"/home/u/h.yaml"}}}'
+    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
     before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 0)"
+    first="$(hl_report_run "$tmp" 0)"
+    second="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$out" == *"alone"* ]] || problems+="[nothing said it was left alone: $out] "
-    [[ "$out" != *"removed"* ]] || problems+="[claimed a removal it did not do: $out] "
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed the user's entry] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[a backup of a file it never changed] "
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the config was rewritten] "
+    [[ "$first" == *"agent-skills"* ]] || problems+="[the first run said nothing: $first] "
+    [[ "$second" == "$first" ]] || problems+="[the second run differed: $second] "
+    hl_untouched "$tmp" "$before" || problems+="[a run touched the config] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: no user-scope entry says skipped, not failed"; then
+if it "homelab: an entry that is not an agent-skills leftover is untouched and unsaid"; then
+    # The user's own homelab server: same name, nothing in it AutoOS recognises.
+    # Neither removed nor commented on — the report is only about AutoOS's own
+    # leftover, and a line naming a working server on every run is noise.
+    if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"serena":{"command":"uvx"}}'
-    out="$(hl_remove_run "$tmp" 0)"
-    if [[ "$out" == *"skipped"* ]]; then pass; else fail "expected skipped, got: $out"; fi
+    hl_cfg_write "$tmp" '{"homelab":{"command":"docker","args":["run","-i","--rm","homelab-mcp:latest"],"env":{"HOMELAB_CONFIG":"/home/u/h.yaml"}}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[said something about the user's entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
     rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
 fi
 
-if it "homelab: a config outside this run's home is never touched"; then
+if it "homelab: no user-scope entry says nothing"; then
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"serena":{"command":"uvx"}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[invented a line for an absent entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a config outside this run's home is not reported on"; then
     # The claude CLI reads $HOME, but the home this run configures is $SYS_HOME.
     # When the two differ - setup under sudo, or a harness that fakes SYS_HOME and
     # leaves HOME at the operator's real one - the file the resolver names belongs
-    # to somebody else's session, and removing an entry from it edits a config
-    # this run was never pointed at. Refuse, say skipped, touch nothing.
+    # to somebody else's session. Nothing is written to it, and a line about it
+    # would describe a config this run was never pointed at, so: say nothing.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
     run_home="$tmp/run"; cfg_home="$tmp/cfg"
@@ -2407,14 +2527,14 @@ if it "homelab: a config outside this run's home is never touched"; then
         SYS_HOME="$run_home" HOME="$cfg_home" AUTOOS_DRY_RUN=0
         unset CLAUDE_CONFIG_DIR
         claude() { printf 'claude %s\n' "$*" >>"$tmp/claude.log"; return 0; }
-        remove_stale_homelab_mcp_entry 2>&1
+        backup_file() { printf 'backup %s\n' "$1" >>"$tmp/backup.log"; return 1; }
+        report_stale_homelab_mcp_entry 2>&1
     ) )"
     problems=""
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed an entry outside this run's home] "
-    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
+    [[ "$out" != *homelab* ]] || problems+="[reported on a config outside this run's home: $out] "
     [[ "$(cat "$cfg_home/.claude.json")" == "$before" ]] || problems+="[the config outside this run's home was rewritten] "
-    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
-    [[ "$out" != *"the stale user-scope"* ]] || problems+="[claimed a removal it did not do: $out] "
+    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[ran claude against a config outside this run's home] "
+    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
@@ -2422,45 +2542,38 @@ fi
 
 if it "homelab: a project-scoped entry of that name is not the user scope"; then
     # ~/.claude.json also carries per-project servers. Those belong to the repo's
-    # own .mcp.json approval, never to a user-scope cleanup.
+    # own .mcp.json approval, never to a user-scope check.
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    mkdir -p "$tmp"
     printf '%s\n' '{"mcpServers":{},"projects":{"/home/u/repo":{"mcpServers":{"homelab":{"command":"python","args":["/home/u/Documents/code/agent-skills/mcp/homelab/server.py"]}}}}}' \
         >"$tmp/.claude.json"
     before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 0)"
+    out="$(hl_report_run "$tmp" 0)"
     problems=""
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the project-scoped entry was touched] "
-    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[removed a project-scope entry] "
-    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *homelab* ]] || problems+="[reported on a project-scope entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the project-scoped entry was touched] "
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
 fi
 
-if it "homelab: the dry run announces the removal and writes nothing"; then
-    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
-    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
-    before="$(cat "$tmp/.claude.json")"
-    out="$(hl_remove_run "$tmp" 1)"
-    problems=""
-    [[ "$out" == *"would"* ]] || problems+="[the dry run made no announcement: $out] "
-    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the dry run rewrote the user config] "
-    [[ -s "$tmp/claude.log" ]] && problems+="[the dry run ran claude: $(tr '\n' '|' <"$tmp/claude.log")] "
-    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[the dry run wrote a backup] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "homelab: the removal runs on the path that wires the MCP stack up"; then
-    # An orphan function nothing calls is a test fixture, not a feature: the
-    # retirement cleanup belongs in install_agent_skills, next to the graphify
-    # link it shares a reason with. The body is taken whole — a fixed window of
+if it "homelab: the report runs once, from the omnigraph component"; then
+    # An orphan function nothing calls is a test fixture, not a feature: naming
+    # the leftover belongs with the omnigraph wiring it shares a reason with
+    # (A7b: install_omnigraph_client), and exactly once — a second caller would
+    # print the line twice per run. The body is taken whole; a fixed window of
     # lines would miss the call as the function grows.
-    if awk '/^install_agent_skills\(\) \{/{on=1} on{print} on && /^\}$/{exit}' \
-            lib/linux/install.sh | grep -q "remove_stale_homelab_mcp_entry"; then pass
-    else fail "remove_stale_homelab_mcp_entry is defined but never called by install_agent_skills"; fi
+    body="$(awk '/^install_omnigraph_client\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    retired="$(awk '/^install_agent_skills\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    links="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    calls="$(grep -c 'report_stale_homelab_mcp_entry' <<<"$body" || true)"
+    total="$(grep -cE '^[[:space:]]+report_stale_homelab_mcp_entry$' lib/linux/install.sh || true)"
+    problems=""
+    [[ "$calls" == "1" ]] || problems+="[install_omnigraph_client calls it $calls times] "
+    grep -q 'report_stale_homelab_mcp_entry' <<<"$retired" && problems+="[the retired step still calls it] "
+    grep -q 'report_stale_homelab_mcp_entry' <<<"$links" && problems+="[the skills linker calls it too] "
+    [[ "$total" == "1" ]] || problems+="[$total call sites in lib/linux/install.sh] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "homelab: lib/ never names the retired tree's path or an agent-skills version"; then
