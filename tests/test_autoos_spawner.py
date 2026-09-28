@@ -1305,7 +1305,14 @@ class McpToolTests(unittest.TestCase):
                                               "AWS_SECRET_ACCESS_KEY": "aws-secret",
                                               "XDG_RUNTIME_DIR": "/run/user/4242"}):
                 self.assertEqual(mcp_server.run_job(path), 0)
-        self.assertEqual(box["argv"], [sys.executable, mcp_server.AGENT, "--version"])
+        argv = box["argv"]
+        if argv[:1] == ["systemd-run"]:
+            # SB-A2 (D-103) item A: on a host with a user manager the CLI child is
+            # launched inside its scope; the wrapper is the runner's business, and
+            # CancelChannelTests measures it. The env is this test's claim.
+            argv = argv[argv.index("--") + 1:]
+        self.assertEqual(argv, [sys.executable, mcp_server.AGENT, "--version"])
+        self.assertNotIn("AUTOOS_WORKER_PGRP", box["env"], box["env"])
         self.assertEqual(path, box["env"]["AUTOOS_TASK_DIR"])
         for name in ("PATH", "HOME"):
             self.assertIn(name, box["env"], name)
@@ -12894,12 +12901,16 @@ class CancelOrphanTests(unittest.TestCase):
         return proc
 
     def make_run(self, run_id, pid, pgrp=None):
+        """The job record the RUNNER writes: its own group, with the leader's
+        start time (SB-A2 item B). `pgrp` is the retired channel — a run dir that
+        still carries one must be ignored, not read."""
         path = os.path.join(self.tmp, "agents", run_id)
         os.makedirs(path)
-        mcp_server._write_json(os.path.join(path, "job.json"), {
-            "id": run_id, "run_id": run_id, "request": {}, "task": "t",
-            "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
-            "pid": pid})
+        job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
+               "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+               "pid": pid,
+               "group": {"pgid": pid, "start": load_agent().proc_start_time(pid)}}
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
         if pgrp is not None:
             mcp_server._write_json(os.path.join(path, "pgrp.json"), {"pgid": pgrp})
         return path
@@ -12922,25 +12933,26 @@ class CancelOrphanTests(unittest.TestCase):
             time.sleep(0.05)
         return self.gone(pid)
 
-    def test_cancel_kills_the_clients_group_and_the_child_it_orphaned(self):
-        # The measured shape: the client exits (or is cut off) and its child is
-        # reparented, still alive, still in the client's process group.
-        runner = self.detached("import time; time.sleep(60)", {})
-        client = self.detached(
+    def test_cancel_kills_the_group_the_workers_child_stays_in(self):
+        # The measured shape, minus the channel the worker could write: a child
+        # that never leaves the runner's group (the CLI and anything it spawns
+        # without setsid) dies with it. A child that DOES setsid away is the
+        # fallback's stated residual, and SystemdScopeCancelTests covers it.
+        runner = self.detached(
             "import os\n"
             "from subprocess import Popen\n"
             "p = Popen(['sleep', '60'])\n"   # same group as its parent, by default
-            "open(os.environ['GRANDCHILD'], 'w').write(str(p.pid))\n",
+            "open(os.environ['GRANDCHILD'], 'w').write(str(p.pid))\n"
+            "import time; time.sleep(60)\n",
             {"GRANDCHILD": os.path.join(self.tmp, "gc.txt")})
         deadline = time.time() + 10
         while time.time() < deadline and not os.path.exists(
                 os.path.join(self.tmp, "gc.txt")):
             time.sleep(0.05)
-        client.wait(10)
         with open(os.path.join(self.tmp, "gc.txt"), encoding="utf-8") as fh:
             grandchild = int(fh.read().strip())
-        self.assertFalse(self.gone(grandchild), "the stub orphan died on its own")
-        path = self.make_run("orphan-test", runner.pid, pgrp=client.pid)
+        self.assertFalse(self.gone(grandchild), "the stub child died on its own")
+        path = self.make_run("orphan-test", runner.pid)
         self.assertEqual(mcp_server.status("orphan-test")["state"], "working")
         st = mcp_server.cancel("orphan-test")
         self.assertEqual(st["state"], "canceled", st)
@@ -12969,21 +12981,6 @@ class CancelOrphanTests(unittest.TestCase):
         self.assertTrue(self.wait_gone(runner.pid, 20),
                         "a SIGTERM-ignoring worker survived the cancel")
 
-    def test_run_client_records_the_clients_group_for_the_canceller(self):
-        # The runner cannot know the client's pgid until the spawner that starts
-        # it writes it down; cancel reads exactly this file.
-        agent = load_agent()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "pgrp.json")
-            with mock.patch.dict(os.environ, {"AUTOOS_WORKER_PGRP": path}):
-                rc = agent.run_client([sys.executable, "-c", "pass"], tmp,
-                                       dict(os.environ))
-            self.assertEqual(rc, 0)
-            self.assertTrue(os.path.isfile(path),
-                            "run_client never recorded the client's group")
-            with open(path, encoding="utf-8") as fh:
-                self.assertIsInstance(json.load(fh)["pgid"], int)
-
     def test_run_client_writes_no_group_file_when_not_asked(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -12994,24 +12991,6 @@ class CancelOrphanTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(os.listdir(tmp), [])
 
-    def test_the_group_path_survives_the_child_env_scrub(self):
-        # The channel is one allowlist entry deep: drop the name and every other
-        # test here still passes while a real `cancel` goes back to orphaning the
-        # client it can no longer address.
-        agent = load_agent()
-        env = agent.spawner_child_env(
-            extra={"AUTOOS_WORKER_PGRP": "/run/%s" % agent.WORKER_PGRP_FILE})
-        self.assertEqual(env.get("AUTOOS_WORKER_PGRP"), "/run/pgrp.json")
-
-    def test_the_mcp_runner_names_the_group_file_to_the_spawner(self):
-        # _run_job execs the CLI with spawner_child_env(extra=...): the channel
-        # that carries the path has to be the one the CLI reads.
-        src = open(TOOLS / "autoos_agent_mcp.py", encoding="utf-8").read()
-        body = src.split("def run_job", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn("AUTOOS_WORKER_PGRP", body, body)
-
-
-@unittest.skipIf(os.name == "nt", "shell stubs and git; POSIX first")
 class CommittedWorkNotANoOpTests(unittest.TestCase):
     """SB-A (D-103) item 2 (NOOPCOMMIT). The no-change check read only the
     uncommitted porcelain and `<start-sha>..<sandbox-branch>`, so a worker that
@@ -13219,6 +13198,500 @@ class ReviewVerdictRecoveryTests(unittest.TestCase):
                                {"cancelled": True, "rc": None, "ended": time.time()})
         st = mcp_server.status("rl-cancel")
         self.assertEqual(st["state"], "canceled", st)
+
+
+class CancelChannelTests(unittest.TestCase):
+    """SB-A2 (D-103) item A/B: what `cancel` reads has to be a record the worker
+    can neither see nor write. SB-A recorded the client's pgid in
+    `<run-dir>/pgrp.json`, a path handed down in the env var
+    AUTOOS_WORKER_PGRP — the worker is the same uid as the run dir and the file,
+    so a worker that wrote a bystander's pgid there aimed the killer at an
+    unrelated process group, and a pgid the OS recycled was killed blind.
+    The design now: (A) a systemd transient scope whose unit name the RUNNER
+    writes into job.json, (B) a fallback group kill that verifies the group
+    leader's start time before signalling anything.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_worker_env_no_longer_carries_the_group_channel(self):
+        # The env var WAS the redirect: any process in the worker's tree could
+        # rewrite the file it names. It is gone from the allowlist and from
+        # spawner_child_env's AUTOOS_* set, so a `extra=` entry is dropped.
+        agent = load_agent()
+        self.assertNotIn("AUTOOS_WORKER_PGRP", agent.WORKER_ENV_AUTOOS)
+        env = agent.spawner_child_env(
+            extra={"AUTOOS_WORKER_PGRP": "/run/pgrp.json"})
+        self.assertNotIn("AUTOOS_WORKER_PGRP", env)
+        self.assertFalse(hasattr(agent, "WORKER_PGRP_ENV"))
+
+    def test_run_client_writes_nothing_a_canceller_reads(self):
+        # Even with the old var set by an attacker in the tree, run_client must
+        # not create the file `cancel` used to read.
+        agent = load_agent()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "pgrp.json")
+            with mock.patch.dict(os.environ, {"AUTOOS_WORKER_PGRP": path}):
+                rc = agent.run_client([sys.executable, "-c", "pass"], tmp,
+                                       dict(os.environ))
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(path),
+                             "run_client still records a worker-writable group file")
+
+    def test_the_runner_launches_in_a_scope_it_records(self):
+        # The unit name lands in job.json, written by the runner; the command the
+        # worker is started with is the wrapped one; and no env var names a file
+        # for the worker to write its own group into.
+        if os.name == "nt":
+            self.skipTest("POSIX process groups; group_record() is empty on Windows")
+
+        def job_dir(run_id):
+            path = os.path.join(self.tmp, "agents", run_id)
+            os.makedirs(path)
+            mcp_server._write_json(os.path.join(path, "job.json"), {
+                "id": run_id, "run_id": run_id, "request": {}, "task": "t",
+                "argv": ["run", "--dry-run", "t"], "cwd": str(ROOT), "route": {},
+                "started": time.time(), "pid": os.getpid()})
+            return path
+
+        for supported, run_id in ((True, "scope-job"), (False, "nofallback-job")):
+            path = job_dir(run_id)
+            seen = {}
+
+            def fake_call(cmd, **kw):
+                seen["cmd"] = list(cmd)
+                seen["env"] = kw.get("env") or {}
+                return 0
+            with mock.patch.object(mcp_server.agent, "scope_supported",
+                                   lambda: supported), \
+                 mock.patch.object(mcp_server.subprocess, "call", fake_call):
+                self.assertEqual(mcp_server.run_job(path), 0)
+            job = mcp_server._read_json(os.path.join(path, "job.json"))
+            self.assertNotIn("AUTOOS_WORKER_PGRP", seen["env"], seen["env"])
+            self.assertEqual(job["group"]["pgid"],
+                             mcp_server.agent.group_record()["pgid"], job)
+            self.assertIsInstance(job["group"]["start"], int, job)
+            if supported:
+                self.assertEqual(job["scope"], "autoos-worker-%s.scope" % run_id, job)
+                self.assertEqual(seen["cmd"][:6],
+                                 ["systemd-run", "--user", "--scope", "--unit",
+                                  "autoos-worker-%s" % run_id, "--collect"], seen["cmd"])
+                self.assertEqual(seen["cmd"][6:],
+                                 ["--", sys.executable, str(mcp_server.AGENT),
+                                  "run", "--dry-run", "t"], seen["cmd"])
+            else:
+                self.assertNotIn("scope", job, job)
+                self.assertEqual(seen["cmd"][0], sys.executable, seen["cmd"])
+
+    def test_scope_unit_name_is_a_safe_unit(self):
+        agent = load_agent()
+        unit = agent.scope_unit_name("20260928-220000-sba2-50268d")
+        self.assertTrue(unit.startswith("autoos-worker-"), unit)
+        self.assertTrue(unit.endswith(".scope"), unit)
+        self.assertEqual(agent.scope_unit_name("../evil;rm -rf /"),
+                         "autoos-worker-___evil_rm_-rf__.scope",
+                         "a run id must not become unit syntax")
+
+    def test_a_worker_written_pgrp_file_cannot_redirect_cancel(self):
+        if os.name == "nt":
+            self.skipTest("POSIX process groups")
+        bystander = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        runner = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            path = self._make_run("redirect-test", runner, {
+                "group": {"pgid": runner.pid,
+                          "start": load_agent().proc_start_time(runner.pid)}})
+            mcp_server._write_json(os.path.join(path, "pgrp.json"),
+                                   {"pgid": bystander.pid})
+            st = mcp_server.cancel("redirect-test")
+            self.assertEqual(st["state"], "canceled", st)
+            self._wait_gone(runner.pid)
+            self.assertTrue(self._alive(bystander.pid),
+                            "CANCELORPHAN-in-reverse: cancel killed a process "
+                            "group a worker pointed it at through pgrp.json")
+        finally:
+            for p in (bystander, runner):
+                if p.poll() is None:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except OSError:
+                        p.kill()
+                p.wait()
+
+    def _make_run(self, run_id, proc, job_extra):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        job = {"id": run_id, "run_id": run_id, "request": {}, "task": "t",
+               "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+               "pid": proc.pid}
+        job.update(job_extra)
+        mcp_server._write_json(os.path.join(path, "job.json"), job)
+        return path
+
+    @staticmethod
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:
+            with open("/proc/%d/status" % pid, encoding="utf-8") as fh:
+                return not next(l for l in fh if l.startswith("State:")).split()[1].startswith("Z")
+        except (OSError, StopIteration):
+            return False
+
+    def _wait_gone(self, pid, secs=12):
+        deadline = time.time() + secs
+        while time.time() < deadline and self._alive(pid):
+            time.sleep(0.05)
+        return not self._alive(pid)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups")
+class VerifiedGroupKillTests(unittest.TestCase):
+    """SB-A2 item B: the fallback may still kill a group, but only after proving
+    the leader it names is the process that was recorded — a pgid the kernel
+    recycled belongs to someone else, and the canceller's own group belongs to
+    the MCP server that is answering the tools/autoos-agent.py call."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    p.kill()
+            p.wait()
+
+    def detached(self, code="import time; time.sleep(60)"):
+        proc = subprocess.Popen([sys.executable, "-c", code],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        self.procs.append(proc)
+        return proc
+
+    def test_a_recycled_pgid_is_not_killed(self):
+        proc = self.detached()
+        real = self.agent.proc_start_time(proc.pid)
+        self.assertIsInstance(real, int)
+        reports = self.agent.kill_verified_groups(
+            [{"pgid": proc.pid, "start": real + 10_000}])
+        self.assertEqual(len(reports), 1, reports)
+        self.assertEqual(reports[0]["action"], "skipped", reports)
+        self.assertIn("start", reports[0]["reason"].lower(), reports)
+        self.assertTrue(self._alive(proc.pid),
+                        "a recycled pgid was killed on the recorded number alone")
+
+    def test_a_matched_pgid_is_killed(self):
+        proc = self.detached()
+        reports = self.agent.kill_verified_groups(
+            [{"pgid": proc.pid, "start": self.agent.proc_start_time(proc.pid)}])
+        self.assertEqual([r["action"] for r in reports], ["killed"], reports)
+        self.assertTrue(self._wait_gone(proc.pid), "the verified kill did not land")
+
+    def test_a_dead_leader_is_left_alone_and_said_so(self):
+        proc = self.detached()
+        pid = proc.pid
+        proc.kill()
+        proc.wait()
+        reports = self.agent.kill_verified_groups(
+            [{"pgid": pid, "start": 123}])
+        self.assertEqual(reports[0]["action"], "skipped", reports)
+
+    def test_the_cancellers_own_group_is_never_killed(self):
+        # Run it in a child so an unfixed build cannot SIGTERM this test process:
+        # the guard is inside kill_groups, not only at the call site.
+        code = (
+            "import os, sys, importlib.util\n"
+            "spec = importlib.util.spec_from_file_location('ag', %r)\n"
+            "ag = importlib.util.module_from_spec(spec); spec.loader.exec_module(ag)\n"
+            "ag.kill_groups([os.getpgrp(), 1, 0])\n"
+            "print('survived')\n" % str(TOOLS / "autoos-agent.py"))
+        # Its own session: an unfixed kill_groups would take down the group of
+        # the test process that asked, not just the child that called it.
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             timeout=60, start_new_session=True)
+        self.assertIn("survived", out.stdout, out.stdout + out.stderr)
+
+    def test_cancel_reports_a_group_it_refused(self):
+        runner = self.detached()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = tmp
+        self.addCleanup(self._restore_state, old)
+        path = os.path.join(tmp, "agents", "recycled-run")
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": "recycled-run", "run_id": "recycled-run", "request": {}, "task": "t",
+            "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+            "pid": runner.pid,
+            "group": {"pgid": runner.pid, "start": self.agent.proc_start_time(runner.pid) + 7}})
+        st = mcp_server.cancel("recycled-run")
+        self.assertEqual(st["state"], "canceled", st)
+        self.assertTrue(self._alive(runner.pid),
+                        "cancel killed a pgid whose leader start time did not match")
+        self.assertIn("skipped", json.dumps(st), json.dumps(st))
+
+    @staticmethod
+    def _restore_state(old):
+        if old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = old
+
+    @staticmethod
+    def _alive(pid):
+        return CancelChannelTests._alive(pid)
+
+    def _wait_gone(self, pid, secs=12):
+        deadline = time.time() + secs
+        while time.time() < deadline and self._alive(pid):
+            time.sleep(0.05)
+        return not self._alive(pid)
+
+
+@unittest.skipIf(os.name == "nt", "systemd-run is a Linux mechanism")
+class SystemdScopeCancelTests(unittest.TestCase):
+    """SB-A2 item A: a scope is a cgroup, and setsid()/setpgid() moves a process
+    out of a group and never out of a cgroup — which is exactly the escape a
+    group kill cannot cover (`opencode serve --stdio` was reparented to
+    systemd --user and kept 480 MB alive)."""
+
+    def test_the_scope_argv_wraps_the_worker_command(self):
+        agent = load_agent()
+        argv = agent.worker_scope_argv("autoos-worker-x.scope", ["/bin/true", "a"])
+        self.assertEqual(argv[:6], ["systemd-run", "--user", "--scope",
+                                    "--unit", "autoos-worker-x", "--collect"], argv)
+        self.assertEqual(argv[6:], ["--", "/bin/true", "a"], argv)
+
+    @classmethod
+    def setUpClass(cls):
+        agent = load_agent()
+        if not agent.scope_supported():
+            raise unittest.SkipTest("systemd-run --user is not available on this host")
+
+    def test_stop_scope_stops_a_setsid_grandchild(self):
+        agent = load_agent()
+        unit = agent.scope_unit_name("escape-probe-%d" % os.getpid())
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "gc.txt")
+            cmd = [sys.executable, "-c",
+                   "import os\n"
+                   "from subprocess import Popen\n"
+                   "p = Popen(['/bin/sleep', '300'], start_new_session=True)\n"
+                   "open(%r, 'w').write(str(p.pid))\n"
+                   "import time; time.sleep(300)\n" % marker]
+            proc = subprocess.Popen(agent.worker_scope_argv(unit, cmd),
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            deadline = time.time() + 20
+            while time.time() < deadline and not os.path.exists(marker):
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(marker), "the scoped stub never started")
+            with open(marker, encoding="utf-8") as fh:
+                gc = int(fh.read().strip())
+            report = agent.stop_scope(unit)
+            self.assertTrue(report.get("stopped"), report)
+            deadline = time.time() + 15
+            while time.time() < deadline and CancelVerifiedAlive(gc):
+                time.sleep(0.05)
+            self.assertFalse(CancelVerifiedAlive(gc),
+                             "SETSID-ESCAPE: %d outlived its scope" % gc)
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def CancelVerifiedAlive(pid):
+    """Is `pid` still a live (non-zombie) process? Shared by the scope tests."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open("/proc/%d/status" % pid, encoding="utf-8") as fh:
+            return not next(l for l in fh if l.startswith("State:")).split()[1].startswith("Z")
+    except (OSError, StopIteration):
+        return False
+
+
+class CommittedRefSetTests(unittest.TestCase):
+    """SB-A2 item C (NOOPCOMMIT): SB-A compared each ref to the sha it held at
+    the START under the SAME name, so a worker that only checked out a ref that
+    already existed — a pre-existing lane, or a detached HEAD parked on a start
+    tip — had that tip reported as its own work. The comparison is against the
+    FULL start set of tips."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master"]
+        subprocess.run(git + ["init", "-q", self.repo], check=True)
+        self._file("a.txt", "one")
+        self._git("add", "a.txt")
+        self._git("commit", "-q", "-m", "first")
+        # A pre-existing branch AHEAD of the run's base, like another lane in a
+        # --local clone: its tip is in the start set but is NOT the base.
+        self._file("b.txt", "two")
+        self._git("add", "b.txt")
+        self._git("commit", "-q", "-m", "second")
+        self._git("branch", "lane")
+        self._git("reset", "-q", "--hard", "HEAD~1")   # master (base) one behind lane
+        self.base = self._out("rev-parse", "HEAD")
+        self.lane_sha = self._out("rev-parse", "refs/heads/lane")
+        self.assertNotEqual(self.base, self.lane_sha)
+        self.start = self.agent.sandbox_ref_heads(self.repo)
+        self.branch = "master"
+
+    def _file(self, name, text):
+        with open(os.path.join(self.repo, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.repo, *args], check=True,
+                       capture_output=True, text=True)
+
+    def _out(self, *args):
+        return subprocess.run(["git", "-C", self.repo, *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def work(self):
+        return self.agent.sandbox_committed_work(self.repo, self.base, self.branch,
+                                                 self.start)
+
+    def test_checking_out_a_pre_existing_ref_is_a_no_op(self):
+        # A `git switch lane` moves HEAD and the checkout, and commits nothing:
+        # every tip still existed when the run started.
+        self._git("switch", "-q", "lane")
+        self.assertEqual(self.work(), [],
+                         "a run that only checked out a pre-existing ref is work")
+
+    def test_a_detached_head_at_a_start_tip_is_a_no_op(self):
+        self._git("switch", "-q", "--detach", "refs/heads/lane")
+        self.assertEqual(self.work(), [],
+                         "a detached HEAD parked on a start tip is work")
+
+    def test_a_commit_on_a_pre_existing_ref_is_still_work(self):
+        self._git("switch", "-q", "lane")
+        self._file("c.txt", "three")
+        self._git("add", "c.txt")
+        self._git("-c", "user.name=autoos-worker",
+                  "-c", "user.email=autoos-worker@users.noreply.github.com",
+                  "commit", "-q", "-m", "worker change")
+        found = self.work()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("refs/heads/lane", found[0], found)
+
+    def test_a_detached_head_with_a_new_commit_is_still_work(self):
+        self._git("switch", "-q", "--detach", "refs/heads/lane")
+        self._file("c.txt", "three")
+        self._git("add", "c.txt")
+        self._git("-c", "user.name=autoos-worker",
+                  "-c", "user.email=autoos-worker@users.noreply.github.com",
+                  "commit", "-q", "-m", "worker change")
+        found = self.work()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("HEAD-detached", found[0], found)
+
+
+class VerdictLineTests(unittest.TestCase):
+    """SB-A2 item D: the verdict scan read a 64 KB tail and accepted any line
+    that merely STARTED with a verdict word, so `VERDICT: ready but the ref
+    snapshot is never read` graded a fix-first review as ready, and a verdict
+    stated early with a long session after it was not seen at all."""
+
+    def verdict(self, text):
+        return mcp_server.review_verdict(text)
+
+    def test_only_the_word_is_a_verdict(self):
+        self.assertEqual(self.verdict("VERDICT: ready\n"), "ready")
+        self.assertEqual(self.verdict("VERDICT: fix-first\n"), "fix-first")
+        self.assertEqual(self.verdict("VERDICT: not-ready\n"), "not-ready")
+        self.assertEqual(self.verdict("VERDICT: NOT READY\n"), "NOT READY")
+        self.assertIsNone(self.verdict(
+            "VERDICT: ready, but sandbox_verdict still needs a test\n"))
+        self.assertIsNone(self.verdict("VERDICT: mostly ready\n"))
+
+    def test_trailing_punctuation_is_allowed(self):
+        self.assertEqual(self.verdict("VERDICT: fix-first.\n"), "fix-first.")
+
+    def test_template_echoes_are_ignored(self):
+        for line in ("VERDICT: <ready|fix-first|NOT READY>\n",
+                     "VERDICT: [ready]\n",
+                     "> VERDICT: ready\n"):
+            self.assertIsNone(self.verdict(line), line)
+
+    def test_a_verdict_inside_a_code_fence_is_ignored(self):
+        text = ("```text\n"
+                "VERDICT: ready\n"
+                "```\n"
+                "and then it died.\n")
+        self.assertIsNone(self.verdict(text))
+
+    def test_the_last_valid_line_wins(self):
+        text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"
+        self.assertEqual(self.verdict(text), "fix-first")
+
+    def test_a_verdict_far_from_the_tail_is_still_read(self):
+        # A long reviewer session: the verdict is the deliverable, and it can sit
+        # hundreds of KB before the closing noise. The scan is bounded (2 MB), not
+        # a 64 KB tail.
+        run_id = "wide-scan"
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        filler = ("Thinking about the sandbox_verdict path and the ref snapshot.\n"
+                  * 3000)
+        self.assertGreater(len(filler), mcp_server._TAIL_BYTES,
+                           "the fixture is not past the tail the old scan read")
+        with io.open(os.path.join(path, "output.log"), "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: not ready\n" + filler + "\nREPORT x · completed · - · - · - · -\n")
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": run_id, "run_id": run_id,
+            "request": {"card": {"role": "review"}},
+            "task": "t", "argv": ["run", "--card", "role=review", "t"],
+            "cwd": str(ROOT), "route": {}, "started": time.time(), "pid": 0})
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": 0, "ended": time.time()})
+        st = mcp_server.status(run_id)
+        self.assertEqual(st["state"], "completed", st)
+        self.assertEqual(st["detail"], "done", st)
+        self.assertIn("not ready", st["verdict"], st)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

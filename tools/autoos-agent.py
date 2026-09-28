@@ -278,12 +278,17 @@ LEAN_CLIENTS = ("opencode",) + MCP_STRICT_CLIENTS
 # reported NO-OP (exit 5) instead of a leak.
 WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
 ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
-# SB-A (D-103) item 1 (CANCELORPHAN): the detached MCP runner is a session of its
-# own, but the client this spawner starts leads a SECOND one, so a `kill` on the
-# runner reaches nothing that matters. The runner names the file, this writes the
-# client's pgid into it, and `cancel` kills both groups.
-WORKER_PGRP_ENV = "AUTOOS_WORKER_PGRP"
-WORKER_PGRP_FILE = "pgrp.json"
+# SB-A2 (D-103) item A/B replaced SB-A's channel. SB-A had `run_client` write the
+# client's pgid into `<run-dir>/pgrp.json`, whose path arrived as the env var
+# AUTOOS_WORKER_PGRP: the worker shares the uid of the run dir, so a worker could
+# write any pgid it liked into the file `cancel` kills from — including its own
+# parent's or a bystander's — and an env var is visible in `/proc/<pid>/environ`.
+# What `cancel` reads now is written by the RUNNER, outside the sandbox:
+#   * a systemd transient scope (`autoos-worker-<run-id>.scope`), a cgroup, so
+#     `setsid()`/`setpgid()` leaves a process in it — the primary mechanism;
+#   * the runner's own process group plus the leader's start time, for hosts with
+#     no user manager (containers, CI, the test suite).
+WORKER_SCOPE_PREFIX = "autoos-worker-"
 
 # KEYDENY3b item 1: the spawn gate is spelled two ways in opencode v2.0.16 — its
 # rename map is {bash: "shell", task: "subagent", apply_patch: "patch"}, so the
@@ -450,10 +455,11 @@ WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
 # AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
 # here: the child gets the minted key, never the path to the file it came from.
 WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
-                     # SB-A (D-103) item 1: the runner names the file run_client
-                     # writes the client's pgid into, or `cancel` cannot reach the
-                     # group the runner's own session does not cover.
-                     "AUTOOS_WORKER_PGRP",
+                     # SB-A2 (D-103) item A: AUTOOS_WORKER_PGRP is gone. It named
+                     # the file `cancel` killed a group from, and the worker — same
+                     # uid, same run dir — could rewrite it. The runner records the
+                     # scope unit and the group in job.json instead; nothing a
+                     # worker can see or write decides what a cancel signals.
                      "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
                      "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
                      "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
@@ -4340,19 +4346,29 @@ def sandbox_committed_work(sandbox: str, base: str, branch: str, start: dict) ->
     honest: a `--local` clone carries every branch of the parent, so "differs
     from the start sha" alone would report pre-existing lanes as this run's work,
     and a ref reset back to the start sha is still no work at all.
+
+    SB-A2 (D-103) item C completes that comparison: it is against the FULL start
+    SET of tips (and the start HEAD, which is `base`), not the sha each name held.
+    A worker that only `git switch`ed onto a ref that already existed — another
+    lane in the clone — moved no tip at all, yet the per-name read saw a name it
+    had never seen and billed the pre-existing commit as this run's work. A tip
+    that existed when the run started is not work, whichever name points at it now.
     """
     end = sandbox_ref_heads(sandbox)
+    known = {sha for sha in (start or {}).values()}
+    if base:
+        known.add(base)
     found = []
     moved = set()
     for name in sorted(end):
-        if end[name] == start.get(name) or end[name] == base:
+        if end[name] in known:
             continue
         moved.add(end[name])
         found.append(sandbox_ref_subject(sandbox, name, end[name]))
     head = subprocess.run(["git", "-C", sandbox, "rev-parse", "-q", "--verify", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
     tip = end.get("refs/heads/" + branch)
-    if head and head != base and head != tip and head not in moved:
+    if head and head not in known and head != tip and head not in moved:
         found.append(sandbox_ref_subject(sandbox, "HEAD-detached", head))
     return found
 
@@ -4802,7 +4818,57 @@ def propose_reprobe(entry: dict, registry_path: str, overlay_path: str,
 
 
 
-def kill_groups(pgids, grace=5.0) -> None:
+def proc_start_time(pid) -> int | None:
+    """Field 22 (starttime, clock ticks since boot) of /proc/<pid>/stat, or None.
+
+    SB-A2 (D-103) item B: this is the one number that tells a pgid the runner
+    recorded apart from the same number the kernel handed to an unrelated process
+    after pid wrap. It is read for the group LEADER only, because a leader's
+    death is what frees the number.
+    """
+    if os.name == "nt":
+        return None
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        with io.open("/proc/%d/stat" % pid, encoding="utf-8", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    # Field 2 (comm) is parenthesised and can hold spaces and ')', so count the
+    # fields from the far end of it: what follows is field 3 onward.
+    tail = data.rsplit(") ", 1)
+    if len(tail) != 2:
+        return None
+    fields = tail[1].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])       # field 22 overall, fields[0] is field 3
+    except ValueError:
+        return None
+
+
+def group_record(pid=None) -> dict:
+    """`{"pgid", "start"}` for the group `pid` leads — the runner's own record.
+
+    Written into job.json by the runner (never inside the sandbox, never through
+    an env var), which is what `cancel` verifies a kill against.
+    """
+    if os.name == "nt":
+        return {}
+    try:
+        pgid = os.getpgid(int(pid) if pid else 0)
+    except OSError:
+        return {}
+    return {"pgid": pgid, "start": proc_start_time(pgid)}
+
+
+def kill_groups(pgids, grace=5.0) -> list:
     """SIGTERM every named process group, then SIGKILL whatever survives `grace`.
 
     SB-A (D-103) item 1 (CANCELORPHAN): a worker's client is started in its own
@@ -4811,11 +4877,30 @@ def kill_groups(pgids, grace=5.0) -> None:
     pgid, so a group kill still reaches it. Sending the signal to each group
     first and polling them together is what keeps one 5 s window instead of one
     per group.
+
+    SB-A2 (D-103) item B: two groups are never signalled, and this is the last
+    gate — the guard lives here, not only at the call site, because the caller
+    can be wrong. `pgid <= 1` is init and the kernel thread groups. The caller's
+    OWN group is the process answering `cancel`: the MCP server, which would
+    otherwise SIGTERM itself along with every other run it hosts. Returns the
+    refused `[(pgid, reason)]` so the caller can report what it did not kill.
     """
+    refused = []
     if os.name == "nt":
-        return
+        return refused
+    own = os.getpgrp()
     live = []
     for pgid in pgids:
+        try:
+            pgid = int(pgid)
+        except (TypeError, ValueError):
+            continue
+        if pgid <= 1:
+            refused.append((pgid, "pgid <= 1 is init or a kernel thread group"))
+            continue
+        if pgid == own:
+            refused.append((pgid, "the canceller's own process group"))
+            continue
         try:
             os.killpg(pgid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -4837,6 +4922,58 @@ def kill_groups(pgids, grace=5.0) -> None:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+    return refused
+
+
+def kill_verified_groups(groups, grace=5.0) -> list:
+    """Kill only the groups whose leader is provably the process that was recorded.
+
+    `groups` is what the runner wrote in job.json: `[{"pgid": int, "start": int}]`.
+    One report per entry: `{"pgid", "action": "killed"|"skipped", "reason"}`.
+    Without a recorded start time, or with a leader whose start time differs from
+    it, NOTHING is signalled: the group is gone or recycled, and a recycled pgid
+    belongs to a process this run has no claim on.
+
+    RESIDUAL, stated rather than papered over: this is a *process-group* kill, so
+    a worker that calls `setsid()`/`setpgid()` moves itself out of reach, and so
+    does one reparented out of a group the runner never recorded. Nothing in the
+    fallback catches it — the mechanism that does is the systemd scope (item A),
+    which is a cgroup and cannot be escaped by changing a process group. `cancel`
+    uses the scope whenever `scope_supported()` says a user manager is reachable,
+    and this function only when it is not.
+    """
+    reports, to_kill = [], []
+    for group in groups or []:
+        try:
+            pgid = int(group.get("pgid"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        start = group.get("start")
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "no recorded leader start time: the group "
+                                      "cannot be told from a recycled pgid"})
+            continue
+        now = proc_start_time(pgid)
+        if now is None:
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "the group leader is gone: nothing to kill"})
+            continue
+        if now != start:
+            reports.append({"pgid": pgid, "action": "skipped",
+                            "reason": "the recorded pgid was recycled: leader start "
+                                      "time %d is not the recorded %d" % (now, start)})
+            continue
+        to_kill.append(pgid)
+        reports.append({"pgid": pgid, "action": "killed",
+                        "reason": "leader start time matches the record"})
+    for pgid, reason in kill_groups(to_kill, grace=grace):
+        for report in reports:
+            if report["pgid"] == pgid and report["action"] == "killed":
+                report["action"], report["reason"] = "skipped", reason
+    return reports
 
 
 def kill_group(pgid, grace=5.0) -> None:
@@ -4853,23 +4990,123 @@ def _terminate_group(proc, pgid) -> None:
     kill_group(pgid)
 
 
-def record_worker_group(pgid) -> None:
-    """Write the client's process group where a canceller can find it.
+def scope_unit_name(run_id) -> str:
+    """The transient scope unit a worker run is launched in (SB-A2 item A).
 
-    The MCP runner cannot see it: the client lives in a session of its own, one
-    the runner's group does not cover. SB-A (D-103) item 1 measured a canceled
-    run whose `opencode run` and child `opencode serve --stdio` (~480 MB) kept
-    running for exactly that reason. Best effort, and only when the runner asked
-    by naming the file: an interactive `autoos-agent.py run` has no canceller.
+    Only `[A-Za-z0-9_-]` survives — a unit name is systemd syntax, and the run id
+    is a string this function did not choose. The `.scope` suffix is part of the
+    name so `systemctl --user` addresses the unit it created and not a service of
+    the same stem.
     """
-    path = os.environ.get(WORKER_PGRP_ENV)
-    if not path or pgid is None:
-        return
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(run_id or "run"))[:120]
+    return "%s%s.scope" % (WORKER_SCOPE_PREFIX, safe)
+
+
+def worker_scope_argv(unit, cmd) -> list:
+    """`systemd-run --user --scope` around `cmd`: the whole subtree joins the cgroup."""
+    return (["systemd-run", "--user", "--scope",
+             "--unit", unit[:-len(".scope")] if unit.endswith(".scope") else unit,
+             "--collect", "--"] + list(cmd))
+
+
+_SCOPE_SUPPORTED: bool | None = None
+
+
+def scope_supported(force: bool = False) -> bool:
+    """Can this host launch (not merely contain) a `systemd-run --user --scope`?
+
+    Cached, and probed by launching the real thing to a no-op command: a container
+    can ship both binaries and have no user manager, and a worker that never
+    started is worse than a worker in the fallback. `force=True` re-probes — the
+    unit tests change PATH under it.
+    """
+    global _SCOPE_SUPPORTED
+    if _SCOPE_SUPPORTED is None or force:
+        _SCOPE_SUPPORTED = _probe_scope()
+    return _SCOPE_SUPPORTED
+
+
+def _probe_scope() -> bool:
+    """Launch a real scope around a no-op and see whether it works.
+
+    The site below is audited as an exception on purpose: `systemd-run` reaches
+    the user manager over the session bus, and the bus address
+    (``DBUS_SESSION_BUS_ADDRESS``, ``XDG_RUNTIME_DIR``) is exactly what
+    ``worker_env`` strips for a client. A probe that scrubbed them would report
+    "no scope here" on a host that has one, and every worker would take the
+    fallback whose kill cannot follow a `setsid()` child.
+    """
+    if os.name == "nt":
+        return False
+    if not (shutil.which("systemd-run") and shutil.which("systemctl")):
+        return False
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        return False
+    argv = worker_scope_argv(scope_unit_name("probe-%d" % os.getpid()),
+                             [sys.executable, "-c", "pass"])
     try:
-        with io.open(path, "w", encoding="utf-8") as fh:
-            json.dump({"pgid": int(pgid)}, fh)
-    except (OSError, TypeError, ValueError):
-        pass
+        # the probe keeps the caller's session-bus address, which the worker scrub
+        # drops on purpose; it runs `python -c pass` and nothing else. subprocess-audit: ok
+        return subprocess.call(argv, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30) == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _systemctl(*args):
+    """`systemctl --user ...`, or None when the manager cannot be reached at all.
+
+    Audited exception, same reason as `_probe_scope`: signalling a unit is the
+    spawner's own plumbing, spoken to the caller's user manager over the caller's
+    session bus. It carries no credential onward and runs no worker code.
+    """
+    try:
+        # subprocess-audit: session-bus plumbing, not a child that forwards a token
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def stop_scope(unit, grace: float = 5.0) -> dict:
+    """Kill every process inside the worker's transient scope, then release the unit.
+
+    `--kill-whom=all` signals the whole cgroup, so a member that `setsid()`ed out
+    of its process group is still reached — the escape the group-kill fallback
+    cannot cover. SIGTERM, then SIGKILL past the grace, then `stop` so the
+    `--collect` unit goes with it. A unit that is unknown (already exited, or a
+    run from before this mechanism) is reported, not raised: cancelling a run that
+    has ended is a no-op, never a failure.
+    """
+    report = {"unit": unit, "stopped": False, "reason": ""}
+    if not unit:
+        report["reason"] = "no scope unit recorded for this run"
+        return report
+    if _systemctl("status", unit) is None:
+        report["reason"] = "systemctl --user is not reachable"
+        return report
+    out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+    state = out.stdout.strip() if out else ""
+    if state != "active":
+        report["stopped"] = True
+        report["reason"] = "the scope is already %s" % (state or "unknown")
+        return report
+    for sig in ("SIGTERM", "SIGKILL"):
+        _systemctl("kill", "--kill-whom=all", "--signal=%s" % sig, unit)
+        deadline = time.time() + (grace if sig == "SIGTERM" else 5.0)
+        while time.time() < deadline:
+            out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+            if not out or out.stdout.strip() != "active":
+                break
+            time.sleep(0.1)
+    out = _systemctl("show", "-p", "ActiveState", "--value", unit)
+    state = out.stdout.strip() if out else ""
+    _systemctl("stop", unit)
+    report["stopped"] = state != "active"
+    report["reason"] = ("the scope is %s" % (state or "gone")) if report["stopped"] \
+        else "the scope is still active after SIGKILL to every process in it"
+    return report
 
 
 def _trim_tail(buf: bytearray, chunk: bytes) -> None:
@@ -4910,6 +5147,12 @@ class ClientExit(int):
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
+    The client leads a session of its own on purpose — but that is exactly the
+    group a canceller cannot reach from the runner, so `cancel` stops the systemd
+    SCOPE this process was launched inside (SB-A2 item A), which is a cgroup and
+    holds a setsid() child anyway. Nothing here writes a file for `cancel` to
+    read: the worker shares the uid of every path it could be given.
+
     capture=True (CAPTURE_CLIENTS only): the child's stdout+stderr are merged,
     streamed to our stdout line by line (unbuffered), the last TAIL_LIMIT bytes
     are kept on ClientExit.tail, and the first headless-refusal line seen
@@ -4944,7 +5187,6 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
                                 stdout=pipe, stderr=merge,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
-    record_worker_group(pgid)
     tail = bytearray()
     raw_tail = bytearray()
     found = []

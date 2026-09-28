@@ -14,7 +14,12 @@ canonical run id (tools/autoos-agent.py mint_run_id) handed to the run as
 child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
     job.json     the request, the canonical run id, the autoos-agent.py argv
-                 (which carries that id as --run-id), pid, route, start time
+                 (which carries that id as --run-id), pid, route, start time,
+                 and — written by the runner, SB-A2 (D-103) item A/B — the
+                 systemd scope unit the worker runs in and the runner's own
+                 process group with its leader start time. `cancel` reads these
+                 and nothing else; a file or env var the worker could write is
+                 not a channel a killer may take orders from
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
@@ -502,6 +507,11 @@ def spawn(req: dict) -> dict:
                             stderr=subprocess.DEVNULL, start_new_session=True,
                             env=agent.spawner_child_env(extra=budget_env))
     job["pid"] = proc.pid
+    # SB-A2 (D-103) item B: the runner leads a session of its own, so its pid IS
+    # its pgid, and its leader start time is only certainly THIS process the
+    # instant after the fork. `cancel` refuses to signal a group whose leader has
+    # a different start time — the number the kernel recycled is someone else's.
+    job["group"] = {"pgid": proc.pid, "start": agent.proc_start_time(proc.pid)}
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
     return {"id": run_id, "state": "working", "route": route, "dir": path}
@@ -536,8 +546,25 @@ def _write_fallback(path: str) -> None:
 
 
 def run_job(path: str) -> int:
-    """The detached runner: one autoos-agent.py run, output and exit code on disk."""
+    """The detached runner: one autoos-agent.py run, output and exit code on disk.
+
+    SB-A2 (D-103) item A: where the host has a user manager, the worker is
+    launched inside a transient systemd SCOPE named for its run id, and the unit
+    name is recorded here, in job.json — a file in the run dir, outside every
+    sandbox, that no worker sees the path to through its own environment. That is
+    what `cancel` stops, and a cgroup is not escapable by `setsid()`. Where there
+    is no user manager (a container, a CI runner, the test suite) the run starts
+    unwrapped and `cancel` falls back to the verified process-group kill; the
+    residual of that fallback — a worker that leaves the group — is stated in
+    `autoos-agent.kill_verified_groups`, not hidden here.
+    """
     job = _read_json(os.path.join(path, "job.json"))
+    cmd = [sys.executable, AGENT] + job["argv"]
+    if agent.scope_supported():
+        job["scope"] = agent.scope_unit_name(os.path.basename(os.path.normpath(path)))
+        cmd = agent.worker_scope_argv(job["scope"], cmd)
+    job["group"] = agent.group_record()
+    _write_json(os.path.join(path, "job.json"), job)
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
         # at this run dir; the CLI forwards its own chosen env onward, so the
@@ -545,15 +572,10 @@ def run_job(path: str) -> int:
         # FF1b item 6: this used to be `dict(os.environ, ...)`. The detached
         # runner above already got a scrubbed env, so this is the same scrub run
         # a second time rather than a copy of the caller's tokens.
-        rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             # SB-A (D-103) item 1 (CANCELORPHAN): the CLI starts
-                             # its client in a session of its own, so this runner's
-                             # group — the one `cancel` kills — does not cover it.
-                             # Naming the file is how `cancel` learns that pgid.
-                             env=agent.spawner_child_env(
-                                 extra={"AUTOOS_TASK_DIR": path,
-                                        "AUTOOS_WORKER_PGRP":
-                                            os.path.join(path, agent.WORKER_PGRP_FILE)}),
+        # SB-A2 (D-103) item A: AUTOOS_WORKER_PGRP is gone with the file it named.
+        # The runner's group and the scope unit are recorded above, by the runner.
+        rc = subprocess.call(cmd, cwd=job["cwd"],
+                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)
@@ -585,14 +607,14 @@ def _alive(pid) -> bool:
         return False
 
 
-def _read_tail(path: str) -> str:
-    """The last ``_TAIL_BYTES`` of the run's output.log, or ""."""
+def _read_tail(path: str, limit: int = _TAIL_BYTES) -> str:
+    """The last ``limit`` bytes of the run's output.log, or ""."""
     log_path = os.path.join(path, "output.log")
     try:
         with io.open(log_path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
-            fh.seek(max(0, size - _TAIL_BYTES))
+            fh.seek(max(0, size - limit))
             return fh.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
@@ -650,19 +672,23 @@ def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     return result
 
 
-# The verdict line a review run's brief asks for ("VERDICT: ready / fix-first /
-# NOT READY + findings"), optionally markdown-wrapped, anchored at the line start
-# so a sentence that merely mentions a verdict does not read as one.
+# The verdict line a review run's brief asks for, anchored at the line start so a
+# sentence that merely mentions a verdict does not read as one. The decoration it
+# tolerates is what a markdown-speaking reviewer wraps a real decision in (a
+# heading, a bullet, bold on the word `VERDICT`); the VALUE has to be the word
+# alone (see `review_verdict`).
 _VERDICT_LINE_RE = re.compile(
-    r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?VERDICT(?:\*\*)?\s*[:\-]?\s*(.+?)\s*$")
+    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(\S.*)$")
 
-# The words that make a verdict a verdict. Ordered longest-first so "not ready"
-# is not read as "ready" by an earlier entry.
-_VERDICT_WORDS = sorted(
-    ("not ready", "fix-first", "fix first", "changes-requested", "changes requested",
-     "needs-work", "needs work", "approved", "approve", "passed", "reject", "blocked",
-     "ready", "pass", "lgtm", "ship", "block"),
-    key=len, reverse=True)
+# SB-A2 (D-103) item D: the words a verdict is. A line that opens with one and
+# then says something else (`VERDICT: ready, but the ref snapshot is never read`)
+# is a reviewer *talking*, and grading it as `ready` merges the very review that
+# said fix-first.
+_VERDICT_WORDS = ("ready", "fix-first", "not-ready")
+
+# The verdict scan reads the transcript up to a bound — a reviewer's verdict can
+# sit a hundred KB before the closing noise, so a tail is not the deliverable.
+_VERDICT_SCAN_BYTES = 2 * 1024 * 1024
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -670,23 +696,39 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def review_verdict(text: str) -> str | None:
     """The verdict a reviewer stated in its own transcript, or None.
 
-    SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code says
-    whether a process ran, and a review run's deliverable is its verdict, so the
-    transcript has to be read. The LAST verdict wins — a reviewer that changed
-    its mind said so. A value that opens with a bracket is a template
-    ("VERDICT: <ready|fix-first|NOT READY>"), which is the brief quoted back, not
-    a decision: the same escape SPAWNFIX3c closed for REPORT headings.
+    SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code says whether
+    a process ran, and a review run's deliverable is its verdict, so the transcript
+    has to be read. The LAST verdict wins — a reviewer that changed its mind said
+    so.
+
+    SB-A2 (D-103) item D tightened what counts. Rejected: a value that is not the
+    bare word (the same escape SPAWNFIX3c closed for REPORT headings — `VERDICT:
+    <ready|fix-first|NOT READY>` is the brief quoted back, and any line carrying
+    `<` or `|` is template syntax, not a decision); a line inside a fenced code
+    block (the reviewer pasted the contract at us); and a `>`-quoted line (someone
+    else's text). A single trailing punctuation mark is tolerated — a reviewer that
+    writes `VERDICT: fix-first.` means fix-first.
     """
     found = None
+    in_fence = False
     for line in (text or "").splitlines():
-        m = _VERDICT_LINE_RE.search(_ANSI_RE.sub("", line))
+        stripped = _ANSI_RE.sub("", line).strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence or stripped.startswith(">"):
+            continue
+        if "<" in stripped or "|" in stripped:
+            continue
+        m = _VERDICT_LINE_RE.match(stripped)
         if not m:
             continue
         value = m.group(1).strip().strip("*_` ").strip()
-        if not value or value[0] in "<[({":
+        if not value:
             continue
-        low = value.lower()
-        if any(low.startswith(word) for word in _VERDICT_WORDS):
+        if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
             found = value
     return found
 
@@ -767,7 +809,7 @@ def _state(path: str) -> dict:
             # never saw the verdict. A reviewer that stated one and then died was
             # thrown away as incomplete; a reviewer that exited 0 having said
             # nothing was counted as done and never re-routed.
-            verdict = review_verdict(_read_tail(path))
+            verdict = review_verdict(_read_tail(path, _VERDICT_SCAN_BYTES))
             if verdict is not None:
                 recovered = verdict
                 if state == "failed" and report is None:
@@ -859,23 +901,22 @@ def cancel(run_id: str) -> dict:
         return dict(_state(path), note="finished before the cancel landed")
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(job["pid"])], capture_output=True)
+        report = {"taskkill": True}
     else:
-        # SB-A (D-103) item 1 (CANCELORPHAN): killing the runner alone left the
-        # client (`opencode run`) and its child (`opencode serve --stdio`,
-        # reparented to systemd --user, ~480 MB) running. A group is addressed by
-        # pgid and reparenting never changes it, so both groups are killed — the
-        # runner's own and the one run_client recorded — with SIGTERM escalating
-        # to SIGKILL past the grace.
-        pgids = [int(job["pid"])]
-        recorded = _read_json(os.path.join(path, agent.WORKER_PGRP_FILE)) or {}
-        try:
-            client_pgid = int(recorded.get("pgid"))
-        except (TypeError, ValueError):
-            client_pgid = 0
-        if client_pgid > 1 and client_pgid != pgids[0]:
-            pgids.append(client_pgid)
-        agent.kill_groups(pgids)
-    return _state(path)
+        # SB-A2 (D-103) items A and B. The scope is the worker's cgroup, so
+        # stopping it reaches the client and any grandchild that `setsid()`ed out
+        # of a process group — SB-A's pgrp.json channel is gone because the file
+        # it named was writable by the very process group it described. The group
+        # kill still runs: the runner itself sits outside the scope (it is the one
+        # that launched systemd-run), and its leader start time is verified before
+        # anything is signalled. Whatever was refused is reported back, so a
+        # canceled run that killed nothing says so instead of looking reaped.
+        report = {}
+        if job.get("scope"):
+            report["scope"] = agent.stop_scope(job["scope"])
+        group = job.get("group") or {"pgid": job.get("pid"), "start": None}
+        report["groups"] = agent.kill_verified_groups([group])
+    return dict(_state(path), cancel=report)
 
 
 def serve() -> None:
@@ -937,9 +978,11 @@ def serve() -> None:
 
     @app.tool(name="cancel")
     def _cancel(run_id: str) -> dict:
-        """Stop a working or input_required agent: SIGTERM to its runner's and
-        its client's whole process groups, SIGKILL to whatever survives the
-        grace."""
+        """Stop a working or input_required agent: it stops the systemd scope the
+        worker was launched in (SIGTERM, then SIGKILL to every process in the
+        cgroup) and kills the runner's process group, whose leader start time is
+        verified first. Where no user manager is reachable only the verified
+        group kill runs. Reports what it refused to kill."""
         return cancel(run_id)
 
     @app.tool(name="respond")
