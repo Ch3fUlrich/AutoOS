@@ -8,11 +8,13 @@
 #   tierN-paid paid escalation for tierN, tried in listed order.
 #
 # Paid rule (PROVFIX3 finding 4 — this header contradicted the file under it):
-# an escalation is only worth routing when a leg answers. Direct DeepSeek is off
-# (providers.deepseek.available: false, 402 without balance), so the two hand
-# chains whose only deployment is it (t2-worker-paid, t3-driver-paid) are INERT —
-# they answer nothing, which is exactly why router_settings.fallbacks is empty
-# (note at the key). MUSEAPI 2026-09-27 moved the paid escalation that does
+# an escalation is only worth routing when a leg answers. Direct DeepSeek is back
+# on (DSBACK 2026-09-28: operator top-up, router balance 19.99 USD) but the two
+# hand chains that used to deploy only it (t2-worker-paid, t3-driver-paid) declare
+# no registry `legs` and stay hand-curated, so nothing here changed for them;
+# router_settings.fallbacks is still empty because the chains that did answer are
+# gone (note at the key — OpenRouter remains off at the provider level, DSMAX
+# 2026-09-27). MUSEAPI 2026-09-27 moved the paid escalation that does
 # answer onto meta_api direct: an OpenAI-compatible endpoint with its own
 # api_base, so t1-orchestrator, t1-orchestrator-paid and spark-1.3-contributor
 # are AUTOOS-MANAGED groups with real legs. OpenRouter is off entirely
@@ -51,6 +53,10 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker
     litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
@@ -63,6 +69,10 @@ model_list:
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
   # AUTOOS-MANAGED-START t2-worker-clean
+  - model_name: t2-worker-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t2-worker-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -87,15 +97,16 @@ model_list:
       api_key: os.environ/FREE_AI_API_KEY
   # AUTOOS-MANAGED-END t2-worker-free-only
 
-  # ── t2-worker-paid / t3-driver-paid: INERT until DeepSeek is funded ─────────
-  # The escalation must actually answer, and this one cannot: its only
-  # deployment is deepseek/deepseek-flash, whose provider is off (402 without
-  # balance, 2026-09-27T16:4xZ). The OpenRouter leg that used to lead these
-  # chains went with OpenRouter itself (DSMAX 2026-09-27), and Zen left in
-  # September (402s without balance). Nothing in this repo falls through to
-  # these groups any more — router_settings.fallbacks is empty (see the note at
-  # the key) — so the tables exist only to be re-funded: give them a leg that
-  # answers (meta_api, like t1-orchestrator-paid) and the chain can come back.
+  # ── t2-worker-paid / t3-driver-paid: hand-curated, deepseek-funded again ────
+  # These two groups declare no registry `legs`, so they stay hand-curated.
+  # Their only deployment is deepseek/deepseek-flash, which was inert while its
+  # provider was off (402 without balance, 2026-09-27T16:4xZ) and ANSWERS again
+  # since the DSBACK top-up of 2026-09-28. Nothing in this repo falls through to
+  # them — router_settings.fallbacks is empty (see the note at the key), which
+  # is an operator decision about escalation, not a dead-leg verdict — so the
+  # groups wait for a re-approved chain (meta_api leads t1-orchestrator-paid as
+  # the pattern; the OpenRouter leg that used to lead these went with OpenRouter
+  # itself, DSMAX 2026-09-27, and Zen left in September on its own 402s).
   - model_name: t2-worker-paid
     litellm_params:
       model: deepseek/deepseek-flash
@@ -110,6 +121,10 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: t3-driver
+    litellm_params:
       model: mistral/mistral-small-latest
       api_key: os.environ/MISTRAL_API_KEY
       rpm: 2
@@ -122,6 +137,10 @@ model_list:
 
   # ── t3-driver-clean: gateway-only legs stripped ────────────────────────────
   # AUTOOS-MANAGED-START t3-driver-clean
+  - model_name: t3-driver-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t3-driver-clean
     litellm_params:
       model: mistral/mistral-small-latest
@@ -208,8 +227,16 @@ model_list:
   # AUTOOS-MANAGED-END t1-orchestrator-paid
 
   # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
-  # deepseek-v4.1-flash omitted: providers.deepseek 402 (2026-09-27T16:4xZ),
-  # no servable leg left - re-add the managed block when topped up.
+  # deepseek-v4.1-flash was omitted while providers.deepseek was 402
+  # (2026-09-27T16:4xZ); DSBACK 2026-09-28 re-added the block after the
+  # operator top-up (router balance 19.99 USD) gave the route a servable leg.
+
+  # AUTOOS-MANAGED-START deepseek-v4.1-flash
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END deepseek-v4.1-flash
 
   # AUTOOS-MANAGED-START gemini-3.8-flash
   - model_name: gemini-3.8-flash
@@ -236,12 +263,16 @@ router_settings:
   # No fallback chains (PROVFIX3, review PROV round 2 finding 5). The three
   # chains this file carried (t2-worker -> t2-worker-paid, t3-driver ->
   # t3-driver-paid, t4-rag -> t2-worker-paid) all ended in a hand group whose
-  # only deployment is deepseek/deepseek-flash, and DeepSeek is off
-  # (providers.deepseek.available: false — 402 without balance), so the
+  # only deployment is deepseek/deepseek-flash, which was an unservable dead
+  # end while providers.deepseek was off (402 without balance) — the
   # "escalation" spent its retries on the same dead provider it was escaping.
-  # Re-add a chain only when its target actually answers;
+  # DSBACK 2026-09-28 topped that balance up (router balance 19.99 USD), so the
+  # deployment answers again, but the chains stay down: re-adding one is an
+  # operator call, and openrouter — the other route they used to end in — is
+  # still off at the provider level. Re-add a chain only when its target
+  # actually answers;
   # tests/test_registry_render.py::LitellmFallbackServabilityTests asserts it.
-  # The two paid groups below stay hand-curated for the day DeepSeek is funded.
+  # The two paid groups below stay hand-curated.
   fallbacks: []
 
 litellm_settings:

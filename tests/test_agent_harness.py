@@ -671,7 +671,7 @@ class VendoredProfileTests(unittest.TestCase):
             self.assertFalse(self.load(name)["enable_sub_agents"], name)
 
     def test_the_reviewer_profile_uses_the_deepseek_model(self):
-        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-v4-flash")
+        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-flash")
 
     def test_every_profile_names_agents_md_and_the_leaf_contract(self):
         for name in self.PROFILES:

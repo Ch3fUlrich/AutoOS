@@ -525,7 +525,7 @@
         },
         "leg_rules": {
           "type": "array",
-          "description": "Ordered list of fnmatch policy gates (Claude budget rules from briefs/common.md). First match wins; no match = allowed. A denied serving leg (not gated via routes.<id>.unavailable_legs) is an error.",
+          "description": "Ordered list of fnmatch policy gates (Claude budget rules from briefs/common.md). Matched case-insensitively (pattern and leg are both casefolded), so a deny cannot be escaped by re-capitalising an id. First match wins; no match = allowed. A denied serving leg (not gated via routes.<id>.unavailable_legs) is an error.",
           "items": {
             "type": "object",
             "required": ["id", "match", "allow", "reason", "source"],

@@ -247,22 +247,32 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # A6a review, re-pinned by PROVFIX3 finding 8: the ladder comes from the
-        # leg that ANSWERS, not from legs[0]. t1-orchestrator-free-only's served
-        # head is gemini-3.8-flash (low/medium/high), so its variants are those
-        # three rungs. t2-worker-clean used to inherit deepseek/deepseek-flash's
-        # none/low/high/max from its first declared leg even though that provider
-        # is off (available: false, 402 2026-09-27T16:4xZ) — the picker then
-        # forwarded an effort the mistral-small leg that actually answers
-        # rejects. It now carries no ladder and no variants; t3-driver (head
-        # mistral-code-latest, empty ladder) never had any.
+        # A6a review, re-pinned by PROVFIX3 finding 8, re-pinned again by DSBACK
+        # 2026-09-28: the ladder comes from the leg that ANSWERS, not from
+        # legs[0] as declared. t1-orchestrator-free-only's served head is
+        # gemini-3.8-flash (low/medium/high), so its variants are those three
+        # rungs. While providers.deepseek was off (402, 2026-09-27T16:4xZ) the
+        # served head of t2-worker-clean was mistral-small-latest — no ladder —
+        # so it carried no variants; DSBACK topped the balance up and the head
+        # is deepseek/deepseek-flash (none/low/high/max) again, so the picker
+        # offers its three real rungs ("none" is deliberately not a picker
+        # entry: it means "send no reasoning param", not "send reasoning_effort
+        # =none" — see tools/registry.py and tools/probe-effort.py). t3-driver
+        # (head mistral-code-latest, empty ladder) still has none.
         free = oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]
         self.assertEqual([v["id"] for v in free["variants"]],
                          ["low", "medium", "high"])
         for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertNotIn("variants",
-                         oc["providers"]["omniroute"]["models"]["t2-worker-clean"])
+        clean = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
+        self.assertEqual([v["id"] for v in clean["variants"]],
+                         ["low", "high", "max"])
+        for v in clean["variants"]:
+            self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
+        self.assertEqual(
+            [v["id"] for v in
+             oc["providers"]["omniroute"]["models"]["t3-driver-clean"]["variants"]],
+            ["low", "high", "max"])
         self.assertNotIn("variants", oc["providers"]["omniroute"]["models"]["t3-driver"])
 
 

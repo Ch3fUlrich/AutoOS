@@ -162,10 +162,10 @@ before, so the rows below record what each one absorbed and where the lesson cam
 | `R-orch-15` | new | the `lesson: … evidence=…` line to the skill owner; a lesson becomes a rule only after a test (A30 + A35) |
 | `R-orch-16` | new | report-driven gates are re-audited cross-family and match names exactly (L33b, REVGATE2) |
 | `R-router-01` | merged | parent's inbox on a refused write, and the batched `Q:` line to a live L0; the literal format lives in `references/layers.md` (A38 + A59 + A65) |
-| `R-coord-01` | merged | merge main into a lane before it spawns — a stale lane runs stale tooling (L07b) |
+| `R-coord-01` | merged | merge main into a lane before it spawns and before its CI runs — never between green CI and `ready`, so `ready` always names a tested tip (L07b; the ready window, 2c3e4f7) |
 | `R-coord-03` | merged | never researches either; Haiku is the allowed first-pass fallback per operator Q-003 (A42) |
 | `R-coord-04` | merged | heavy suites counted: one per orchestrator, two per host (A21) |
 | `R-coord-08` | merged | answers a ping with a pong, and WIP-commits work older than one beat (A09 + A28) |
 | `R-orch-10` | merged | widened from sudo/root to installer and state-mutating changes (L21) |
 | `R-orch-13` | merged | "bigger" sized as diff lines including tests, read off the bucket table (L24-25) |
-| `R-worker-08` | merged | the detached copy is a `git clone --no-hardlinks`; a tar export broke 37 git-fixture tests (L30) |
+| `R-worker-08` | merged | the detached copy is `git clone --no-hardlinks` **or** `git worktree add --detach`; `cp -r` of a worktree is forbidden outright — the copy shares the original's index, so a later `git checkout` mutates it (ci7); `tar` is usable only where no test reads git — a tar export broke 37 git-fixture tests (L30) |
