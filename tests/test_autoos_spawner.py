@@ -3139,6 +3139,452 @@ class HeadlessRefusalTests(unittest.TestCase):
         self.assertTrue(rc.tail.endswith("THE-END"))
 
 
+def load_redact():
+    """SPAWNREDACT item 1: the shared pattern module (loaded lazily so a
+    missing module fails the redaction tests, not the whole file)."""
+    import autoos_redact
+    return autoos_redact
+
+
+# Synthetic secrets (never real): one per pattern class, with the exact
+# substring that must never reach the caller's terminal, log, record or commit.
+REDACT_SAMPLES = (
+    ("curl -H 'Authorization: Bearer abcdef1234567890ABCD' https://h",
+     "abcdef1234567890ABCD"),
+    ("wrote sk-" "ABCDEFGHIJKLMNOP1234 into the file",
+     "sk-" "ABCDEFGHIJKLMNOP1234"),
+    ("leg sk-" "or-v1-0123456789abcdef0123456789abcdef is down",
+     "sk-" "or-v1-0123456789abcdef0123456789abcdef"),
+    ("key sk-" "ant-api03-0123456789abcdef0123456789abcdef",
+     "sk-" "ant-api03-0123456789abcdef0123456789abcdef"),
+    ("pushed with gh" "p_0123456789abcdef0123456789abcd now",
+     "gh" "p_0123456789abcdef0123456789abcd"),
+    ("gh" "o_0123456789abcdef0123456789abcd", "gh" "o_0123456789abcdef0123456789abcd"),
+    ("github" "_pat_11ABCDEFGH0123456789_abcdefghijklmnopqrstuvwx",
+     "github" "_pat_11ABCDEFGH0123456789_abcdefghijklmnopqrstuvwx"),
+    ("google AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678", "AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678"),
+    ("xo" "xb-123456789012-abcdefghijklmnop", "xo" "xb-123456789012-abcdefghijklmnop"),
+    ("xo" "xp-123456789012-abcdefghijklmnop", "xo" "xp-123456789012-abcdefghijklmnop"),
+    ("gl" "pat-ABCDEFGH12345678", "gl" "pat-ABCDEFGH12345678"),
+    ("api_key = fakevaluexyz123456", "fakevaluexyz123456"),
+    ("password: fakepass12345678", "fakepass12345678"),
+    ("TOKEN=faketokenvalue123", "faketokenvalue123"),
+    ("secret = fakesecretvalue99", "fakesecretvalue99"),
+    ("clone https://user:hunter2@git.internal/r.git", "hunter2"),
+)
+
+# A PEM private key spans lines, so it is tested on its own (a stream, not a line).
+REDACT_PEM_LINES = (
+    "report follows",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIBogIBAAJBALRm9DaFhwmB8QKB8CgYQK0AAAAAAAAAAAAAAAAAAAAB",
+    "hQL9Zm1Yq8ZkQYoZ1F0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "-----END RSA PRIVATE KEY-----",
+    "end of report",
+)
+
+
+class SharedRedactPatternTests(unittest.TestCase):
+    """SPAWNREDACT item 1: one home for the secret patterns, shared by the
+    spawner's text streams and hostexec's argv redaction."""
+
+    def setUp(self):
+        self.r = load_redact()
+
+    def test_every_pattern_class_is_masked_in_text(self):
+        for line, secret in REDACT_SAMPLES:
+            red = self.r.Redactor()
+            out = red.text(line)
+            self.assertNotIn(secret, out, line)
+            self.assertIn(self.r.TEXT_MASK, out, line)
+            self.assertEqual(red.count, 1, line)
+
+    def test_a_pem_block_is_masked_across_streamed_lines(self):
+        red = self.r.Redactor()
+        out = "".join(red.text(ln + "\n") for ln in REDACT_PEM_LINES)
+        self.assertNotIn("MIIBogIBAAJBALRm9DaFhwmB8QKB", out)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", out)
+        self.assertIn("report follows", out, "the surrounding output must survive")
+        self.assertIn("end of report", out)
+        self.assertIn(self.r.TEXT_MASK, out)
+
+    def test_ordinary_output_is_untouched(self):
+        red = self.r.Redactor()
+        for line in ("lane merged cleanly, the 429 backoff was retried\n",
+                     "FOO=bar PATH=/usr/bin make test\n",
+                     "the token count and key paths are in the report\n"):
+            self.assertEqual(red.text(line), line, line)
+        self.assertEqual(red.count, 0)
+
+    def test_secret_env_values_takes_long_secret_named_values_only(self):
+        vals = self.r.secret_env_values({
+            "AUTOOS_OMNIROUTE_KEY": "omniroute-test-value-0123456789",
+            "MY_TOKEN": "a-fine-32-char-token-value-abcdef",
+            "OPENAI_API_KEY": "too-short",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/tester"})
+        self.assertEqual(sorted(vals),
+                         sorted(["omniroute-test-value-0123456789",
+                                 "a-fine-32-char-token-value-abcdef"]))
+
+    def test_an_injected_env_value_is_masked_by_exact_value(self):
+        value = "omniroute-test-value-0123456789"
+        red = self.r.Redactor([value])
+        out = red.text("the key is %s and nothing else" % value)
+        self.assertNotIn(value, out)
+        self.assertIn(self.r.TEXT_MASK, out)
+        # a value the redactor was not given is not guessed at
+        self.assertEqual(red.text("plain line"), "plain line")
+
+    def test_redact_argv_masks_named_and_prefixed_tokens(self):
+        r = self.r
+        self.assertEqual(r.redact_argv(["tool", "API_KEY=abc123"]), ["tool", "API_KEY=***"])
+        self.assertEqual(r.redact_argv(["curl", "-H", "Bearer sk-live-x"]),
+                         ["curl", "-H", "Bearer ***"])
+        self.assertEqual(r.redact_argv(["tool", "sk-or-v1-0123456789abcdef"]), ["tool", "***"])
+        self.assertEqual(r.redact_argv(["env", "FOO=bar"]), ["env", "FOO=bar"])
+
+    def test_non_string_argv_elements_render_from_the_shared_module(self):
+        # REDACTMERGE: main's hx fix for a non-str argv element (MCP JSON can
+        # carry a number/bool/null, and a refused call must still be recorded)
+        # moved here with the rest of the pattern set, so the spawner's argv
+        # view gets it too and audit.py cannot drift from it.
+        self.assertEqual(self.r.redact_argv(["echo", 123, None, True]),
+                         ["echo", "123", "null", "true"])
+        # an element json.dumps cannot name falls back to repr, never raises
+        self.assertEqual(len(self.r.redact_argv(["echo", {1, 2}])), 2)
+
+    def test_audit_holds_no_pattern_set_of_its_own(self):
+        # REDACTMERGE resolution rule: ONE home for the patterns. hostexec keeps
+        # only what is audit-specific (its "***" mask and argv_sha256 over the
+        # redacted form); the carriers are the shared module's functions.
+        from hostexec import audit
+        self.assertIs(audit.redact_argv, self.r.redact_argv)
+        self.assertIs(audit.sanitize_text, self.r.sanitize_text)
+        src = (Path(__file__).resolve().parent.parent / "tools" / "hostexec"
+               / "audit.py").read_text(encoding="utf-8")
+        for own in ("_CONTROL_RE =", "_SECRET_PREFIX_RE =", "_BEARER_IN_TOKEN_RE =",
+                    "_URL_USERPASS_RE =", "_SECRET_VALUE_FLAGS ="):
+            self.assertNotIn(own, src, "the pattern set is duplicated in audit.py: " + own)
+
+    def test_the_text_prefix_rule_stays_case_exact_on_aiza(self):
+        # REDACTFIX item 3 pins the asymmetry review-spfix H1 accepted: hostexec's
+        # argv path matches every prefix case-insensitively, the text stream
+        # keeps `AIza` case-exact (Google's own keys always are `AIza`, and a
+        # case-insensitive run would eat ordinary prose). The other prefixes are
+        # masked in either case, so widening argv costs no real secret.
+        line = "note AIZA_SYABCDEFGHJKLMNOPQRSTUVW1234 in the report"
+        self.assertEqual(self.r.Redactor().text(line), line)
+        red = self.r.Redactor()
+        out = red.text("key AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678")
+        self.assertNotIn("AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678", out)
+        self.assertIn(self.r.TEXT_MASK, out)
+
+
+class RedactAssignmentCostTests(unittest.TestCase):
+    """REDACTFIX item 1: the assignment scan runs in the output pump, once per
+    line of a stream whose line length the worker chooses, so it must be linear.
+    Evidence: review-spfix S1 on 227f470 measured the old ``_ASSIGNMENT_RE``
+    (two unbounded quantifiers overlapping the keyword literals) at 4.8 KB ->
+    2.56 s, and 200 KB -> 104 s; the pump thread hangs for that long and the run
+    is never reaped. The replacement tokenizes ``<word>[=:]<value>`` in one
+    linear pass and decides the keyword in Python."""
+
+    ADVERSARIAL = "keytokensecretpasswordcredential"   # keywords, no separator
+    SECRET = "faketokenvalue123"
+
+    def setUp(self):
+        self.r = load_redact()
+
+    def _timed(self, line):
+        red = self.r.Redactor()
+        start = time.monotonic()
+        out = red.text(line)
+        return out, time.monotonic() - start, red
+
+    def repeat(self, unit, size):
+        return (unit * (size // len(unit) + 1))[:size]
+
+    def test_a_200_kb_line_of_padded_keywords_redacts_in_under_a_second(self):
+        # The bug: this line has no `:`/`=`, so there is nothing to mask, and
+        # the old regex backtracked through every way to split the run first.
+        line = self.repeat(self.ADVERSARIAL, 200 * 1024)
+        out, elapsed, red = self._timed(line)
+        self.assertLess(elapsed, 1.0, "200 KB cost %.1f s" % elapsed)
+        self.assertEqual(out, line, "no carrier, so no masking")
+        self.assertEqual(red.count, 0)
+
+    def test_a_200_kb_value_after_a_carrier_is_masked_in_under_a_second(self):
+        # A long single-token value: masked whole, not left half-visible.
+        line = "token=" + self.repeat(self.ADVERSARIAL, 200 * 1024)
+        out, elapsed, _red = self._timed(line)
+        self.assertLess(elapsed, 1.0, "200 KB value cost %.1f s" % elapsed)
+        self.assertEqual(out, "token=" + self.r.TEXT_MASK)
+
+    def test_a_one_megabyte_normal_line_streams(self):
+        line = self.repeat("the lane merged cleanly ", 1024 * 1024)
+        out, elapsed, red = self._timed(line)
+        self.assertLess(elapsed, 2.0, "1 MB cost %.1f s" % elapsed)
+        self.assertEqual(out, line)
+        self.assertEqual(red.count, 0)
+
+    def test_a_carrier_at_the_end_of_a_one_megabyte_line_is_still_masked(self):
+        # A length cap that dropped the tail of a long line would leak here.
+        line = self.repeat("word ", 1024 * 1024) + "TOKEN=" + self.SECRET
+        out, elapsed, _red = self._timed(line)
+        self.assertLess(elapsed, 2.0, "1 MB cost %.1f s" % elapsed)
+        self.assertNotIn(self.SECRET, out)
+
+    def test_an_injected_value_far_into_a_one_megabyte_line_is_masked(self):
+        value = "omniroute-injected-test-value-0123456789"
+        line = self.repeat("filler ", 1024 * 1024) + value + " tail"
+        red = self.r.Redactor([value])
+        start = time.monotonic()
+        out = red.text(line)
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertNotIn(value, out)
+
+    def test_the_keyword_membership_rules_are_unchanged_by_the_rewrite(self):
+        # Pins the equivalence with the old regex's name/separator/value rules:
+        # the keyword is anywhere in the name run, the separator may be
+        # whitespace-padded, and the value must have a non-space character.
+        cases = [("MY_SECRET_TOKEN=s", True), ("api_key = v", True),
+                 ("password:  v", True), ("x-api-key: v", True),
+                 ("credential-id: v", True), ("key = 1", True),
+                 ("key=", False), ("key = ", False), ("passwd : ", False),
+                 ("the key paths are listed", False), ("FOO=bar", False)]
+        for line, masked in cases:
+            red = self.r.Redactor()
+            out = red.text(line)
+            self.assertEqual(self.r.TEXT_MASK in out, masked, line)
+            self.assertEqual(red.count, 1 if masked else 0, line)
+
+    def test_a_line_past_the_scan_cap_still_gets_the_other_patterns(self):
+        # Above the cap the assignment scan is skipped (documented), but the
+        # prefix/PEM/env patterns still run over the whole line.
+        line = self.repeat("word ", self.r.ASSIGNMENT_SCAN_CAP + 1024)
+        out, _elapsed, red = self._timed(line + " wrote sk-ABCDEFGHIJKLMNOP1234")
+        self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", out)
+        self.assertGreaterEqual(red.count, 1)
+
+
+class SpawnerOutputRedactionTests(unittest.TestCase):
+    """SPAWNREDACT items 2 and 3: every stream the spawner writes of a worker's
+    output is redacted - the live pass-through, the captured tail, the worker
+    record, the track entry and the WIP commit message - while refusal and
+    provider-stop classification still work on it. Evidence: lesson inbox
+    2026-09-27T18:58:28Z, a worker REPORT that printed a found secret."""
+
+    INJECTED = "omniroute-injected-test-value-0123456789"
+    # The child echoes these lines, replacing $KEY with the env value the
+    # spawner injected, so the test proves the exact-value rule too.
+    ECHO_CODE = (
+        "import os, sys\n"
+        "key = os.environ.get('AUTOOS_OMNIROUTE_KEY', '')\n"
+        "for line in sys.argv[1].split('\\n'):\n"
+        "    sys.stdout.write(line.replace('$KEY', key) + '\\n')\n"
+        "    sys.stdout.flush()\n")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.r = load_redact()
+
+    def _run_captured(self, lines, extra_env=None):
+        env = dict(os.environ)
+        env["AUTOOS_OMNIROUTE_KEY"] = self.INJECTED
+        env.update(extra_env or {})
+        payload = "\n".join(lines)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.agent.run_client([sys.executable, "-c", self.ECHO_CODE, payload],
+                                       ".", env, capture=True)
+        return rc, out.getvalue()
+
+    def test_the_live_stream_and_the_tail_carry_no_secret(self):
+        lines = [line for line, _ in REDACT_SAMPLES] + ["$KEY", "worker report done"]
+        rc, streamed = self._run_captured(lines)
+        for _, secret in REDACT_SAMPLES:
+            self.assertNotIn(secret, streamed, secret)
+            self.assertNotIn(secret, rc.tail, secret)
+        self.assertNotIn(self.INJECTED, streamed)
+        self.assertNotIn(self.INJECTED, rc.tail)
+        # streaming still works: ordinary output reaches the caller, masked or not
+        self.assertIn("worker report done", streamed)
+        self.assertIn(self.r.TEXT_MASK, streamed)
+
+    def test_a_pem_block_never_reaches_the_caller_line_by_line(self):
+        rc, streamed = self._run_captured(list(REDACT_PEM_LINES) + ["$KEY"])
+        self.assertNotIn("MIIBogIBAAJBALRm9DaFhwmB8QKB", streamed)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", streamed)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", rc.tail)
+        self.assertIn("end of report", streamed)
+
+    def test_provider_stop_still_detects_a_rate_limit_next_to_a_redacted_line(self):
+        rc, _ = self._run_captured(["key sk-or-v1-0123456789abcdef0123456789abcdef",
+                                    "Error: Rate limit exceeded, quota 429 reached",
+                                    "$KEY"])
+        self.assertNotIn("sk-or-v1-0123456789abcdef0123456789abcdef", rc.tail)
+        stop = self.agent.provider_stop(rc.tail)
+        self.assertIsNotNone(stop, "redaction must not blind the provider-stop check")
+        self.assertIn("rate limit exceeded", stop.lower())
+        self.assertNotIn(self.INJECTED, stop)
+
+    def test_a_stop_marker_the_redactor_eats_is_still_classified(self):
+        # REDACTFIX item 2 (review-spfix S2): the marker here IS the value of a
+        # secret-named carrier, so no copy of the tail that reaches the caller
+        # can contain it. The check runs on the raw copy the pump kept in
+        # memory; the printed and recorded copy stays redacted.
+        rc, streamed = self._run_captured(["working", "error: retry_key = 429"])
+        self.assertIn("retry_key = 429", rc.raw_tail)
+        self.assertNotIn("retry_key = 429", rc.tail)
+        self.assertNotIn("retry_key = 429", streamed)
+        self.assertIsNone(self.agent.provider_stop(rc.tail),
+                          "the recorded copy is blind — the check must not use it")
+        self.assertIsNotNone(self.agent.provider_stop(rc.raw_tail))
+
+    def test_a_refusal_line_the_redactor_eats_is_still_classified(self):
+        rc, streamed = self._run_captured(
+            ["jetski: quota_token = no output produced"])
+        self.assertNotIn("= no output produced", rc.tail)
+        self.assertNotIn("= no output produced", streamed)
+        self.assertIsNone(self.agent.headless_refusal(rc.tail))
+        self.assertEqual(self.agent.refusal_exit(0, rc.raw_tail)[0], 6)
+
+    def test_a_refusal_is_classified_then_redacted(self):
+        refusal = ('jetski: no output produced - a tool required the "command" '
+                   'permission that headless mode cannot prompt for, so it was auto-denied')
+        rc, _ = self._run_captured(["api_key = fakevaluexyz123456", refusal, "$KEY"])
+        self.assertIsNotNone(rc.refusal)
+        self.assertNotIn("fakevaluexyz123456", rc.refusal)
+        self.assertNotIn(self.INJECTED, rc.refusal or "")
+        self.assertEqual(self.agent.refusal_exit(0, rc.refusal or "")[0], 6)
+
+    def test_the_raw_tail_is_capped_like_the_redacted_one(self):
+        # The raw copy is in memory only, but it is still bounded: a long run
+        # must not hold a megabyte of the worker's own text per client.
+        code = ("import sys\n"
+                "sys.stdout.write('a' * 70000 + 'THE-END')\n"
+                "sys.stdout.flush()\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.agent.run_client([sys.executable, "-c", code], tmp,
+                                            dict(os.environ), capture=True)
+        self.assertLessEqual(len(rc.tail.encode("utf-8")), 64 * 1024)
+        self.assertLessEqual(len(rc.raw_tail.encode("utf-8")), 64 * 1024)
+        self.assertTrue(rc.raw_tail.endswith("THE-END"))
+
+    def test_the_redaction_is_reported_once_to_the_caller(self):
+        rc, streamed = self._run_captured(["key sk-ABCDEFGHIJKLMNOP1234", "done"])
+        self.assertEqual(rc, 0)
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.report_redactions()
+        printed = out.getvalue() + err.getvalue()
+        self.assertIn("autoos-agent: redacted", printed)
+        self.assertRegex(printed, r"redacted \d+ secret\(s\) from worker output")
+
+    def test_a_worker_record_never_carries_a_secret(self):
+        self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
+        args = argparse.Namespace(task="fix https://user:hunter2@git.internal/r.git\n",
+                                  title=None)
+        with tempfile.TemporaryDirectory() as d:
+            wid, rec = self.agent._worker_record_start(
+                {"session_tag": "t", "client": "agy", "model": "m",
+                 "route": {"combo": ""}, "cwd": ".", "depth": [1, 3]}, args, d)
+            on_disk = json.load(open(os.path.join(d, wid + ".json")))
+        self.assertNotIn("hunter2", on_disk["task_head"])
+        self.assertIn(self.r.TEXT_MASK, on_disk["task_head"])
+
+    def test_a_track_entry_never_carries_a_secret(self):
+        entry = self.agent.redact_record(
+            {"route": "omniroute/sk-ABCDEFGHIJKLMNOP1234", "gate": "pass", "cost": 0.5})
+        self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", json.dumps(entry))
+        self.assertEqual(entry["cost"], 0.5, "non-text fields pass through")
+
+    def test_the_wip_commit_message_is_redacted(self):
+        self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(git + ["init", "-q", repo], check=True)
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as fh:
+            fh.write("work\n")
+        subprocess.run(git + ["-C", repo, "add", "-A"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "-m", "i"], check=True)
+        with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as fh:
+            fh.write("more\n")
+        stop = ("Error: Rate limit exceeded for sk-or-v1-0123456789abcdef0123456789abcdef "
+                "key " + self.INJECTED)
+        sha = self.agent.wip_commit(repo, 0, stop)
+        self.assertTrue(sha)
+        msg = subprocess.run(git + ["-C", repo, "log", "-1", "--format=%s"],
+                             capture_output=True, text=True).stdout
+        self.assertIn("WIP(autoos-agent)", msg)
+        self.assertIn("Rate limit exceeded", msg, "the stop must stay readable")
+        self.assertNotIn("sk-or-v1-0123456789abcdef0123456789abcdef", msg)
+        self.assertNotIn(self.INJECTED, msg)
+
+
+class RawTailClassificationTests(unittest.TestCase):
+    """REDACTFIX item 2: cmd_run classifies on ClientExit.raw_tail (the child's
+    own text, kept in memory only) and prints/records the redacted copy. A
+    stop/refusal line that redaction alters must still decide the exit code."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+
+    def _run_verdict(self, exit_obj):
+        fake_plan = {
+            "agent": "t2-worker", "client": "qoder", "model": "qoder-model",
+            "cmd": ["qodercli", "do the thing"], "env": {},
+            "route": {"combo": "qoder-model", "reason": "test",
+                      "privacy": "public", "review": False, "tier": 2,
+                      "card": None},
+            "depth": (1, 3), "free": False, "sandbox": None,
+            "cwd": os.getcwd(),
+        }
+        ns = argparse.Namespace(
+            client="qoder", task="do the thing", free=False, dry_run=False,
+            card=None, clean=False, tier=2, joinable=False, lean=False,
+            isolate=False, auto=False, title=None, model=None,
+            free_model=None, max_depth=None, plan=None, allow_training=False)
+        with mock.patch.object(self.agent, "build_plan", return_value=fake_plan):
+            with mock.patch.object(self.agent, "run_client", return_value=exit_obj):
+                with mock.patch.object(self.agent.clients, "record_probe"):
+                    with mock.patch.object(self.agent.clients, "signin_state",
+                                           return_value=(None, "")):
+                        with mock.patch("shutil.which",
+                                        return_value="/usr/bin/qodercli"):
+                            out, err = io.StringIO(), io.StringIO()
+                            with contextlib.redirect_stdout(out), \
+                                    contextlib.redirect_stderr(err):
+                                rc = self.agent.cmd_run(ns, {})
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_a_stop_the_redacted_tail_hides_still_exits_8(self):
+        raw = "working\nerror: retry_key = 429\n"
+        red = "working\nerror: retry_key = [autoos:redacted]\n"
+        rc, printed = self._run_verdict(
+            self.agent.ClientExit(0, tail=red, raw_tail=raw))
+        self.assertEqual(rc, 8, printed)
+        self.assertIn("PROVIDER-STOP", printed)
+        self.assertNotIn("retry_key = 429", printed, "what the caller sees is redacted")
+
+    def test_a_refusal_the_redacted_tail_hides_still_exits_6(self):
+        raw = "jetski: quota_token = no output produced\n"
+        red = "jetski: quota_token = [autoos:redacted] output produced\n"
+        rc, printed = self._run_verdict(
+            self.agent.ClientExit(0, tail=red, refusal=red.strip(), raw_tail=raw))
+        self.assertEqual(rc, 6, printed)
+        self.assertIn("HEADLESS-REFUSAL", printed)
+        self.assertNotIn("= no output produced", printed)
+
+
 class KeyFileTests(unittest.TestCase):
     """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
     and linking it in was refused); the spawner falls back to the main checkout."""
@@ -7195,6 +7641,26 @@ class ProviderResetStateTests(unittest.TestCase):
         self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
         self.assertEqual(entry["combo"], "r-cheap")
         self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_line_carrying_a_secret_records_a_redacted_reason(self):
+        # REDACTFIX3 (S1): `record_reset_stop` is handed the child's OWN line
+        # because only that copy can still be classified (REDACTFIX item 2) --
+        # but it stored that copy in logs/routing/provider-state.json, which
+        # outlives the run. The classification keeps reading the raw line; the
+        # stored dict gets the redaction every other copy of it has.
+        key = "sk-" "ABCDEFGHIJKLMNOP1234"
+        stop = "%s (the worker echoed the key it was given: %s)" % (self.AGY_STOP, key)
+        recorded = self.agent.record_reset_stop(stop, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "the window is still parsed from the raw line and the "
+                         "provider still resolved off it")
+        stored = json.dumps(self.state())
+        self.assertNotIn(key, stored, "the key reached the state file")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertIn(load_redact().TEXT_MASK, entry["reason"])
+        self.assertIn("resets in ~83h", entry["reason"],
+                      "the reason must still say what the client stated")
 
     def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
         self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",
