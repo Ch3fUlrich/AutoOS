@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — tombstones reach the browser, and a requirement on a retired id fails out loud (A7a review, 2026-09-28)
+
+Muse's review of the A7a commits found the retirement mechanism stopping at the
+terminal: the served payload never carried the flag, so the page — which resolves
+dependencies, pre-ticks profiles and collects prompts **in the browser** — did the
+opposite of `setup.sh` with the same catalog. And the rule "no entry may require a
+retired id" lived only in the validators, which a normal run never calls.
+
+- **`lib/linux/serve.py`**: `build_state`'s inline projection became a module-level
+  pure `state_components(catalog, platform, platforms, arch, headless, installed)`
+  that adds `tombstone` and `note`, so a test can ask the server's own function
+  without a server; `installed names` is derived from the same rows now instead of
+  being collected beside them.
+- **`lib/windows/AutoOS.Serve.psm1`** (`Get-AutoOSServeState`): the same two fields,
+  read from the projection's `Tombstone` / `RetireNote`.
+- **`web/index.html`**: retirement is one answer in one place — `canInstall()` —
+  which the profile pre-tick, the dependency closure, the questions card, the
+  quick-install button and the tick box all already ask. A retired row is **shown,
+  disabled and labelled**, not hidden: hiding it removes the only place a reader
+  learns the id went away and what replaced it, which is the reason the catalog
+  still carries it. `retiredChip` and the `(retired)` description match the terminal
+  wording, `installedChip` never says `✓ Installed` for something AutoOS no longer
+  installs, and the Configure button for a prompt the page will never ask is gone.
+- **`lib/linux/catalog.sh` + `setup.sh`**, **`lib/windows/AutoOS.Catalog.psm1` +
+  `setup.ps1`**: resolve now records a refusal (`PLAN_BLOCKED` /
+  `catalog_resolve_blocked` on Linux, `BlockedReason` on Windows) for an entry whose
+  `requires` names a tombstone, and spreads it to that entry's own dependents until
+  the set stops growing. The plan warns, the questions loop asks nothing, execution
+  records the component as failed, and the run exits 1 — the retired row stays in
+  the plan so the report can point at it. Nothing is installed without a dependency
+  it asked for.
+- **`setup.ps1`** plan tag: `(dependency)` and `(retired)` are two independent tags,
+  as in `setup.sh`; the `elseif` hid the retirement the moment a tombstone arrived
+  as a dependency rather than a hand-pick.
+- Tests (`tests/linux/39-catalog-tombstone.sh` +8, `tests/run-tests.ps1` +7,
+  `tests/test-web-progress.js` +1 block): the serve projection through
+  `state_components` itself, refusal and cascade at resolve, the ordinary resolve
+  recording nothing, `setup.sh`/`setup.ps1` end-to-end over the fixture tree
+  (non-zero exit, `Failed 1`, no prompt asked, both tags on one row), and the
+  shipped page functions run in node — `canInstall`, `closure`,
+  `profileClosureDirect` and `itemHtml` — so a page that merely stops drawing the
+  row cannot pass.
+- Docs: `docs/catalog.md`'s retirement section states the resolve-time refusal and
+  the browser's shown/disabled/labelled choice.
+
 ### Added — a retired component keeps its id and installs nothing (A7a, 2026-09-28)
 
 An `id` is a contract (AGENTS.md §3): saved state files, `--only` / `-Only` flags

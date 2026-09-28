@@ -109,8 +109,20 @@ What that changes, on both platforms:
   from is the one the rest of the run reads.
 - `postInstall`, `prompt`, `requires` and `verify` may all be absent — they only
   mean something for something that installs. No other entry may `require` a
-  tombstone: that dependency could never be satisfied, so the validator rejects
-  it, and a tombstone drags nothing in when it is chosen.
+  tombstone: that dependency could never be satisfied. The validator rejects it,
+  and because a normal run never validates, **resolve refuses it too** — the
+  dependent is announced in the plan (`Asks A Question requires retired old-thing
+  - it cannot be installed`), asked nothing, and recorded as a failure at execute
+  time, so the run exits non-zero instead of installing green without the thing it
+  needed. Its own dependents are refused on the same grounds, transitively. A
+  tombstone still drags nothing in when it is chosen.
+- The browser UI sees the same facts: `--serve` / `-Serve` sends `tombstone` and
+  `note` with every component, and the page draws a retired id **shown, disabled
+  and labelled** `(retired)` rather than hiding it — the row is where a reader
+  learns the product went away and what replaced it, which is the only reason the
+  catalog still carries the id. It is never pre-ticked by a profile, never pulled
+  in as a dependency, never asked about in the questions card, and offers neither
+  a Configure button nor a one-click install.
 - `tombstone` must be the boolean `true` (a truthy string would silently retire a
   live entry), and `note` is rejected on an entry that installs something.
 

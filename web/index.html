@@ -2392,8 +2392,12 @@ function sync() {
 
     cb.checked = isEff;
     cb.disabled = !canInstall(c) || (isAuto && locks.length > 0);
-    cb.title = !canInstall(c) ? "AutoOS cannot install this application. Use the vendor link for manual setup." : cb.disabled
-      ? "Required by " + locks.map(d => BY_ID.get(d)?.name || d).join(", ") : "";
+    // The disabled box has to say why, and for a retired id "use the vendor
+    // link" would be the wrong answer: the product is gone, not manual.
+    cb.title = c.tombstone
+      ? "Retired - " + (c.note || "the id stays known, nothing installs.")
+      : !canInstall(c) ? "AutoOS cannot install this application. Use the vendor link for manual setup." : cb.disabled
+        ? "Required by " + locks.map(d => BY_ID.get(d)?.name || d).join(", ") : "";
 
     node.classList.toggle("checked", isEff && !isAuto);
     node.classList.toggle("auto", isAuto);
