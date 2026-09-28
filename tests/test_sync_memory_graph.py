@@ -7,7 +7,9 @@ is read. Run from anywhere:
 
     python3 tests/test_sync_memory_graph.py
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -49,7 +51,10 @@ def fixture_root():
         "| Task | Owner | Started | DONE-criteria | Status |\n"
         "|---|---|---|---|---|\n"
         "| New running thing | autoos-L1-backlog | 2026-09-28 | tests green | Running |\n"
-        "| Old done thing | tier1 | 2026-09-20 | green | Done 2026-09-20 |\n",
+        "| Old done thing | tier1 | 2026-09-20 | green | Done 2026-09-20 |\n"
+        "| Wire router links (D-088) | autoos-L1-backlog | 2026-09-28 | "
+        "Implements routing-d-100; tests green | Running |\n"
+        "| Closed cite thing (D-999) | tier1 | 2026-09-20 | green | Done 2026-09-20 |\n",
         encoding="utf-8",
     )
     return tmp
@@ -103,10 +108,15 @@ class ShapeTests(unittest.TestCase):
     def test_ndjson_shape(self):
         """Nodes carry type+data, edges carry PascalCase edge + from/to slugs."""
         batch = self.mod.emit(self.root, self.state)
-        for _, node, edges in batch:
-            self.assertIn("type", node)
-            self.assertIn("data", node)
-            self.assertIn("slug", node["data"])
+        for key, node, edges in batch:
+            if node is not None:
+                self.assertIn("type", node)
+                self.assertIn("data", node)
+                self.assertIn("slug", node["data"])
+            else:
+                # An edge-only record carries no node, only the ledger key
+                # that gates it (Implements/Supersedes have no node of their own).
+                self.assertRegex(key, r"^[A-Z][A-Za-z]+:")
             for edge in edges:
                 self.assertIn("edge", edge)
                 self.assertTrue(edge["edge"][0].isupper(), edge)
@@ -119,6 +129,10 @@ class ShapeTests(unittest.TestCase):
 
         batch = self.mod.emit(self.root, self.state)
         for key, node, _ in batch:
+            if node is None:
+                # Edge-only ledger key; the slugs live in the edge's from/to.
+                self.assertRegex(key, r"^[A-Z][A-Za-z]+:autoos-[a-z0-9-]+->routing-d-\d+$")
+                continue
             self.assertEqual(key, key.lower(), key)
             self.assertRegex(key, r"^[a-z0-9][a-z0-9-]*$")
             self.assertRegex(node["data"]["slug"], r"^[a-z0-9][a-z0-9-]*$")
@@ -128,6 +142,8 @@ class ShapeTests(unittest.TestCase):
         hubs = {"DecidedIn", "ConstrainsProject", "AppliesTo", "PartOf", "Tracks"}
         batch = self.mod.emit(self.root, self.state)
         for key, node, edges in batch:
+            if node is None:
+                continue  # edge-only records (Implements/Supersedes) have no node
             hub = [e for e in edges if e["edge"] in hubs and e["to"] == "autoos"]
             self.assertTrue(hub, f"{key} ({node['type']}) has no hub edge to autoos")
 
@@ -135,10 +151,12 @@ class ShapeTests(unittest.TestCase):
         """History rows stay out of the live-board sync."""
         batch = self.mod.emit(self.root, self.state)
         titles = " ".join(
-            json.dumps(node) for _, node, _ in batch if node["type"] == "Task"
+            json.dumps(node) for _, node, _ in batch
+            if node is not None and node["type"] == "Task"
         )
         self.assertIn("New running thing", titles)
         self.assertNotIn("Old done thing", titles)
+        self.assertNotIn("Closed cite thing", titles)
 
     def test_no_secrets_or_absolutisms_in_output(self):
         """Public repo: no tokens, no key paths, no username-carrying paths."""
@@ -240,6 +258,154 @@ class LoadConfirmTests(unittest.TestCase):
             self.assertEqual(ledger.read_text().split(), [])
         # Nothing was marked, so the full batch is still pending.
         self.assertEqual(len(mod.emit(root, ledger)), len(pending))
+
+
+class CitationParserTests(unittest.TestCase):
+    """Pure helpers: routing-d-NNN lookup by slug, and explicit supersession."""
+
+    def setUp(self):
+        self.mod = load_script()
+
+    def test_routing_citations_normalise_bare_and_dedupe(self):
+        text = ("Implements routing-d-100 and D-088; also D-088 again. "
+                "See autoos-adr-0006 (an ADR, not a router decision).")
+        self.assertEqual(self.mod.routing_citations(text),
+                         ["routing-d-100", "routing-d-088"])
+
+    def test_routing_citations_ignores_non_router_d_digits(self):
+        """`routing-d-044` must not also match its own inner `d-044`."""
+        self.assertEqual(self.mod.routing_citations("routing-d-044"), ["routing-d-044"])
+
+    def test_supersedes_targets_only_after_a_supersede_verb(self):
+        self.assertEqual(self.mod.supersedes_targets("superseding D-085's interim 250k"),
+                         ["routing-d-085"])
+        self.assertEqual(self.mod.supersedes_targets("replaces routing-d-040 in the plan"),
+                         ["routing-d-040"])
+        # A bare citation with no verb is an implementation, not a replacement.
+        self.assertEqual(self.mod.supersedes_targets("implements routing-d-040"), [])
+        self.assertEqual(self.mod.supersedes_targets("no replacement here"), [])
+
+    def test_supersedes_targets_window_ignores_a_distant_citation(self):
+        text = "replaced the interim cap; " + "x" * 80 + " D-085"
+        self.assertEqual(self.mod.supersedes_targets(text), [])
+
+
+class RoutingLinkTests(unittest.TestCase):
+    """D-140: Task -> Decision `Implements` edges (and gated `Supersedes`)."""
+
+    def setUp(self):
+        self.mod = load_script()
+        self.root = fixture_root()
+        self.state = self.root / ".state" / "graph-loaded.txt"
+        self.task_slug = "autoos-task-wire-router-links-d-088"
+
+    def _implements(self, batch):
+        return {(e["from"], e["to"]) for _, _, edges in batch
+                for e in edges if e["edge"] == "Implements"}
+
+    def test_task_citations_become_implements_edges(self):
+        batch = self.mod.emit(self.root, self.state)
+        impl = self._implements(batch)
+        self.assertIn((self.task_slug, "routing-d-088"), impl)   # bare D-088 normalised
+        self.assertIn((self.task_slug, "routing-d-100"), impl)   # slug form accepted
+
+    def test_implements_is_task_to_decision_only(self):
+        """Never Decision -> Decision `Implements` (no such schema edge)."""
+        batch = self.mod.emit(self.root, self.state)
+        for _, _, edges in batch:
+            for e in edges:
+                if e["edge"] == "Implements":
+                    self.assertTrue(e["from"].startswith("autoos-task-"), e)
+                    self.assertRegex(e["to"], r"^routing-d-\d+$")
+
+    def test_target_is_slug_not_project(self):
+        """Targets are looked up by routing-d-NNN slug, never by project."""
+        batch = self.mod.emit(self.root, self.state)
+        targets = {e["to"] for _, _, edges in batch
+                   for e in edges if e["edge"] == "Implements"}
+        self.assertTrue(targets)
+        for target in targets:
+            self.assertRegex(target, r"^routing-d-\d+$")
+
+    def test_done_task_citations_are_not_emitted(self):
+        batch = self.mod.emit(self.root, self.state)
+        all_edges = [e for _, _, edges in batch for e in edges]
+        self.assertFalse(any(e["edge"] == "Implements" and e["to"] == "routing-d-999"
+                             for e in all_edges))
+
+    def test_unknown_slug_is_skipped_with_stderr_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            batch = self.mod.records(self.root, known={"routing-d-100"})
+        impl = self._implements(batch)
+        self.assertIn((self.task_slug, "routing-d-100"), impl)
+        self.assertNotIn((self.task_slug, "routing-d-088"), impl)
+        self.assertIn("routing-d-088", err.getvalue())
+
+    def test_known_none_emits_every_citation(self):
+        batch = self.mod.records(self.root)
+        self.assertIn((self.task_slug, "routing-d-088"), self._implements(batch))
+
+    def test_supersedes_only_where_text_explicitly_replaces(self):
+        """Exactly one explicit replacement in the DECISIONS text; all others none."""
+        batch = self.mod.emit(self.root, self.state)
+        supersedes = [(e["from"], e["to"]) for _, _, edges in batch
+                      for e in edges if e["edge"] == "Supersedes"]
+        self.assertEqual(supersedes, [("autoos-plan-restart-spec", "routing-d-085")])
+
+    def test_unknown_supersedes_target_is_skipped(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            batch = self.mod.records(self.root, known={"routing-d-100"})
+        supersedes = [e for _, _, edges in batch for e in edges
+                      if e["edge"] == "Supersedes"]
+        self.assertEqual(supersedes, [])
+        self.assertIn("routing-d-085", err.getvalue())
+
+    def test_edge_only_records_survive_a_node_slug_ledger(self):
+        """Regression: a machine whose ledger already holds the Task slug (an
+        older schema that stored cross-project links as text, not edges) must
+        still emit the Implements edge once - node slug and edge key are
+        distinct ledger entries."""
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        self.state.write_text(self.task_slug + "\n", encoding="utf-8")
+        batch = self.mod.emit(self.root, self.state)
+        self.assertNotIn(self.task_slug, {key for key, _, _ in batch})
+        self.assertIn((self.task_slug, "routing-d-088"), self._implements(batch))
+        # Marking the edge batch leaves the node slug untouched and re-emits nothing.
+        self.mod.mark(self.root, self.state, batch)
+        self.assertEqual(self.mod.emit(self.root, self.state), [])
+
+    def test_edge_key_is_not_a_node_slug(self):
+        batch = self.mod.emit(self.root, self.state)
+        edge_only = [(k, n) for k, n, _ in batch if n is None]
+        self.assertTrue(edge_only)
+        for key, node in edge_only:
+            self.assertIsNone(node)
+            self.assertRegex(key, r"^(Implements|Supersedes):autoos-[a-z0-9-]+->routing-d-\d+$")
+
+    def test_main_prints_no_null_nodes(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.mod.main([], root=self.root, env={})
+        self.assertEqual(rc, 0)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertNotEqual(line.strip(), "null")
+            rec = json.loads(line)
+            self.assertTrue("type" in rec or "edge" in rec, rec)
+
+    def test_main_known_slugs_comma_list_filters(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.mod.main(["--known-slugs", "routing-d-100"], root=self.root, env={})
+        self.assertEqual(rc, 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        targets = {r["to"] for r in records if r.get("edge") in ("Implements", "Supersedes")}
+        self.assertEqual(targets, {"routing-d-100"})
+        self.assertIn("routing-d-088", err.getvalue())
 
 
 if __name__ == "__main__":

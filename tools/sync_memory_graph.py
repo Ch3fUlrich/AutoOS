@@ -10,13 +10,21 @@ top-level dirs (PartOf -> autoos).
 
 Why this shape (copied from the router's bin/sync-memory-graph, same project
 graph): edges have no @key and duplicate on every re-load (structured-memory
-operations.md rule 7), so every emitted slug is recorded in the local state
-ledger ``.state/graph-loaded.txt`` (gitignored); ``--mark`` appends them only
-after a load is confirmed. Load mode is always ``merge`` (never ``overwrite`` -
-rule 8). Cross-project links to ``routing-d-NNN`` decisions are plain-text
-``rationale`` references, not edges: Implements is Task->Decision and there is
-no Decision->Decision implements edge, and fabricating a stand-in node would be
-worse than a text reference.
+operations.md rule 7), so every emitted record carries a ledger key recorded in
+the local state ledger ``.state/graph-loaded.txt`` (gitignored); ``--mark``
+appends them only after a load is confirmed. Load mode is always ``merge``
+(never ``overwrite`` - rule 8).
+
+Cross-project links to ``routing-d-NNN`` decisions are now real edges, not
+plain-text references (D-140): each live Task that cites a router decision emits
+``Implements: Task -> Decision`` by slug, and a Decision whose text explicitly
+supersedes another emits ``Supersedes: Decision -> Decision``. There is no
+Decision->Decision ``Implements`` edge and no schema change. ``Implements`` and
+``Supersedes`` have no node of their own, so each is emitted as an edge-only
+record keyed ``"<edge>:<from>-><to>"`` - distinct from node-slug keys, so an
+edge still flows once on a machine whose ledger predates this change. Pass a set
+of known decision slugs (``known=`` / ``--known-slugs``) to drop citations that
+do not resolve, each with a stderr warning; the default ``None`` skips nothing.
 
 Usage: tools/sync_memory_graph.py > out.ndjson   (then load with omnigraph `load` mode=merge)
        tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs)
@@ -154,6 +162,42 @@ RULE_COMPONENT = {
 }
 
 
+# D-140: router decisions are looked up by slug ``routing-d-NNN``. A citation may
+# also appear bare (``D-085``); normalise both to the slug form. The lookbehind
+# stops ``routing-d-085``'s own inner ``d-085`` from matching a second time.
+_ROUTING_CITATION_RE = re.compile(r"routing-d-(\d+)|(?<![A-Za-z0-9-])d-(\d+)", re.I)
+
+# A citation only becomes Supersedes when a supersede/replace verb introduces it;
+# the window keeps a distant citation later in the same sentence out.
+_SUPERSEDE_VERB_RE = re.compile(r"\b(supersed\w*|replac\w*)\b", re.I)
+_SUPERSEDE_WINDOW = 60
+
+
+def routing_citations(text):
+    """Normalised, de-duplicated ``routing-d-NNN`` slugs cited in ``text``."""
+    out = []
+    for m in _ROUTING_CITATION_RE.finditer(text or ""):
+        slug = "routing-d-" + (m.group(1) or m.group(2))
+        if slug not in out:
+            out.append(slug)
+    return out
+
+
+def supersedes_targets(text):
+    """Slugs a Decision explicitly supersedes/replaces, else empty.
+
+    Only the first citation within ``_SUPERSEDE_WINDOW`` chars after a
+    supersede/replace verb counts, so a sentence that merely cites other
+    decisions alongside a replacement is not read as replacing all of them.
+    """
+    out = []
+    for m in _SUPERSEDE_VERB_RE.finditer(text or ""):
+        cited = routing_citations((text or "")[m.end():m.end() + _SUPERSEDE_WINDOW])
+        if cited and cited[0] not in out:
+            out.append(cited[0])
+    return out
+
+
 def repo_root(explicit=None):
     if explicit is not None:
         return str(explicit)
@@ -211,7 +255,8 @@ def parse_task_board(root):
         if status == "Open":
             state = "planned"
         slug = "autoos-task-" + re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:60]
-        out.append((slug, task[:160], state, status[:300]))
+        row = " ".join(cells)
+        out.append((slug, task[:160], state, status[:300], row))
     return out
 
 
@@ -231,8 +276,15 @@ def decide_rule_severity(statement):
     return "must"
 
 
-def records(root=None):
-    """(ledger_key, node, [edges]) for everything mineable. Pure: reads repo files only."""
+def records(root=None, known=None):
+    """(ledger_key, node, [edges]) for everything mineable. Reads repo files only.
+
+    ``known`` is an optional set of decision slugs. A citation whose target is
+    not in it is skipped with a stderr warning (never an error); ``None`` accepts
+    every citation. ``Implements``/``Supersedes`` are edge-only records (``node``
+    is ``None``) keyed ``"<edge>:<from>-><to>"`` so a machine whose ledger already
+    holds the node slugs still emits each edge once.
+    """
     root = repo_root(root)
     out = []
     for slug, name, kind, location in COMPONENTS:
@@ -249,6 +301,13 @@ def records(root=None):
                      "data": {"slug": slug, "title": title[:300], "rationale": rationale[:1800],
                               "status": status, "date": date}},
                     edges))
+        for target in supersedes_targets(f"{title} {rationale}"):
+            if known is not None and target not in known:
+                print(f"warning: skipping Supersedes edge {slug} -> {target}: "
+                      "unknown decision slug", file=sys.stderr)
+                continue
+            out.append((f"Supersedes:{slug}->{target}", None,
+                        [{"edge": "Supersedes", "from": slug, "to": target}]))
     for rid, statement in parse_skill_rules(root):
         slug = "autoos-" + rid.lower()
         edges = [{"edge": "ConstrainsProject", "from": slug, "to": PROJECT_SLUG}]
@@ -261,19 +320,26 @@ def records(root=None):
                               "statement": f"{rid}: {statement}"[:800],
                               "severity": decide_rule_severity(statement)}},
                     edges))
-    for slug, title, state, status in parse_task_board(root):
+    for slug, title, state, status, row in parse_task_board(root):
         out.append((slug,
                     {"type": "Task",
                      "data": {"slug": slug, "title": title, "state": state}},
                     [{"edge": "Tracks", "from": slug, "to": PROJECT_SLUG}]))
+        for target in routing_citations(row):
+            if known is not None and target not in known:
+                print(f"warning: skipping Implements edge {slug} -> {target}: "
+                      "unknown decision slug", file=sys.stderr)
+                continue
+            out.append((f"Implements:{slug}->{target}", None,
+                        [{"edge": "Implements", "from": slug, "to": target}]))
     return out
 
 
-def emit(root=None, state=None):
+def emit(root=None, state=None, known=None):
     """Records whose ledger key is not yet in the state ledger."""
     done = loaded(root) if state is None else set(open(state).read().split()) \
         if os.path.exists(state) else set()
-    return [(k, n, e) for k, n, e in records(root) if k not in done]
+    return [(k, n, e) for k, n, e in records(root, known) if k not in done]
 
 
 def mark(root=None, state=None, batch=None):
@@ -314,16 +380,47 @@ def post_load(base_url, token, lines):
     return json.load(urllib.request.urlopen(req, timeout=120))
 
 
+def read_known_slugs(spec):
+    """Slugs from ``-`` (stdin), a file path, or a comma/space-separated list."""
+    if spec == "-":
+        text = sys.stdin.read()
+    elif os.path.isfile(spec):
+        with open(spec, encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = spec
+    return {s for s in re.split(r"[,\s]+", text.strip()) if s}
+
+
+def _take_known_slugs(argv):
+    """Split ``--known-slugs VALUE`` / ``--known-slugs=VALUE`` out of argv."""
+    known, rest, i = None, [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--known-slugs":
+            i += 1
+            if i >= len(argv):
+                raise SystemExit("error: --known-slugs needs a value")
+            known = read_known_slugs(argv[i])
+        elif arg.startswith("--known-slugs="):
+            known = read_known_slugs(arg.split("=", 1)[1])
+        else:
+            rest.append(arg)
+        i += 1
+    return known, rest
+
+
 def main(argv=None, root=None, env=None):
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if env is None else env
     root = repo_root(root)
-    new = emit(root, ledger_path(root))
+    known, argv = _take_known_slugs(list(argv))
+    new = emit(root, ledger_path(root), known)
     if "--load" in argv:
         if not new:
             print("nothing new", file=sys.stderr)
             return 0
-        lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new] + \
+        lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new if n is not None] + \
                 [json.dumps(e) for _, _, es in new for e in es]
         res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
                         env["OMNIGRAPH_TOKEN"], lines)
@@ -341,7 +438,8 @@ def main(argv=None, root=None, env=None):
         print(f"marked {len(new)} records as loaded", file=sys.stderr)
         return 0
     for _, node, _ in new:
-        print(json.dumps(node, ensure_ascii=False))
+        if node is not None:
+            print(json.dumps(node, ensure_ascii=False))
     for _, _, edges in new:
         for e in edges:
             print(json.dumps(e))
