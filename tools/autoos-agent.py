@@ -1208,18 +1208,54 @@ def append_inbox_line(path, line):
         fh.write(line + "\n")
 
 
+def ci_run_status(run_id, runner=None):
+    """``(conclusion, head_sha, error)`` — what one CI run says about its own commit.
+
+    ``gh run view --json conclusion,headSha``, through an injectable runner:
+    SPAWNFIX3 item 6, because a test cannot ask GitHub about a commit that only
+    exists under ``/tmp``, and the real call has exactly one place to live.
+    Mirrors `remote_branch_tip`: a non-None ``error`` means the question was
+    never answered (gh missing, gh refusing, output that is not the JSON asked
+    for), which is a different next action and a different exit code from a run
+    that came back red. The timeout is not decoration — `ready` runs inside a
+    lane's session, and a gate that hangs takes that session with it.
+    """
+    runner = runner or subprocess.run
+    argv = ["gh", "run", "view", str(run_id), "--json", "conclusion,headSha"]
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "%s" % exc
+    if proc.returncode != 0:
+        return None, None, ((proc.stderr or proc.stdout or "").strip()
+                            or "gh run view exited %d" % proc.returncode)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, None, "gh run view printed output that is not JSON: %s" % exc
+    head_sha = data.get("headSha")
+    if not head_sha:
+        return None, None, ("gh run view answered with no headSha (conclusion %r)"
+                            % data.get("conclusion"))
+    return data.get("conclusion"), head_sha, None
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Three gates, in this order, each naming itself when it fails: the record
+    Four gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
-    for ``--branch``, and only then is the line appended to the inbox. The rule
-    moved into code because the hand-written claim was wrong once -- L1-main
-    refused a `ready` line whose record had no reviews (inbox 00:31:52Z).
+    for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
+    finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
+    certify a commit the gate never tested (SPAWNFIX3 item 6; the run id rides
+    on the line as ``ci=<id>``). Without ``--ci-run`` the lane is still allowed
+    and one note says the gate was skipped. The gates live in code because the
+    hand-written claim was wrong once -- L1-main refused a `ready` line whose
+    record had no reviews (inbox 00:31:52Z).
 
     Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
-    met, 2 a gate could not be read (unreadable record, git failure, unwritable
-    inbox)."""
+    met, 2 a gate could not be read (unreadable record, git or gh failure,
+    unwritable inbox)."""
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
@@ -1243,10 +1279,29 @@ def cmd_ready(args) -> int:
         print("ready: not pushed -- %s is at %s on origin, not %s"
               % (args.branch, tip, args.sha))
         return 1
-    line = "%s ready %s %s reviews: %s | %s" % (
+    ci_field = ""
+    if getattr(args, "ci_run", None):
+        conclusion, head_sha, ci_error = ci_run_status(args.ci_run)
+        if ci_error:
+            print("ready: cannot read CI run %s: %s" % (args.ci_run, ci_error),
+                  file=sys.stderr)
+            return 2
+        if conclusion != "success":
+            print("ready: not appended -- CI run %s is %s, not success"
+                  % (args.ci_run, conclusion or "still running"))
+            return 1
+        if head_sha != args.sha:
+            print("ready: not appended -- CI run %s tested %s, not %s"
+                  % (args.ci_run, head_sha, args.sha))
+            return 1
+        ci_field = " ci=%s" % args.ci_run
+    else:
+        print("note: no --ci-run given -- the lane is declared ready on the "
+              "reviews and the pushed sha alone")
+    line = "%s ready %s %s reviews: %s | %s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
-        report["cross_family"]["detail"], report["final"]["detail"])
+        report["cross_family"]["detail"], report["final"]["detail"], ci_field)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -3915,6 +3970,12 @@ def main(argv=None) -> int:
                               "(default: catalog/ai-registry.json)")
     ready_p.add_argument("--repo",
                          help="git checkout to ask origin about (default: the cwd)")
+    ready_p.add_argument("--ci-run", dest="ci_run", metavar="RUN_ID",
+                         help="a GitHub Actions run that tested --sha: it must have "
+                              "conclusion=success AND headSha=--sha, else the lane is not "
+                              "ready (exit 1) or the gate could not be read (exit 2). Its "
+                              "id is appended to the inbox line as ci=<RUN_ID>; without it "
+                              "the lane is still allowed and one note says so")
     ready_p.add_argument("--dry-run", action="store_true",
                          help="print the line, append nothing")
     args = ap.parse_args(argv)

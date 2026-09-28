@@ -7861,6 +7861,140 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
+    # --- the CI gate (SPAWNFIX3 item 6) -------------------------------------
+
+    def ready_with_ci(self, status, extra=("--ci-run", "1234"), push=True):
+        """`ready` with the gh read replaced — a real call would ask a network
+        service about a commit that only exists under /tmp.
+
+        Returns (rc, out, err, inbox_content, repo, sha).
+        """
+        repo, sha = self.make_repo(push=push)
+        inbox = self.make_inbox("")
+        with mock.patch.object(self.agent, "ci_run_status",
+                               lambda run_id, runner=None: status(sha, run_id)):
+            rc, out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                      repo, sha, inbox, extra=extra)
+        return rc, out, err, self.read_inbox(inbox), repo, sha
+
+    def test_a_green_ci_run_at_the_right_sha_appends_the_line_with_ci(self):
+        rc, out, _err, inbox, _repo, sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None))
+        self.assertEqual(rc, 0, out + _err)
+        line = inbox.rstrip("\n")
+        self.assertTrue(line.endswith(" ci=1234"), line)
+        self.assertIn(sha, line)
+        self.assertNotIn("no --ci-run", out)
+
+    def test_a_failing_ci_run_is_refused_and_nothing_is_appended(self):
+        for conclusion in ("failure", "cancelled", "skipped", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                rc, out, err, inbox, _repo, sha = self.ready_with_ci(
+                    lambda sha, run_id, c=conclusion: (c, sha, None))
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn(conclusion, out + err)
+                self.assertEqual(inbox, "")
+
+    def test_a_ci_run_on_another_sha_is_refused(self):
+        # The green run must be green AT the sha the lane is ready at, or the
+        # line certifies a commit nobody tested.
+        rc, out, err, inbox, _repo, sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", "f" * 40, None))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("f" * 40, out + err)
+        self.assertIn(sha, out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_ci_read_that_cannot_run_exits_2_not_1(self):
+        # "gh failed" is not "CI is red": one is a gate that did not answer.
+        rc, out, err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: (None, None, "gh: command not found"))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("gh", err)
+        self.assertEqual(inbox, "")
+
+    def test_no_ci_run_is_allowed_but_says_so_once(self):
+        rc, out, _err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None), extra=())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count("note: no --ci-run given"), 1, out)
+        self.assertNotIn("ci=", inbox)
+
+    def test_the_ci_gate_does_not_jump_the_push_gate(self):
+        # Both must hold; a green CI on an unpushed lane is still not ready.
+        rc, out, err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None), push=False)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(inbox, "")
+
+
+class CIRunStatusTests(unittest.TestCase):
+    """`ci_run_status` reads one fact off GitHub Actions with `gh`, through an
+    injected runner (SPAWNFIX3 item 6): the conclusion and the head sha, or the
+    reason it cannot answer. Never raises — a gate that cannot run reports."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def read(self, proc=None, exc=None):
+        seen = {}
+
+        def runner(argv, **kw):
+            seen["argv"] = list(argv)
+            seen["kw"] = kw
+            if exc is not None:
+                raise exc
+            return proc
+
+        out = self.agent.ci_run_status("1234", runner=runner)
+        return out, seen
+
+    def proc(self, stdout, rc=0, stderr=""):
+        return subprocess.CompletedProcess(["gh"], rc, stdout=stdout, stderr=stderr)
+
+    def test_it_asks_gh_for_exactly_the_two_fields(self):
+        (_conclusion, _sha, err), seen = self.read(
+            self.proc('{"conclusion": "success", "headSha": "abc"}'))
+        self.assertIsNone(err)
+        self.assertEqual(seen["argv"],
+                         ["gh", "run", "view", "1234", "--json", "conclusion,headSha"])
+
+    def test_it_returns_the_conclusion_and_the_head_sha(self):
+        conclusion, sha, err = self.read(
+            self.proc('{"conclusion": "failure", "headSha": "deadbeef"}'))[0]
+        self.assertEqual((conclusion, sha), ("failure", "deadbeef"))
+        self.assertIsNone(err)
+
+    def test_a_nonzero_gh_is_an_error_naming_its_own_output(self):
+        (conclusion, sha, err), _seen = self.read(
+            self.proc("", rc=1, stderr="gh: could not find run 1234"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("could not find run", err)
+
+    def test_unparseable_output_is_an_error_not_a_crash(self):
+        (conclusion, sha, err), _seen = self.read(self.proc("not json at all"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("json", err.lower())
+
+    def test_a_missing_field_is_an_error(self):
+        (conclusion, sha, err), _seen = self.read(self.proc('{"conclusion": "success"}'))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("headSha", err)
+
+    def test_a_gh_that_cannot_start_is_an_error(self):
+        (conclusion, sha, err), _seen = self.read(exc=OSError("No such file or directory"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("No such file", err)
+
+    def test_it_times_out_rather_than_hanging_the_gate(self):
+        (_c, _s, _e), seen = self.read(
+            self.proc('{"conclusion": "success", "headSha": "a"}'))
+        self.assertLessEqual(seen["kw"].get("timeout", 10 ** 9), 120)
+
 
 def _reviewer_client_state():
     return {name: {"installed": True, "signed_in": True, "reason": ""}
