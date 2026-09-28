@@ -229,3 +229,75 @@ PY
     then pass; else fail "windows git identity is asked but never applied"; fi
 fi
 
+
+# WS-NPMCACHE (2026-09-28): `npm ls -g` is one slow process that answers for
+# every npm package at once; a dry run asked it ~20 times (half of a 50 s
+# setup.sh dry run). A scan and a dry run now take one snapshot; a real run's
+# is_installed still asks npm fresh, because installs happen between calls.
+npm_stub() {
+    # npm_stub <dir> <json|--hang>: a fake npm on PATH that logs each call.
+    mkdir -p "$1/bin"
+    {
+        printf '#!/usr/bin/env bash\necho call >> "%s/calls"\n' "$1"
+        if [[ "$2" == --hang ]]; then printf 'sleep 20\n'; else printf "printf '%%s' '%s'\n" "$2"; fi
+    } > "$1/bin/npm"
+    chmod +x "$1/bin/npm"
+}
+
+if it "npm detection: a scan asks npm once and answers every package from that snapshot"; then
+    tmp="$(mktemp -d)"
+    npm_stub "$tmp" '{"dependencies":{"alpha":{},"beta":{}}}'
+    out="$(
+        PATH="$tmp/bin:$PATH"
+        CAT_ID=(a b c); CAT_PROVIDER=(npm npm npm); CAT_PACKAGE=(alpha beta gamma); CAT_CASK=(0 0 0)
+        CAT_INSTALLED=()
+        catalog_is_tombstone() { return 1; }
+        catalog_detect_installed
+        printf '%s %s %s\n' "${CAT_INSTALLED[@]}"
+    )"
+    calls=$(wc -l < "$tmp/calls" 2>/dev/null || echo 0)
+    rm -rf "$tmp"
+    if [[ "$out" == "1 1 0" && "$calls" -eq 1 ]]; then pass
+    else fail "installed=[$out] (want 1 1 0), npm calls=$calls (want 1)"; fi
+fi
+
+if it "npm detection: a real run's is_installed asks npm fresh every time; a dry run reuses one answer"; then
+    tmp="$(mktemp -d)"
+    npm_stub "$tmp" '{"dependencies":{"alpha":{}}}'
+    (
+        PATH="$tmp/bin:$PATH"
+        AUTOOS_DRY_RUN=0
+        is_installed npm alpha; is_installed npm alpha
+    )
+    real=$(wc -l < "$tmp/calls"); rm -f "$tmp/calls"
+    (
+        PATH="$tmp/bin:$PATH"
+        AUTOOS_DRY_RUN=1
+        is_installed npm alpha; is_installed npm beta; is_installed npm alpha
+    )
+    dry=$(wc -l < "$tmp/calls")
+    rm -rf "$tmp"
+    if [[ "$real" -eq 2 && "$dry" -eq 1 ]]; then pass
+    else fail "real-run npm calls=$real (want 2), dry-run npm calls=$dry (want 1)"; fi
+fi
+
+if it "npm detection: no npm is not-detected; bad JSON or null dependencies is unknown, cached or not"; then
+    tmp="$(mktemp -d)"
+    problems=""
+    for cache in 0 1; do
+        got="$( PATH="/usr/bin:/bin"; command -v npm >/dev/null && exit 0
+                _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
+                detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"
+        [[ -z "$got" || "$got" == not-detected ]] || problems+="[cache=$cache no npm: $got] "
+        npm_stub "$tmp" '{"dependencies":null}'
+        got="$( PATH="$tmp/bin:$PATH"; _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
+                detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"
+        [[ "$got" == unknown ]] || problems+="[cache=$cache null dependencies: $got] "
+        npm_stub "$tmp" 'not json'
+        got="$( PATH="$tmp/bin:$PATH"; _AUTOOS_NPM_CACHE=$cache; unset _AUTOOS_NPM_LS_STATE
+                detect_installed_status npm alpha; echo "$INSTALLED_STATUS" )"
+        [[ "$got" == unknown ]] || problems+="[cache=$cache bad json: $got] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi

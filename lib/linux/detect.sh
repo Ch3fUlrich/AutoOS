@@ -493,6 +493,39 @@ detect_installed_status() {
         if script_is_installed "$package"; then INSTALLED_STATUS=installed; else INSTALLED_STATUS=not-detected; fi
         return 0
     fi
+    # `npm ls -g` is one slow process that answers for every npm package at once;
+    # a dry run used to start it ~20 times (half of a setup.sh dry run,
+    # WS-NPMCACHE 2026-09-28). With _AUTOOS_NPM_CACHE=1 - set only by a catalog
+    # scan and by a dry run's is_installed - the first call takes a snapshot in
+    # this shell's memory and later calls answer from it. Never on disk, never
+    # across runs, and never for a real run's is_installed, which must see a
+    # package an earlier step just installed.
+    if [[ "$provider" == npm && "${_AUTOOS_NPM_CACHE:-0}" == 1 ]]; then
+        if [[ -z "${_AUTOOS_NPM_LS_STATE:-}" ]]; then
+            _AUTOOS_NPM_LS="$(python3 - <<'PY'
+import shutil,subprocess
+if not shutil.which('npm'):
+    print('ABSENT')
+else:
+    try:
+        r=subprocess.run(['npm','ls','-g','--depth=0','--json'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=8)
+        print('OK'); print(r.stdout)
+    except (subprocess.TimeoutExpired,OSError):
+        print('UNKNOWN')
+PY
+)"
+            _AUTOOS_NPM_LS_STATE="${_AUTOOS_NPM_LS%%$'\n'*}"
+        fi
+        case "$_AUTOOS_NPM_LS_STATE" in
+            ABSENT) INSTALLED_STATUS=not-detected ;;
+            OK) INSTALLED_STATUS="$(printf '%s' "${_AUTOOS_NPM_LS#OK$'\n'}" | python3 -c '
+import json,sys
+try: print("installed" if sys.argv[1] in json.load(sys.stdin).get("dependencies",{}) else "not-detected")
+except (ValueError, AttributeError, TypeError): print("unknown")' "$package")" ;;
+            *) INSTALLED_STATUS=unknown ;;
+        esac
+        return 0
+    fi
     INSTALLED_STATUS="$(python3 - "$provider" "$package" "$cask" <<'PY'
 import json,shutil,subprocess,sys
 provider,package,cask=sys.argv[1:]
@@ -512,7 +545,7 @@ try:
         r=probe(['npm','ls','-g','--depth=0','--json']); installed=bool(r and package in json.loads(r.stdout).get('dependencies',{}))
     else: known=False
     print('installed' if installed else 'not-detected' if known else 'unknown')
-except (subprocess.TimeoutExpired,OSError,ValueError): print('unknown')
+except (subprocess.TimeoutExpired,OSError,ValueError,AttributeError,TypeError): print('unknown')
 PY
 )"
 }
