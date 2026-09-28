@@ -97,6 +97,7 @@
 - D1.14 Rationale: no copy prevents order-semantics drift.
 - D1.15 Rationale: one line per event keeps wakes auditable.
 - D1.16 Rationale: blocking follower enables 0-turn quiet wait.
+- D1.17 The follower reads by byte offset, not by timestamp: append order is the truth. A late-stamped record (stamp older than records already read) is still surfaced once in append position; it is never skipped and never reorders already-read records (see D2.6).
 
 | Actionable | Not actionable |
 |---|---|
@@ -117,11 +118,11 @@
 
 ### D2 Offsets
 - D2.1 Follower resumes from status card `last-event` via `card_last_event`.
-- D2.2 If no card is given, resume after this reader's newest own line in the inbox (its last ack), else from the last 30 records - never from the end (an event that landed before arming would be lost).
+- D2.2 If no card is given, resume from this session's own last handled line: scan the inbox for the newest `→ done:` record written by this reader and resume after it; if none exists, resume from the start of today's records. There is NO "last 30 records" fallback - it can silently skip an order that landed 31 records back. Spurious re-delivery from the wider fallback is accepted (policy 1.4/1.5: missed = HIGH, spurious = fine).
 - D2.3 Explicit `--since` overrides card when provided for repair.
-- D2.4 Order per handled event: (1) write the new position into the card `last-event`, (2) re-arm the follower from that card, (3) side effects (push, pong, spawn). Re-arming before the card write would self-wake on the same event.
-- D2.5 A restart therefore neither replays nor misses handled events.
-- D2.6 Malformed/late lines are reported once as one event.
+- D2.4 Order of effects per handled event (safety asymmetry: a missed order/ping/ready is HIGH, a spurious wake is fine, so a crash must re-deliver, never drop): (1) perform the side effect idempotently, keyed by the record's inbox offset/position (repeating the same offset is a no-op, e.g. ack already present); (2) advance the cursor by writing the new position into the card `last-event`; (3) re-arm the follower from that card. Re-arming before the card write would self-wake on the same event; writing the card before an idempotent side effect would drop the event on a crash between the two steps.
+- D2.5 A restart therefore replays (re-delivers) at most the one event whose card write never landed, and never misses a handled event. Replays are spurious wakes (acceptable); skips are lost orders (HIGH).
+- D2.6 Malformed/late lines are reported once as one event, in append (byte-offset) order, not timestamp order.
 - D2.7 They do not advance past unprocessed good records.
 - D2.8 Rationale: card is already the durable per-reader cursor.
 - D2.9 Edge: missing card falls back as in D2.2; a replayed already-handled event is a spurious wake (acceptable), a skipped one is a lost order (HIGH).
@@ -135,7 +136,7 @@
 - D3.4 `Monitor` is fallback only.
 - D3.5 Fallback is used only if phase 0 shows background Bash is killed or silently lost.
 - D3.6 Events within 5 s are coalesced into one line.
-- D3.7 A storm of > 20 events/min collapses to one `N events, read inbox` line.
+- D3.7 Storm backoff: a burst of > 20 events/min collapses to one `N events, read inbox` wake, and while the rate stays above that threshold the follower emits at most one wake per 60 s (sustained collapse, not one wake per record and not one collapse followed by per-record wakes).
 - D3.8 Rationale: `Monitor` cannot meet idle budget due to expiry turns.
 - D3.9 Rationale: exit-on-first bounds one wake to one turn.
 - D3.10 Rationale: coalescing prevents wake storms from matching polling cost.
@@ -145,21 +146,28 @@
 - D3.14 Background Bash lifetime across compaction is measured in phase 0.
 
 ### D4 Dead-man keepalive
-- D4.1 Keep one `CronCreate` fallback beat every 3 h, not 10 min.
+- D4.1 Dead-man interval is taken from exactly one table (no other section states an interval):
+
+| Session state | Dead-man interval | Idle cost |
+|---|---|---|
+| No lane unit of this session running | 3 h | 8 turns/day |
+| Any lane unit of this session running | 30 min | <= 48 turns/day while lanes run |
+
 - D4.2 It checks the follower is alive.
-- D4.3 Follower writes `RUN/state/<name>.follow` with `{pid, started, last_poll}`.
-- D4.4 Stale `last_poll` > 2 min means re-arm.
-- D4.5 Missing pid means re-arm.
-- D4.6 Dead pid means re-arm.
+- D4.3 The follower touches (rewrites) `RUN/state/<name>.follow` with `{pid, started, session_id}` at least every 60 s in BOTH `inotify` and poll modes - the file mtime IS the heartbeat.
+- D4.4 The dead-man judges liveness ONLY by that file's mtime: mtime > 2 min stale means re-arm. It never judges by a `last_poll` content field (a dead follower's last-written content looks fresh forever).
+- D4.5 Missing heartbeat file means re-arm.
+- D4.6 Dead pid, pid gone, or pid start time differing from the recorded start time means re-arm (stale lock takeover, see D4.15a).
 - D4.7 Otherwise the beat ends the turn with no output.
-- D4.8 3 h keeps the session under 8 h idle retirement even if every event is missed.
+- D4.8 What keeps the session alive: each dead-man `CronCreate` firing IS a model turn, and a turn counts as session activity against the 8 h idle-retirement rule (phase 0 probe 5.10 confirms or refutes this; if refuted, the interval table above is void and re-decided). Both intervals are therefore <= the idle limit minus a margin (30 min and 3 h are both < 8 h), so the session never idles out even if every inbox event is missed.
 - D4.9 ORCH-C1 REVIVE covers actual session death, not this beat.
-- D4.10 Resulting idle cost is 8 turns/day versus 144.
+- D4.10 Resulting idle cost is 8 turns/day versus 144 (30-min cadence applies only while lanes run, when the session is not idle by definition).
 - D4.11 The `0 turns/h` target is met as `0 event-less turns except dead-man`.
 - D4.12 Say so plainly in operator reports; do not claim literal zero.
 - D4.13 Interval is a policy knob, not hardcoded doctrine.
 - D4.14 Raise it if phase 0 shows the 8 h rule counts only user turns.
-- D4.15 While any lane unit of this session runs, the dead-man interval is 30 min (stall detection for hung-but-alive workers); 3 h only when no lane runs (see Q2). The cadence switches at the transition itself: spawning the first lane recreates the dead-man cron at 30 min immediately; the last lane ending recreates it at 3 h.
+- D4.15 The cadence switches at the transition itself: spawning the first lane recreates the dead-man cron at 30 min immediately; the last lane ending recreates it at 3 h. (Stall detection itself is NOT the dead-man's job - see D5.4.)
+- D4.15a One reader per inbox by design (one session = one inbox). The follower holds `RUN/state/<name>.follow.lock` containing `{pid, start_time, session_id}`. A second starter with a live lock holder (pid alive AND start time matches) exits nonzero with one loud stderr line and never starts a second reader (a silent second reader would starve or double-deliver). A stale lock (pid gone, or pid start time differs = pid recycled) is taken over and the takeover is logged to the wake log.
 - D4.16 Every dead-man firing unconditionally recreates its own cron (delete + CronCreate) so the 7-day expiry never removes it; also recreated after relaunch and clear.
 - D4.17 Rationale: polling is retained only as loss detector.
 - D4.18 Edge: dead-man itself must not do polling work when follower is healthy.
@@ -168,17 +176,18 @@
 - D5.1 While lanes run, follower also watches unit exits when `--include-units` is set.
 - D5.2 It also watches CI conclusions when `--include-ci` is set.
 - D5.3 No separate polling beat is needed for `is my worker done`.
-- D5.4 A worker exceeding expected runtime is caught by the dead-man beat.
+- D5.4 Hung-but-alive workers (unit active but stuck) are detected by the lane monitor, NOT the dead-man: the lane monitor watches each worker's output file `work/<lane>/<name>.out` and emits a `stall <lane>/<name>` event line into the session inbox when the unit is active and the output file shows no new bytes for N min (default N = 20) or the unit exits unexpectedly; the follower surfaces that line like any other actionable event. The dead-man only guards the follower itself (D4.2-D4.6) and never classifies worker stalls.
 - D5.5 Stall classification is unchanged.
 - D5.6 Rationale: unit exit is an event, not a polled state.
 - D5.7 Edge: unit flapping inactive/active must coalesce like inbox storms.
 - D5.8 Edge: CI branch list must be explicit; no wildcard watch.
 - D5.9 CI polling mechanism itself must stay quiet-turn-free or be disabled.
+- D5.10 Each unit-exit/stall event carries its own id `lane@run-id` (unit name + systemd invocation/run id, recorded by the lane monitor at spawn). The follower dedupes unit events on that id, NOT on the inbox offset: the same `lane@run-id` exiting twice (flap) emits one wake; two different run-ids of the same lane emit two wakes.
 
 ### D6 Skill rewrite
 - D6.1 Rewrite R-coord-07 to `Wake on events`.
 - D6.2 New text: arm `inbox --follow --actionable --exit-on-first` in background at launch and after every handled event.
-- D6.3 New text: a 3 h `CronCreate` dead-man beat re-arms it.
+- D6.3 New text: a `CronCreate` dead-man beat re-arms it, at the D4.1 interval-table cadence (30 min while any lane of this session runs, 3 h otherwise) - not a flat 3 h.
 - D6.4 New text: recreate both after relaunch or clear.
 - D6.5 New why: `10-min beats cost 144 idle turns/day; an idle session is retired after 8 h`.
 - D6.6 Move R-coord-08 beat duties to handler or dead-man.
@@ -195,8 +204,8 @@
 - D6.8 Rationale: push/pong are responses, not ticks.
 - D6.9 Rationale: WIP-commit and stamps are loss-tolerant and fit 3-h cadence.
 - D6.10 Rationale: relaunch belongs with liveness checks in dead-man and C1.
-- D6.11 Edge: handler order is card write -> re-arm -> side effects (D2.4).
-- D6.13 The parent's 'status quiet > 25 min -> relaunch child' check (SKILL.md levels table, R-coord-08) reads the card header stamp; every card write (D2.4 per event, dead-man beat) refreshes it. The threshold becomes 'quiet > dead-man interval + 10 min' (40 min with lanes running, 3 h 10 min idle); rewritten together with R-coord-07/08.
+- D6.11 Edge: handler order is idempotent side effect (keyed by record offset) -> card write -> re-arm (D2.4).
+- D6.13 The parent's 'status quiet > 25 min -> relaunch child' check (SKILL.md levels table, R-coord-08) reads the card header stamp; every card write (D2.4 per event, dead-man beat) refreshes it. The threshold becomes 'quiet > dead-man interval + 10 min' per the D4.1 table (40 min with lanes running, 3 h 10 min idle); rewritten together with R-coord-07/08.
 - D6.12 Edge: dead-man must skip WIP-commit when tree is clean.
 
 ## 5. Phases
@@ -217,7 +226,8 @@
 - 5.7 Phase 0 measures survival across compaction.
 - 5.8 Phase 0 measures behavior when REPL is busy.
 - 5.9 Phase 0 confirms Monitor expiry turn cost.
-- 5.10 Phase 0 confirms what counts toward 8 h retirement.
+- 5.10 Phase 0 probe for the 8 h rule (pass/fail, recorded in the pilot notes): leave a session idle except for dead-man fires at the D4.1 cadence and check it is NOT retired after 8 h. PASS = alive with only dead-man turns; FAIL = retired, and the D4.1 table is re-decided (shorter interval or explicit keepalive).
+- 5.10a Phase 0 harness-lifetime fallback: if neither background Bash nor Monitor survives `/clear`, compaction, and timeouts (all FAIL per 5.6/5.7), the fallback is the dead-man cron alone with no background process: 30 min while lanes run, 3 h idle, at the honest budget cost of one turn per fire (up to 48/day while lanes run, 8/day idle). That fallback still meets zero-missed-orders (polling bound) but NOT the 0 event-less turns target - the pilot report states which binding shipped.
 - 5.11 Phase 1 replay uses a scripted inbox.
 - 5.12 Script includes orders, pings, acks, own lines.
 - 5.13 Expected output is exactly the actionable subset.
@@ -236,21 +246,28 @@
 - 6.5 Zero missed readies in pilot versus shadow log/audit.
 - 6.6 Replay test covers acks that must not refire.
 - 6.7 Replay test covers own lines that must not self-wake.
-- 6.8 Offset resume neither replays nor skips.
-- 6.9 Dead-man beat re-arms a dead follower within one 3-h tick.
-- 6.10 Storm input collapses instead of emitting one wake per record.
-- 6.11 Stall latency: a hung-but-alive worker is noticed within 40 min while lanes run (30 min dead-man + 10 min slack), measured in the pilot with an injected hung worker.
-- 6.12 Dead-man cron still present after a simulated 7-day expiry (recreated on every firing).
+- 6.8 Offset resume replays at most the one event whose card write never landed, and never skips a handled event (D2.5).
+- 6.8a Effects-before-cursor kill test (finding 1): scripted harness delivers one order, then SIGKILLs the follower (a) after the side effect but before the card write, and (b) after the card write but before re-arm. In both cases the order is re-delivered on restart (spurious wake accepted) and never dropped; the side effect applied exactly once (idempotent key verified by record offset).
+- 6.8b Byte-offset read test (finding 8): scripted inbox appends a record with a backdated stamp AFTER newer records were read; the follower surfaces it once in append position and does not reorder or skip.
+- 6.8c Cursor-fallback test (finding 3): with the card missing, the follower resumes after this session's newest `→ done:` line; with no `→ done:` line either, from the start of today's records. Test asserts no "last 30 records" cutoff exists and no order is skipped.
+- 6.8d Unit-id dedupe test (finding 12): the same `lane@run-id` exiting twice (flap) emits one wake; two run-ids of the same lane emit two wakes; inbox-offset dedupe alone would fail this test.
+- 6.9 Dead-man beat re-arms a dead follower within one tick of the D4.1 table (30 min while lanes run, 3 h idle). Heartbeat test (finding 2): follower heartbeat mtime advances at least every 60 s in BOTH inotify and poll modes; dead-man re-arms when and only when mtime is > 2 min stale (a test that stops the follower but leaves a fresh `last_poll` content field must still re-arm).
+- 6.9a Lock test (finding 4): a stale lock (pid gone, or pid start time differs) is taken over with a wake-log line; a second starter against a live lock exits nonzero with one loud stderr line and starts no reader.
+- 6.10 Storm input collapses instead of emitting one wake per record: sustained > 20 events/min emits at most one wake per 60 s until the rate drops (finding 9).
+- 6.11 Stall latency (finding 5): a hung-but-alive worker (unit active, no output-file bytes for N min) is surfaced as a lane-monitor `stall` inbox event within N + 10 min slack, measured in the pilot with an injected hung worker; the test fails if the stall arrives via the dead-man path instead of the lane-monitor event path. Default N = 20 (<= 30 min total while lanes run).
+- 6.12 Dead-man self-recreation test (measurable, not a 7-day wait): a replay harness fires the dead-man handler twice and asserts each firing issues delete + CronCreate and appends a recreation line to the wake log; the launch/clear checklist asserts the cron exists afterwards. A 7-day sleep is NOT required.
+- 6.13 Interval-consistency check (finding 11): D4.1 is the only interval table in the spec and skill; a link/plan check fails if any other section or skill text states a flat interval without pointing at D4.1.
+- 6.14 Idle-lifetime probe (finding 6) and harness-lifetime probe (finding 7) record PASS/FAIL per 5.10/5.10a before phase 1; if the harness probe fails for both Bash and Monitor, phase 1 ships the dead-man-alone fallback at its honest budget (up to 48 turns/day while lanes run, 8/day idle).
 
 ## 7. Risks and edge cases
 - 7.1 Follower dies silently and events queue unseen until dead-man.
-- 7.2 Mitigation is `RUN/state/<name>.follow` plus 3-h liveness check.
+- 7.2 Mitigation is `RUN/state/<name>.follow` heartbeat mtime (touched every <= 60 s in both modes) plus the D4.1-cadence liveness check on mtime only.
 - 7.3 Events arrive while session is mid-turn.
 - 7.4 Mitigation is next re-arm starts from card offset, so nothing is lost.
 - 7.5 Two followers run on one inbox.
-- 7.6 Mitigation is pid lock; second starter exits with one line.
+- 7.6 Mitigation is `RUN/state/<name>.follow.lock` holding `{pid, start_time, session_id}`: one reader per inbox by design; a stale lock is taken over with a log line, a second live reader exits nonzero with one loud stderr line, never a silent starve (D4.15a).
 - 7.7 Clock skew produces out-of-order stamps.
-- 7.8 Mitigation is ordinal tiebreak plus report-late-once.
+- 7.8 Mitigation is byte-offset order (append order is the truth) plus report-late-once (D1.17, D2.6).
 - 7.9 Late-stamped lines are reported once, not silently dropped.
 - 7.10 Session is compacted and forgets to re-arm.
 - 7.11 Mitigation is dead-man beat plus launch/clear checklist in skill.
@@ -266,13 +283,13 @@
 - 7.21 `Monitor` fallback would reintroduce >= 2 turns/h if chosen.
 - 7.22 Therefore fallback requires explicit phase-0 justification.
 - 7.23 Unit-exit signal may race inbox `ready`.
-- 7.24 Mitigation is treat either as wake; dedupe by card offset.
+- 7.24 Mitigation is treat either as wake; dedupe unit events by `lane@run-id` (D5.10), inbox events by card offset.
 
 ## 8. Open questions
 - Q1 Does 8 h retirement count background-task wakes as activity?
-- Q1 Resolution is measured in phase 0.
+- Q1 Resolution is the phase-0 probe in 5.10 (PASS/FAIL recorded): the spec assumes each dead-man fire is a turn and therefore activity (D4.8); a FAIL re-decides the D4.1 table.
 - Q2 Should dead-man shorten while lanes run, e.g. 1 h?
-- Q2 Decided: yes, 30 min while lanes run (D4.15); revisit with pilot stall data.
+- Q2 Decided: yes, 30 min while lanes run (D4.1 table); stall detection itself lives in the lane monitor (D5.4), not the dead-man - revisit N and the 30-min cadence with pilot stall data.
 - Q3 One follower per session versus one per inbox shared by supervisor?
 - Q3 Decision is deferred to B3.
 - Q3 Per-session follower ships now; shared supervisor waits for JSONL offsets.
@@ -289,9 +306,26 @@
 ## 10. Files and interfaces
 - 10.1 Inbox path: `RUN/inbox/<name>.md`.
 - 10.2 Card cursor: `last-event <position>`.
-- 10.3 Follower state: `RUN/state/<name>.follow`.
+- 10.3 Follower state: `RUN/state/<name>.follow` (content `{pid, started, session_id}`, mtime is the heartbeat, touched every <= 60 s in both modes).
+- 10.3a Follower lock: `RUN/state/<name>.follow.lock` (content `{pid, start_time, session_id}`; stale takeover logged, live contention exits nonzero with one stderr line).
 - 10.4 Wake log: `RUN/state/<name>.wakes`.
 - 10.5 CLI: `autoos-agent.py inbox <name> --follow --actionable [--since-card CARD] [--exit-on-first] [--include-units PREFIX] [--include-ci BRANCHES]`.
 - 10.6 Exit code 0 on `--exit-on-first` event batch.
 - 10.7 Nonzero with one stderr line on lock contention.
 - 10.8 Stdout contract is one line per actionable event batch, nothing else.
+
+## 11. Review round 3 (deepseek-flash cross-family, fix-first)
+- All 12 findings resolved in the spec above; none rejected.
+- 1 HIGH effects-before-cursor -> D2.4 (idempotent side effect keyed by record offset, then card write, then re-arm), D2.5 (restart re-delivers, never drops), D6.11; test 6.8a (SIGKILL between each pair).
+- 2 HIGH follower heartbeat -> D4.3 (touch every <= 60 s both modes), D4.4 (mtime > 2 min stale, never content), 7.2; test 6.9.
+- 3 HIGH missing/corrupt card -> D2.2 (own `→ done:` scan, else start of today; no last-30), D2.10; test 6.8c.
+- 4 HIGH shared inbox lock -> D4.15a (pid + start time + session id; stale takeover logged; live second reader loud nonzero exit), 7.6, 10.3a; test 6.9a.
+- 5 HIGH hung-but-alive stall path -> D5.4 (lane monitor watches `work/<lane>/<name>.out`, emits `stall` inbox event; dead-man guards only the follower), D4.15; test 6.11.
+- 6 HIGH idle-session lifetime -> D4.8 (dead-man fire = a turn; intervals <= limit minus margin), 5.10 (phase-0 PASS/FAIL probe), 8 Q1; test 6.14.
+- 7 HIGH harness lifetime -> 5.10a (dead-man-alone fallback: 30 min lanes-running, 3 h idle, honest budget); test 6.14.
+- 8 MED byte offset -> D1.17, D2.6; test 6.8b.
+- 9 MED storm backoff -> D3.7 (one wake per 60 s sustained after 20/min); test 6.10.
+- 10 MED measurable 6.12 -> 6.12 (replay-harness recreation assertions, no 7-day wait).
+- 11 MED interval contradiction -> D4.1 (single table), D4.15, D6.3, D6.13 pointing at it; check 6.13.
+- 12 MED unit-exit id -> D5.10 (`lane@run-id` dedupe, not inbox offset), 7.24; test 6.8d.
+- Rejected: none.
