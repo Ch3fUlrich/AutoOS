@@ -2634,12 +2634,16 @@ function Sync-AutoOSSkillDirs {
                     [IO.Directory]::Move($staged, $link)
                 } catch {
                     $why = $_.Exception.Message
+                    $state = 'old link left in place'
                     if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
-                        $null = New-AutoOSSkillLink -Path $link -Target $raw
+                        # A junction needs its target: a dangling old link cannot be
+                        # recreated, and the next run links the skill afresh.
+                        $state = if (New-AutoOSSkillLink -Path $link -Target $raw) { 'old link put back' }
+                                 else { 'old link could not be put back (its target is gone); the next run links it' }
                     }
                     $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
                     if ($left -and $left.LinkType) { $left.Delete() }
-                    Write-AutoOSLine "could not retarget ${link}: $why - old link put back" -Level warn
+                    Write-AutoOSLine "could not retarget ${link}: $why - $state" -Level warn
                     $ok = $false
                     continue
                 }
