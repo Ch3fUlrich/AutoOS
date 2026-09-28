@@ -12,6 +12,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Only for Test-AutoOSTombstone: whether a component is installed is a catalog
+# question as much as a machine one - a retired id must never be detected, and
+# the field must be read in the one place that knows how. Catalog.psm1 imports
+# nothing, so this edge does not close a cycle.
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Catalog.psm1') -DisableNameChecking
+
 # Get-StartApps takes a couple of seconds; a run asks about dozens of
 # components, so it is read once and reused.
 $script:StartAppsCache = $null
@@ -227,6 +233,11 @@ function Get-AutoOSInstalledStatus {
        Verify commands are never executed: some of them launch a desktop app. #>
     param([Parameter(Mandatory)][psobject]$Component, [switch]$Refresh, [psobject]$Inventory)
     if ($Refresh) { $script:InstalledCache = @{}; $script:InstalledInventory = $null }
+    # Before the cache and before any probe: a tombstone is never looked for.
+    # The product it named may well still be on the machine, and a ✓ there
+    # would answer for the component AutoOS no longer offers - it would also
+    # poison the cache that the rest of the run reads.
+    if (Test-AutoOSTombstone -Component $Component) { return 'not-detected' }
     $verify = if ($Component.PSObject.Properties.Name -contains 'Verify') { [string]$Component.Verify } else { '' }
     $name = if ($Component.PSObject.Properties.Name -contains 'Name') { [string]$Component.Name } else { '' }
     $key = "$($Component.Provider)|$($Component.Package)|$name|$verify"

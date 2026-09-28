@@ -126,6 +126,245 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record its own uuid, as the real transcript does; they had keyed the uuid off
   the token count, which is exactly what the dedup now collapses. 9 red before
   the change, 50 green after.
+### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
+
+A7b retired the component's *work* and left a live row holding a pointer: the
+catalog entry still named a `postInstall`, still sat in two profiles, and still
+answered "installed" from a hand-written detection branch. A7a shipped the
+mechanism that says all three from data, so the last step is to stop saying them
+in code. Windows (`catalog/windows.json`, `lib/windows`) is untouched — its entry
+still clones, and its retirement is a later lane.
+
+- **`catalog/linux.json`, `catalog/macos.json`**: `agent-skills` is
+  `"tombstone": true` with the note *its work moved to agent-skill-links,
+  omnigraph-client and the mcp-\* components* and `replaced_by` naming the six ids
+  that took it (`agent-skill-links`, `omnigraph-client`, `mcp-graphify`,
+  `mcp-serena`, `mcp-playwright`, `mcp-context7` — all present in both catalogs).
+  It is dropped from `workstation` and `ai-coding`: a profile pre-selects what
+  should get *installed*. `postInstall` goes with the installer, and the long
+  `notes` line goes because `note` now carries the same fact — one home per fact.
+  The `uv` entry's note named `agent-skills` as its consumer; it names the
+  `mcp-*` components, which is what actually runs `uv`.
+- **`lib/linux/install.sh`**: `install_agent_skills` deleted (setup.sh reports a
+  retired row before it ever asks the provider, so nothing could call it), and the
+  `agent-skills` branch of `custom_is_installed` deleted with it
+  (`catalog_probe_installed` answers *not installed* for a tombstone before it
+  probes, so the branch was unreachable too). Leaving either would have kept a
+  second owner for a fact the catalog holds.
+- **Behaviour**, on the paths A7's verify row names: a `--profile workstation` /
+  `ai-coding` dry run plans no `agent-skills` row at all and still plans the
+  successors (they are profile members in their own right); `--only
+  agent-skills` announces `agent-skills is retired: replaced by …`, plans the six
+  beside the retired row, and the row reports `skipped: retired (its work moved
+  to …)`. A state file saved before the retirement replays the same way. The
+  retired row is no longer in the "Installed apps" line, no longer prints
+  "✓ Already installed", and no longer hunted for a launcher in the landing
+  report.
+- **Tests** (all five red before the catalogs flipped, for exactly those
+  reasons): `tests/linux/13-end-to-end-dry-run-only.sh` drives the real entry
+  point over the shipped catalogs — `--only` expands, a profile plans no retired
+  id, `--from-state` replays a hand-authored pre-retirement file to its
+  successors — and its three scratch-home cases now share one `e2e_setup` helper
+  instead of restating the trick. `tests/linux/18-mcp-wiring.sh` asserts the
+  catalog shape (the boolean flag, the note, the exact successor set, no profile,
+  no `postInstall`/`prompt`/`requires`/`verify`), that the retirement leaves no
+  installer or detection branch behind, and — with detection stubbed to "everything
+  is here" — that the retired id is never reported installed while its
+  successors are. The two A7b cases that drove `install_agent_skills` and
+  `custom_is_installed agent-skills` directly are gone: the function they tested
+  no longer exists, and what replaces them is reached the way a run reaches it.
+- **`docs/catalog.md`**: the field table and the retirement section say what a
+  tombstone now *is* in this repo — no profile, no installer, the note and the
+  successors as the only prose — with the shipped `agent-skills` entry as the
+  `replaced_by` example. `docs/plans/2026-09-27-omnigraph-mcp-catalog-plan.md`
+  marks A7 done on Linux and macOS.
+
+Verified: `bash tests/run-tests.sh --filter='agent-skills,tombstone,skill,catalog,end-to-end,from-state'`
+121 passed / 0 failed; `bash setup.sh --check-catalog` exits 0; shellcheck clean
+on the touched `.sh`; `python3 -m pytest -q tests/` green.
+
+### Fixed — a retired row is locked in both terminal menus, and every selection path expands it (A7a review 2, 2026-09-28)
+
+Muse's re-check found the `replaced_by` expansion sitting behind the wrong
+condition. It ran only for a selection named by ids (`--from-state`, `--only`, and
+the browser payload that arrives as `--only`), while **neither terminal menu locked
+a retired row**: `setup.sh` set `MENU_DISABLED` for the `manual` provider only, and
+`New-AutoOSMenuItem` set `Locked` for the `manual` provider only. So a person who
+highlighted a retired row and pressed space got exactly the failure the previous
+commit was meant to close — a plan holding the `skipped: retired` row and none of
+the work that replaced it — and the row's `(retired)` label said nothing about
+where the work had gone.
+
+Both halves, because either one alone leaves a hole:
+
+- **The row**: `catalog_menu_rows` (new in `lib/linux/catalog.sh`, the twin of
+  `New-AutoOSMenuItem`, which the menu now calls instead of building its own arrays)
+  locks a retired row and labels it `(retired: replaced by <ids>)`, naming only the
+  successors this machine offers, the way the announcement line does. On Windows
+  `New-AutoOSMenuItem` gained `-OfferedIds` and the same lock and label, plus a
+  `Reason`. `ui_menu`'s and `Show-AutoOSMenu`'s non-interactive fallback read only
+  the tick, so a locked row could still leave the selector with nobody at a
+  keyboard; both now honour the lock, the same rule the key handlers apply.
+- **The selection**: `setup.sh` and `setup.ps1` expand on the way to the plan,
+  unconditionally, so no path — menu, profile, replay, `--only`, browser, or one
+  added later — can plan a tombstone without its replacements.
+- **Guard order** (the review's LOW): resolve asked whether AutoOS could install
+  the *provider* before it asked whether the row had *retired*, so a retired
+  `manual` component failed the whole run with "use its vendor link". Retirement is
+  now asked first, the row resolves and reports `skipped: retired`, and the plan no
+  longer prints its stale homepage as an "Action required" step.
+
+Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`) covers the row flags
+and label, the real `ui_menu` key handlers, the locked row against the
+non-interactive fallback, the retired-`manual` resolve, and — over a `script(1)`
+pty, skipped where none exists — the reviewer's own scenario through the real
+`setup.sh`: highlight a retired row, press space, and see that it never reaches the
+plan. The PowerShell suite (`tests/run-tests.ps1 -Filter tombstone`) covers the same
+row through `New-AutoOSMenuItem`, the same lock through `Show-AutoOSMenu`, the same
+guard order in `Resolve-AutoOSPlan`, and `-Only` of a retired `manual` id through
+`setup.ps1`. `docs/catalog.md` said a hand-chosen retired id "is still planned"; it
+no longer is, and the document says so where it describes the row.
+
+### Fixed — a tombstone names what replaced it, so a replayed state keeps the work (A7a)
+
+Sonnet's final review of the A7b lane found the retirement mechanism keeping the
+id and losing the job. A state file saved **before** a component was retired names
+the retired id and cannot name the ids that inherited its work, and `--from-state`
+took the selection verbatim: the tombstone was known, skipped, and nothing else was
+planned. The machine came back without that work and the run reported `skipped`,
+which reads like success.
+
+- **`replaced_by`** (catalog field, tombstone only): the ids that took the retired
+  component's work on. Both validators reject one that is empty, that sits on a live
+  entry, or that names an unknown id or another tombstone — a successor that installs
+  nothing would replay into a second `skipped` row, the same defect one step later.
+- **`lib/linux/catalog.sh`** (`catalog_expand_replacements`) and
+  **`lib/windows/AutoOS.Catalog.psm1`** (`Expand-AutoOSTombstoneReplacements`):
+  expand a retired id into its successors, once per id, and are asked by every
+  selection built from explicit ids — `--from-state` / `-FromState`, `--only` /
+  `-Only`, and a browser run, whose payload the server passes in as `--only`. The
+  retired row stays (it is still what reports `skipped: retired`), a successor the
+  selection already lists is not added twice, a successor this machine does not
+  offer is left out of both the plan and the announcement, and a successor retired
+  since is expanded in turn. Profiles never name a tombstone, so they never expand.
+- **`setup.sh` / `setup.ps1`**: one muted line per expanded tombstone — `agent-skills
+  is retired: replaced by agent-skill-links, omnigraph-client` — before the plan, so
+  nothing is substituted silently.
+- **`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`, `web/index.html`**: the
+  payload carries `replaced_by` and the retired row shows it, the way it shows the
+  note. The page displays the successors; the installer is the one that plans them.
+- **`docs/catalog.md`**: the field and the replay rules.
+- Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`), the PowerShell
+  suite (`tests/run-tests.ps1 -Filter tombstone`) and the page checks
+  (`tests/test-web-progress.js`) cover the validator, the loader column, the
+  expansion (dedupe, unoffered successor, chain), a hand-written pre-retirement
+  state file replayed to a plan that installs the successors, and `-Only` /
+  `--only` of a retired id.
+
+### Fixed — tombstones reach the browser, and a requirement on a retired id fails out loud (A7a review, 2026-09-28)
+
+Muse's review of the A7a commits found the retirement mechanism stopping at the
+terminal: the served payload never carried the flag, so the page — which resolves
+dependencies, pre-ticks profiles and collects prompts **in the browser** — did the
+opposite of `setup.sh` with the same catalog. And the rule "no entry may require a
+retired id" lived only in the validators, which a normal run never calls.
+
+- **`lib/linux/serve.py`**: `build_state`'s inline projection became a module-level
+  pure `state_components(catalog, platform, platforms, arch, headless, installed)`
+  that adds `tombstone` and `note`, so a test can ask the server's own function
+  without a server; `installed names` is derived from the same rows now instead of
+  being collected beside them.
+- **`lib/windows/AutoOS.Serve.psm1`** (`Get-AutoOSServeState`): the same two fields,
+  read from the projection's `Tombstone` / `RetireNote`.
+- **`web/index.html`**: retirement is one answer in one place — `canInstall()` —
+  which the profile pre-tick, the dependency closure, the questions card, the
+  quick-install button and the tick box all already ask. A retired row is **shown,
+  disabled and labelled**, not hidden: hiding it removes the only place a reader
+  learns the id went away and what replaced it, which is the reason the catalog
+  still carries it. `retiredChip` and the `(retired)` description match the terminal
+  wording, `installedChip` never says `✓ Installed` for something AutoOS no longer
+  installs, and the Configure button for a prompt the page will never ask is gone.
+- **`lib/linux/catalog.sh` + `setup.sh`**, **`lib/windows/AutoOS.Catalog.psm1` +
+  `setup.ps1`**: resolve now records a refusal (`PLAN_BLOCKED` /
+  `catalog_resolve_blocked` on Linux, `BlockedReason` on Windows) for an entry whose
+  `requires` names a tombstone, and spreads it to that entry's own dependents until
+  the set stops growing. The plan warns, the questions loop asks nothing, execution
+  records the component as failed, and the run exits 1 — the retired row stays in
+  the plan so the report can point at it. Nothing is installed without a dependency
+  it asked for.
+- **`setup.ps1`** plan tag: `(dependency)` and `(retired)` are two independent tags,
+  as in `setup.sh`; the `elseif` hid the retirement the moment a tombstone arrived
+  as a dependency rather than a hand-pick.
+- Tests (`tests/linux/39-catalog-tombstone.sh` +8, `tests/run-tests.ps1` +7,
+  `tests/test-web-progress.js` +1 block): the serve projection through
+  `state_components` itself, refusal and cascade at resolve, the ordinary resolve
+  recording nothing, `setup.sh`/`setup.ps1` end-to-end over the fixture tree
+  (non-zero exit, `Failed 1`, no prompt asked, both tags on one row), and the
+  shipped page functions run in node — `canInstall`, `closure`,
+  `profileClosureDirect` and `itemHtml` — so a page that merely stops drawing the
+  row cannot pass.
+- Docs: `docs/catalog.md`'s retirement section states the resolve-time refusal and
+  the browser's shown/disabled/labelled choice.
+
+### Added — a retired component keeps its id and installs nothing (A7a, 2026-09-28)
+
+An `id` is a contract (AGENTS.md §3): saved state files, `--only` / `-Only` flags
+and a user's last selection all name it. Deleting a component that stops being
+installable turned all of those into "Unknown component id" and a red run, and
+there was no way to say "this used to be a thing, here is what replaced it". The
+catalog can now mark one instead: `"tombstone": true` with an optional `"note"`.
+**Mechanism only — no real component is retired by this change**; deciding which
+ids become tombstones is a separate, catalog-only edit.
+
+- **`lib/linux/catalog.sh`**: the field is read in one place — `catalog_is_tombstone`
+  — which the profile expansion, the dependency walk, the loader and the installed
+  probe all ask rather than each re-deriving it. `catalog_load` carries
+  `CAT_TOMBSTONE` / `CAT_RETIRE_NOTE` beside the other columns;
+  `catalog_profile_defaults` never pre-ticks a retired id; `catalog_resolve` keeps
+  the id in the plan but drags nothing in behind it; `catalog_detect_installed`
+  reports a tombstone as not installed. `catalog_validate` accepts the field (a
+  tombstone may omit `postInstall`, `prompt`, `requires` and `verify` — they only
+  mean something for something that installs) and rejects `"tombstone"` that is
+  not the boolean `true`, an empty `note`, a `note` on a live entry, and any entry
+  that `requires` a tombstone.
+- **`lib/linux/install.sh`** (`catalog_probe_installed`): skipped for a retired id,
+  so the `✓` and the "Installed apps" line cannot answer for a product AutoOS no
+  longer offers — the same reason the cache in Detect is gated on Windows.
+- **`setup.sh`**: `--list` and the menu mark the row `(retired)`, the plan row is
+  tagged, the questions loop asks a tombstone nothing, and execution prints
+  `skipped: retired (<note>)` and counts it as already present — never installed,
+  never failed, identical on the second run. A retired component is not in the
+  post-run "where to find them" hunt, because for it "no launcher found yet" would
+  be a wrong answer rather than a blank one.
+- **`lib/windows/AutoOS.Catalog.psm1`** — the twin: `Test-AutoOSTombstone` (reads
+  the raw JSON field and the flattened projection's, and tests the type because
+  PowerShell would coerce `'1'` to `$true`), `Format-AutoOSTombstoneSkip` (one home
+  for the skip wording, so `setup.ps1` and the suite cannot drift),
+  `Test-AutoOSProfileDefault` + `Get-AutoOSProfileDefaults` (the profile rule the
+  menu row and the `-Yes` expansion shared by copy-paste now share as code), plus
+  the same four validator rules, the `Tombstone`/`RetireNote` projection fields,
+  the menu's `(retired)` label, and the dependency walk that expands nothing behind
+  a retired id.
+- **`lib/windows/AutoOS.Detect.psm1`** (`Get-AutoOSInstalledStatus`): returns
+  `not-detected` for a tombstone before the cache and before any probe — one gate
+  that `Set-AutoOSInstalledStatus`, `Test-AutoOSInstalled`,
+  `Get-AutoOSInstalledComponents`, `-Installed`, `-ListComponents` and the
+  installer's own skip check all read through.
+- **`setup.ps1`**: `-ListComponents` marks `(retired)`, the plan row is tagged, the
+  prompt collection and the `-Yes` expansion skip retired ids, execution prints the
+  skip line into `results.skipped`, and the "Where to find them" report excludes them.
+- Tests (**`tests/fixtures/catalog-tombstone.json`** — a fixture, so no real catalog
+  was touched — `tests/linux/39-catalog-tombstone.sh` 18 cases, 21 cases in
+  `tests/run-tests.ps1`'s `catalog tombstone` group): validator accepts and rejects,
+  projection keeps the facts, profile expansion and menu tick leave it alone, a
+  retired id is never detected as installed *while an ordinary id with the same
+  package still is*, the plan keeps the known id and pulls no dependency, the skip
+  line is pinned with and without a note, and the Linux side runs `setup.sh` itself
+  against a scratch tree — `--only`, a state file written by a real run replayed
+  with `--from-state`, `--list`, the summary counts and a second run.
+- Docs: **`docs/catalog.md`** gained the two Fields rows and a
+  *Retiring a component (tombstone)* section — the rules above, and why `note` and
+  `notes` are different fields.
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the
