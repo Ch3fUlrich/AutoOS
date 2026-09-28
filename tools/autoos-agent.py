@@ -169,6 +169,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -309,7 +310,8 @@ WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
 # is refused and announced, because a name nobody wrote down here is a name
 # nobody decided the child should have.
 WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
-                            "XDG_RUNTIME_DIR", clients.GEMINI_CUSTOM_HEADERS_ENV)
+                            "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                            clients.GEMINI_CUSTOM_HEADERS_ENV)
 WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
@@ -328,6 +330,15 @@ WORKER_GIT_GUARDS = ((
     # GIT_CONFIG_PARAMETERS is how `git -c key=value` reaches a child git; it
     # is read before GIT_CONFIG_KEY_n, so forcing it empty is not optional.
     ("GIT_CONFIG_PARAMETERS", ""),
+    # FF1c item 1: the two numbered channels *cancel* settings, they do not stop
+    # git reading a config. $GIT_CONFIG_GLOBAL overrides both $HOME/.gitconfig
+    # and $XDG_CONFIG_HOME/git/config; naming a dead path is the only way to shut
+    # the file itself, and an inherited HOME reopened it — url.insteadOf (a
+    # remote repointed at the parent), core.sshCommand and core.hooksPath (a
+    # program of the operator's) are all beyond the reach of the guard above.
+    # NOSYSTEM shuts /etc/gitconfig, which the repo's own installers write.
+    ("GIT_CONFIG_GLOBAL", os.devnull),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_CONFIG_COUNT", str(len(_GIT_GUARD_CONFIG))))
     + tuple(("GIT_CONFIG_KEY_%d" % i, k) for i, (k, _v) in enumerate(_GIT_GUARD_CONFIG))
     + tuple(("GIT_CONFIG_VALUE_%d" % i, v) for i, (_k, v) in enumerate(_GIT_GUARD_CONFIG))
@@ -390,6 +401,11 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     # is not the worker's, whatever the XDG_ prefix rule above decided (FF1b
     # item 4). The plan puts a private one back.
     env.pop("XDG_RUNTIME_DIR", None)
+    # Same rule, same reason, one round later (FF1c item 1): $XDG_CONFIG_HOME is
+    # not only git's config file, it is where gh, npm, pip and the clients look
+    # for the operator's own settings and any token they stored there. git is
+    # already shut by GIT_CONFIG_GLOBAL above; nothing else is.
+    env.pop("XDG_CONFIG_HOME", None)
     for n, v in (plan.get("env") or {}).items():
         # A plan entry is our own code talking, so a name that is not on the
         # passlist is drift, not an attack — refuse it and say so loudly rather
@@ -415,6 +431,17 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     return env
 
 
+def _child_env_passed(name: str) -> bool:
+    """Whether an ``extra`` entry may reach a CLI child (FF1c item 2).
+
+    The plan passlist plus the spawner's own ``AUTOOS_*`` state names — the same
+    decision the plan side makes. ``PATH`` is deliberately *not* in here: it is
+    inheritable, and an extra that repoints it is not something a caller should
+    get to decide on the child's behalf.
+    """
+    return _plan_env_passed(name) or name in WORKER_ENV_AUTOOS
+
+
 def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> dict:
     """The environment of a child that is *our own CLI*, not a worker.
 
@@ -425,16 +452,29 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> di
     directly (``AUTOOS_OMNIROUTE_KEY``, which it mints the worker's client key
     from) and whatever ``extra`` names for itself. The path to the keys file is
     not among them: the CLI finds it under ``ROOT``.
+
+    ``extra`` is a caller's own dictionary, which is exactly why it has to clear
+    the same checks as everything else: a bare ``env.update(extra)`` made the
+    whole policy a matter of caller discipline (FF1c item 2).
     """
     env = worker_env({"cwd": os.getcwd(), "env": {}}, None, base=base)
     src = os.environ if base is None else base
     if src.get("AUTOOS_OMNIROUTE_KEY"):
         env["AUTOOS_OMNIROUTE_KEY"] = src["AUTOOS_OMNIROUTE_KEY"]
-    env.update(extra or {})
+    for n, v in (extra or {}).items():
+        if _worker_env_denied(n):
+            print("autoos-agent: refused child env %s: secret-shaped name"
+                  % n, file=sys.stderr)
+            continue
+        if not _child_env_passed(n):
+            print("autoos-agent: refused child env %s: not on the child passlist"
+                  % n, file=sys.stderr)
+            continue
+        env[n] = v
     return env
 
 
-def provision_runtime_dir(path: str | None) -> str | None:
+def provision_runtime_dir(path: str | None, _retry: bool = False) -> str | None:
     """Create the worker's private ``XDG_RUNTIME_DIR``: empty, mode 0700.
 
     Provisioned at the launch site, not in the plan builder — a dry run writes
@@ -442,12 +482,54 @@ def provision_runtime_dir(path: str | None) -> str | None:
     dir beside the clone would have to come after it. Failing to make it is not
     fatal: a client with an unusable runtime dir falls back to its own default,
     which is exactly the state before this change.
+
+    A leaf that is already there is judged, not inherited (FF1c item 3).
+    ``makedirs(exist_ok=True)`` happily walked *through* a pre-existing symlink
+    and then chmod 0700'd whatever it pointed at: on a shared host, where the
+    state tree is reachable by more than one account, that is both a write into
+    someone else's directory and a denial of service on it. Same for a leaf of
+    another owner, and for a leaf that is not a directory at all.
     """
     if not path or not os.path.isabs(path):
         return None
     try:
-        os.makedirs(path, mode=0o700, exist_ok=True)
-        os.chmod(path, 0o700)
+        st = os.lstat(path)
+    except OSError:
+        st = None                    # absent: the normal case
+    if st is not None:
+        if stat.S_ISLNK(st.st_mode):
+            print("autoos-agent: refusing to provision %s: it is a symlink"
+                  % path, file=sys.stderr)
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            print("autoos-agent: refusing to provision %s: not a directory"
+                  % path, file=sys.stderr)
+            return None
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            print("autoos-agent: refusing to provision %s: owned by uid %d"
+                  % (path, st.st_uid), file=sys.stderr)
+            return None
+        os.chmod(path, 0o700)        # ours already: re-tighten, idempotent
+        return path
+    try:
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            # 0700 on the parent too — makedirs(mode) only ever applies it to
+            # the leaf, and a world-readable sibling is the same leak.
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            os.chmod(parent, 0o700)
+        # mkdir, not makedirs: the leaf is created atomically, so a competitor
+        # that wins the race is seen as an existing entry instead of merged into.
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        # Something appeared in the window between the lstat and the mkdir.
+        # Re-check it under the same rules, once: a racer that pre-creates the
+        # leaf as a symlink must still be refused, not followed.
+        if _retry:
+            print("autoos-agent: refusing to provision %s: still there after "
+                  "a retry" % path, file=sys.stderr)
+            return None
+        return provision_runtime_dir(path, _retry=True)
     except OSError as exc:
         print("autoos-agent: could not provision the worker's runtime dir %s: %s"
               % (path, exc), file=sys.stderr)
@@ -2208,6 +2290,13 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # decided here: provisioning happens at the launch site, because a dry run
     # writes nothing and git will not clone into a directory that has content.
     env["XDG_RUNTIME_DIR"] = os.path.join(clients.state_dir(), "runtimes", run_id)
+    # FF1c item 1: the same treatment for the config home. Inheriting the
+    # operator's $XDG_CONFIG_HOME handed the worker git's global config (the
+    # guard above only cancels two settings, it cannot hide a file) along with
+    # wherever else a tool reads a config and finds a token. Private, per run,
+    # inside the same git-ignored state tree; provisioning at the launch site
+    # for the same reason as the runtime dir — a dry run writes nothing.
+    env["XDG_CONFIG_HOME"] = os.path.join(clients.state_dir(), "configs", run_id)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
@@ -4527,6 +4616,9 @@ def cmd_run(args, cfg: dict) -> int:
     # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
     # this is the first point past the dry run, where a directory is allowed.
     provision_runtime_dir(env.get("XDG_RUNTIME_DIR"))
+    # FF1c item 1: the private config home is named in the plan and created
+    # here, under the same rule — a dry run writes nothing.
+    provision_runtime_dir(env.get("XDG_CONFIG_HOME"))
     # SPAWNREDACT item 2: the key is in the child's env from here on, so a
     # worker echoing it back must be masked before anything of this run is
     # written -- the record, the log line and the caller's terminal all read
@@ -4581,6 +4673,16 @@ def cmd_run(args, cfg: dict) -> int:
         # keeps the parent safe (worker_env, FF1b).
         fence_sandbox_push(sb["path"])
         subprocess.run(["git", "-C", sb["path"], "switch", "-q", "-c", sb["branch"]], check=True)
+        # FF1c: the clone gets its own identity, local to itself. The worker's
+        # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
+        # path), so the operator's `user.name` is gone — and a worker that ends
+        # its brief with `git commit` would die on "Author identity unknown",
+        # leaving the run's work uncommitted. Same author the spawner's own
+        # end-of-run commit signs with.
+        for name, value in (("user.name", "autoos-worker"),
+                            ("user.email", WORKER_EMAIL)):
+            subprocess.run(["git", "-C", sb["path"], "config", "--local", name, value],
+                           check=True)
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a

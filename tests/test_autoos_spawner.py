@@ -8,6 +8,7 @@ Run from the repo root (optionally one class, e.g. RoutingTableTests):
     python3 tests/test_autoos_spawner.py [ClassName]
 """
 import argparse
+import ast
 import contextlib
 import datetime
 import importlib.util
@@ -10171,6 +10172,14 @@ class _EnvScrubBase(unittest.TestCase):
         self.assertEqual("", gitcfg["credential.helper"])
         self.assertEqual("", gitcfg["core.askPass"])
         self.assertEqual(str(len(gitcfg)), env.get("GIT_CONFIG_COUNT"))
+        # FF1c item 1: the numbered channels cancel two settings, they do not
+        # stop git *reading* a config. GIT_CONFIG_GLOBAL is the one variable
+        # that overrides both $HOME/.gitconfig and $XDG_CONFIG_HOME/git/config,
+        # and NOSYSTEM shuts /etc/gitconfig — without them an inherited HOME
+        # reintroduces url.insteadOf, core.sshCommand and core.hooksPath.
+        self.assertEqual(os.devnull, env.get("GIT_CONFIG_GLOBAL"),
+                         "git's global config must be forced to a dead path")
+        self.assertEqual("1", env.get("GIT_CONFIG_NOSYSTEM"))
         if has_key:
             self.assertEqual("test-only-key", env.get("AUTOOS_OMNIROUTE_KEY"))
         else:
@@ -10214,17 +10223,35 @@ class WorkerEnvAllowlistTests(_EnvScrubBase):
         self.assertEqual("core.askPass", env["GIT_CONFIG_KEY_1"])
         self.assertEqual("", env["GIT_CONFIG_VALUE_1"])
         self.assertEqual("2", env["GIT_CONFIG_COUNT"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual("1", env["GIT_CONFIG_NOSYSTEM"])
 
     def test_secrets_absent_and_core_vars_present(self):
         env = self.scrub()
         self.assertScrubbed(env, has_key=False)
         for name in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
-                     "SHELL", "NVM_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+                     "SHELL", "NVM_DIR", "XDG_CACHE_HOME",
                      "AUTOOS_STATE_DIR", "AUTOOS_TASK_DIR", "AUTOOS_WORKERS_DIR",
                      "AUTOOS_AGENT_MAX_DEPTH", "SYSTEMROOT", "USERPROFILE"):
             self.assertIn(name, env, name)
         self.assertEqual("/tmp/sandbox", env["PWD"])
         self.assertGitGuards(env)
+
+    def test_the_operators_config_home_is_not_inherited(self):
+        # FF1c item 1: XDG_* was allowlisted wholesale, and $XDG_CONFIG_HOME/
+        # git/config *is* git's global config — an inherited /home/tester/.config
+        # handed the worker the operator's url.insteadOf, core.sshCommand and
+        # core.hooksPath, none of which the two-entry guard can cancel. The plan
+        # puts a private one back, exactly as it does for XDG_RUNTIME_DIR.
+        env = self.scrub()
+        self.assertNotIn("XDG_CONFIG_HOME", env,
+                         "the operator's config home leaked into the worker")
+        self.assertNotIn("/home/tester/.config", env.values())
+
+    def test_a_private_config_home_from_the_plan_is_kept(self):
+        plan = dict(self.plan, env={"XDG_CONFIG_HOME": "/tmp/state/configs/run-1"})
+        env = self.scrub(plan=plan)
+        self.assertEqual("/tmp/state/configs/run-1", env["XDG_CONFIG_HOME"])
 
     def test_the_parent_key_is_dropped_and_only_the_workers_own_key_is_added(self):
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", self.scrub())
@@ -10278,6 +10305,77 @@ class WorkerEnvAllowlistTests(_EnvScrubBase):
                          "both the first launch and the fallthrough re-run must scrub")
 
 
+class GitGlobalConfigFenceTests(unittest.TestCase):
+    """FF1c item 1 (D-106): the numbered config channels *cancel* two settings,
+    they do not stop git **reading** a global config file. Inheriting HOME and
+    XDG_CONFIG_HOME therefore handed the worker the operator's own
+    url.insteadOf / core.sshCommand / core.hooksPath — every one of which is a
+    way to run a program of the operator's, or repoint a remote at the parent,
+    and none of which the two-entry guard can reach. Checked with a real git,
+    against a fake global config, in both homes git knows about."""
+
+    EVIL = ("[core]\n"
+            "\tsshCommand = /evil/ssh -i /evil/id_ed25519\n"
+            "\thooksPath = /evil/hooks\n"
+            "[url \"git@parent:\"]\n"
+            "\tinsteadOf = https://parent/\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        io.open(os.path.join(self.home, ".gitconfig"), "w",
+                encoding="utf-8").write(self.EVIL)
+        xdg_git = os.path.join(self.home, ".config", "git")
+        os.makedirs(xdg_git)
+        io.open(os.path.join(xdg_git, "config"), "w",
+                encoding="utf-8").write(self.EVIL)
+        self.base = {"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": self.home,
+                     "USER": "tester", "XDG_CONFIG_HOME": os.path.join(self.home, ".config")}
+
+    def git(self, env, *args):
+        return subprocess.run(["git", "config", *args], env=env,
+                              capture_output=True, text=True)
+
+    def test_the_fake_global_config_is_really_visible_to_a_plain_git(self):
+        # Guards the fixture: if this does not see the evil value, the test
+        # below passes for the wrong reason.
+        plain = {"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": self.home}
+        r = self.git(plain, "--get", "core.sshCommand")
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("/evil/ssh", r.stdout)
+
+    def test_worker_env_hides_the_GLOBAL_gitconfig(self):
+        env = self.agent.worker_env({"cwd": self.home, "env": {}}, None, base=self.base)
+        for key in ("core.sshCommand", "core.hooksPath", "url.git@parent:.insteadOf"):
+            r = self.git(env, "--get", key)
+            self.assertNotEqual(0, r.returncode,
+                                "git read the operator's global config: %s -> %r"
+                                % (key, r.stdout))
+            self.assertNotIn("evil", r.stdout)
+        listed = self.git(env, "--list")
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        self.assertNotIn("evil", listed.stdout,
+                         "a value from the operator's global config reached the worker")
+
+    def test_the_plan_gives_the_worker_a_private_config_home(self):
+        # git is only half of it: gh, npm and the clients read $XDG_CONFIG_HOME
+        # too, so the inherited value must be replaced by the plan, not merely
+        # denied to git.
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0, env_over={
+            "XDG_CONFIG_HOME": os.path.join(self.home, ".config")})
+        self.assertEqual(0, rc, out + err)
+        env = calls["envs"][0]
+        config_home = env.get("XDG_CONFIG_HOME")
+        self.assertTrue(config_home, "the worker got no config home: %s" % sorted(env))
+        self.assertNotIn(os.path.join(self.home, ".config"), env.values())
+        self.assertTrue(os.path.isabs(config_home), config_home)
+        self.assertNotEqual(self.home, os.path.dirname(config_home))
 class SpawnerChildEnvTests(_EnvScrubBase):
     """FF1 (D-106) through the real cmd_run: the env handed to the client at the
     first launch and at the provider-stop re-run is the scrubbed one."""
@@ -10305,6 +10403,51 @@ class SpawnerChildEnvTests(_EnvScrubBase):
         envs, calls = self.run_with_secrets(stops=0)
         self.assertEqual("test-only-key", envs[0]["AUTOOS_OMNIROUTE_KEY"])
         self.assertEqual(1, len(calls["cwds"]))
+
+    def test_extra_is_filtered_by_the_same_deny_and_passlist(self):
+        # FF1c item 2: the CLI-child env scrubbed `base` and then did a bare
+        # `env.update(extra)`, so the one call site that passes an extra entry
+        # was the whole policy — a future `extra={"GH_TOKEN": ...}` or a
+        # repointed PATH would have gone through with no check at all.
+        self.agent = load_agent()
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester"}
+        for name, value in (("GH_TOKEN", "gh-oauth"), ("FOO_API_KEY", "k"),
+                            ("PATH", "/evil/bin"), ("LD_PRELOAD", "/evil.so"),
+                            ("GIT_SSH_COMMAND", "ssh -i /evil/key"),
+                            ("SOMETHING_ELSE", "x")):
+            out = io.StringIO()
+            with contextlib.redirect_stderr(out):
+                env = self.agent.spawner_child_env(base=base, extra={name: value})
+            self.assertNotEqual(value, env.get(name),
+                                "%s reached a CLI child through extra" % name)
+            self.assertIn(name, out.getvalue(),
+                          "%s was refused silently: an unlisted extra is drift "
+                          "in our own code and must be said out loud" % name)
+        self.assertEqual("/usr/bin", env["PATH"])
+
+    def test_the_extra_the_cli_actually_needs_still_arrives(self):
+        # The detached runner passes the task dir; refusing it would silently
+        # move the worker's records somewhere else.
+        self.agent = load_agent()
+        env = self.agent.spawner_child_env(
+            base={"PATH": "/usr/bin", "HOME": "/home/tester"},
+            extra={"AUTOOS_TASK_DIR": "/tmp/task", "AUTOOS_AGENT_RUN_ID": "run-1"})
+        self.assertEqual("/tmp/task", env["AUTOOS_TASK_DIR"])
+        self.assertEqual("run-1", env["AUTOOS_AGENT_RUN_ID"])
+
+    def test_the_filter_lives_in_the_helper_not_in_caller_discipline(self):
+        # The reviewer's finding was exactly this: "currently only safe by
+        # caller discipline". The shape of the helper is what makes it safe.
+        src = io.open(AGENT, encoding="utf-8").read()
+        fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)
+                  and n.name == "spawner_child_env")
+        calls = [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        self.assertFalse([c for c in calls if c.startswith("env.update")],
+                         "spawner_child_env merges extra with a bare dict update")
+        self.assertTrue([c for c in calls if "_worker_env_denied" in c],
+                        "spawner_child_env never consults the deny list for extra")
+        self.assertTrue([c for c in calls if "_child_env_passed" in c],
+                        "spawner_child_env never consults the passlist for extra")
 
 
 class SandboxPushFenceTests(unittest.TestCase):
@@ -10419,7 +10562,7 @@ class PlanEnvPasslistTests(_EnvScrubBase):
         self.assertEqual(set(), names - passed,
                          "plan env names not on the passlist: %s" % sorted(names - passed))
         for name in ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
-                     clients.GEMINI_CUSTOM_HEADERS_ENV):
+                     "XDG_CONFIG_HOME", clients.GEMINI_CUSTOM_HEADERS_ENV):
             self.assertIn(name, names, name)
             self.assertIn(name, passed, name)
 
@@ -10432,10 +10575,15 @@ class PlanEnvPasslistTests(_EnvScrubBase):
                   "MYPROVIDER_CREDENTIALS", "GIT_CONFIG_KEY_9"]
         for name in denied:
             from_base, _ = self.scrub({}, {name: "/evil/" + name})
-            self.assertNotIn(name, from_base, "%s inherited from the caller" % name)
+            self.assertNotEqual("/evil/" + name, from_base.get(name),
+                                "%s inherited from the caller" % name)
             from_plan, err = self.scrub({name: "/evil/" + name})
-            self.assertNotIn(name, from_plan, "%s came from the plan" % name)
+            self.assertNotEqual("/evil/" + name, from_plan.get(name),
+                                "%s came from the plan" % name)
             self.assertIn(name, err, "%s was refused silently" % name)
+        # GIT_CONFIG_GLOBAL is on the deny list *and* on the guards: nobody but
+        # the spawner may name it, and the value it gets must be the dead path.
+        self.assertEqual(os.devnull, self.scrub({})[0]["GIT_CONFIG_GLOBAL"])
 
     def test_the_passlisted_plan_entries_still_apply(self):
         env, err = self.scrub({"OPENCODE_CONFIG_CONTENT": "{}",
@@ -10486,6 +10634,43 @@ class PlanEnvPasslistTests(_EnvScrubBase):
                              "%s carries the operator's private runtime dir" % name)
 
 
+class SandboxGitIdentityTests(unittest.TestCase):
+    """FF1c, opened while closing item 1: forcing `GIT_CONFIG_GLOBAL` at a dead
+    path hides the operator's `user.name` too, and every brief in this lane ends
+    with the *worker* running `git commit`. Without an identity of its own the
+    clone cannot commit at all (“Author identity unknown”), which is a worse
+    failure than the leak it closed: the run exits with uncommitted work. The
+    sandbox therefore carries a local identity — the same author the spawner's
+    own end-of-run commit uses — set where the clone stands up, not inherited."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_a_worker_commits_in_its_sandbox_under_the_worker_env(self):
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        io.open(os.path.join(home, ".gitconfig"), "w", encoding="utf-8").write(
+            "[user]\n\tname = Operator Ostentatious\n"
+            "\temail = operator@example.invalid\n")
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
+        self.assertEqual(0, rc, out + err)
+        sb = calls["cwds"][0]
+        env = dict(calls["envs"][0], HOME=home, USERPROFILE=home)
+        committed = subprocess.run(
+            ["git", "-C", sb, "commit", "--allow-empty", "-q", "-m", "worker work"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(0, committed.returncode,
+                         "a worker cannot commit in its own sandbox: %s%s"
+                         % (committed.stdout, committed.stderr))
+        author = subprocess.run(["git", "-C", sb, "log", "-1", "--format=%an <%ae>"],
+                                capture_output=True, text=True, env=env).stdout.strip()
+        self.assertEqual("autoos-worker <%s>" % self.agent.WORKER_EMAIL, author,
+                         "the commit was authored by the operator's global config")
+
+
 class ChildRuntimeDirTests(unittest.TestCase):
     """FF1b item 4: XDG_RUNTIME_DIR is the operator's session — bus, sockets,
     the agent's own dir. A worker gets an empty directory of its own, mode 0700."""
@@ -10509,11 +10694,79 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertIsNone(self.agent.provision_runtime_dir(None))
         self.assertIsNone(self.agent.provision_runtime_dir(""))
 
+    def test_provisioning_refuses_a_pre_existing_symlink(self):
+        # FF1c item 3: on a shared host the state tree is writable by more than
+        # one account, and makedirs(exist_ok=True) walks straight through a leaf
+        # somebody else pre-created as a symlink — the worker's sockets, tokens
+        # and client state would then land wherever that link points, and the
+        # 0700 chmod would punch a hole in a directory it never owned.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = os.path.join(tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        before = stat.S_IMODE(os.stat(elsewhere).st_mode)
+        target = os.path.join(tmp, "run-1")
+        os.symlink(elsewhere, target)
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.islink(target), "the link was replaced, not refused")
+        self.assertEqual([], os.listdir(elsewhere))
+        self.assertEqual(before, stat.S_IMODE(os.stat(elsewhere).st_mode),
+                         "the chmod landed through the symlink on someone "
+                         "else's directory")
+
+    def test_provisioning_refuses_a_leaf_that_is_not_a_directory(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "run-1")
+        io.open(target, "w", encoding="utf-8").write("x")
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.isfile(target))
+
+    def test_provisioning_refuses_a_directory_it_does_not_own(self):
+        # The owner check is the other half of the symlink story: an existing
+        # dir of another uid is never chmod 0700'd (that would be a denial of
+        # service on its real owner) and never written into.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "run-1")
+        os.mkdir(target)
+        with mock.patch.object(os, "getuid", lambda: 999999):
+            self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.isdir(target))
+
+    def test_provisioning_does_not_widen_the_parent(self):
+        # makedirs(mode) applies the mode to the leaf only, so a 0755 parent
+        # beside a 0700 leaf is the shape that let a sibling read in.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "runtimes", "run-1")
+        self.agent.provision_runtime_dir(target)
+        parent = os.path.dirname(target)
+        self.assertTrue(stat.S_IMODE(os.stat(parent).st_mode) & 0o077 == 0,
+                        "the runtimes parent is world-readable: %o"
+                        % stat.S_IMODE(os.stat(parent).st_mode))
+
+    def test_provisioning_creates_the_leaf_itself_not_through_a_parent_link(self):
+        # os.mkdir is the atomic half: no O_CREAT-after-O_EXCL window on the
+        # leaf, and an existing competitor's dir is caught, not merged into.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "runtimes", "run-1")
+        # pre-create the leaf as a plain dir owned by us: accepted, tightened.
+        os.makedirs(target)
+        os.chmod(target, 0o755)
+        self.assertEqual(target, self.agent.provision_runtime_dir(target))
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(target).st_mode))
+
     def test_an_isolate_run_gets_a_private_runtime_dir(self):
         import stat
         self.agent = load_agent()
         rc, out, err, calls, names = _fallthrough_run(
-            self, ["r-a"], 0, env_over={"XDG_RUNTIME_DIR": "/run/user/4242"})
+            self, ["r-a"], 0, env_over={"XDG_RUNTIME_DIR": "/run/user/4242",
+                                        "XDG_CONFIG_HOME": "/home/dev/.config"})
         self.assertEqual(0, rc, out + err)
         env = calls["envs"][0]
         runtime = env.get("XDG_RUNTIME_DIR")
@@ -10522,6 +10775,13 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(runtime), runtime)
         self.assertEqual(0o700, stat.S_IMODE(os.stat(runtime).st_mode))
         self.assertEqual([], os.listdir(runtime))
+        # FF1c item 1: the config home is provisioned the same way — named in
+        # the plan, created at the launch site, private, and empty.
+        config = env.get("XDG_CONFIG_HOME")
+        self.assertTrue(config, "the worker got no config home: %s" % sorted(env))
+        self.assertNotEqual("/home/dev/.config", config)
+        self.assertTrue(os.path.isdir(config), config)
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(config).st_mode))
 
 
 class PushFenceHonestyTests(unittest.TestCase):
@@ -10589,54 +10849,160 @@ class PushFenceHonestyTests(unittest.TestCase):
 
 
 class SubprocessEnvAuditTests(unittest.TestCase):
-    """FF1b item 6: the scrub is only as good as the sites that use it. Every
-    child that runs our own code (a worker, or a CLI child that goes on to spawn
-    one) must be handed a chosen env, not the caller's."""
+    """FF1b item 6, extended by FF1c item 4: the scrub is only as good as the
+    sites that use it. Every child that runs our own code (a worker, or a CLI
+    child that goes on to spawn one) must be handed a chosen env, not the
+    caller's.
+
+    Round b's walker looked at five `subprocess.*` names and trusted the first
+    element of a literal argv. Three shapes walked straight past it: `os.system`
+    / `os.popen` / `os.exec*`, which cannot take an env at all; `shell=True`,
+    which hands the whole env to a shell and parses the argv as operator text;
+    and a variable argv, which was only ever checked for the presence of an
+    `env=` keyword, never for what it actually runs."""
 
     FILES = [AGENT, TOOLS / "autoos_agent_mcp.py"]
     # A call whose argv starts with one of these is the spawner's own plumbing:
     # it runs as the spawner, in the operator's context, on purpose. Everything
-    # else is a child that could carry a credential onward.
+    # else is a child that could carry a credential onward. Only a *literal*
+    # argv earns the exemption — a variable called `git` is not git.
     PLUMBING = ("git", "taskkill")
     SPAWNERS = ("run", "Popen", "call", "check_output", "check_call")
+    # os.* has no env parameter: the child inherits whatever the process holds.
+    OS_SPAWNERS = ("system", "popen")
+    OS_SPAWNER_PREFIXES = ("exec", "spawn")
+    # A site that genuinely must run outside the audit names itself in a
+    # comment carrying this marker, on the call line or the one above it.
+    ALLOW_MARK = "subprocess-audit:"
 
     @classmethod
     def setUpClass(cls):
         cls.agent = load_agent()
 
-    def sites(self, path):
-        import ast
-        tree = ast.parse(io.open(path, encoding="utf-8").read())
+    def _allowed(self, lines, lineno):
+        for i in (lineno, lineno - 1):
+            if 0 < i <= len(lines) and self.ALLOW_MARK in lines[i - 1]:
+                return True
+        return False
+
+    def _site(self, node, lines):
+        """Classify one call: what it runs, whether the env is chosen, whether
+        it goes through a shell, and whether the argv is readable at all."""
+        fn = node.func
+        rec = {"lineno": node.lineno, "first": None, "dynamic": False,
+               "os_call": False, "shell": False,
+               "has_env": any(k.arg == "env" for k in node.keywords),
+               "allowed": self._allowed(lines, node.lineno)}
+        for k in node.keywords:
+            if k.arg == "shell" and isinstance(k.value, ast.Constant):
+                rec["shell"] = bool(k.value.value)
+        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) \
+                and fn.value.id == "os":
+            if (fn.attr in self.OS_SPAWNERS or
+                    fn.attr.startswith(self.OS_SPAWNER_PREFIXES)):
+                rec["os_call"] = True
+                rec["first"] = "os." + fn.attr
+                return rec
+            return None
+        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
+                and fn.value.id == "subprocess" and fn.attr in self.SPAWNERS):
+            return None
+        argv = node.args[0] if node.args else None
+        if isinstance(argv, ast.List) and argv.elts and \
+                isinstance(argv.elts[0], ast.Constant):
+            rec["first"] = argv.elts[0].value
+        elif isinstance(argv, ast.Call) and isinstance(argv.func, ast.Attribute) \
+                and argv.func.attr == "join":
+            rec["first"] = "path"
+        else:
+            # a variable, a subscript, a concatenation — the audit cannot read
+            # what it runs, so the plumbing exemption never applies to it.
+            rec["dynamic"] = True
+            rec["first"] = "<dynamic>"
+        return rec
+
+    def scan(self, text):
+        lines = text.splitlines()
         out = []
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(text)):
             if not isinstance(node, ast.Call):
                 continue
-            fn = node.func
-            if not (isinstance(fn, ast.Attribute) and
-                    isinstance(fn.value, ast.Name) and
-                    fn.value.id == "subprocess" and fn.attr in self.SPAWNERS):
-                continue
-            argv = node.args[0] if node.args else None
-            first = None
-            if isinstance(argv, ast.List) and argv.elts and isinstance(argv.elts[0], ast.Constant):
-                first = argv.elts[0].value
-            elif isinstance(argv, ast.Call):  # os.path.join(...)
-                first = "path"
-            elif isinstance(argv, ast.Name):
-                first = argv.id
-            has_env = any(k.arg == "env" for k in node.keywords)
-            out.append((node.lineno, first, has_env))
+            rec = self._site(node, lines)
+            if rec is not None:
+                out.append(rec)
         return out
+
+    def sites(self, path):
+        return self.scan(io.open(path, encoding="utf-8").read())
+
+    def sites_text(self, text):
+        return self.scan(text)
+
+    def test_the_walker_sees_every_shape_it_claims_to(self):
+        # A detector that silently detects nothing is worse than none: round b's
+        # walker passed because the files were clean, and it was not reading
+        # three of the shapes that matter. Feed it the shapes explicitly.
+        snippet = "\n".join([
+            "import os, subprocess",
+            'subprocess.run(["git", "status"], check=True)',
+            'subprocess.run(cmd, env=env)',
+            'subprocess.run("rm -rf x", shell=True)',
+            'subprocess.Popen(["evil"], shell=True, env=env)',
+            'os.system("echo hi")',
+            'os.popen("id")',
+            'os.execvp("evil", ["evil"])',
+            'os.spawnl(os.P_NOWAIT, "evil")',
+            'os.path.exists("x")',
+            'subprocess.run(os.path.join(d, "x"), env=env)',
+            'open("f")',
+        ])
+        recs = self.sites_text(snippet)
+        got = {r["first"] for r in recs}
+        self.assertIn("git", got, "literal argv no longer read")
+        self.assertTrue(any(r["dynamic"] for r in recs), "variable argv not flagged")
+        self.assertTrue(any(r["shell"] for r in recs), "shell=True not flagged")
+        for name in ("os.system", "os.popen", "os.execvp", "os.spawnl"):
+            self.assertIn(name, got, "%s not audited" % name)
+            self.assertTrue([r for r in recs if r["first"] == name and r["os_call"]])
+        self.assertNotIn("os.path.exists", got,
+                         "an os.path call counted as a child spawn")
+        joined = [r for r in recs if r["first"] == "path"]
+        self.assertEqual(1, len(joined), "os.path.join argv not read as a path")
+        self.assertFalse(joined[0]["os_call"] or joined[0]["dynamic"])
+        self.assertTrue(joined[0]["has_env"])
+        # the plumbing exemption is literal-only
+        literal = [r for r in recs if r["first"] == "git"]
+        self.assertFalse(literal[0]["dynamic"] or literal[0]["shell"])
 
     def test_every_non_plumbing_child_call_passes_an_env(self):
         missing = []
         for path in self.FILES:
-            for lineno, first, has_env in self.sites(path):
-                if first in self.PLUMBING:
+            for rec in self.sites(path):
+                if rec["allowed"]:
                     continue
-                if not has_env:
-                    missing.append("%s:%d argv[0]=%r" % (os.path.basename(path), lineno, first))
+                if not rec["dynamic"] and not rec["shell"] and \
+                        rec["first"] in self.PLUMBING:
+                    continue
+                if rec["os_call"] or not rec["has_env"]:
+                    missing.append("%s:%d argv[0]=%r os_call=%s env=%s"
+                                   % (os.path.basename(path), rec["lineno"],
+                                      rec["first"], rec["os_call"], rec["has_env"]))
         self.assertEqual([], missing, "these child sites inherit the caller's whole env")
+
+    def test_no_site_spawns_through_the_shell_or_the_os_helpers(self):
+        # Both classes are absent today; the assertion is what keeps them absent
+        # when someone adds a one-liner that "obviously" doesn't need an env.
+        offenders = []
+        for path in self.FILES:
+            for rec in self.sites(path):
+                if rec["allowed"]:
+                    continue
+                if rec["os_call"] or rec["shell"]:
+                    offenders.append("%s:%d %s" % (os.path.basename(path),
+                                                   rec["lineno"], rec["first"]))
+        self.assertEqual([], offenders,
+                          "os.system/popen/exec and shell=True both hand the "
+                          "caller's env onward")
 
     def test_no_site_copies_the_environment_wholesale(self):
         for path in self.FILES:

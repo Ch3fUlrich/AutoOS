@@ -569,7 +569,9 @@ if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never 
     missing=""
     leaked=""
     for want in OPENCODE_CONFIG_CONTENT XDG_DATA_HOME XDG_RUNTIME_DIR \
-                GIT_TERMINAL_PROMPT GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS; do
+                XDG_CONFIG_HOME \
+                GIT_TERMINAL_PROMPT GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+                GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM; do
         if ! grep -q "env: [^\n]*${want}" <<<"$out"; then
             missing="${missing}${want} "
         fi
@@ -579,6 +581,11 @@ if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never 
             leaked="${leaked}${banned} "
         fi
     done
+    # FF1c item 1: the plan prints names only, so the values are checked in
+    # tests/test_autoos_spawner.py — GitGlobalConfigFenceTests writes a fake
+    # ~/.gitconfig and a fake $XDG_CONFIG_HOME/git/config and runs a real
+    # `git config --get core.sshCommand` under the worker env, and
+    # ChildRuntimeDirTests asserts the private dirs are created 0700.
     assert_eq "$missing" ""
     assert_eq "$leaked" ""
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then

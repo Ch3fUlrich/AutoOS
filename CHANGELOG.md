@@ -5,6 +5,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — git still read the operator's global config, and `extra` skipped the scrub (FF1c, D-106)
+
+Muse#high over 6bdeca5..ce65d22 confirmed all six FF1b fixes and opened four more.
+Tests first in `tests/test_autoos_spawner.py` (`GitGlobalConfigFenceTests`,
+`ChildRuntimeDirTests`, `SpawnerChildEnvTests`, `SubprocessEnvAuditTests`,
+`WorkerEnvAllowlistTests`) and `tests/linux/33-documentation.sh` — 17 red before
+the change, plus one more the first fix opened (the identity bullet below), 815
+passing in the three spawner/harness/suite-wiring files after.
+
+- **`XDG_CONFIG_HOME` and `HOME` reintroduced git's global config** (MED): the
+  two-entry guard *cancels* `credential.helper` and `core.askPass`; it does not
+  stop git **reading** `$HOME/.gitconfig` or `$XDG_CONFIG_HOME/git/config`, both
+  of which were inherited. A worker could therefore run under the operator's
+  `url.insteadOf` (a remote repointed at the parent), `core.sshCommand` and
+  `core.hooksPath` (a program of the operator's), none of them reachable by the
+  guard. `worker_env` now forces `GIT_CONFIG_GLOBAL=<os.devnull>` and
+  `GIT_CONFIG_NOSYSTEM=1` in the git guards — the only variables that hide the
+  file itself and `/etc/gitconfig`, which this repo's own installers write — and
+  drops an inherited `XDG_CONFIG_HOME` the same way FF1b dropped
+  `XDG_RUNTIME_DIR`; the plan points it at a private, per-run directory in the
+  git-ignored state tree. `GitGlobalConfigFenceTests` writes a fake evil
+  `~/.gitconfig` *and* a fake `$XDG_CONFIG_HOME/git/config`, proves a plain git
+  sees them, and asserts `git config --get core.sshCommand` under the worker env
+  does not.
+- **`spawner_child_env(extra)` merged after the scrub** (LOW-MED): the CLI-child
+  env filtered `base` and then did a bare `env.update(extra)`, so the policy for
+  the one call site that passes an entry was caller discipline alone. `extra`
+  now clears the same deny check and a passlist of its own
+  (`_child_env_passed`: the plan passlist plus the spawner's `AUTOOS_*` state
+  names — `PATH` is inheritable but not settable by a caller), and a refusal is
+  printed to stderr.
+- **`provision_runtime_dir()` walked through a symlink** (LOW):
+  `makedirs(exist_ok=True)` accepted a leaf somebody else had pre-created as a
+  symlink and `chmod 0700` was applied *through* it — on a shared host that is a
+  write into, and a hole punched in, a directory this run does not own; parents
+  were left 0755. It now `lstat`s first and refuses a symlink, a non-directory
+  and a directory of another uid, saying so on stderr, creates the parent 0700
+  and the leaf with `os.mkdir` (atomic; a racer is caught and re-checked under
+  the same rules, once, rather than merged into).
+- **The child-env audit missed three shapes** (LOW): the walker read five
+  `subprocess.*` names and only the first element of a *literal* argv, so
+  `os.system` / `os.popen` / `os.exec*` / `os.spawn*` (which take no `env` at
+  all), `shell=True`, and a variable argv walked straight past it. The walker
+  now classifies each site (`os_call`, `shell`, `dynamic`) and the plumbing
+  exemption applies to literal argv only; a site that genuinely must run outside
+  the audit marks itself with a `# subprocess-audit:` comment. Both file checks
+  pass today — the exemption is exercised, not assumed:
+  `test_the_walker_sees_every_shape_it_claims_to` feeds the walker the shapes it
+  claims to catch and fails if it stops seeing them.
+- **A sandbox had no git identity of its own** (MED, opened by the first fix
+  above): hiding the global config also hides the operator's `user.name`, and
+  every brief in this lane ends with the *worker* running `git commit` — it died
+  on "Author identity unknown" and left the run's work uncommitted, a worse
+  failure than the leak that was closed. The clone now sets `user.name` and
+  `user.email` `--local` where it stands up, to the same author the spawner's
+  own end-of-run commit signs with, and `SandboxGitIdentityTests` commits inside
+  a real sandbox under the real worker env with a fake operator identity in
+  `HOME` — so a worker commit that quietly inherited an operator again fails the
+  suite.
+
+
 ### Fixed — the FF1 env scrub had a second door, and its push fence was an accident guard (FF1b, D-106)
 
 Muse#high over 362b8af..6bdeca5 read FF1's own diff and found four things it
@@ -69,6 +130,7 @@ did not close. Tests first, in `tests/test_autoos_spawner.py`
   literal `git`/`taskkill` (the spawner's own plumbing, running as the operator on
   purpose).
 - Out of scope, recorded under `open:`: per-worker `HOME` isolation.
+
 
 ### Fixed — a spawned worker's environment is chosen, not inherited (FF1, D-106)
 
