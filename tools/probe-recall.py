@@ -23,7 +23,7 @@ already fails, nothing is written for tokens (the registry default stays in
 force) and only a detail is recorded. Every non-200 status (or a transport
 error) means no verdict: whatever the overlay already said is kept.
 
-The verdict lands in the git-ignored overlay logs/routing/measured.json as
+The verdict lands in the machine-wide overlay (tools/autoos_overlay.py) as
 overlay["models"][<model_id>]["context_usable"] (read-modify-write: every
 other key is kept), the shape tools/autoos_resolver.py's usable_context()
 already reads. Every request logs leg, size, prompt_tokens and
@@ -40,7 +40,7 @@ Usage:
     python3 tools/probe-recall.py --route t2-worker
     python3 tools/probe-recall.py --sizes 32000,128000
     python3 tools/probe-recall.py --registry catalog/ai-registry.json \\
-        --overlay logs/routing/measured.json --gateway http://127.0.0.1:20128/v1/chat/completions
+        --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 
 Exit codes: 0 the probe ran (a "no usable context" verdict is data, not
 failure); 2 bad arguments or an unreadable registry; 3 no OmniRoute client
@@ -52,6 +52,7 @@ Never prints or logs the gateway key.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -65,6 +66,7 @@ from registry import resolve_leg  # noqa: E402 - tools/ is on sys.path above
 from probe_common import (  # noqa: E402 - tools/ is on sys.path above
     DEFAULT_GATEWAY,
     DEFAULT_OVERLAY,
+    overlay_target,
     DEFAULT_REGISTRY,
     RETRY_DELAYS_S,  # re-exported: tests read it on this module
     gateway_up,
@@ -466,7 +468,8 @@ def main(argv=None) -> int:
                     help="print the plan (legs, skip reasons, sizes, estimated "
                          "prompt tokens); make no request")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY)
-    ap.add_argument("--overlay", default=DEFAULT_OVERLAY)
+    ap.add_argument("--overlay", default=None,
+                    help="overlay file (default: the machine-wide one, %s)" % DEFAULT_OVERLAY)
     ap.add_argument("--gateway", default=DEFAULT_GATEWAY)
     args = ap.parse_args(argv)
 
@@ -512,7 +515,9 @@ def main(argv=None) -> int:
         return 3
 
     post = make_post(args.gateway, key)
-    overlay = load_overlay(args.overlay)
+    overlay_path, legacy = overlay_target(args.overlay)
+    overlay = load_overlay(overlay_path, legacy)
+    base = copy.deepcopy(overlay)  # save_overlay merges only this run's changes
     total_prompt = 0
     total_completion = 0
     for leg, skip in todo:
@@ -545,7 +550,7 @@ def main(argv=None) -> int:
             else:
                 print("%s\tverdict\t%d\t%s" % (leg, verdict["tokens"],
                                                _format_detail(verdict["detail"])))
-    save_overlay(args.overlay, overlay)
+    save_overlay(overlay_path, overlay, base, legacy)
     print_total(total_prompt, total_completion)
     return 0
 

@@ -41,11 +41,19 @@ no framework. Secrets live in git-ignored `configuration/api-keys.yml` +
   A crashing python heredoc used to pass on empty stdout — all 16
   empty-expected checks now capture stderr plus a meta-guard test.
 
-## 2. Merge to main (operator — agents cannot push)
+## 2. Merge to main (operator — nothing hands an agent a push)
 
-`opencode.jsonc` denies `git push *` to agent sessions. That rule is
-deliberate (it keeps unreviewed agent work off the public repo) — do not
-weaken it to push this work. The branch is already `main`; "merging to
+`opencode.jsonc` denies `git push *` to agent sessions, and an `--isolate`
+clone disables every remote's push URL and carries a `pre-push` hook that exits
+1. Say what those are: **accident guards**. A deny glob is matched against a
+command string, and `--no-verify`, `core.hooksPath` and `git remote set-url`
+each walk past the hook and the push URL — `PushFenceHonestyTests` in
+`tests/test_autoos_spawner.py` asserts the bypass, so nobody reads it as a
+boundary. What keeps the repo clean is that the agent has no credential in its
+environment to push with (`tools/autoos-agent.py` `worker_env`, D-106) and the
+clone it works in is disposable. The rule is still deliberate (it keeps
+unreviewed agent work off the public repo) — do not weaken it to push this
+work. The branch is already `main`; "merging to
 main" means publishing local `main` to `origin/main`:
 
 ```powershell

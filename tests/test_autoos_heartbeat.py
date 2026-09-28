@@ -1047,7 +1047,7 @@ class HeartbeatCliTests(unittest.TestCase):
         self.assertIn("pause: none", proc.stdout)
         self.assertNotIn("unpushed:", proc.stdout)
         self.assertNotIn("dirty:", proc.stdout)
-        self.assertIn("context: 1000/600000 0%", proc.stdout)
+        self.assertIn("context: 1000/500000 0%", proc.stdout)
 
     def test_json_has_the_same_facts(self):
         proc = self.run_heartbeat("--json")
@@ -1058,6 +1058,9 @@ class HeartbeatCliTests(unittest.TestCase):
         self.assertEqual(data["context"]["tokens"], 1000)
         self.assertFalse(data["over_cap"])
         self.assertEqual(data["exit_code"], 0)
+        # OVERLAYHOME: the CLI's --json carries the overlay facts too, not only
+        # heartbeat_state() (Sonnet final: the key whitelist dropped it).
+        self.assertEqual(set(data["overlay"]), {"path", "present", "age_hours"})
 
     def test_unpushed_and_dirty_are_reported_and_exit_1(self):
         git("commit", "-q", "--allow-empty", "-m", "second", cwd=self.work)

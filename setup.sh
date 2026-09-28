@@ -236,7 +236,11 @@ if (( LIST_ONLY )); then
         if (( CAT_INSTALLED[i] )); then
             inst_mark="$(_c ok)✓$(_c reset) "
         fi
-        printf '  %s%-18s %-8s %s\n' "$inst_mark" "${CAT_ID[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}"
+        # A tombstone is a known id that installs nothing; the row says so
+        # rather than letting someone tick it and watch nothing happen.
+        retired=""
+        catalog_is_tombstone "$i" && retired=" $(_c muted)(retired)$(_c reset)"
+        printf '  %s%-18s %-8s %s%s\n' "$inst_mark" "${CAT_ID[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}" "$retired"
         [[ -n "${CAT_PROFILES[i]}" ]] && printf '    %-18s profiles: %s\n' "" "${CAT_PROFILES[i]}"
     done
     exit 0
@@ -554,15 +558,9 @@ elif [[ -n "$ONLY" ]]; then
 elif (( ASSUME_YES )); then
     SELECTED="$(catalog_profile_defaults "$PROFILE")"
 else
-    defaults=" $(catalog_profile_defaults "$PROFILE") "
-    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=(); MENU_SEL=(); MENU_INSTALLED=(); MENU_DISABLED=()
-    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
-        MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
-        MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
-        if [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then MENU_SEL+=(1); else MENU_SEL+=(0); fi
-        MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
-        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then MENU_DISABLED+=(1); MENU_DESC[i]+=" (vendor setup required)"; else MENU_DISABLED+=(0); fi
-    done
+    menu_pre="$(catalog_profile_defaults "$PROFILE")"
+    # shellcheck disable=SC2086  # the pre-tick list is a deliberate word list
+    catalog_menu_rows $menu_pre
     if ! ui_menu "Choose what to install" "Dependencies are added automatically."; then
         ui_warn "Cancelled — nothing was changed."
         exit 0
@@ -573,6 +571,19 @@ fi
 if [[ -z "${SELECTED// /}" ]]; then
     ui_warn "Nothing selected — nothing to do."
     exit 0
+fi
+
+# Any of the paths above may still name a retired id — a state file written
+# before the retirement, --only, the browser's payload arriving as --only, a menu
+# whose rows the lock failed to keep out — and the ids that took its work over
+# cannot be in a selection made before they existed. Expand on the way to the
+# plan, unconditionally, so the plan, the run and the saved state all read the
+# same list and no path can plan a tombstone without its replacements.
+# shellcheck disable=SC2086  # SELECTED is a deliberate word list
+catalog_expand_replacements $SELECTED >/dev/null
+SELECTED="$EXPANDED_IDS"
+if (( ${#EXPANDED_LINES[@]} )); then
+    for _line in "${EXPANDED_LINES[@]}"; do ui_muted "$_line"; done
 fi
 
 # ─── 4. Plan ────────────────────────────────────────────────────────────────
@@ -586,7 +597,14 @@ for id in $PLAN_IDS; do
     i="$(catalog_index_of "$id")"
     tag=""
     if [[ " $PLAN_AUTO " == *" $id "* ]]; then tag="$(_c muted)(dependency)$(_c reset)"; fi
+    if catalog_is_tombstone "$i"; then tag="$tag $(_c muted)(retired)$(_c reset)"; fi
     printf '  %2d. %-22s %-8s %s %s\n' "$n" "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "$tag"
+    # Announced while there is still nothing on the disk to undo: a requirement
+    # that installs nothing can never be satisfied, so this row will fail.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_warn "${CAT_NAME[i]} $blocked_reason - it cannot be installed"
+    fi
     if (( CAT_INSTALLED[i] )); then
         if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}"; then
             ui_ok "✓ Already installed - checking for a newer version (--update)"
@@ -594,7 +612,12 @@ for id in $PLAN_IDS; do
             ui_ok "✓ Already installed - package will be skipped"
         fi
     fi
-    if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_warn "Action required: ${CAT_HOMEPAGE[i]}"; fi
+    # A retired entry keeps the provider it had, and its vendor link is stale
+    # with its work: telling the user to go and install it by hand asks for a
+    # step nobody needs, for a row that reports "skipped: retired" two stages on.
+    if [[ "${CAT_PROVIDER[i]}" == manual ]] && ! catalog_is_tombstone "$i"; then
+        ui_warn "Action required: ${CAT_HOMEPAGE[i]}"
+    fi
     if [[ -n "${CAT_NOTES[i]}" ]]; then ui_muted "      ${CAT_NOTES[i]}"; fi
 done
 auto_count=0
@@ -607,6 +630,12 @@ asked=" "
 config_updated=0
 for id in $PLAN_IDS; do
     i="$(catalog_index_of "$id")"
+    # Nothing installs, so nothing needs to be known first: a retired entry that
+    # still carries its old prompt asks a question whose answer would be thrown
+    # away. Same for a component resolve refused - it will not be installed
+    # either, and its prompt can never be answered in time to matter.
+    if catalog_is_tombstone "$i"; then continue; fi
+    if [[ -n "$(catalog_resolve_blocked "$id")" ]]; then continue; fi
     raw_prompts="${CAT_PROMPT[i]}"
     [[ -z "$raw_prompts" ]] && continue
     for key in ${raw_prompts//,/ }; do
@@ -667,6 +696,29 @@ for id in $PLAN_IDS; do
     i="$(catalog_index_of "$id")"
     ui_step "[$step/$n] ${CAT_NAME[i]}"
     progress_start "$id" "${CAT_NAME[i]}" "$((step-1))" "$n"
+    if catalog_is_tombstone "$i"; then
+        # A tombstone is kept in the catalog for exactly one reason: old state
+        # files and --only still name it. Selecting it is not an error and not a
+        # success — it is a no-op that says which id retired and what replaced it.
+        if [[ -n "${CAT_RETIRE_NOTE[i]:-}" ]]; then
+            ui_ok "${CAT_NAME[i]}: skipped: retired (${CAT_RETIRE_NOTE[i]})"
+        else
+            ui_ok "${CAT_NAME[i]}: skipped: retired"
+        fi
+        AUTOOS_RESULT_SKIPPED+=("$id")
+        progress_update skipped 1
+        continue
+    fi
+    # Resolve already announced this one and said why; the plan is not the
+    # report, so it is recorded as the failure it is rather than installed
+    # without the dependency it asked for.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_err "${CAT_NAME[i]}: $blocked_reason"
+        AUTOOS_RESULT_FAILED+=("$id")
+        progress_update failed 1
+        continue
+    fi
     install_rc=0
     install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}" || { install_rc=$?; INSTALL_STATE="failed"; }
     case "$INSTALL_STATE" in
@@ -735,6 +787,10 @@ if (( ${#landed[@]} )); then
     fi
     for id in "${landed[@]}"; do
         i="$(catalog_index_of "$id")"
+        # A retired row is not something the user can go and find; hunting for
+        # its launcher would answer "no launcher found yet" about a component
+        # that was never meant to launch anything.
+        if catalog_is_tombstone "$i"; then continue; fi
         if launch_hint "${CAT_NAME[i]}" "${CAT_ID[i]}" "${CAT_VERIFY[i]}"; then
             ui_kv "${CAT_NAME[i]}" "$LAUNCH_HOW"
             [[ -n "$LAUNCH_PATH" ]] && ui_muted "                         $LAUNCH_PATH"

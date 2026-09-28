@@ -26,14 +26,19 @@ import os
 from pathlib import Path
 
 # Spec 8.3, exactly: (lowercased substring, window, hand off at).
-# Opus 600k/1M, Fable 600k/1M (operator 2026-09-27, was 400k), Muse Spark 300k/1M, Gemini 200k/1M,
-# 200k-class default 150k.
+# Operator D-088 (2026-09-28): orchestration sessions (Opus, Fable, Sonnet; 1M window) hand off
+# at 500k; worker agents at min(40% of window, 400k): Muse Spark 400k, Gemini 400k, 200k-class 80k.
+# Rows key on model family as a proxy for role: only a long-running session reads its cap here
+# (`context`, `heartbeat`). Opus/Fable/Sonnet run such sessions only as orchestrators - as a
+# reviewer subagent or a gateway leg they never read this table - so their row is the orchestrator
+# rule; Spark, Gemini and 200k-class models run as worker agents, so theirs is the worker rule.
 DEFAULT_CAPS = [
-    ("opus", 1000000, 600000),
-    ("fable", 1000000, 600000),
-    ("spark", 1000000, 300000),
-    ("gemini", 1000000, 200000),
-    ("*", 200000, 150000),
+    ("opus", 1000000, 500000),
+    ("fable", 1000000, 500000),
+    ("spark", 1000000, 400000),
+    ("gemini", 1000000, 400000),
+    ("sonnet", 1000000, 500000),
+    ("*", 200000, 80000),
 ]
 
 # The three usage fields that together fill the context window.

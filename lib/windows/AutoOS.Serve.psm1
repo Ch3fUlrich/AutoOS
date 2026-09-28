@@ -221,6 +221,14 @@ function Get-AutoOSServeState {
             installed = $InstalledStatus[$c.Id] -eq 'installed'
             installedStatus = $(if ($InstalledStatus.ContainsKey($c.Id)) { $InstalledStatus[$c.Id] } else { 'unknown' })
             platforms = @($platforms[$c.Id])
+            # The page resolves dependencies, pre-ticks profiles and collects
+            # prompts in the browser, so it can only honour a retired id if the
+            # row says so - the same two facts setup.ps1's own menu reads. The
+            # browser's selection comes back to setup.ps1 as -Only, where the
+            # same replacement expansion runs before anything plans.
+            tombstone = [bool]$c.Tombstone
+            note = $c.RetireNote
+            replaced_by = @($c.ReplacedBy)
         }
     }
     [ordered]@{
@@ -920,7 +928,7 @@ function Set-AutoOSKeyValue {
             try {
                 $srcAcl = Get-Acl -LiteralPath $file
                 Set-Acl -LiteralPath $backup -AclObject $srcAcl -ErrorAction Stop
-            } catch { }
+            } catch { $null = $_ }  # best effort: the backup's bytes are what matters
         }
 
         $rand = [Guid]::NewGuid().ToString('N').Substring(0,8)
@@ -935,7 +943,7 @@ function Set-AutoOSKeyValue {
             try {
                 $srcAcl = Get-Acl -LiteralPath $file
                 Set-Acl -LiteralPath $tmp -AclObject $srcAcl -ErrorAction Stop
-            } catch { }
+            } catch { $null = $_ }  # best effort: a new file keeps the directory's default ACL
         }
         Move-Item -LiteralPath $tmp -Destination $file -Force
         $tmp = $null

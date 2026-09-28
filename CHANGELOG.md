@@ -471,6 +471,1115 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
   in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
   `relaunch-line` (R3+).
+### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
+
+Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the
+same shape as FF1c item 3 one step away from where that fix looked:
+
+- **The parent was walked through** (LOW): `provision_runtime_dir` judged the
+  leaf (symlink / not-a-dir / another uid) but only asked `os.path.isdir` about
+  its parent — which follows a symlink. A pre-existing
+  `…/state/runtimes -> somewhere else`, or one owned by another account on a
+  shared host, was created *and* chmod'd from underneath, exactly the leak the
+  leaf check exists to stop. The parent is now `lstat`'ed under the same three
+  rules, through one helper (`_provision_path_usable`) so leaf and parent cannot
+  drift apart. Tests: `ChildRuntimeDirTests.test_provisioning_refuses_a_parent_*`
+  (both red before the change).
+- **A `--free` fallthrough re-run lost its own directories** (LOW): the re-plan
+  mints a fresh run id and the private `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME` are
+  named after it, but only the *first* launch site provisioned them. The
+  survivor of a provider-stopped attempt therefore ran with an XDG dir nobody
+  created — which the client makes itself, outside the 0700 rule. A non-isolate
+  run has no clone to touch the disk, so nothing else masked it. The re-run
+  site provisions both. Test:
+  `ChildRuntimeDirTests.test_a_fallthrough_rerun_provisions_its_own_dirs`.
+
+### Fixed — git still read the operator's global config, and `extra` skipped the scrub (FF1c, D-106)
+
+Muse#high over 6bdeca5..ce65d22 confirmed all six FF1b fixes and opened four more.
+Tests first in `tests/test_autoos_spawner.py` (`GitGlobalConfigFenceTests`,
+`ChildRuntimeDirTests`, `SpawnerChildEnvTests`, `SubprocessEnvAuditTests`,
+`WorkerEnvAllowlistTests`) and `tests/linux/33-documentation.sh` — 17 red before
+the change, plus one more the first fix opened (the identity bullet below), 815
+passing in the three spawner/harness/suite-wiring files after.
+
+- **`XDG_CONFIG_HOME` and `HOME` reintroduced git's global config** (MED): the
+  two-entry guard *cancels* `credential.helper` and `core.askPass`; it does not
+  stop git **reading** `$HOME/.gitconfig` or `$XDG_CONFIG_HOME/git/config`, both
+  of which were inherited. A worker could therefore run under the operator's
+  `url.insteadOf` (a remote repointed at the parent), `core.sshCommand` and
+  `core.hooksPath` (a program of the operator's), none of them reachable by the
+  guard. `worker_env` now forces `GIT_CONFIG_GLOBAL=<os.devnull>` and
+  `GIT_CONFIG_NOSYSTEM=1` in the git guards — the only variables that hide the
+  file itself and `/etc/gitconfig`, which this repo's own installers write — and
+  drops an inherited `XDG_CONFIG_HOME` the same way FF1b dropped
+  `XDG_RUNTIME_DIR`; the plan points it at a private, per-run directory in the
+  git-ignored state tree. `GitGlobalConfigFenceTests` writes a fake evil
+  `~/.gitconfig` *and* a fake `$XDG_CONFIG_HOME/git/config`, proves a plain git
+  sees them, and asserts `git config --get core.sshCommand` under the worker env
+  does not.
+- **`spawner_child_env(extra)` merged after the scrub** (LOW-MED): the CLI-child
+  env filtered `base` and then did a bare `env.update(extra)`, so the policy for
+  the one call site that passes an entry was caller discipline alone. `extra`
+  now clears the same deny check and a passlist of its own
+  (`_child_env_passed`: the plan passlist plus the spawner's `AUTOOS_*` state
+  names — `PATH` is inheritable but not settable by a caller), and a refusal is
+  printed to stderr.
+- **`provision_runtime_dir()` walked through a symlink** (LOW):
+  `makedirs(exist_ok=True)` accepted a leaf somebody else had pre-created as a
+  symlink and `chmod 0700` was applied *through* it — on a shared host that is a
+  write into, and a hole punched in, a directory this run does not own; parents
+  were left 0755. It now `lstat`s first and refuses a symlink, a non-directory
+  and a directory of another uid, saying so on stderr, creates the parent 0700
+  and the leaf with `os.mkdir` (atomic; a racer is caught and re-checked under
+  the same rules, once, rather than merged into).
+- **The child-env audit missed three shapes** (LOW): the walker read five
+  `subprocess.*` names and only the first element of a *literal* argv, so
+  `os.system` / `os.popen` / `os.exec*` / `os.spawn*` (which take no `env` at
+  all), `shell=True`, and a variable argv walked straight past it. The walker
+  now classifies each site (`os_call`, `shell`, `dynamic`) and the plumbing
+  exemption applies to literal argv only; a site that genuinely must run outside
+  the audit marks itself with a `# subprocess-audit:` comment. Both file checks
+  pass today — the exemption is exercised, not assumed:
+  `test_the_walker_sees_every_shape_it_claims_to` feeds the walker the shapes it
+  claims to catch and fails if it stops seeing them.
+- **A sandbox had no git identity of its own** (MED, opened by the first fix
+  above): hiding the global config also hides the operator's `user.name`, and
+  every brief in this lane ends with the *worker* running `git commit` — it died
+  on "Author identity unknown" and left the run's work uncommitted, a worse
+  failure than the leak that was closed. The clone now sets `user.name` and
+  `user.email` `--local` where it stands up, to the same author the spawner's
+  own end-of-run commit signs with, and `SandboxGitIdentityTests` commits inside
+  a real sandbox under the real worker env with a fake operator identity in
+  `HOME` — so a worker commit that quietly inherited an operator again fails the
+  suite.
+
+
+### Fixed — the FF1 env scrub had a second door, and its push fence was an accident guard (FF1b, D-106)
+
+Muse#high over 362b8af..6bdeca5 read FF1's own diff and found four things it
+did not close. Tests first, in `tests/test_autoos_spawner.py`
+(`PlanEnvPasslistTests`, `ChildRuntimeDirTests`, `PushFenceHonestyTests`,
+`SubprocessEnvAuditTests`) and `tests/test_user_config_fence.py`
+(`LanePathIdentityTests`) — 24, red before the change.
+
+- **`plan["env"]` bypassed the allowlist** (HIGH): the scrub only filtered what
+  the *caller* exported, then copied the plan's entries in behind it. A builder
+  that set `PATH`, `LD_PRELOAD`, `PYTHONPATH` or `NODE_OPTIONS` owned the child
+  and nothing said so. Plan entries now need a name on
+  `WORKER_PLAN_ENV_PASSLIST` (the names the plan builders actually set:
+  `OPENCODE_CONFIG_CONTENT`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, the gemini
+  header constant, `AUTOOS_AGENT_*`) **and** must clear the deny check; anything
+  else is refused and printed to stderr. The deny set gained the loader and
+  interpreter injection names, `GIT_*`, `SSH_*`, `*_ASKPASS`,
+  `GIT_PROXY_COMMAND`, `KUBECONFIG`, `DOCKER_CONFIG`, `AUTOOS_KEYS_FILE` and the
+  `*_CONFIG_FILE` / `*_CREDENTIALS` shapes. A test derives the passlist from
+  `build_plan`'s own `env[...] =` assignments, so a new plan name that is not
+  reviewed fails rather than leaking.
+- **git's config channels were not all forced** (HIGH): the worker's git reads
+  `GIT_CONFIG_PARAMETERS` (what a parent's `git -c key=value` exports) and
+  `GIT_CONFIG_KEY_n/VALUE_n` by *index*. `worker_env` now forces
+  `GIT_CONFIG_PARAMETERS=""`, sets `GIT_CONFIG_COUNT` from the guard list itself
+  (two entries, cancelling `credential.helper` and `core.askPass`), deletes any
+  `GIT_CONFIG_KEY_n/VALUE_n` past that count, and names `GIT_SSH`,
+  `GIT_SSH_COMMAND` and `GIT_PROXY_COMMAND` off rather than trusting a pattern.
+- **The push fence was called a fence** (HIGH): the `pre-push` hook and the
+  disabled push URLs are an **accident guard** — `git push --no-verify`,
+  `core.hooksPath` and `git remote set-url` walk past both. They stay (they stop
+  the worker that types `git push` at a path its own brief named), the code and
+  `docs/handoff.md` now say what they are, and
+  `test_a_no_verify_push_is_NOT_blocked_by_the_hook` asserts the bypass *works*
+  so no future reader treats the hook as containment. Real containment is the
+  disposable clone plus an environment with no credential in it. Also:
+  `fence_sandbox_push()` was defined and unit-tested but **never called** — a
+  real `--isolate` sandbox only had `origin`'s push URL disabled. It is wired
+  into the clone site now, which is what installs the hook.
+- **`XDG_RUNTIME_DIR` was inherited** (HIGH/MED): the operator's session
+  directory (message bus, sockets, sometimes the agent's own) came through the
+  `XDG_` allow prefix. It is now dropped from the inheritance and the plan points
+  it at a private, empty directory under the state tree keyed by run id, created
+  mode 0700 at the launch site (`provision_runtime_dir`) — a dry run still writes
+  nothing. A test asserts no value in the child env names an ssh-agent socket or
+  the operator's runtime dir.
+- **`user_config_fence()` compared paths as strings** (MED): `os.path.abspath`
+  folds `..` lexically and never follows a symlink, so a lane reached through a
+  link read as a real checkout and the render wrote into the home directory. Both
+  halves now go through `os.path.realpath`, and the comparison folds case
+  (`normcase` + `casefold`) where the filesystem does — Windows and macOS open one
+  directory under `AutoOS-lanes` and `autoos-lanes`; a case-sensitive host keeps
+  them apart. `is_lane_checkout(..., fold=True)` lets the Linux suite prove the
+  case-insensitive branch.
+- **Every child site is audited** (MED): `tools/autoos_agent_mcp.py` handed its
+  detached runner, its preflight and `run_job` the caller's whole environment
+  (`env=dict(os.environ, AUTOOS_TASK_DIR=path)`). The three now pass
+  `agent.spawner_child_env()` — the worker scrub with the one credential the CLI
+  genuinely reads (`AUTOOS_OMNIROUTE_KEY`) added back. An ast-based test walks
+  every `subprocess.run/Popen/call/check_output/check_call` in both files and
+  fails on any site without `env=`, allowing only the ones whose argv head is the
+  literal `git`/`taskkill` (the spawner's own plumbing, running as the operator on
+  purpose).
+- Out of scope, recorded under `open:`: per-worker `HOME` isolation.
+
+
+### Fixed — a spawned worker's environment is chosen, not inherited (FF1, D-106)
+
+- **`tools/autoos-agent.py` `worker_env()`** (new, used by both spawn sites —
+  the first launch and the provider-stop fallthrough re-run): the child's
+  environment is an **allowlist** of the caller's (`PATH`, `HOME`, `USER`,
+  `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SHELL`, `XDG_*`, `NVM_DIR` and
+  an explicitly named set of `AUTOOS_*`), plus the plan's own entries. A
+  denylist only covers the names somebody remembered, and the operator's shell
+  on this host holds GitHub, provider, cloud and ssh-agent credentials — all of
+  which a worker could read with `env`. `AUTOOS_OMNIROUTE_KEY` is never
+  inherited; the run's own minted key is added only when it uses the gateway,
+  and `register_secret_env` still sees the final dict.
+- **git in a worker can neither prompt nor fetch a stored credential**:
+  `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` to a binary that always fails, and
+  `GIT_CONFIG_COUNT/KEY_n/VALUE_n` cancelling `credential.helper` and
+  `core.askPass`.
+- **`fence_sandbox_push()`**: an `--isolate` clone had its `origin` push URL
+  disabled; every remote is now disabled and the clone gets a `pre-push` hook
+  that exits 1, because `pushurl` does not fence `git push </absolute/parent>`
+  — a path the containment brief itself names to the worker.
+- **`lib/agent_harness.py` `user_config_fence()`**: rendering a user-level
+  config (under `$HOME`/`$XDG_*_HOME`) from a lane sandbox checkout is refused
+  (exit 1). Measured on this branch: a lane render baked the sandbox's own path
+  into `.config/opencode/opencode.json` twice, so the user's next session read
+  instructions and fences pointing at a directory deleted with the sandbox. A
+  staged target outside any home is unaffected.
+- Tests: `tests/test_autoos_spawner.py` (`WorkerEnvAllowlistTests`,
+  `SpawnerChildEnvTests`, `SandboxPushFenceTests` — 15, red before the change)
+  and the new `tests/test_user_config_fence.py` (13, wired into
+  `tests/linux/07-mcp-pins.sh`).
+### Fixed — the budget gate judges the model the runner launches (CLAUDEBUDGET-f, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-d, from `rev-claudebudget3.out` (FIX-FIRST). One design rule for all
+  of it: **the gate must read the same value the argv carries**, computed once in the runner's own
+  precedence order — explicit `--model` > the tier agent's model (for a client that goes through
+  the gateway) > the client's own default > the card's combo.
+  - **An unknown combo was priced as free.** `spawn_spends_claude` returned `False` whenever the
+    caller named the string itself (`--model`, a registry `clients` row), so an attacker naming an
+    all-Claude combo the registry does not carry was told the run costs nothing. A combo the
+    registry cannot price is now "cannot tell" — refused under the budget, unchanged with the
+    budget off, with the value named in the message. The name still decides for the two values that
+    are not route ids at all: a client default compiled into the adapter
+    (`clients.QODER_DEFAULT_MODEL`) and a caller's `--model` on an own-account client, which goes
+    to that CLI verbatim. A typo in a registry `clients` row is registry data and refuses (item 5).
+  - **The client default shadowed the tier.** `effective_spawn_model` consulted the registry row /
+    `AGY` / `QODER` default *before* the tier, so a tier agent whose `opencode.jsonc` model IS
+    Claude was priced as a free client default. The tier branch now calls the launcher's own
+    `resolve_model`, so a `--clean` tier and a declared variant come back spelled exactly as the
+    run receives them.
+  - **`model or free_model` short-circuited the resolution.** Both spawn paths pre-OR'd the promo
+    model into `model`, so `--free`/`--tier` never reached the tier branch. The flags are passed as
+    flags now (`free`, `free_model`, `clean`), and the tests assert gate input == launch model
+    across 12 client/tier/card/free/`--model` combinations.
+  - **`AUTOOS_CLAUDE_FINAL` leaked to the closer.** `_select_reviewers` gated the `risk=high`
+    closer on the env declaration alone, so any high-risk non-final card with the variable in the
+    profile got client `claude` / model `sonnet`. The closer now needs the card to be a final
+    (`kind`/`role`) *and* the declaration; a non-budget run keeps the behaviour it always had.
+  - Two tests asserted the wrong door (item 6): `agy_default_model_is_a_claude_spend` fell back to
+    a unit call because its `role=implement` card hit the capability check first — it is a CLI run
+    with a read-only card now; `qoder` non-Claude never-gated asserts the run is *allowed*
+    (`would run:`), not only that the budget said nothing.
+
+### Fixed — a Claude final is declared, never claimed; the spawn gate reads the model (CLAUDEBUDGET-d, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET-b, from `rev-claudebudget2.out` (FIX-FIRST). Three holes, all of them
+  "the gate trusted the wrong side of the table":
+  - **`kind=final` was self-grantable, exactly like `critical` was.** `claude_allowed("final")`
+    returned True with no env, so any worker that wrote `kind=final` (or `role=final`) into its own
+    card got a Claude leg, client `claude`, a Claude reviewer *and* the `risk=high` closer
+    (`_CLOSER`, client claude / model sonnet), which HEAD emitted with no gate at all. A final is
+    now what the orchestrator declares: `AUTOOS_CLAUDE_FINAL="<lane>@<sha>"` in the caller's env, or
+    `AUTOOS_CLAUDE_CRITICAL` (which declares the bigger thing and so opens the final too). A blank
+    declaration is not one. `strip_claude_env()` already removed the whole `AUTOOS_CLAUDE*`
+    namespace from every child, so a worker still cannot hold or pass down a declaration — and the
+    plan line now cites `final declared (<lane>@<sha>)`, not only a critical-path override.
+  - **The spawn gate read the client *name*.** `qoder`/`agy`/`opencode`/`codex`/`qwen`/`gemini` with
+    `--model claude-*|opus|sonnet|haiku|fable`, an `openrouter/anthropic/*` leg, or a client whose
+    own default model IS Claude (`clients.AGY_DEFAULT_MODEL` = `claude-opus-4-6-thinking`) walked
+    straight past `claude_spawn_refusal` and `client_held`. Both spawn paths — `autoos-agent.py run`
+    and the MCP `spawn` tool — now gate the **effective model**: `--model` / `--free-model`, a
+    registry `clients.<id>.default_model` row, the adapter's own default, the `--tier` agent's model
+    in `opencode.jsonc`, then the card's combo route (all-Claude legs = a spend, one non-Claude leg
+    falls through to it). When none of those can say what will answer, budget mode **refuses**
+    instead of assuming free, and names `--model=<provider/leg>` as the way to ask.
+  - **The MCP `spawn` tool takes `claude_reason`** — a per-spawn declaration threaded to
+    `claude_allowed(kind="spawn")`, so an orchestrator does not have to export
+    `AUTOOS_CLAUDE_CRITICAL` server-wide where every later caller inherits it. It reaches the CLI
+    preflight and the runner as that one spawn's env, and the spawner strips it before the worker's
+    own env. `filter_routes`' client hold asks `kind="spawn"` now instead of its default `"leg"`, so
+    the plan and the spawn path are one decision.
+  - Tests: `tests/test_autoos_resolver.py` `ClaudeBudgetGateTests` (a forged final gets no leg, no
+    client, no reviewer, no closer; `AUTOOS_CLAUDE_FINAL` opens each; a final declaration does not
+    open the ordinary kinds) and `tests/test_autoos_spawner.py` `ClaudeBudgetSpawnTests` /
+    `ClaudeBudgetMcpSpawnTests` (`--model sonnet`, `openrouter/anthropic/claude-*`, agy's default,
+    the unknown-model refusal, `claude_reason` unlocking exactly one spawn, budget-off unchanged).
+    Non-Claude-shape tests that spawn `agy` declare the run the way `claude_env()` already did for
+    `--client claude`, because agy *is* a Claude spend now.
+
+### Fixed — the Claude budget has one gate, and only the orchestrator holds the key (CLAUDEBUDGET-b, D-102, 2026-09-28)
+
+- Follow-up on CLAUDEBUDGET (`claude_budget`, same day). Four holes in a policy that was written
+  once per caller instead of once:
+  - **`critical=true` was self-grantable.** A card is written by the worker that wants the model, so
+    any worker could unlock Claude. The override now needs `AUTOOS_CLAUDE_CRITICAL="<why>"` in the
+    **spawning process's** env; `tools/autoos-agent.py` `strip_claude_env()` removes every
+    `AUTOOS_CLAUDE*` key from each child env, so a declaration cannot travel down the tree. A held
+    card that claimed `critical` is refused with `claude_budget: critical needs the orchestrator's
+    AUTOOS_CLAUDE_CRITICAL`, and an allowed plan cites the declared *reason* so the DONE line says
+    why Claude was spent.
+  - **`wait_until` could name a Claude window** — `cc`'s 21:00 hour, i.e. "wait until Claude gets
+    cheap", the opposite of holding it. `budget_wait_until` now skips every Claude provider
+    (`is_claude_provider`: a provider whose every leg is Claude); with no non-Claude window on file
+    the answer is `free capacity`. `tests/test_autoos_resolver.py` `test_a_claude_offpeak_window_is_never_a_wait`
+    replaces the test that pinned the old behaviour.
+  - **One gate: `claude_allowed(kind, env, registry, now)`**, called by the leg filter, the
+    client-bound hold, **cross-family reviewer selection** (a Claude reviewer only for the final —
+    this caller had no budget check at all at HEAD), **the escalation ladders** (same), `route_plan_for`
+    (which now passes `client`/`env`, and `route` grew a `--client` so a plan can be asked for the
+    client that would run), `autoos-agent.py run --client claude` (refused at rc 2, the existing
+    "card or route refused" code, before any sandbox is cloned), and `tools/autoos_agent_mcp.py`
+    `spawn`.
+  - **The Claude predicate is the model's family and name, not the provider id**: family `anthropic`
+    or a model id containing claude/opus/sonnet/haiku/fable, case-insensitive, under *any* provider
+    (a proxy, `openrouter/anthropic/*`), plus client `claude` always. An unknown provider now fails
+    toward "Claude" — guessing the other way is the side that spends the allowance.
+- Deferred plans carry the same key set a ready plan does (`leg`/`p`/`theta`/`expected_cost` null,
+  `reviewers`/`escalation` empty): a caller that read `plan["reviewers"]` on every plan raised only
+  on a deferred one, which is the state that arrives most when the fleet is busy.
+
+### Changed — memoised identical dry runs and split part 13 across two shards (WS-PART13)
+
+- **`tests/linux/13-end-to-end-dry-run-only.sh`**: identical `setup.sh` runs are
+  served from a memo (`memo_dry_run`, keyed on argv + every `AUTOOS_*` variable
+  + `PATH` + the e2e/real home mode), so the repeated `--profile ai-coding` and
+  `--check-catalog` runs happen once. Filesystem-asserting tests and the
+  determinism pair keep real runs; a guard test pins the keying.
+- **`tests/linux/41-end-to-end-retirement.sh`** (new): the four retirement tests
+  moved out of part 13 onto their own shard (`g 41` in `tests/ci-shards.txt`),
+  so the two halves run in parallel.
+
+### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
+
+- **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid
+  completion through the OmniRoute gateway, asked for the allowed registry leg
+  with `max_tokens` 4096; never local Ollama. Which served models count is
+  `catalog/ai-registry.json`'s call: exactly a leg of route `deepseek-v4.1-flash`
+  that `policy.leg_rules` allows, checked as served (via
+  `tools/registry.leg_denied`), so V4 Pro, a dated snapshot or another provider
+  never passes. Keys come from `configuration/api-keys.yml` in-process, never
+  argv, scrubbed from errors.
+- **Monthly DeepSeek cap, fail-closed:** `providers.deepseek.monthly_cap_usd: 25`
+  (with `monthly_cap_source`; schema entry; `tools/registry.py` requires a positive
+  number and a source) is read through the one reader
+  `autoos_usage.monthly_cap_usd`. `deepseek_call.py` is orchestrator-only: before
+  each call it reads this month's spend from the gateway's call logs and refuses
+  (exit 3) at or above the cap or when the spend cannot be read.
+  `SPEND_WARN_USD` (20) stays the warning line.
+- **OpenRouter dropped** from the helper: `providers.openrouter` has no credit
+  (BYOK answered 401), so there is nothing to fall back to.
+- **`deepseek_review.sh`, `deepseek_chunked_review.sh`** call it instead of
+  opencode in WSL, whose `--file` silently reviewed only the first ~1,000 lines
+  and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
+  Re-created from the operator's local work (2026-09-25) and reworked for the
+  DSBACK policy (2026-09-28).
+- **WS-DSCALL-LOW:** `main()` refuses `--max-tokens` below the 4096 floor (exit 2, before any key or network access); a truncated call-log walk is tested to refuse the cap.
+
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
+- **RESTART spec v3.6** (RSTAMEND5, 2026-09-28): **`docs/plans/2026-09-28-restart-spec.md`** resolves the Muse FIX-FIRST on v3.5 with one correction to §5's *mechanism*, its numbers untouched. v3.5 claimed hand-off caps are keyed by **(family, role)** and that `cap_for` reads a `role` field from §4's `run.json`; lane CAPD088 builds no such thing and none is planned. §5 now states what CAPD088 does: operator **D-088** (orchestration sessions 500k, workers min(40 % of window, 400k), supersedes D-085/CAPL2's interim 250k) is implemented as **model-family rows used as the role proxy** — opus, fable and sonnet **500k** (those families only run long sessions as orchestrators), spark and gemini **400k**, and the 200k class **80k** (the worker agents) — because `tools/autoos_context.py` `cap_for(model)` takes a model id and **no role argument**. `catalog/ai-registry.json` `policy.handoff_caps` is the one home for the numbers, and the comment at `DEFAULT_CAPS` (the unreadable-registry fallback) mirrors the same rows in the same order; §4's `role` field selects a §8 MCP document and nothing else, so it is no longer an input to any cap. What follows from that: the CAPD088 delivery row says family rows rather than a (family, role) key, the lane order drops CAPD088's dependency on R4, the Order and invariant bullets speak of families (tests pin each *family's* id resolving to its own number, not the wildcard; `validate`'s `cap_tokens == window × cap_fraction` invariant is stated per family row — 400000/0.4 on a 1M-window worker family, 80000/0.4 on a 200k-class family, 500000/0.5 on a 1M-window orchestration family), and the v2 D-044 row and the v3.4 CAPD088 row stop calling the cap "per role". The only `role` left in the spec is §4/§8's: the `run.json` field that selects `configuration/mcp/<role>.json`. The three §5 obligations that survive are the row **order** (`cap_for` is first-match-wins and strips a trailing `[1m]`, so every new row goes before the `*` row), the **invariant**, and **revisit** — §8's baseline protocol (the non-sidechain first assistant turn's `input + cache_creation + cache_read` on a fixed `Reply OK` probe, pinned model and role document, 3 runs, the median, reported per role to L0) is what measures what a session pays to start, D-085's ~15 min handoff and **55.5k** fresh sonnet start stand as *why* a cap is a number at all, and the 55.5k is §8's pre-R9 anchor, not a cap. v3.5's resolutions stand: a `ready <branch> <sha>` record is an open order until §7's one closing rule closes it, so an unanswered ready stays live whatever its position and counts in `kept N records: no covering done`; §7 is that rule's one home, §3's open-readies scan points at it; every inbox writer is locked, `append_inbox_line` holds the lock for every Python caller (`autoos-agent.py ready` already writes through it), a bare `echo … >> inbox` is forbidden and R8's grep reaches shell recipes only; rotate acquires exclusive with a 30 s timeout and exits 2 having moved nothing, an appender waits 10 s then appends anyway and reports `inbox: lock timeout`.
+### Added — the orchestrator's own models are known review authors (AUTHORS (S1), 2026-09-28)
+
+- **`catalog/ai-registry.json:models`**: `claude-opus-5-5`, `claude-sonnet-5`, `claude-fable-5-1`,
+  `claude-haiku-4-5`, each `family: anthropic`. Measured: `autoos-agent.py ready` and
+  `review-status` refused a lane record its own orchestrator wrote — *"author claude-opus-5-5 is
+  not a model, leg, route or reviewer the registry knows, and not a family it declares"* — so
+  records borrowed `claude-opus-4-6`, which is a false statement about who wrote the diff and
+  makes the gate's detail line useless in an audit. `author_family`
+  (`tools/autoos_resolver.py`) reads the `models` table first, so the smallest fix is data, not
+  code: an author row carries no provider and no route names it, so none of the four is a
+  routable leg (`test_an_orchestrator_author_is_not_a_leg_of_any_route` pins that, and
+  `policy.leg_rules` `deny-claude-paid-api` still keeps Claude off a paid API).
+- **`tools/registry.py` rule 13**: `validate` checks `policy.handoff_caps` — every row's
+  `cap_tokens == round(window * cap_fraction)`, and a `match: ["*"]` fallback row exists.
+  `tools/autoos_context.py` reads `cap_tokens` and never recomputes it, so a row whose pair
+  disagreed stated two caps at once and the lane handed off at the stale one; with no `*` row a
+  model no other row names silently got that tool's hand-maintained `DEFAULT_CAPS` instead of
+  the policy. Rule 13 red first in `HandoffCapsPolicyTests`.
+### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
+
+Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
+the identity FLEETP0/FLEETP0b had just added, and router D-063 asked for one more
+carrier. All of them are in `tools/autoos-agent.py` unless named.
+
+- **HIGH — the slug is scrubbed before it is cut.** `mint_run_id` slugified the raw
+  title/task, and `RUN_ID_SLUG_CAP` is 24 characters — *shorter* than a vendor key,
+  so the cap that was supposed to keep task text out of the id kept a pasted key in
+  it whole, into the branch, the sandbox dir, the printed `run-id:` line and the
+  gateway header. The slug now comes from `slug_source`: the shared
+  `redact.Redactor` masks first, the mask token is dropped rather than slugged, and
+  only then does `slugify` cut. A title that is nothing but a key yields `task`.
+  `session_tag` — the other half of that header, cut at 40 — is scrubbed through
+  the same helper, because the cap missed the leak on both sides.
+- **D-063 — `x-omniroute-session-id` is now `<tag>/<run-id>`,** so OmniRoute threads
+  one Conversation per run (`X-AutoOS-Run-Id` rides beside it unchanged). Measured
+  read-only in the running gateway: `resolveConversationId` takes
+  `header.trim().slice(0, 128)` with **no charset check** — the limit is a length,
+  and it truncates silently, which would cut the run id off the end. `session_header_value`
+  therefore sends the tag alone when the pair would not fit, with one warning line,
+  instead of sending a value the gateway would chew.
+- **`tools/autoos_usage.py` — `--by lane` is the part before the FIRST `/`,** so an
+  old `<lane>/<title>` row and a new `<lane>/<title>/<run-id>` row group together,
+  and **`--by run`** is the part after the last `/` when `is_run_id` recognises it
+  (`(no run id)` otherwise — a tag's tail is a title slug, not a run). The run-id
+  shape is written a second time here because the spawner delegates `usage` *to* this
+  module and cannot be imported back; `test_the_run_id_shape_matches_the_one_the_spawner_mints`
+  pins the two copies, `test_every_id_the_spawner_mints_is_a_run_to_usage` checks them
+  against real mints. The key column is capped at one whole id (48), not 40.
+- **MEDIUM — the two headers go to every gateway client that can stamp a request,**
+  not to opencode alone. `omniroute run` has no header option (`omniroute run
+  --help`), so each launched CLI has to carry them itself; measured 2026-09-28 by
+  pointing the launcher at a local listener (`--remote http://127.0.0.1:<port>`)
+  and reading the headers back off the request — no gateway spend, no completion:
+  `codex` takes `-c 'model_providers.omniroute.http_headers.<name>="<value>"'`,
+  and only *before* its `exec` subcommand (after it the override replaces the
+  whole `model_providers` table and codex dies on "provider name must not be
+  empty"; a quoted key segment is dropped without a word); `gemini` takes env
+  `GEMINI_CLI_CUSTOM_HEADERS="name:value,name2:value2"`. Carriers live in
+  `tools/autoos_clients.py` (`HEADER_CLIENTS`, `gateway_header_args`,
+  `gemini_custom_headers`) and the plan's `session_tag` is set for both, so their
+  dry run prints the tag it really sends. **`qwen` cannot**: its `customHeaders`
+  exists only in a `settings.json` inside the temporary `QWEN_HOME` the launcher
+  writes and deletes, and the one env hook (`QWEN_CODE_SYSTEM_SETTINGS_PATH`) is
+  the machine-wide system file — not something one spawn may write. Those rows
+  stay `session_tag = null` (`(untagged)` / `(no run id)`), are attributable
+  host-side only, and get no `session-tag:` line, so nothing claims an
+  attribution the gateway never received. `docs/routing.md` carries the table.
+  The only gateway call the spawner makes itself is the `/api/health` probe, which
+  is not a completion and has no conversation.
+- **LOW — `_redact_value` recurses tuples, sets and frozensets** (it walked dicts and
+  lists only, so `skipped_legs` as a tuple reached the record with its key intact) and
+  **a fallthrough re-run adopts the reused clone's `agent/<suffix>` only when the suffix
+  is canonical** (`is_canonical_run_id`) — before, any branch tail became a run id
+  unvalidated. **A record whose caller's `AUTOOS_AGENT_RUN_ID` equals its own id now
+  stores no parent edge**, which is what a self-parent is.
+- **Tests** (`tests/test_autoos_spawner.py`): header value shape, the tag/run split
+  back apart, the 128-char fallback and its warning, key-shaped titles, reuse of a
+  non-canonical branch, the self-parent record, and a **parent-cycle `ps --tree` case**
+  (A↔B: both rows listed, one entered as a root, the walk returns); plus the two
+  new carriers (codex argv prefix and its position before `exec`, gemini's env value
+  re-parsed with the CLI's own split rule) and the negative that keeps `qwen` honest.
+- **Test hermeticity** (`tests/test_autoos_spawner.py`): `clean_env` now drops an
+  ambient `AUTOOS_SESSION_TAG` the way it already dropped the ambient key, and the
+  two tag classes `pop` it in `setUp`. A spawn inherits the caller's tag, so two
+  `SessionTagTests` failed only inside a lane session and passed on a bare checkout
+  — the suite measured the machine it ran on, not the code (R-worker-02).
+
+### Added - `run --run-id`, so an MCP spawn and its run share one id (FLEETP0b, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: FLEET left one open item - the MCP server's `spawn`
+  still minted `logs/agents/<id>` with its own local-time `stamp-hex6` (no slug),
+  so an MCP spawn had two ids again (FLEETSPEC §5.1 says one). `run` now takes
+  `--run-id <id>`: the caller's id is used instead of a mint, and names the same
+  four places a minted one does - `agent/<id>`, the `--isolate` clone dir,
+  `logs/workers/<id>.json`, the child's `AUTOOS_AGENT_RUN_ID` (and so the
+  `X-AutoOS-Run-Id` header). A run id is a filename, a branch and a header value,
+  so a shape that is not the canonical one is refused with exit 2 by
+  `is_canonical_run_id` (a real UTC stamp, a slug within `RUN_ID_SLUG_CAP`, a
+  6-hex tail) before any clone, record or client start. The `parent_run_id` edge
+  is unchanged and stays the caller's own `AUTOOS_AGENT_RUN_ID`: a handed-in id
+  is never read from that variable, or the child would name itself its parent.
+- **`tools/autoos_agent_mcp.py`**: `spawn` mints with the agent module's own
+  `mint_run_id` (the module it already loads via importlib for `route`), keeps the
+  collision retry, names its run dir with that id, records it in `job.json`
+  (`run_id`, beside the `id` `status()` reads) and passes it to the CLI as
+  `--run-id` - built into the argv *before* the dry-run preflight, so the CLI
+  checks the id it will actually be started with and a refusal still creates no
+  run dir. `run_job`'s environment is untouched, so the server's own
+  `AUTOOS_AGENT_RUN_ID` (when the MCP client is itself a spawned run) stays the
+  parent of everything it spawns. Its local-time mint and the `secrets` import
+  that only it used are gone.
+- **`tests/test_autoos_spawner.py`**: `McpCanonicalRunIdTests` (canonical id for
+  the run dir, `--run-id` in the argv with the task still last, `job.json`
+  carrying `run_id`, a refused spawn leaving no dir, the caller's id flowing as
+  the parent), plus `run --run-id` cases in `CanonicalRunIdTests` (one id in
+  branch + dir + child env + header, the CLI printing the id it was given, 13
+  malformed shapes refused at exit 2) and in `RunIdRecordTests` (a handed-in id
+  is parented to the caller, not to itself; a top-level one leaves no parent; a
+  malformed one is refused before `build_plan`). Red before: **8 failed**; green
+  after: **700 passed / 111 subtests** on `tests/test_autoos_spawner.py
+  tests/test_autoos_heartbeat.py`, with `test_agent_harness.py`,
+  `test_autoos_context.py`, `test_autoos_inbox.py`, `test_autoos_tokenrate.py`,
+  `test_autoos_track.py` and `test_autoos_usage.py` at 227 passed. An MCP dry-run
+  spawn end to end prints one id: its run dir, the argv and the CLI's `run-id:`
+  line agree (`20260928-102313-mcp-id-check-9362d5`).
+
+### Added - one canonical run id per spawn, its parent edge, and the route it was scored on (FLEET, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: a spawn minted **two** ids from **two** clocks and nothing tied them
+  together - the `--isolate` clone and its branch were stamped from `datetime.now()` (local time, a
+  slug of the *task*), the worker record minted a separate UTC `stamp-hex6`, and the `logs/agents/`
+  run dir a third, so a console could not say which record, clone, branch and request belonged to one
+  run (FLEETSPEC §5.1/§10 P0). `mint_run_id` mints `YYYYMMDD-HHMMSS-<slug>-<hex6>` **once, in UTC**,
+  the slug the run's title capped at 24 chars of `[a-z0-9-]` (never task text past it: a brief can
+  carry a key), and it is now the clone dir suffix, `agent/<id>`, `logs/workers/<id>.json`, the
+  child's `AUTOOS_AGENT_RUN_ID` and the `X-AutoOS-Run-Id` header sent beside
+  `x-omniroute-session-id` (a fallthrough re-run keeps the first attempt's clone, branch and id - one
+  spawn is one id). A record stores `parent_run_id` (the `AUTOOS_AGENT_RUN_ID` this spawner was
+  itself spawned with, `None` at top level), `host` (`socket.gethostname()`, in the git-ignored
+  record only - never in a committed fixture), `task_dir` (the `AUTOOS_TASK_DIR` run dir the child
+  asks back in, which links the third id) and the resolver's whole `route_plan`; `redact_record` now
+  walks nested values, because the resolver's `reason` carries whatever a probe line said.
+  `ps --tree` prints the spawn tree - children indented under the run that spawned them, an orphan
+  whose parent record is gone a top-level row marked `(parent <id> gone)`, an unvisited row still
+  emitted so a cycle never swallows a run - and `ps --json` rows carry `parent_run_id` untruncated.
+  Old records with none of these fields still list; nothing else renames.
+- **`tests/test_autoos_spawner.py`**: `CanonicalRunIdTests`, `RunIdRecordTests`, `PsTreeTests`
+  (22 cases: the id's shape, its UTC stamp and 24-char cap, no task text past the slug, one id in
+  branch + dir + record + child env, the parent inherited from the spawner's own env, `ps --tree`
+  ordering and the gone-parent row, the host (a fake one, patched in), `route_plan` persisted and
+  redacted, the header injected next to the session tag, an old record still listing). Red before:
+  **20 failed / 584 passed** on `tests/test_autoos_spawner.py tests/test_autoos_track.py`; green
+  after: **604 passed / 0**, with `test_agent_harness.py`, `test_autoos_context.py`,
+  `test_autoos_heartbeat.py`, `test_autoos_usage.py`, `test_autoos_measure.py` and
+  `test_autoos_resolver.py` at 415 passed / 1 skipped. Six pre-existing fakes of `build_plan`'s
+  output gained the `run_id` the plan now carries, `SandboxUniquenessTests` its `t2-` prefix (the
+  slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
+  `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
+  `task_dir` is what links the two ids meanwhile.
+### Changed — hand-off caps: orchestrators 500k, workers min(40% of window, 400k) (CAPD088, operator D-088, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps` and **`tools/autoos_context.py`** `DEFAULT_CAPS`:
+  Opus 500k (was 600k), Fable 500k (was 600k), Sonnet 500k (was CAPL2's interim 250k) - orchestration
+  sessions, 1M window; Muse Spark 400k (was 300k), Gemini 400k (was 200k), the 200k class 80k (was
+  150k) - worker agents. Rows key on model family as the role proxy (comment at `DEFAULT_CAPS`).
+### Fixed — the key fence spells the real file names, so no leaf reads or cats them (KEYDENY, 2026-09-28)
+
+`catalog/agent-harness.json` fenced `*api_keys*` (underscore) while the real file is
+`configuration/api-keys.yml`, and the gateway keys `~/.config/autoos/ai-stack/client.key` /
+`manage.key` were not fenced at all — a spawned leaf could `Read` and `cat` all three; they are
+now denied for read and shell everywhere (with `*api-keys.example*` allowed through the same
+deny-then-allow mechanism as `*.env.example*`), and `opencode.jsonc`'s `t3-reviewer`, which
+allowed every `read`, carries the `read_deny_all` patterns as denies.
+
+- KEYDENY2 (2026-09-28, same lane): that shell **allow** was matched against the whole command
+  line, not a path, so `cat configuration/api-keys.yml configuration/api-keys.example.yml`,
+  `cp configuration/api-keys.yml /tmp/api-keys.example/x` and `cat /tmp/api-keys.example/stolen`
+  all resolved to `allow` — a substring allow can never fence a command line. Both shell allows
+  are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
+  the template with the read tool, and the read allow is narrowed to the exact suffix
+  `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
+
+- **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
+  was red before its fix** (72 red of 108 in `tests/test_autoos_risk.py`). The one
+  failure mode this module may not have is a diff that reads `normal` because the
+  reader never saw it; five of the six were exactly that.
+- **A rename kept only the name it moved to.** `git mv AGENTS.md docs/AGENTS.md`
+  reports one changed path, so a rule on `AGENTS.md` watched a policy file walk out
+  of the class that guards it. `changed_files` now carries `old_path`, every
+  `path_glob` is tested against both names, and the reason line says which moved:
+  `policy: AGENTS.md -> docs/AGENTS.md`.
+- **Secrets were path-only.** `**/*.key` and `**/*secret*` catch a file named for
+  what it holds and nothing else, so a key added to `notes.txt` was `normal`. Five
+  `added_regex` content rules now read the ADDED lines for the high-confidence
+  shapes (`-----BEGIN … PRIVATE KEY-----`, `AKIA…{16}`, `ghp_…{36}`, `sk-…{20,}`,
+  `xox[baprs]-`), and `**/*.pem`, `**/.env`, `**/.env.*` join the path rules. A new
+  `exclude` field on `path_glob` keeps the tracked `.env.example` templates out of
+  it — AGENTS.md rule 1 says commit those, and a rule that punished honest
+  templates is a rule that gets switched off. `tools/registry.py` rule 12 knows
+  both new fields. (Test fixtures assemble these shapes at runtime, so no tracked
+  file ever holds a literal key; the public scrub scan stays green.)
+- **`high` risk was cheaper to review than `normal`.** The RISKTIER-a registry
+  declared `review_counts.high` as 1 cross-family + the final, while operator Q-013
+  (common.md, D-060) says two diverse cheap cross-family reviews and, for high, the
+  same two *plus* the Sonnet final. `high` is now `cross_family: 2, final: true`,
+  which also agrees with the resolver's own D2 fallback constants it had been
+  overriding.
+- **`--sha HEAD` exited 2, and one commit had two audit answers.** `HEAD`, a branch
+  or a tag is not hex, so the draw raised while the diff classified perfectly; and
+  `audit()` buckets 12 hex digits, so `28ada0a` and the 40 digits of the same commit
+  could land in different buckets — a caller who learns the friendlier spelling.
+  `assess` now resolves the rev with `git rev-parse --verify <rev>^{commit}` (a tree
+  or blob is refused) and uses that hex everywhere, reporting it as `sha` /
+  `commit:` so a lane records which commit the answer is about.
+- **The diff was parsed line-and-tab, which git quotes.** `--name-status` C-quotes a
+  path containing a tab or a newline — and escapes the tab with the very character
+  the parser splits on, so the path arrived wrapped in quotes and matched no glob.
+  `changed_files` and the new `deleted_lines` read `-z` and split on NUL (a rename's
+  two paths by the arity its status declares, so a file named `A100` is never
+  mistaken for a status). The same quoting hits the `+++` header of `git diff -U0`:
+  an awkward filename left `current` unset for the file's whole body and dropped
+  every added line in it, `sudo` included. Added lines are now unquoted too.
+- **The rule table's gaps, and how much a change deletes.** `**/*.sql`,
+  `**/setup*`, `**/bootstrap*`, `**/Install*` (case-sensitive, so it is not the
+  existing `**/install*`) and `docs/**/*spec*.md` joined the globs; the generic
+  `diff_deletion` rule gained `min_deleted_lines: 200`, because a change that
+  deletes 240 lines from a file that *survives* is a large deletion and only a whole
+  file disappearing used to read as one. Corpus: `f5744611` (679 lines removed, no
+  file lost) flips `normal` → `high`; `967021cb8`, which edits
+  `stack.env.example`, stays `normal`.
+- Tests: 108 in `tests/test_autoos_risk.py` (was 82), wired into both harnesses
+  already. No CLI surface changed but the `risk` verb's output, which now leads with
+  the resolved commit.
+
+### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
+
+- **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the
+  registry's `policy.risk_rules` were data no code read. `tools/autoos_risk.py`
+  (stdlib, pure, one injectable git runner) now applies every rule to the diff at
+  `merge-base(base, sha)`: `path_glob` and `diff_deletion` (the two declared
+  shapes), plus the two the operator asked for — `added_regex`, an added line
+  matching a pattern (`\bsudo\b`, case-sensitive and deliberately textual: a test
+  that only *mentions* sudo raises the class), and `registry_policy`, which loads
+  `catalog/ai-registry.json` at both ends and compares only its `policy` object,
+  so a models-only edit is not a routing-policy edit. `audit(sha, percent)` is
+  `int(sha[:12], 16) % 100 < percent`: a property of the commit, so re-running
+  after an unlucky draw cannot shop for a friendlier bucket. Any git failure
+  raises `RiskError` (exit 2) — an unreadable diff never reads as `normal`.
+- **`tools/registry.py` rule 12** validates the new shapes, and refuses a rule
+  field its type does not read. A `paths` on a `path_glob` looks like a scope and
+  is not one; `classify()` ignores it silently, so validate says it out loud.
+  `policy.risk_rules` grows the 17 operator rules; `risk_audit_percent` (20) and
+  `review_counts` (normal 2 cross-family / high 1 + final) carry their source.
+- **`tools/autoos_resolver.py:_review_policy()`** reads the count from
+  `policy.review_counts[risk].cross_family` and the Sonnet close from `final`,
+  falling back to D2's constants when a registry predates the field — tested both
+  ways. The zero-reviewer case now genuinely means zero (the cap is checked
+  before the pick, not after).
+- **Two silent-`normal` bugs found while reviewing this** (both red before the
+  fix, `tests/test_autoos_risk.py`): a developer's `diff.noprefix=true` removes
+  the `b/` the `+++` header is read through, so *every* added line vanishes and a
+  sudo change classifies as normal; and git escapes an added line that starts
+  with a plus by doubling it, so a line of `+++++ x` in a test fixture was
+  dropped as a header. The default runner now pins `core.quotepath`,
+  `diff.noprefix`, `color.diff` and `--no-ext-diff`, and the parser tells a
+  header from content by hunk position.
+- **CLI**: `python3 tools/autoos-agent.py risk --sha <sha> [--base origin/main]
+  [--repo .] [--json]`. Wiring that class into `ready`/`review-status` is the
+  sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
+  harnesses.
+
+### Fixed — one machine-wide tool_calls overlay, and a loud reason when it is missing (OVERLAYHOME, 2026-09-28)
+
+The overlay lived at `<checkout>/logs/routing/measured.json`. At 12:5xZ the main
+checkout had none, so `route` skipped every agentic leg as `tool_calls: ...
+unproven` and returned `input_required` — it looked like a fleet-wide outage.
+
+- **`tools/autoos_overlay.py`** (new): the one path — `$AUTOOS_MEASURED_OVERLAY`,
+  else `${XDG_STATE_HOME:-~/.local/state}/autoos/measured.json` (Windows
+  `%LOCALAPPDATA%\autoos\measured.json`) — plus load with a read-only legacy
+  fallback (one stderr note; the old file is never deleted), an atomic mode-600
+  save, `status` and the missing-overlay reason.
+- **Readers**: `tools/autoos-agent.py` (`route`, `run`/`spawn` routing,
+  `propose_reprobe`) and `tools/autoos_agent_mcp.py` read through it. With no
+  overlay anywhere, an agentic card that fails on tool_calls says `no tool_calls
+  overlay found at <path> (run tools/probe-toolcalls.py or set
+  AUTOOS_MEASURED_OVERLAY)`. `heartbeat --json` gains `overlay: {path, present,
+  age_hours}`.
+- **Writers**: `tools/probe_common.py` (`probe-toolcalls`, `probe-recall`,
+  `probe-effort`) default to the new path; the first run reads the legacy file so
+  its verdicts carry over (only when `--overlay` is not given). The
+  read-modify-write holds a lock on `<overlay>.lock` and merges only this run's
+  changes into the file as it is now, so probes running at once lose nothing.
+- `$AUTOOS_MEASURED_OVERLAY` is expanded (`~`, `$VAR`) and made absolute. The
+  loud reason is gated on the resolver's structured `unproven_toolcalls` flag,
+  not on reason text.
+### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
+  **`tools/autoos_context.py`** `DEFAULT_CAPS`: a sonnet L2 no longer falls into the 200k-class row.
+  Measured: L1-backlog handed off every ~15 min at 150k with a 55.5k fresh-session baseline. Temporary
+  until the RESTART packs land; lowered again if a measured relaunch costs < ~20k. Haiku and unknown
+  models keep 150k.
+### Fixed — `codestral-latest` counts as training until a source says otherwise (MISTRALFIX3, Muse review of MISTRALFIX2, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `models.codestral-latest.trains_on_prompts: true` (operator 12:0xZ
+  "Mistral trains -> never in -clean tiers"), so `private_safe()` keeps it out of every `-clean`
+  route; its limits row names both sources (10:5xZ direct headers for rpm/tpm, 11:5xZ gateway
+  answers); the Mistral provider note counts three limits rows. Guard tests in `MistralReplaceTests`.
+
+### Fixed — the codestral pair replaces `mistral-small`; the `-clean` twins stay non-training (MISTRALFIX2, 2026-09-28)
+
+- **Operator brief (via L1-main 11:5xZ)**: `mistral-small` does not work — replace it
+  with Mistral Codestral wherever it was a leg, and where both codestral siblings
+  answer, take `mistral-code-latest`. Measured through the gateway (3 calls each,
+  `max_tokens 4096`, `work/L1-routing/MISTRALREPL.probe.jsonl`):
+  `mistral/mistral-code-latest` 3/3 200 p50 0.3 s, `mistral/codestral-latest` 3/3 200
+  p50 0.3 s, `mistral/mistral-small-latest` 0/3 (429) — the gateway agrees with the
+  10:5xZ direct probe (MISTRALFIX).
+- **`catalog/ai-registry.json:models.codestral-latest` +
+  `providers.mistral.limits.codestral-latest`**: registered with the measured 125 rpm /
+  625k tpm row and the gateway-probe source, and **not** made a leg of any route — it is
+  the tested alternative, which is what the brief's tie-break left it. `context_advertised`
+  / `output_max` / `reasoning` are inherited from the provider's other records, not
+  measured here, and the `$comment` says so; `trains_on_prompts` stays unset (inherits
+  `providers.mistral`, the shape `mistral-small-latest` carried) because nobody has
+  measured whether codestral trains. `mistral-code-latest` already had its measured row.
+- **The requested `-clean` swap was measured and refused, not skipped**: putting
+  `mistral/mistral-code-latest` in `t2-worker-clean` / `t3-driver-clean` (the position
+  `mistral-small` held, which would have given each twin two live legs) makes
+  `tools/registry.py validate` exit 1 twice — `privacy: <route> leg
+  mistral/mistral-code-latest model trains on prompts` (spec 3.1 rule 3, `private_safe()`).
+  Those are the routes a `privacy=sensitive` card lands on
+  (`tests/test_autoos_spawner.py`), and `tests/linux/33-documentation.sh` independently
+  bans `mistral/mistral-code` in any `-clean` combo, so the leg would have routed private
+  prompts into a training pool. The twins keep MISTRALFIX's legs and their one live leg,
+  the native `deepseek/deepseek-flash` head, which satisfies the route-liveness invariant.
+- **`t3-driver`** needed no change and no new leg: `mistral/mistral-code-latest` was
+  already its head, so the dead model's slot is covered without duplicating the leg
+  (`MistralReplaceTests` pins the count at 1).
+- **Tests, `tests/test_registry.py:MistralReplaceTests` (written first, red, then made
+  green)**: codestral's measured row and source, codestral in no route, the probe recorded
+  in the registry, `mistral-small` in no route, `t3-driver`'s single mistral-code leg — and
+  the guard that the `-clean` twins carry no training leg and exactly one live leg, so a
+  later lane cannot "finish" this swap by adding it. The route-liveness invariant now reads
+  through the new `live_legs()` helper, shared with the count tests instead of restating the
+  filter.
+- **Docs**: `docs/models.md` records the gateway probe and the refused swap next to the
+  MISTRALFIX plan-limits table; `docs/models-proposed.md`'s three rows for the affected
+  combos stop listing `mistral-small` as a leg and name the reason. All five `render
+  --check` surfaces pass unchanged — no route's legs moved and a route-less model renders
+  nowhere, so `combos.json`, the litellm block, `ide-models.json` and the OpenHands
+  profiles had nothing to re-derive.
+
+### Fixed — Mistral plan limits are measured and gate the route; no route routes into a dead leg (MISTRALFIX, 2026-09-28)
+
+- **`catalog/ai-registry.json:providers.mistral.limits`**: the plan itself, not the
+  provider's uptime, is what killed `mistral-small-latest` — a direct probe
+  (2026-09-28T10:5xZ, `x-ratelimit` headers on `api.mistral.ai`) returns 429 at
+  **0 req/min** for it while `mistral-code-latest` serves 125 rpm / 625k tpm on the
+  same key. The measured rows now live in the registry's one home for plan caps
+  (`rpm`/`tpm`/`source`), and the bare-spelling models that were never registered
+  (`devstral-latest`, `mistral-medium-latest`, `magistral-medium-latest`,
+  `codestral-latest`, `open-mistral-nemo`, `ministral-8b-latest`, and
+  `mistral-large-latest` at 403) are recorded in the provider `$comment` only —
+  rule 10 rejects a limits key that does not resolve to a model of that provider.
+  The gateway agrees: `mistral-small-latest` failed 51/51 calls over 7 days.
+- **`tools/registry.py:plan_dead_reasons()`** (new, alongside
+  `provider_plan_limits()`): a leg is plan-dead when its row says `rpm: 0` or
+  `plan_available: false`; no row is never a deny. `plan_available` joined
+  `$defs.provider_limits` in the schema and `_LIMITS_ENTRY_KEYS`, so rule 10 now
+  rejects a non-boolean (a string would read as available).
+- **`tools/autoos_resolver.py:usable_legs()`** had no plan gate at all — only a
+  request-size `tpm` check — so a 0-rpm leg survived every filter and got served.
+  `plan_dead_reasons` now runs immediately after the availability hard check,
+  naming the reason `"plan: 0 rpm"`. The stale "rpm/rpd/tpd are data only" claims
+  in that module are corrected: `rpm` gates, but only for its zero.
+- **`routes.t3-driver` / `t2-worker-clean` / `t3-driver-clean`**: `mistral/
+  mistral-small-latest` is out of all three (13→12, 4→3, 3→2 legs). The `-clean`
+  twins do not need marking unavailable — after DSBACK they head on native
+  `deepseek/deepseek-flash`, which is live and plan-ungated, so each keeps a
+  serving leg. `t3-driver` keeps its paid `mistral/mistral-code-latest` leg.
+- **Invariant, `tests/test_registry.py:MistralPlanLimitsTests`**: every route that
+  serves traffic (`servable_route_ids`) keeps at least one leg that is
+  gateway-servable *and* plan-alive, over the real registry — the check that would
+  have caught this on the day the leg was added. A route with zero servable legs
+  renders no combo and so serves nothing, which is why `t1-orchestrator-clean` is
+  correctly outside the rule rather than exempt from it.
+- **Renders** re-derived from the registry: `sync-router-tiers.py` rewrote the
+  litellm managed block, `docs/models.md`'s managed block plus its mermaid chains
+  and provider table, `configuration/omniroute/combos.json` by minimal hand-edit
+  of the three leg arrays (its hand-written `$comment` is an intentional equality
+  exception and stays); `validate` and all five `render --check` surfaces pass.
+- **Stale pins re-derived, not loosened (R-worker-01)**: `RuleThreePrivacyTests`
+  read the live head leg from the registry instead of hard-coding mistral-small,
+  and three resolver tests that called it "the proven leg" now use
+  `test_autoos_resolver.py:clean_head_leg()`; `PlanLimitsGateTests` seeds the dead
+  plan inline so the gate is tested without `measured.json`.
+
+### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (HIGH): R5A4's `Totals.add` lets a second copy
+  of one response add no usage and still move it *into* the subagent view — and
+  the move carried the **duplicate's** numbers. The two are only equal while every
+  copy of a response repeats the same usage, which this client does not do:
+  measured over the R5a window, 872 of the 13,691 collapsed duplicates carry a
+  different usage than the record that got counted (the growing partial usage of
+  a streaming response, R5A4's own "first-wins, measured" note), so a promotion
+  could put more into `subagent_weighted` than `weighted` holds for that response
+  and break D-045's rule that the subagent columns are a *view onto* the
+  numerator. `counted` now stores what was summed beside the claim —
+  `(sidechain, weighted, naive)` per identity — and a promotion re-uses exactly
+  those. **Latent on this host**: 0 promotions occur over the whole R5a window
+  (parent and `subagents/` files share no response id, as R5A3 measured), so all
+  three rows re-ran to R5A4's numbers to the token — L1-routing 4,964 records /
+  104,768,807.8 weighted / 24,380,131.1 subagent / 23.3 % / 28 merges /
+  3,741,743.1 per merge, L1-backlog 6,205 / 135,999,291.6 / 62,663,439.9 /
+  46.1 % / 34 / 3,999,979.2, L1-main 4,034 / 107,119,446.4 / 45,288,117.6 /
+  42.3 % / 76 / 1,409,466.4. No before-number moved; R5b still compares against
+  the R5A4 table.
+- **`--json`**: an unnamed `--repo` prints `"default"` instead of the resolved
+  current directory. That was the same leak R5A3 closed for `--projects-dir`
+  (hard rule 1 — the path carries the operator's username), reached by a
+  different flag; a named `--repo` is still echoed as given, and `--no-git` still
+  reports no repo at all.
+- **`tests/test_autoos_tokenrate.py`**: 6 new cases — the promotion across the two
+  depths with a deliberately *larger* duplicate (the streaming shape), a property
+  sweep over the fixture usages at both depths asserting
+  `subagent_weighted <= weighted` and `subagent_naive <= naive` for every
+  ordering, and four `--json` repo cases (report-level and CLI-level, defaulted
+  and named). 15 red before the fix (the promotion case, 12 of its sweep
+  subtests, and the two repo echoes), **66 green + 32 subtests** after;
+  `python3 -m pytest -q tests/` 2,245 passed / 4 skipped,
+  `bash tests/run-tests.sh --filter token-rate` 1 passed / 0 failed.
+
+### Changed — `token-rate` counts each API response once (RESTART R5A4, the metric owner's answer to R5A3's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: R5A3 left the numerator counting *turns x
+  content blocks*, because a record's identity was its transcript `uuid` and this
+  client writes one record per content block, each repeating the same
+  `message.id`, the same top-level `requestId` and (usually) the same usage. The
+  decision — the metric counts one **API response** — moves identity into a new
+  `response_identity`: `message.id` plus `requestId` when the record carries one
+  (a retried response repeats the message id and is billed again), falling back
+  to the `uuid` only when there is no `message.id`, and to no identity at all
+  (never deduped) when there is neither. The first record of a response wins and
+  a later duplicate may only move it *into* the subagent view, which is unchanged
+  from R5A3: `isSidechain` or `subagents/`-file provenance still decides
+  membership, and `weighted` still contains `subagent_weighted`. Measured over
+  the R5a window (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`, same
+  `--repo`/`--branch`/prefixes as R5A3; every response id is unique to one
+  session and no response id ever spans two files, so the collapse is entirely
+  same-file blocks — 1.96 / 1.94 / 1.76 records per response — and the
+  cross-file dedup stays defensive):
+
+  | row | records (before → after) | weighted (before → after) | naive (before → after) | subagent weighted (before → after) | share | merges | weighted-per-merge |
+  |---|---|---|---|---|---|---|---|
+  | L1-routing | 9,745 → **4,964** | 202,093,981.4 → **104,768,807.8** | 1,748,832,653 → 932,606,194 | 53,589,959.0 → 24,380,131.1 | 26.5 % → **23.3 %** | 28 | 7,217,642.2 → **3,741,743.1** |
+  | L1-backlog | 12,060 → **6,205** | 262,700,682.6 → **135,999,291.6** | 2,279,918,775 → 1,201,840,938 | 124,163,141.7 → 62,663,439.9 | 47.3 % → **46.1 %** | 34 | 7,726,490.7 → **3,999,979.2** |
+  | L1-main | 7,089 → **4,034** | 190,405,176.5 → **107,119,446.4** | 1,733,132,396 → 989,705,170 | 85,499,036.7 → 45,288,117.6 | 44.9 % → **42.3 %** | 76 | 2,505,331.3 → **1,409,466.4** |
+
+  The denominators are untouched, so every row drops ~43–49 % and R5b must
+  compare against these numbers, not R5A3's. L1-backlog's subagent weighted
+  tokens grouped by `message.model` (counts only, never message text):
+  3,343 responses / 61,138,502.0 weighted = **97.6 %** `claude-sonnet-5` plus
+  212 / 1,524,937.9 = 2.4 % `claude-haiku-4-5` — R5A3's reading survives the
+  re-key: the share is the Sonnet reviewer legs, not Haiku first passes.
+- **first-wins, measured**: 242 of the 4,964 L1-routing responses do *not*
+  repeat their usage — the client writes the growing partial usage as blocks
+  land, so the last record of a message carries the most. The rule stays
+  first-wins (a duplicate never adds usage); keying on the largest copy instead
+  would move the L1-routing numerator by 132,582.0 weighted, 0.13 %.
+- **`tests/test_autoos_tokenrate.py`**: `ResponseDedupTests` (new, 10 cases) and
+  R5A3's `test_the_blocks_of_one_turn_are_not_deduped…` reversed to pin the new
+  rule. Covers three records sharing a message id counting once, distinct message
+  ids counting separately, the same message id under another request id being
+  *two* responses, the uuid fallback, a record with neither id staying its own
+  response, first-wins against a growing duplicate, and a subagent copy of a
+  parent message counting once and landing in the subagent view. The fixture
+  `usage_line` now writes a `requestId` (derived from the message id, as the real
+  transcript always agrees; `rid=` sets it explicitly) — 8 red before the change,
+  **60 green** after.
+
+### Changed — `token-rate` discovery reaches `<session>/subagents/*.jsonl` (RESTART R5A3, the router's answer to D-045's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: D-045 kept an in-session subagent turn in the
+  numerator and reported its share, but all three measured rows printed `0.0%`
+  because this host's client writes those turns one level below the session
+  files `discover_transcripts` scanned. Discovery reads both depths now, so the
+  subagent records are in `records`/`weighted`/`naive` *and* in the subagent
+  columns: a record is a subagent turn when its own `isSidechain` flag is set
+  **or** it was read out of a `subagents/` file — the flag is the record's claim,
+  the directory is the client's. A turn written to both depths is still one cost:
+  `Totals.add` dedups by transcript `uuid`, falling back to `message.id` for a
+  record that carries none, counts it once, and lets the second copy move it
+  *into* the subagent view only. Measured over the R5a window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`): L1-routing 5,462 → 9,745
+  records / 148,504,022.4 → 202,093,981.4 weighted / share 26.5 %, L1-backlog
+  4,907 → 12,060 / 138,537,540.9 → 262,700,682.6 / 47.3 %, L1-main 2,959 → 7,089
+  / 104,906,139.8 → 190,405,176.5 / 44.9 %. The before-numbers still reproduce to
+  the token and nothing deduped on this host — parent and subagent files share
+  neither uuid nor message id, so the dedup is defensive. That corrects the third
+  row of the R5a caveat (417 records / 4.6 %): that probe counted only
+  `subagents/` dirs sitting beside a same-named session file in the *same*
+  project dir, and an L1-main subagent turn routinely runs in a worktree under
+  the main checkout while its parent session is filed under a lane's dir — its
+  records belong to the main row by `cwd`, and the real figure is 4,130.
+- **`--json`**: an unnamed `--projects-dir` prints `"default"` instead of the
+  resolved transcript root. That path carries the operator's username, and the
+  repository is public (hard rule 1); an explicit flag is echoed as it was given.
+- **`tests/test_autoos_tokenrate.py`**: `SubagentFileDiscoveryTests` (new, 11
+  cases) plus 3 CLI cases, on a fixture tree holding a session file and its
+  `subagents/` dir — both depths in the numerator, provenance alone counts as a
+  subagent turn, a shared uuid (or message id, without a uuid) counts once and
+  lands in the subagent view, the blocks of one turn keep their own uuids, an
+  agent file invents no session of its own, the window and `cwd` filters still
+  apply one level down, and `--json` says `default`. Fixtures now give every
+  record its own uuid, as the real transcript does; they had keyed the uuid off
+  the token count, which is exactly what the dedup now collapses. 9 red before
+  the change, 50 green after.
+### Fixed — OpenCode no longer loads a managed skill twice (WS-HARNESS)
+
+- **`lib/agent_harness.py`**: `desired_opencode` drops a managed skill's
+  `SKILL.md` entry that still points into an `agent-skills` clone (the skills
+  home before `.agents/skills`, retired 2026-09-25) when it writes the
+  replacement entry. Before, the merge appended the new entry and kept the old
+  one, so OpenCode loaded two diverged copies of the same skill. Only the
+  harness's own skills are touched: a user's other `agent-skills` paths, and any
+  entry at all when there is no skills source to replace it, are kept.
+
+### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
+
+A7b retired the component's *work* and left a live row holding a pointer: the
+catalog entry still named a `postInstall`, still sat in two profiles, and still
+answered "installed" from a hand-written detection branch. A7a shipped the
+mechanism that says all three from data, so the last step is to stop saying them
+in code. Windows (`catalog/windows.json`, `lib/windows`) is untouched — its entry
+still clones, and its retirement is a later lane.
+
+- **`catalog/linux.json`, `catalog/macos.json`**: `agent-skills` is
+  `"tombstone": true` with the note *its work moved to agent-skill-links,
+  omnigraph-client and the mcp-\* components* and `replaced_by` naming the six ids
+  that took it (`agent-skill-links`, `omnigraph-client`, `mcp-graphify`,
+  `mcp-serena`, `mcp-playwright`, `mcp-context7` — all present in both catalogs).
+  It is dropped from `workstation` and `ai-coding`: a profile pre-selects what
+  should get *installed*. `postInstall` goes with the installer, and the long
+  `notes` line goes because `note` now carries the same fact — one home per fact.
+  The `uv` entry's note named `agent-skills` as its consumer; it names the
+  `mcp-*` components, which is what actually runs `uv`.
+- **`lib/linux/install.sh`**: `install_agent_skills` deleted (setup.sh reports a
+  retired row before it ever asks the provider, so nothing could call it), and the
+  `agent-skills` branch of `custom_is_installed` deleted with it
+  (`catalog_probe_installed` answers *not installed* for a tombstone before it
+  probes, so the branch was unreachable too). Leaving either would have kept a
+  second owner for a fact the catalog holds.
+- **Behaviour**, on the paths A7's verify row names: a `--profile workstation` /
+  `ai-coding` dry run plans no `agent-skills` row at all and still plans the
+  successors (they are profile members in their own right); `--only
+  agent-skills` announces `agent-skills is retired: replaced by …`, plans the six
+  beside the retired row, and the row reports `skipped: retired (its work moved
+  to …)`. A state file saved before the retirement replays the same way. The
+  retired row is no longer in the "Installed apps" line, no longer prints
+  "✓ Already installed", and no longer hunted for a launcher in the landing
+  report.
+- **Tests** (all five red before the catalogs flipped, for exactly those
+  reasons): `tests/linux/13-end-to-end-dry-run-only.sh` drives the real entry
+  point over the shipped catalogs — `--only` expands, a profile plans no retired
+  id, `--from-state` replays a hand-authored pre-retirement file to its
+  successors — and its three scratch-home cases now share one `e2e_setup` helper
+  instead of restating the trick. `tests/linux/18-mcp-wiring.sh` asserts the
+  catalog shape (the boolean flag, the note, the exact successor set, no profile,
+  no `postInstall`/`prompt`/`requires`/`verify`), that the retirement leaves no
+  installer or detection branch behind, and — with detection stubbed to "everything
+  is here" — that the retired id is never reported installed while its
+  successors are. The two A7b cases that drove `install_agent_skills` and
+  `custom_is_installed agent-skills` directly are gone: the function they tested
+  no longer exists, and what replaces them is reached the way a run reaches it.
+- **`docs/catalog.md`**: the field table and the retirement section say what a
+  tombstone now *is* in this repo — no profile, no installer, the note and the
+  successors as the only prose — with the shipped `agent-skills` entry as the
+  `replaced_by` example. `docs/plans/2026-09-27-omnigraph-mcp-catalog-plan.md`
+  marks A7 done on Linux and macOS.
+
+Verified: `bash tests/run-tests.sh --filter='agent-skills,tombstone,skill,catalog,end-to-end,from-state'`
+121 passed / 0 failed; `bash setup.sh --check-catalog` exits 0; shellcheck clean
+on the touched `.sh`; `python3 -m pytest -q tests/` green.
+
+### Fixed — a retired row is locked in both terminal menus, and every selection path expands it (A7a review 2, 2026-09-28)
+
+Muse's re-check found the `replaced_by` expansion sitting behind the wrong
+condition. It ran only for a selection named by ids (`--from-state`, `--only`, and
+the browser payload that arrives as `--only`), while **neither terminal menu locked
+a retired row**: `setup.sh` set `MENU_DISABLED` for the `manual` provider only, and
+`New-AutoOSMenuItem` set `Locked` for the `manual` provider only. So a person who
+highlighted a retired row and pressed space got exactly the failure the previous
+commit was meant to close — a plan holding the `skipped: retired` row and none of
+the work that replaced it — and the row's `(retired)` label said nothing about
+where the work had gone.
+
+Both halves, because either one alone leaves a hole:
+
+- **The row**: `catalog_menu_rows` (new in `lib/linux/catalog.sh`, the twin of
+  `New-AutoOSMenuItem`, which the menu now calls instead of building its own arrays)
+  locks a retired row and labels it `(retired: replaced by <ids>)`, naming only the
+  successors this machine offers, the way the announcement line does. On Windows
+  `New-AutoOSMenuItem` gained `-OfferedIds` and the same lock and label, plus a
+  `Reason`. `ui_menu`'s and `Show-AutoOSMenu`'s non-interactive fallback read only
+  the tick, so a locked row could still leave the selector with nobody at a
+  keyboard; both now honour the lock, the same rule the key handlers apply.
+- **The selection**: `setup.sh` and `setup.ps1` expand on the way to the plan,
+  unconditionally, so no path — menu, profile, replay, `--only`, browser, or one
+  added later — can plan a tombstone without its replacements.
+- **Guard order** (the review's LOW): resolve asked whether AutoOS could install
+  the *provider* before it asked whether the row had *retired*, so a retired
+  `manual` component failed the whole run with "use its vendor link". Retirement is
+  now asked first, the row resolves and reports `skipped: retired`, and the plan no
+  longer prints its stale homepage as an "Action required" step.
+
+Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`) covers the row flags
+and label, the real `ui_menu` key handlers, the locked row against the
+non-interactive fallback, the retired-`manual` resolve, and — over a `script(1)`
+pty, skipped where none exists — the reviewer's own scenario through the real
+`setup.sh`: highlight a retired row, press space, and see that it never reaches the
+plan. The PowerShell suite (`tests/run-tests.ps1 -Filter tombstone`) covers the same
+row through `New-AutoOSMenuItem`, the same lock through `Show-AutoOSMenu`, the same
+guard order in `Resolve-AutoOSPlan`, and `-Only` of a retired `manual` id through
+`setup.ps1`. `docs/catalog.md` said a hand-chosen retired id "is still planned"; it
+no longer is, and the document says so where it describes the row.
+
+### Fixed — a tombstone names what replaced it, so a replayed state keeps the work (A7a)
+
+Sonnet's final review of the A7b lane found the retirement mechanism keeping the
+id and losing the job. A state file saved **before** a component was retired names
+the retired id and cannot name the ids that inherited its work, and `--from-state`
+took the selection verbatim: the tombstone was known, skipped, and nothing else was
+planned. The machine came back without that work and the run reported `skipped`,
+which reads like success.
+
+- **`replaced_by`** (catalog field, tombstone only): the ids that took the retired
+  component's work on. Both validators reject one that is empty, that sits on a live
+  entry, or that names an unknown id or another tombstone — a successor that installs
+  nothing would replay into a second `skipped` row, the same defect one step later.
+- **`lib/linux/catalog.sh`** (`catalog_expand_replacements`) and
+  **`lib/windows/AutoOS.Catalog.psm1`** (`Expand-AutoOSTombstoneReplacements`):
+  expand a retired id into its successors, once per id, and are asked by every
+  selection built from explicit ids — `--from-state` / `-FromState`, `--only` /
+  `-Only`, and a browser run, whose payload the server passes in as `--only`. The
+  retired row stays (it is still what reports `skipped: retired`), a successor the
+  selection already lists is not added twice, a successor this machine does not
+  offer is left out of both the plan and the announcement, and a successor retired
+  since is expanded in turn. Profiles never name a tombstone, so they never expand.
+- **`setup.sh` / `setup.ps1`**: one muted line per expanded tombstone — `agent-skills
+  is retired: replaced by agent-skill-links, omnigraph-client` — before the plan, so
+  nothing is substituted silently.
+- **`lib/linux/serve.py`, `lib/windows/AutoOS.Serve.psm1`, `web/index.html`**: the
+  payload carries `replaced_by` and the retired row shows it, the way it shows the
+  note. The page displays the successors; the installer is the one that plans them.
+- **`docs/catalog.md`**: the field and the replay rules.
+- Tests: the Linux suite (`tests/linux/39-catalog-tombstone.sh`), the PowerShell
+  suite (`tests/run-tests.ps1 -Filter tombstone`) and the page checks
+  (`tests/test-web-progress.js`) cover the validator, the loader column, the
+  expansion (dedupe, unoffered successor, chain), a hand-written pre-retirement
+  state file replayed to a plan that installs the successors, and `-Only` /
+  `--only` of a retired id.
+
+### Fixed — tombstones reach the browser, and a requirement on a retired id fails out loud (A7a review, 2026-09-28)
+
+Muse's review of the A7a commits found the retirement mechanism stopping at the
+terminal: the served payload never carried the flag, so the page — which resolves
+dependencies, pre-ticks profiles and collects prompts **in the browser** — did the
+opposite of `setup.sh` with the same catalog. And the rule "no entry may require a
+retired id" lived only in the validators, which a normal run never calls.
+
+- **`lib/linux/serve.py`**: `build_state`'s inline projection became a module-level
+  pure `state_components(catalog, platform, platforms, arch, headless, installed)`
+  that adds `tombstone` and `note`, so a test can ask the server's own function
+  without a server; `installed names` is derived from the same rows now instead of
+  being collected beside them.
+- **`lib/windows/AutoOS.Serve.psm1`** (`Get-AutoOSServeState`): the same two fields,
+  read from the projection's `Tombstone` / `RetireNote`.
+- **`web/index.html`**: retirement is one answer in one place — `canInstall()` —
+  which the profile pre-tick, the dependency closure, the questions card, the
+  quick-install button and the tick box all already ask. A retired row is **shown,
+  disabled and labelled**, not hidden: hiding it removes the only place a reader
+  learns the id went away and what replaced it, which is the reason the catalog
+  still carries it. `retiredChip` and the `(retired)` description match the terminal
+  wording, `installedChip` never says `✓ Installed` for something AutoOS no longer
+  installs, and the Configure button for a prompt the page will never ask is gone.
+- **`lib/linux/catalog.sh` + `setup.sh`**, **`lib/windows/AutoOS.Catalog.psm1` +
+  `setup.ps1`**: resolve now records a refusal (`PLAN_BLOCKED` /
+  `catalog_resolve_blocked` on Linux, `BlockedReason` on Windows) for an entry whose
+  `requires` names a tombstone, and spreads it to that entry's own dependents until
+  the set stops growing. The plan warns, the questions loop asks nothing, execution
+  records the component as failed, and the run exits 1 — the retired row stays in
+  the plan so the report can point at it. Nothing is installed without a dependency
+  it asked for.
+- **`setup.ps1`** plan tag: `(dependency)` and `(retired)` are two independent tags,
+  as in `setup.sh`; the `elseif` hid the retirement the moment a tombstone arrived
+  as a dependency rather than a hand-pick.
+- Tests (`tests/linux/39-catalog-tombstone.sh` +8, `tests/run-tests.ps1` +7,
+  `tests/test-web-progress.js` +1 block): the serve projection through
+  `state_components` itself, refusal and cascade at resolve, the ordinary resolve
+  recording nothing, `setup.sh`/`setup.ps1` end-to-end over the fixture tree
+  (non-zero exit, `Failed 1`, no prompt asked, both tags on one row), and the
+  shipped page functions run in node — `canInstall`, `closure`,
+  `profileClosureDirect` and `itemHtml` — so a page that merely stops drawing the
+  row cannot pass.
+- Docs: `docs/catalog.md`'s retirement section states the resolve-time refusal and
+  the browser's shown/disabled/labelled choice.
+
+### Added — a retired component keeps its id and installs nothing (A7a, 2026-09-28)
+
+An `id` is a contract (AGENTS.md §3): saved state files, `--only` / `-Only` flags
+and a user's last selection all name it. Deleting a component that stops being
+installable turned all of those into "Unknown component id" and a red run, and
+there was no way to say "this used to be a thing, here is what replaced it". The
+catalog can now mark one instead: `"tombstone": true` with an optional `"note"`.
+**Mechanism only — no real component is retired by this change**; deciding which
+ids become tombstones is a separate, catalog-only edit.
+
+- **`lib/linux/catalog.sh`**: the field is read in one place — `catalog_is_tombstone`
+  — which the profile expansion, the dependency walk, the loader and the installed
+  probe all ask rather than each re-deriving it. `catalog_load` carries
+  `CAT_TOMBSTONE` / `CAT_RETIRE_NOTE` beside the other columns;
+  `catalog_profile_defaults` never pre-ticks a retired id; `catalog_resolve` keeps
+  the id in the plan but drags nothing in behind it; `catalog_detect_installed`
+  reports a tombstone as not installed. `catalog_validate` accepts the field (a
+  tombstone may omit `postInstall`, `prompt`, `requires` and `verify` — they only
+  mean something for something that installs) and rejects `"tombstone"` that is
+  not the boolean `true`, an empty `note`, a `note` on a live entry, and any entry
+  that `requires` a tombstone.
+- **`lib/linux/install.sh`** (`catalog_probe_installed`): skipped for a retired id,
+  so the `✓` and the "Installed apps" line cannot answer for a product AutoOS no
+  longer offers — the same reason the cache in Detect is gated on Windows.
+- **`setup.sh`**: `--list` and the menu mark the row `(retired)`, the plan row is
+  tagged, the questions loop asks a tombstone nothing, and execution prints
+  `skipped: retired (<note>)` and counts it as already present — never installed,
+  never failed, identical on the second run. A retired component is not in the
+  post-run "where to find them" hunt, because for it "no launcher found yet" would
+  be a wrong answer rather than a blank one.
+- **`lib/windows/AutoOS.Catalog.psm1`** — the twin: `Test-AutoOSTombstone` (reads
+  the raw JSON field and the flattened projection's, and tests the type because
+  PowerShell would coerce `'1'` to `$true`), `Format-AutoOSTombstoneSkip` (one home
+  for the skip wording, so `setup.ps1` and the suite cannot drift),
+  `Test-AutoOSProfileDefault` + `Get-AutoOSProfileDefaults` (the profile rule the
+  menu row and the `-Yes` expansion shared by copy-paste now share as code), plus
+  the same four validator rules, the `Tombstone`/`RetireNote` projection fields,
+  the menu's `(retired)` label, and the dependency walk that expands nothing behind
+  a retired id.
+- **`lib/windows/AutoOS.Detect.psm1`** (`Get-AutoOSInstalledStatus`): returns
+  `not-detected` for a tombstone before the cache and before any probe — one gate
+  that `Set-AutoOSInstalledStatus`, `Test-AutoOSInstalled`,
+  `Get-AutoOSInstalledComponents`, `-Installed`, `-ListComponents` and the
+  installer's own skip check all read through.
+- **`setup.ps1`**: `-ListComponents` marks `(retired)`, the plan row is tagged, the
+  prompt collection and the `-Yes` expansion skip retired ids, execution prints the
+  skip line into `results.skipped`, and the "Where to find them" report excludes them.
+- Tests (**`tests/fixtures/catalog-tombstone.json`** — a fixture, so no real catalog
+  was touched — `tests/linux/39-catalog-tombstone.sh` 18 cases, 21 cases in
+  `tests/run-tests.ps1`'s `catalog tombstone` group): validator accepts and rejects,
+  projection keeps the facts, profile expansion and menu tick leave it alone, a
+  retired id is never detected as installed *while an ordinary id with the same
+  package still is*, the plan keeps the known id and pulls no dependency, the skip
+  line is pinned with and without a note, and the Linux side runs `setup.sh` itself
+  against a scratch tree — `--only`, a state file written by a real run replayed
+  with `--from-state`, `--list`, the summary counts and a second run.
+- Docs: **`docs/catalog.md`** gained the two Fields rows and a
+  *Retiring a component (tombstone)* section — the rules above, and why `note` and
+  `notes` are different fields.
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the

@@ -8,6 +8,7 @@ Run from the repo root (optionally one class, e.g. RoutingTableTests):
     python3 tests/test_autoos_spawner.py [ClassName]
 """
 import argparse
+import ast
 import contextlib
 import datetime
 import importlib.util
@@ -62,11 +63,49 @@ def tearDownModule():
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 
+SHIPPED_REGISTRY = json.loads(
+    (ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+
+
+def r_leg_is_claude(leg):
+    """The shipped registry's own Claude predicate, for CLI-level assertions."""
+    return bool(leg) and resolver.is_claude_leg(leg, SHIPPED_REGISTRY)
+
+
 def clean_env(**extra):
+    # An ambient AUTOOS_SESSION_TAG is the lane's own tag: a spawn run from a
+    # lane session takes it instead of deriving one from ROOT, so every
+    # session-tag test that does not name a tag passed on whatever the calling
+    # shell happened to export (measured 2026-09-28 in a lane sandbox: two
+    # SessionTagTests fail only there). The same reasoning as the key strip -
+    # the suite must pass on a machine that is mid-handoff. A test that wants a
+    # tag sets one: clean_env(AUTOOS_SESSION_TAG="lane/one").
+    dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("AUTOOS_AGENT_") and k != "AUTOOS_OMNIROUTE_KEY"}
+           if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
     env.update(extra)
     return env
+
+
+def claude_env(**extra):
+    """`clean_env` plus the orchestrator's Claude declaration.
+
+    CLAUDEBUDGET-b item 1/3(d): with the shipped `claude_budget` on, spawning
+    `--client claude` is refused -- Claude is held for finals and for the work the
+    orchestrator declares. The tests below that only want to look at the *claude
+    client's own shape* (its argv, `--joinable`, `--lean`'s mcp config, the
+    sandbox containment path) are not tests of the budget, so they declare the run
+    the way an orchestrator would. The budget's own tests
+    (ClaudeBudgetSpawnTests/ClaudeBudgetMcpSpawnTests) deliberately leave it unset:
+    that refusal is what they measure.
+
+    CLAUDEBUDGET-d item 2: the same declaration covers `--client agy`. What spends
+    the allowance is the model that answers, and agy answers with
+    `clients.AGY_DEFAULT_MODEL` = a Claude model when the caller names no --model,
+    so naming that client was never a claim that the run is free.
+    """
+    return clean_env(AUTOOS_CLAUDE_CRITICAL="test: the claude client's own argv",
+                     **extra)
 
 
 def run_agent(*args, env=None):
@@ -370,15 +409,47 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_codex_runs_exec_through_omniroute(self):
         r = plan_of("--client", "codex", "t")
-        self.assertIn("omniroute run codex --model t2-worker --api-key-env AUTOOS_OMNIROUTE_KEY -- exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
+        self.assertIn("omniroute run codex --model t2-worker --api-key-env AUTOOS_OMNIROUTE_KEY --",
+                      r.stdout)
+        self.assertIn("exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
+
+    def test_codex_header_overrides_precede_the_exec_subcommand(self):
+        # FLEETP0 review item 4, measured 2026-09-28 against a listener the
+        # launcher was pointed at: -c before `exec` merges into the provider the
+        # launcher configured and the header rides the request; the same -c after
+        # `exec` replaces model_providers wholesale and codex refuses to start.
+        headers = {"x-omniroute-session-id": "lane/t/20260928-092516-fix-the-router-abc123",
+                   "X-AutoOS-Run-Id": "20260928-092516-fix-the-router-abc123"}
+        cmd = clients.build_command(clients.CLIENTS["codex"], "task", "combo",
+                                    "edit", "m", None, headers)
+        sep = cmd.index("--")
+        self.assertEqual(cmd[:sep], ["omniroute", "run", "codex", "--model", "m",
+                                     "--api-key-env", "AUTOOS_OMNIROUTE_KEY"])
+        self.assertEqual(cmd[sep + 1:sep + 5],
+                         ["-c", 'model_providers.omniroute.http_headers.'
+                                'x-omniroute-session-id="lane/t/20260928-092516-fix-the-router-abc123"',
+                          "-c", 'model_providers.omniroute.http_headers.'
+                                'X-AutoOS-Run-Id="20260928-092516-fix-the-router-abc123"'])
+        self.assertEqual(cmd[sep + 5], "exec")
+        self.assertEqual(cmd[-1], "task", "the brief still lands in the last argv")
+
+    def test_a_client_with_no_argv_header_hook_ignores_the_headers(self):
+        # gemini carries by env (autoos-agent.py sets it), qwen carries nothing:
+        # neither gets an -c it cannot use.
+        for name in ("qwen", "gemini"):
+            cmd = clients.build_command(clients.CLIENTS[name], "task", "combo",
+                                        "edit", "m", None, {"x-a": "b"})
+            self.assertNotIn("-c", cmd, name)
+            self.assertEqual(cmd[-1], "task", name)
 
     def test_claude_is_headless_print_on_its_own_login(self):
-        r = plan_of("--client", "claude", "t")
+        r = plan_of("--client", "claude", "t", env=claude_env())
         self.assertIn("would run: claude -p --permission-mode acceptEdits t", r.stdout)
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", r.stdout)
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t",
+                    env=claude_env())
         self.assertIn("claude --bg --remote-control d1 --strict-mcp-config --mcp-config "
                       "'{\"mcpServers\":{}}' --name d1", r.stdout)
 
@@ -402,7 +473,7 @@ class ClientCommandTests(unittest.TestCase):
         # go BEFORE -p. Item 2: with no caller model it gets the measured
         # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
         # own default Gemini whose quota is out until ~2026-10-01.
-        r = plan_of("--client", "agy", "t")
+        r = plan_of("--client", "agy", "t", env=claude_env())
         self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
 
@@ -463,8 +534,14 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("qodercli -p --permission-mode dont_ask", r.stdout)
         self.assertNotIn("bypass_permissions", r.stdout)
 
-    def test_qoder_explicit_model_is_kept(self):
-        r = plan_of("--client", "qoder", "--model", "Efficient", "t")
+    def test_a_declared_qoder_explicit_model_is_kept(self):
+        # CLAUDEBUDGET-g item A: "Efficient" is a qoder-native name no registry row
+        # carries, and under the shipped budget an unpriceable caller-named model is
+        # a refusal. This test measures the argv, so it declares the run the way an
+        # orchestrator would (the suite's `claude_env` convention) -- the declared
+        # path only; the undeclared refusal is
+        # `ClaudeBudgetLastMileTests.test_an_undeclared_claude_model_on_qoder_is_refused`.
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t", env=claude_env())
         self.assertIn("--model Efficient", r.stdout)
         self.assertNotIn("Qwen3.8-Flash", r.stdout)
 
@@ -633,7 +710,8 @@ class ReviewFindingTests(unittest.TestCase):
     """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
 
     def test_joinable_keeps_an_explicit_model(self):
-        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "--model", "opus", "t")
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1",
+                    "--model", "opus", "t", env=claude_env())
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
@@ -671,7 +749,7 @@ class DepthTests(unittest.TestCase):
         self.assertIn("depth: 1/%d" % clients.DEFAULT_MAX_DEPTH, r.stdout)
 
     def test_spawn_past_the_max_is_refused(self):
-        r = plan_of("--client", "agy", "t", env=clean_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
+        r = plan_of("--client", "agy", "t", env=claude_env(AUTOOS_AGENT_DEPTH="2", AUTOOS_AGENT_MAX_DEPTH="2"))
         self.assertEqual(r.returncode, 4)
         self.assertIn("depth", r.stderr)
 
@@ -712,7 +790,7 @@ class LeanTests(unittest.TestCase):
         self.assertIn("lean: no serena, playwright, context7", r.stdout)
 
     def test_lean_claude_uses_a_strict_empty_mcp_config(self):
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertIn("--strict-mcp-config", r.stdout)
 
     def test_lean_is_refused_where_it_cannot_be_applied(self):
@@ -783,7 +861,7 @@ class LeanTests(unittest.TestCase):
         r = plan_of("--lean", "--card", "role=review", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
-        r = plan_of("--client", "claude", "--lean", "t")
+        r = plan_of("--client", "claude", "--lean", "t", env=claude_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("cannot drop its MCP servers", r.stdout)
 
@@ -865,7 +943,8 @@ class SignInProbeTests(unittest.TestCase):
     def test_run_refuses_a_signed_out_agy_fast_and_never_starts_the_task(self):
         d, env = self.stub(self.SIGNED_OUT)
         start = time.time()
-        r = run_agent("run", "--client", "agy", "Reply with exactly: ack", env=env)
+        r = run_agent("run", "--client", "agy", "Reply with exactly: ack",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("agy is installed but not signed in", r.stderr)
         self.assertIn("Please sign in", r.stderr)
@@ -874,7 +953,8 @@ class SignInProbeTests(unittest.TestCase):
 
     def test_run_goes_ahead_when_agy_is_signed_in(self):
         d, env = self.stub(self.SIGNED_IN)
-        r = run_agent("run", "--client", "agy", "t", env=env)
+        r = run_agent("run", "--client", "agy", "t",
+                      env=dict(env, AUTOOS_CLAUDE_CRITICAL="test: agy sign-in probe"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # AGYFIX item 1+2 (measured 2026-09-27): the working form is
         # `agy --model <m> -p <task>`, and with no caller model the spawner
@@ -1185,8 +1265,10 @@ class McpToolTests(unittest.TestCase):
 
     def test_run_job_exports_the_task_dir_to_the_child(self):
         """run_job passes AUTOOS_TASK_DIR=<run dir> so a blocked worker's brief
-        can point tools/autoos-ask.py at this run; autoos-agent.py forwards
-        os.environ to the client, so the worker itself sees it."""
+        can point tools/autoos-ask.py at this run — and passes it inside a
+        chosen environment, not a copy of the caller's (FF1b item 6): the CLI
+        child scrubs again before a client starts, but a token does not need to
+        reach the process that only forwards it."""
         path = self.make_run("env-test", argv=["--version"])
         box = {}
 
@@ -1195,9 +1277,23 @@ class McpToolTests(unittest.TestCase):
             return 0
 
         with mock.patch.object(mcp_server.subprocess, "call", fake_call):
-            self.assertEqual(mcp_server.run_job(path), 0)
+            with mock.patch.dict(os.environ, {"GH_TOKEN": "gh-secret",
+                                              "GITHUB_TOKEN": "ghs-secret",
+                                              "SSH_AUTH_SOCK": "/run/user/4242/a.sock",
+                                              "AUTOOS_KEYS_FILE": "/x/api-keys.yml",
+                                              "OPENAI_API_KEY": "sk-secret",
+                                              "AWS_SECRET_ACCESS_KEY": "aws-secret",
+                                              "XDG_RUNTIME_DIR": "/run/user/4242"}):
+                self.assertEqual(mcp_server.run_job(path), 0)
         self.assertEqual(box["argv"], [sys.executable, mcp_server.AGENT, "--version"])
-        self.assertEqual(box["env"], dict(os.environ, AUTOOS_TASK_DIR=path))
+        self.assertEqual(path, box["env"]["AUTOOS_TASK_DIR"])
+        for name in ("PATH", "HOME"):
+            self.assertIn(name, box["env"], name)
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "AUTOOS_KEYS_FILE",
+                     "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "XDG_RUNTIME_DIR"):
+            self.assertNotIn(name, box["env"], "%s reached the CLI child" % name)
+        self.assertNotEqual(dict(os.environ), box["env"],
+                            "run_job handed the child the caller's whole env")
 
     def test_a_refused_spawn_is_rejected(self):
         """Spec §9: a spawn the server refuses never started anything, so its
@@ -1941,7 +2037,7 @@ class ProbeProposalTests(unittest.TestCase):
     """TC2: propose a tool-calling re-probe when a real run's gate contradicts
     the recorded tool_calls status of its route's legs (spec 5.6 track_entry,
     catalog/ai-registry.json models[<model>].tool_calls, overlay
-    logs/routing/measured.json legs[<leg>].tool_calls.value)."""
+    (tools/autoos_overlay.py) legs[<leg>].tool_calls.value)."""
 
     REGISTRY = {
         "providers": {
@@ -2883,8 +2979,12 @@ class SandboxUniquenessTests(unittest.TestCase):
 
     def _two_plans(self, task):
         fixed = datetime.datetime(2026, 9, 26, 12, 0, 0)
-        frozen = types.SimpleNamespace(datetime=type(
-            "FrozenDatetime", (), {"now": staticmethod(lambda: fixed)}))
+        # the fake carries the whole datetime surface build_plan touches:
+        # datetime.datetime.now(timezone.utc) stamps the run id
+        frozen = types.SimpleNamespace(
+            datetime=type("FrozenDatetime", (),
+                          {"now": staticmethod(lambda tz=None: fixed)}),
+            timezone=datetime.timezone)
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
             cfg = self.cli.load_jsonc(str(ROOT / "opencode.jsonc"))
@@ -2899,7 +2999,11 @@ class SandboxUniquenessTests(unittest.TestCase):
 
     def test_the_readable_prefix_is_kept_and_a_short_suffix_added(self):
         first, second = self._two_plans("fix the spawner twice")
-        stamp, slug = "20260926-120000", "fix-the-spawner-twice"
+        # FLEET: the clone and its branch are named by the run id, whose slug is
+        # the title the run is named by - a titleless spawn's title is the tier
+        # plus the task head, so the readable prefix grew the "t2-" it always
+        # showed in `ps`.
+        stamp, slug = "20260926-120000", "t2-fix-the-spawner-twice"
         base = "%s-%s-%s" % (os.path.basename(self.cli.ROOT), stamp, slug)
         self.assertTrue(os.path.basename(first["sandbox"]["path"]).startswith(base + "-"),
                         first["sandbox"]["path"])
@@ -2920,6 +3024,19 @@ class SessionTagTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = load_agent()
+
+    def setUp(self):
+        # A spawn taken from inside a lane session inherits that lane's
+        # AUTOOS_SESSION_TAG instead of deriving its tag from ROOT, so every
+        # fallback expectation below would only hold on a host where the
+        # variable happens to be unset (measured 2026-09-28 in a lane sandbox:
+        # these tests fail in a lane and pass on a bare checkout). A test that
+        # wants a tag sets one itself.
+        self._saved_tag = os.environ.pop("AUTOOS_SESSION_TAG", None)
+
+    def tearDown(self):
+        if self._saved_tag is not None:
+            os.environ["AUTOOS_SESSION_TAG"] = self._saved_tag
 
     def _lane(self):
         # The lane part as session_tag() derives it (sanitised, capped): a
@@ -2957,6 +3074,10 @@ class SessionTagTests(unittest.TestCase):
     def _overlay(self, plan):
         return json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}"))
 
+    def _header(self, plan):
+        return self._overlay(plan)["providers"]["omniroute"]["headers"][
+            self.cli.SESSION_TAG_HEADER]
+
     def test_omniroute_model_carries_the_session_header_from_title(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AUTOOS_SESSION_TAG", None)
@@ -2964,13 +3085,14 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(
             prov["headers"]["x-omniroute-session-id"],
-            "%s/fix-the-router" % self._lane())
+            "%s/fix-the-router/%s" % (self._lane(), plan["run_id"]))
 
     def test_autoos_session_tag_overrides_the_default(self):
         with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one.two_3-x"}):
             plan = self.cli.build_plan(self._args(title="ignored"), self._cfg({}))
         prov = self._overlay(plan)["providers"]["omniroute"]
-        self.assertEqual(prov["headers"]["x-omniroute-session-id"], "lane/one.two_3-x")
+        self.assertEqual(prov["headers"]["x-omniroute-session-id"],
+                         "lane/one.two_3-x/%s" % plan["run_id"])
 
     def test_an_invalid_tag_falls_back_with_one_warning(self):
         with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "bad tag with spaces!!"}):
@@ -2979,7 +3101,7 @@ class SessionTagTests(unittest.TestCase):
                 plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % self._lane())
+                         "%s/t/%s" % (self._lane(), plan["run_id"]))
         warns = [l for l in err.getvalue().splitlines()
                  if "AUTOOS_SESSION_TAG" in l]
         self.assertEqual(len(warns), 1, err.getvalue())
@@ -3001,7 +3123,152 @@ class SessionTagTests(unittest.TestCase):
         prov = self._overlay(plan)["providers"]["omniroute"]
         self.assertEqual(prov["settings"], {"baseURL": "http://x/v1"})
         self.assertEqual(prov["headers"]["x-omniroute-session-id"],
-                         "%s/t" % self._lane())
+                         "%s/t/%s" % (self._lane(), plan["run_id"]))
+
+    # --- D-063: one Conversation per run ----------------------------------
+    # OmniRoute's resolveConversationId keys a conversation on the whole header
+    # value, so "<tag>/<run-id>" threads one conversation per spawn while the
+    # part before the first "/" still names the lane (usage --by lane).
+
+    def test_the_header_is_the_tag_slash_the_run_id(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one"}):
+            plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        header = self._header(plan)
+        self.assertEqual(header, "lane/one/%s" % plan["run_id"])
+        self.assertEqual(header.split("/")[0], "lane", "the lane part survives")
+        self.assertEqual(header.rsplit("/", 1)[1], plan["run_id"],
+                         "the run id is the last segment")
+        self.assertRegex(header, self.cli.SESSION_TAG_RE)
+
+    def test_the_tag_part_and_the_run_id_part_split_back_apart(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one"}):
+            plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        header = self._header(plan)
+        tag, run_id = header.rsplit("/", 1)
+        self.assertEqual(tag, plan["session_tag"],
+                         "the bare tag the record and the printout keep")
+        self.assertTrue(self.cli.is_canonical_run_id(run_id), header)
+
+    def test_the_record_and_the_printout_keep_the_bare_tag(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one"}):
+            plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        self.assertEqual(plan["session_tag"], "lane/one")
+        r = run_agent("run", "--dry-run", "--tier", "2", "t",
+                      env=clean_env(AUTOOS_SESSION_TAG="lane/one"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("session-tag: lane/one\n", r.stdout, r.stdout)
+
+    def test_a_long_tag_keeps_the_tag_only_and_says_so(self):
+        # Measured in the gateway build: resolveConversationId does
+        # header.trim().slice(0,128) - it TRUNCATES, so an over-long combined
+        # value would silently cut the run id off the end of the conversation
+        # key. The tag alone is what OmniRoute can hold, so it is what we send.
+        long_tag = "lane/" + "t" * 100   # valid: [A-Za-z0-9._/-]{1,120}
+        self.assertLessEqual(len(long_tag), self.cli.SESSION_TAG_MAX_LEN)
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": long_tag}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        self.assertEqual(self._header(plan), long_tag)
+        self.assertIn("x-omniroute-session-id", err.getvalue())
+        # the run id still rides its own header, so the run is not untraceable
+        self.assertEqual(self._overlay(plan)["providers"]["omniroute"]["headers"][
+            self.cli.RUN_ID_HEADER], plan["run_id"])
+
+    def test_an_ordinary_tag_and_run_id_fit_the_cap_it_enforces(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one"}):
+            plan = self.cli.build_plan(self._args(title="T"), self._cfg({}))
+        self.assertLessEqual(len(self._header(plan)),
+                             self.cli.OMNIROUTE_SESSION_ID_MAX)
+
+    # --- item 4 (FLEETP0 review): the headers are not opencode's alone ------
+    # Every gateway client that can put a header on its own requests carries the
+    # same pair; the carriers are measured in autoos_clients.py, and qwen, which
+    # has no hook at all, stays untagged (docs/routing.md).
+
+    def _gateway_plan(self, client):
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": "lane/one"}):
+            return self.cli.build_plan(self._args(client=client, title="T"),
+                                       self._cfg({}))
+
+    def _codex_header_args(self, plan):
+        """{name: value} of the `-c …http_headers.<name>="v"` overrides in argv."""
+        cmd = plan["cmd"]
+        out = {}
+        for i, tok in enumerate(cmd[:-1]):
+            if tok == "-c" and ".http_headers." in cmd[i + 1]:
+                key, _, value = cmd[i + 1].partition("=")
+                out[key.rsplit(".http_headers.", 1)[1]] = value.strip('"')
+        return out
+
+    def test_the_gateway_carrier_names_are_the_measured_vendor_ones(self):
+        # Pinning the two names the measurement found, so a rename in our code
+        # fails here rather than silently un-attributing every run of that client.
+        self.assertEqual(self.cli.clients.GEMINI_CUSTOM_HEADERS_ENV,
+                         "GEMINI_CLI_CUSTOM_HEADERS")
+        self.assertEqual(self.cli.clients.CODEX_PROVIDER_TABLE, "model_providers.omniroute")
+        self.assertEqual(set(self.cli.clients.HEADER_CLIENTS), {"gemini", "codex"})
+
+    def test_codex_carries_both_headers_and_puts_them_before_its_exec(self):
+        plan = self._gateway_plan("codex")
+        self.assertEqual(self._codex_header_args(plan), {
+            self.cli.SESSION_TAG_HEADER: "lane/one/%s" % plan["run_id"],
+            self.cli.RUN_ID_HEADER: plan["run_id"]})
+        cmd = plan["cmd"]
+        # Measured 2026-09-28: the same -c after `exec` replaces the whole
+        # model_providers table, and codex then refuses its own provider
+        # ("provider name must not be empty") and never starts.
+        self.assertLess(cmd.index("-c"), cmd.index("exec"), cmd)
+        self.assertEqual(cmd[-1], plan["brief"], "the task stays the last argv")
+        self.assertEqual(plan["session_tag"], "lane/one")
+
+    def test_gemini_carries_both_headers_in_its_custom_headers_env(self):
+        plan = self._gateway_plan("gemini")
+        raw = plan["env"][self.cli.clients.GEMINI_CUSTOM_HEADERS_ENV]
+        # Parse it the way the CLI does (bundle parseCustomHeaders): a comma only
+        # splits when a `name:` follows, and the FIRST ':' divides name from value.
+        got = {}
+        for entry in re.split(r",(?=\s*[^,:]+:)", raw):
+            name, _, value = entry.partition(":")
+            got[name.strip()] = value.strip()
+        self.assertEqual(got, {self.cli.SESSION_TAG_HEADER: "lane/one/%s" % plan["run_id"],
+                               self.cli.RUN_ID_HEADER: plan["run_id"]})
+        self.assertEqual(plan["session_tag"], "lane/one")
+        self.assertNotIn("-c", plan["cmd"], "gemini carries its headers by env, not argv")
+
+    def test_qwen_carries_neither_header_and_claims_no_tag(self):
+        plan = self._gateway_plan("qwen")
+        self.assertNotIn(self.cli.clients.GEMINI_CUSTOM_HEADERS_ENV, plan["env"])
+        self.assertNotIn("-c", plan["cmd"])
+        self.assertIsNone(plan["session_tag"],
+                          "qwen cannot stamp a request header; printing a tag it "
+                          "never sends would attribute rows that do not exist")
+
+    def test_a_long_tag_keeps_the_bare_tag_for_a_headed_client_too(self):
+        long_tag = "lane/" + "t" * 110   # 118 chars: fits SESSION_TAG_MAX_LEN
+        with mock.patch.dict(os.environ, {"AUTOOS_SESSION_TAG": long_tag}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                plan = self.cli.build_plan(self._args(client="codex", title="T"),
+                                           self._cfg({}))
+        args = self._codex_header_args(plan)
+        self.assertEqual(args[self.cli.SESSION_TAG_HEADER], long_tag)
+        self.assertEqual(args[self.cli.RUN_ID_HEADER], plan["run_id"])
+        self.assertIn("x-omniroute-session-id", err.getvalue())
+
+    def test_a_key_in_the_title_reaches_neither_the_tag_nor_the_header(self):
+        # The tag is the other half of the same header, cut at 40 chars - also
+        # shorter than a key. Measured before the fix: with a key in the title,
+        # the run id came back scrubbed and the HEADER still carried the key,
+        # because session_tag slugified the raw title.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.cli.build_plan(
+                self._args(title="rotate sk-ABCDEFGHIJKLMNOP"), self._cfg({}))
+        self.assertNotIn("abcdefghijklmnop", plan["session_tag"])
+        self.assertNotIn("abcdefghijklmnop", self._header(plan))
+        self.assertNotIn("abcdefghijklmnop", json.dumps(self._overlay(plan)))
+        self.assertEqual(plan["session_tag"].rsplit("/", 1)[-1], "rotate")
 
     def test_the_plan_output_prints_the_session_tag(self):
         r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
@@ -3010,11 +3277,26 @@ class SessionTagTests(unittest.TestCase):
         self.assertIn("session-tag: %s/my-tag" % self._lane(),
                       r.stdout)
 
-    def test_a_non_opencode_client_prints_no_session_tag(self):
-        r = run_agent("run", "--dry-run", "--client", "gemini", "--tier", "2",
-                      "t", env=clean_env())
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("session-tag:", r.stdout)
+    def test_a_client_that_carries_no_header_prints_no_session_tag(self):
+        # qwen has no header hook at all (autoos_clients.py), and claude never
+        # reaches the gateway: neither may claim a tag it cannot send.
+        # CLAUDEBUDGET: the claude leg asks through claude_env(). With the shipped
+        # budget on, an undeclared `--client claude` is refused before it prints
+        # any tag at all, and this test measures the tag, not the gate.
+        for client, env in (("qwen", clean_env()), ("claude", claude_env())):
+            r = run_agent("run", "--dry-run", "--client", client, "--tier", "2",
+                          "t", env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("session-tag:", r.stdout, client)
+
+    def test_a_client_that_carries_headers_prints_its_session_tag(self):
+        # FLEETP0 review item 4: the tag is not opencode's alone, so the two
+        # other gateway clients that can send it say so in the plan.
+        for client in ("gemini", "codex"):
+            r = run_agent("run", "--dry-run", "--client", client, "--tier", "2",
+                          "t", env=clean_env(AUTOOS_SESSION_TAG="lane/one"))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("session-tag: lane/one\n", r.stdout, client)
 
 
 class HeadlessRefusalTests(unittest.TestCase):
@@ -3069,8 +3351,8 @@ class HeadlessRefusalTests(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(stub)
         os.chmod(path, 0o755)
-        env = clean_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
-                        AUTOOS_STATE_DIR=d)
+        env = claude_env(PATH=d + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                         AUTOOS_STATE_DIR=d)
         r = run_agent("run", "--client", "agy", "t", env=env)
         self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
         self.assertIn("autoos-agent: HEADLESS-REFUSAL:", r.stderr)
@@ -3502,6 +3784,28 @@ class SpawnerOutputRedactionTests(unittest.TestCase):
         self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", json.dumps(entry))
         self.assertEqual(entry["cost"], 0.5, "non-text fields pass through")
 
+    def test_a_nested_tuple_set_or_frozenset_is_walked_too(self):
+        # FLEETP0 review LOW: redact_record walked dicts and lists, so a value
+        # of any other container type reached the record, the `ps` output and
+        # the log with its key intact.
+        self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
+        rec = self.agent.redact_record({
+            "skipped_legs": ("omniroute/sk-ABCDEFGHIJKLMNOP1234",),
+            "legs_seen": {"omniroute/sk-ABCDEFGHIJKLMNOP1234"},
+            "leg_set": frozenset({"Bearer " + self.INJECTED}),
+            "nested": {"deep": [{"t": ("ghp_0123456789abcdefGHIL",)}]},
+            "n": 3})
+        dump = repr(rec)
+        self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", dump)
+        self.assertNotIn("ghp_0123456789abcdefGHIL", dump)
+        self.assertNotIn(self.INJECTED, dump)
+        self.assertEqual(rec["n"], 3)
+        self.assertIsInstance(rec["skipped_legs"], tuple)
+        self.assertIsInstance(rec["legs_seen"], set)
+        self.assertIsInstance(rec["leg_set"], frozenset)
+        self.assertEqual(rec["skipped_legs"][0],
+                         "omniroute/" + self.r.TEXT_MASK)
+
     def test_the_wip_commit_message_is_redacted(self):
         self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
         repo = tempfile.mkdtemp()
@@ -3536,16 +3840,23 @@ class RawTailClassificationTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
 
     def _run_verdict(self, exit_obj):
         fake_plan = {
-            "agent": "t2-worker", "client": "qoder", "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"], "env": {},
+            "agent": "t2-worker", "client": "qoder",
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: the argv a real qoder launch carries (build_command
+            # always names a model), because the last-mile gate now prices the plan
+            # it reads instead of falling back to a value the plan does not carry.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"], "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
                       "card": None},
             "depth": (1, 3), "free": False, "sandbox": None,
+            "run_id": "20260928-092516-test-run-abc123",
             "cwd": os.getcwd(),
         }
         ns = argparse.Namespace(
@@ -3631,7 +3942,8 @@ class CardV2Tests(unittest.TestCase):
 
     def test_the_v2_tables_are_the_documented_ones(self):
         self.assertEqual(routing.CARD_V2_VALUES, {
-            "kind": ("implement", "debug", "review", "plan", "bulk", "research"),
+            "kind": ("implement", "debug", "review", "plan", "bulk", "research",
+                     "final"),
             "risk": ("normal", "high"),
             "spec": ("exact", "partial", "vague"),
             "privacy": ("public", "sensitive"),
@@ -3641,12 +3953,33 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
-            "author": None,
+            "author": None, "critical": False,
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
         self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
         self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+
+    def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
+        """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
+        `critical=true` names blocking work -- the two card states that may
+        still spend Claude in budget mode. `critical` is a boolean like
+        `deferrable`, and both are v2-only fields."""
+        self.assertIs(self.norm({"kind": "final"})["kind"], "final")
+        self.assertIs(self.norm({"critical": True})["critical"], True)
+        self.assertIs(self.norm({"critical": "true"})["critical"], True)
+        self.assertIs(self.norm({})["critical"], False)
+        for bad in ("yes", "1", "maybe"):
+            with self.assertRaises(routing.CardError, msg=bad):
+                routing.normalize_v2({"critical": bad})
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2({"kind": "final-review"})
+
+    def test_a_dotted_card_string_carries_final_and_critical(self):
+        out = routing.normalize_v2(routing.parse_card(
+            "kind=final,critical=true,paths=README.md"))
+        self.assertEqual(out["kind"], "final")
+        self.assertTrue(out["critical"])
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})
@@ -3974,6 +4307,7 @@ class RouteCliTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         self.agent.clients = _FakeClients
 
@@ -4105,14 +4439,18 @@ class RouteCliTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # Build a minimal fake plan so cmd_run does not need the real
         # route-resolution machinery.
         fake_plan = {
             "agent": "t2-worker",
             "client": "qoder",
-            "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"],
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: a real qoder argv names its model (see the fixture in
+            # RawTailClassificationTests._run_verdict); the gate prices the plan.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"],
             "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
@@ -4120,6 +4458,7 @@ class RouteCliTests(unittest.TestCase):
             "depth": (1, 3),
             "free": False,
             "sandbox": None,
+            "run_id": "20260928-092516-test-run-abc123",
             "cwd": os.getcwd(),
         }
         ns = argparse.Namespace(
@@ -4167,6 +4506,7 @@ class RunCardV2Tests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # _small_route_registry()'s only orchestrator-priceable model is "orch".
         self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
@@ -4446,7 +4786,7 @@ class RunCardV2PrivacyTests(unittest.TestCase):
         agent = load_agent()
         registry = json.loads((ROOT / "catalog" / "ai-registry.json")
                               .read_text(encoding="utf-8"))
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, _ = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         result = agent.route_plan_for(
             "kind=review,paths=tools/registry.py,privacy=sensitive", "", str(ROOT),
@@ -4557,8 +4897,8 @@ class McpRouteTests(unittest.TestCase):
 
 _FAKE_ISOLATE_AGY_SRC = '''
 import os, subprocess, sys
-root = os.environ["AUTOOS_FAKE_ROOT"]
-mode = os.environ.get("AUTOOS_FAKE_MODE", "noop")
+root = os.environ["AUTOOS_AGENT_FAKE_ROOT"]
+mode = os.environ.get("AUTOOS_AGENT_FAKE_MODE", "noop")
 def git(*a):
     subprocess.run(["git", "-C", root, *a], check=True,
                    capture_output=True, text=True)
@@ -5039,19 +5379,44 @@ class IsolateContainmentTests(unittest.TestCase):
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
-            env["AUTOOS_FAKE_ROOT"] = root
-            env["AUTOOS_FAKE_MODE"] = mode
+            env["AUTOOS_AGENT_FAKE_ROOT"] = root
+            env["AUTOOS_AGENT_FAKE_MODE"] = mode
+            # CLAUDEBUDGET-d item 2: agy's own default model IS Claude, so these
+            # spawns are Claude spends and the budget gate holds them -- the same
+            # `claude_env` convention as the claude-client tests above. These
+            # tests measure containment, not the budget, so the harness declares
+            # the run the way an orchestrator would; ClaudeBudgetSpawnTests
+            # measures the refusal itself and leaves this out.
+            # FF1 (D-106): the declaration is this *parent* process's, and the
+            # spawner strips it before the worker; the fake's own knobs come down
+            # the plan (see build_plan_with_fake below), because the child env is
+            # an allowlist now.
+            env["AUTOOS_CLAUDE_CRITICAL"] = "test: agy containment harness"
             out, err = io.StringIO(), io.StringIO()
+
+            # FF1 (D-106): the child env is an allowlist of the caller's, so a
+            # knob the fake client reads has to come down the plan — the channel
+            # a real plan uses. The copy in os.environ above is still what the
+            # pre-run client probe sees, which runs in the spawner's own env.
+            real_build_plan = agent.build_plan
+
+            def build_plan_with_fake(*a, **k):
+                plan = real_build_plan(*a, **k)
+                plan["env"]["AUTOOS_AGENT_FAKE_ROOT"] = root
+                plan["env"]["AUTOOS_AGENT_FAKE_MODE"] = mode
+                return plan
+
             with mock.patch.dict(os.environ, env, clear=True):
-                # SPAWNCAP (S2): the real registry declares headless agy with
-                # shell=false/write=false (its headless refusal evidence), but
-                # these tests exercise containment/leak/provider-stop with a fake
-                # worker, not the capability gate. Neutralise the gate here so
-                # the containment behaviour is still what is measured.
-                with mock.patch.object(agent, "client_capabilities",
-                                       lambda name, registry=None: {"shell": True, "write": True}):
-                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                        rc = agent.cmd_run(args, cfg)
+                with mock.patch.object(agent, "build_plan", build_plan_with_fake):
+                    # SPAWNCAP (S2): the real registry declares headless agy with
+                    # shell=false/write=false (its headless refusal evidence), but
+                    # these tests exercise containment/leak/provider-stop with a fake
+                    # worker, not the capability gate. Neutralise the gate here so
+                    # the containment behaviour is still what is measured.
+                    with mock.patch.object(agent, "client_capabilities",
+                                           lambda name, registry=None: {"shell": True, "write": True}):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(args, cfg)
         finally:
             os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
@@ -5671,11 +6036,29 @@ class IsolateContainmentTests(unittest.TestCase):
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
-            env["AUTOOS_FAKE_ROOT"] = root
+            env["AUTOOS_AGENT_FAKE_ROOT"] = root
+            # CLAUDEBUDGET-b: this Namespace spawns client "claude", which the
+            # shipped budget holds for finals. The test measures the joinable
+            # sandbox's containment, so it carries the orchestrator's
+            # declaration; without it cmd_run refuses before it gets that far.
+            # FF1 (D-106): it is read by the spawner process, and stripped out
+            # of the worker's env; the fake's knob comes down the plan.
+            env[agent.resolver.CLAUDE_CRITICAL_ENV] = "test: joinable containment"
             out, err = io.StringIO(), io.StringIO()
+
+            # FF1 (D-106): as in run_isolated — a fake client's knob comes down
+            # the plan, because the child env is an allowlist now.
+            real_build_plan = agent.build_plan
+
+            def build_plan_with_fake(*a, **k):
+                plan = real_build_plan(*a, **k)
+                plan["env"]["AUTOOS_AGENT_FAKE_ROOT"] = root
+                return plan
+
             with mock.patch.dict(os.environ, env, clear=True):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = agent.cmd_run(args, cfg)
+                with mock.patch.object(agent, "build_plan", build_plan_with_fake):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = agent.cmd_run(args, cfg)
         finally:
             os.chdir(old_cwd)  # before the cleanup removes the scratch dir
             agent.ROOT, agent.TRACK_RECORD = old_root, old_track
@@ -5756,12 +6139,18 @@ def _fallthrough_registry(route_ids, policy=None):
 
 
 def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
-                      track_record, client_state):
+                      track_record, client_state, client="opencode", env=None,
+                      overlay_missing_at=None):
     """route_plan_for stand-in: the first route id still in `registry`.
 
     `_resolve_route_v2` drops the excluded ids before calling, so the second
     attempt sees only the routes that have not been tried yet. No routes left
-    is the resolver's own input_required."""
+    is the resolver's own input_required. `client`/`env` (CLAUDEBUDGET-b item 3)
+    are the Claude gate's two inputs and `overlay_missing_at` (OVERLAYHOME) is
+    the no-overlay report's; this stub plans without the resolver, so it
+    takes them and ignores them -- but it must take them, because `run` now
+    passes them and a stub that silently dropped them would let the real gate
+    drift from what a spawn actually sees."""
     routes = list((registry.get("routes") or {}).keys())
     if not routes:
         return {"route": None, "state": "input_required",
@@ -5772,7 +6161,7 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
 
 
 def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
-                     stop_tail=None):
+                     stop_tail=None, env_over=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -5798,8 +6187,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     statedir = tempfile.mkdtemp()
     case.addCleanup(shutil.rmtree, root, True)
     case.addCleanup(shutil.rmtree, statedir, True)
-    old_root, old_track, old_overlay = (agent.ROOT, agent.TRACK_RECORD,
-                                        agent.MEASURED_OVERLAY_PATH)
+    old_root, old_track, old_overlay, old_legacy = (agent.ROOT, agent.TRACK_RECORD,
+                                                    agent.MEASURED_OVERLAY_PATH,
+                                                    agent.LEGACY_OVERLAY_PATH)
     agent.ROOT = root
     # A run without --isolate works in the caller's own directory (plan["cwd"] is
     # os.getcwd()), and the fake client writes there — so the whole run happens
@@ -5808,27 +6198,29 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    agent.LEGACY_OVERLAY_PATH = os.path.join(statedir, "legacy-measured.json")
     case.provider_state = os.path.join(statedir, "provider-state.json")
     old_provider_state = agent.PROVIDER_STATE_PATH
     agent.PROVIDER_STATE_PATH = case.provider_state
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
-    calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
-             "track": []}
+    calls = {"n": 0, "cwds": [], "cmds": [], "envs": [], "route_marks": [],
+             "free_models": [], "track": []}
     real_build_plan = agent.build_plan
 
     def marking_build_plan(*a, **k):
         # Tag each plan's env with its route, so a re-run that kept the
         # first plan's env shows up as a stale mark.
         plan = real_build_plan(*a, **k)
-        plan["env"]["AUTOOS_TEST_ROUTE_MARK"] = plan["route"]["combo"]
+        plan["env"]["AUTOOS_AGENT_TEST_MARK"] = plan["route"]["combo"]
         return plan
 
     def fake_run_client(cmd, cwd, env, reap=True, capture=False):
         calls["n"] += 1
         calls["cwds"].append(cwd)
         calls["cmds"].append(cmd)
-        calls["route_marks"].append(env.get("AUTOOS_TEST_ROUTE_MARK"))
+        calls["envs"].append(dict(env))
+        calls["route_marks"].append(env.get("AUTOOS_AGENT_TEST_MARK"))
         calls["free_models"].append(
             (json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}") or {}).get("model"))
         with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
@@ -5845,6 +6237,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
     args.__dict__.update(args_over or {})
     env = dict(os.environ)
+    env.update(env_over or {})
     env["AUTOOS_STATE_DIR"] = statedir
     # A gateway run needs a client key and a live gateway; both are faked
     # here. The key is what makes the run track-recorded at all.
@@ -5879,8 +6272,8 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
         (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH,
-         agent.PROVIDER_STATE_PATH) = (
-            old_root, old_track, old_overlay, old_provider_state)
+         agent.LEGACY_OVERLAY_PATH, agent.PROVIDER_STATE_PATH) = (
+            old_root, old_track, old_overlay, old_legacy, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
@@ -5913,7 +6306,13 @@ class LeakStrictnessTests(unittest.TestCase):
         # like a bug that only old leftovers have. Any worktree of the parent's
         # .git is inside the fence - live, stale, or one the worker adds itself.
         doc = self.agent.parent_leak.__doc__
-        self.assertIn("ANY\n    worktree the sandboxed worker can reach", doc)
+        # Not one string across a line break: the compiler dedents a docstring by
+        # the common indent of its lines, and CPython has changed its mind about
+        # that (3.12 strips here, 3.13 does not), so a test that matched
+        # "ANY\n    worktree" only passed on one interpreter. The claim is what
+        # is under test — ANY worktree, not a stale one.
+        self.assertIn("can be carried by ANY", doc)
+        self.assertIn("worktree the sandboxed worker can reach", doc)
         self.assertIn("live one it did not make and a", doc)
 
     def sibling_worktree(self, branch, existing=False):
@@ -6894,6 +7293,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=True,
@@ -6979,6 +7379,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -7021,6 +7422,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -7051,6 +7453,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
                 "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
                 "session_tag": "lane-a"}
         ns = argparse.Namespace(client="opencode", task="do it", free=False, dry_run=False,
@@ -7280,6 +7683,7 @@ class ReviewerGateTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         self.tmp = tmp
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         # No recorded provider stop: this fixture decides who reviews from the
         # registry and the probes, not from an outage some earlier run saw.
@@ -8504,6 +8908,66 @@ class ReviewStatusTests(unittest.TestCase):
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
                 self.assertEqual(report["cross_family"]["family"], family)
 
+    # The models an orchestrator session actually runs, spelled as its own client
+    # reports them. They are authors, never routes: no provider serves them here,
+    # no route leg names them, and the resolver cannot send work to any of them.
+    ORCHESTRATOR_AUTHORS = ("claude-opus-5-5", "claude-sonnet-5",
+                            "claude-fable-5-1", "claude-haiku-4-5")
+
+    def test_the_real_registry_knows_every_orchestrator_model_as_an_anthropic_author(self):
+        # AUTHORS (S1) measured 2026-09-28: `ready` and `review-status` refused an
+        # orchestrator-written record outright -- "author claude-opus-5-5 is not a
+        # model, leg, route or reviewer the registry knows, and not a family it
+        # declares" -- so lanes borrowed `claude-opus-4-6`, which is a false
+        # statement about who wrote the diff and it makes the gate's own detail
+        # line unreadable for a real audit.
+        real = self.real_registry()
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                family, why_not = self.agent.resolver.author_family(author, real)
+                self.assertEqual(family, "anthropic", why_not)
+
+    def test_an_orchestrator_author_reviewed_by_the_paid_muse_is_cross_family(self):
+        # The point of the four ids above: a lane an Opus 5.5 session wrote is
+        # reviewable by Muse without anyone editing the author field to a lie.
+        real = self.real_registry()
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=%s "
+                     "reviewer=omniroute/spark-1.3-contributor verdict=ship\n" % author)
+                    + FINAL_LINE, real)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                self.assertEqual(report["cross_family"]["family"], "meta")
+
+    def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
+        # Known is not routable, and this pins the difference: a route leg whose
+        # model half is one of these ids would put the orchestrator's own
+        # subscription model into gateway traffic, which the "Claude budget"
+        # leg rules deny (registry rule 9) -- so guard the absence here, next to
+        # the rows that made them known.
+        real = self.real_registry()
+        legs = [leg for route in real["routes"].values()
+                for leg in (route.get("legs") or [])
+                + list(route.get("unavailable_legs") or {})]
+        for author in self.ORCHESTRATOR_AUTHORS:
+            with self.subTest(author=author):
+                self.assertEqual([leg for leg in legs
+                                  if leg.split("/", 1)[1:2] == [author]], [])
+
+    def test_an_anthropic_reviewer_of_an_orchestrator_author_is_not_cross_family(self):
+        # Known is not the same as independent: Haiku is the anthropic family's
+        # own first-pass fallback, so an Opus-authored lane it reviewed stays NOT
+        # READY -- adding the authors must not open that door.
+        real = self.real_registry()
+        for reviewer in ("haiku", "claude-haiku-4-5", "claude-sonnet-5"):
+            with self.subTest(reviewer=reviewer):
+                report = self.agent.review_status(
+                    ("AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+                     "reviewer=%s verdict=ship\n" % reviewer) + FINAL_LINE, real)
+                self.assertFalse(report["ready"], report)
+                self.assertIn("same family", report["cross_family"]["detail"])
+
 
 class ReadyCommandTests(unittest.TestCase):
     """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
@@ -8956,6 +9420,7 @@ class EffortRungPlumbingTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         patch = mock.patch.object(self.agent.measure_mod, "client_state",
                                   lambda *a, **k: {})
@@ -9084,6 +9549,2685 @@ class EffortRungPlumbingTests(unittest.TestCase):
 def _reviewer_client_state():
     return {name: {"installed": True, "signed_in": True, "reason": ""}
             for name in ("opencode", "gemini", "qoder", "claude")}
+
+
+RUN_ID_RE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9-]+)-([0-9a-f]{6})$")
+
+
+class CanonicalRunIdTests(unittest.TestCase):
+    """FLEETSPEC P0 (FLEET): one canonical run id per spawn, minted ONCE in UTC.
+    It names the sandbox branch, the sandbox dir, the worker record and the
+    child's AUTOOS_AGENT_RUN_ID. Before this, the sandbox was stamped in LOCAL
+    time from the task and the worker record minted a second, unrelated UTC id
+    (two unlinked ids for one run)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def setUp(self):
+        # A spawn taken from inside a lane session inherits that lane's
+        # AUTOOS_SESSION_TAG instead of deriving its tag from ROOT, so every
+        # fallback expectation below would only hold on a host where the
+        # variable happens to be unset (measured 2026-09-28 in a lane sandbox:
+        # these tests fail in a lane and pass on a bare checkout). A test that
+        # wants a tag sets one itself.
+        self._saved_tag = os.environ.pop("AUTOOS_SESSION_TAG", None)
+
+    def tearDown(self):
+        if self._saved_tag is not None:
+            os.environ["AUTOOS_SESSION_TAG"] = self._saved_tag
+
+    def _lane(self):
+        return self.cli.session_tag("t", env={}).rsplit("/", 1)[0]
+
+    def _args(self, **overrides):
+        ns = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            read_only=False, title=None, run_id=None)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def _cfg(self, providers=None):
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": providers or {}}
+        cfg["providers"].setdefault("omniroute", {"models": {"t2-worker": {}}})
+        return cfg
+
+    def _overlay(self, plan):
+        return json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}"))
+
+    # --- the id itself -----------------------------------------------------
+    def test_the_id_is_utc_stamped_slug_capped_and_hex6(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("Fix The Router!!", "unused task text", now=now)
+        match = RUN_ID_RE.match(rid)
+        self.assertIsNotNone(match, rid)
+        self.assertEqual(match.group(1), "20260928-092516")   # UTC, not local
+        self.assertEqual(match.group(2), "fix-the-router")
+        self.assertRegex(match.group(3), r"^[0-9a-f]{6}$")
+
+    def test_the_stamp_is_utc_whatever_clock_it_is_given(self):
+        # The old sandbox stamp used datetime.now() (local): a host at UTC+8
+        # named its runs 8 h off every other id on the same machine.
+        plus8 = datetime.timezone(datetime.timedelta(hours=8))
+        rid = self.cli.mint_run_id("T", "T",
+                                   now=datetime.datetime(2026, 9, 28, 17, 25, 16,
+                                                         tzinfo=plus8))
+        self.assertEqual("-".join(rid.split("-")[:2]), "20260928-092516")
+
+    def test_the_slug_is_capped_at_24_chars_of_safe_charset(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id(
+            "run to the end, finish with a commit and the REPORT", "task", now=now)
+        slug = RUN_ID_RE.match(rid).group(2)
+        self.assertLessEqual(len(slug), 24, rid)
+        self.assertRegex(slug, r"^[a-z0-9-]+$")
+        self.assertFalse(slug.endswith("-"), rid)
+
+    def test_no_task_text_reaches_the_id_when_a_title_names_the_run(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("short title",
+                                  "grep zebratoken across the whole repository", now=now)
+        self.assertNotIn("zebra", rid)
+        self.assertIn("short-title", rid)
+
+    def test_a_titleless_spawn_slugs_the_task_instead(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id(None, "Fix THE spawner, please, in the sandbox", now=now)
+        slug = RUN_ID_RE.match(rid).group(2)
+        # the first 24 chars of the task's own slug - a mid-word cut is accepted,
+        # because the cap has to bound a filename, a branch and a header value.
+        self.assertEqual(slug, "fix-the-spawner-please-i")
+        self.assertNotIn("sandbox", rid)
+
+    def test_two_spawns_in_the_same_second_never_share_an_id(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        self.assertNotEqual(self.cli.mint_run_id("same", "same", now=now),
+                            self.cli.mint_run_id("same", "same", now=now))
+
+    # --- the slug is scrubbed before it is cut (FLEETP0 review, HIGH) -----
+    # A run id is a filename, a branch name, a gateway header and a printed
+    # line at once, and the slug is capped at 24 chars - so a pasted key is
+    # SHORT ENOUGH to fit, and used to be written into all four verbatim.
+
+    def test_a_key_in_the_title_does_not_reach_the_slug(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("rotate sk-ABCDEFGHIJKLMNOP", "t", now=now)
+        self.assertEqual(RUN_ID_RE.match(rid).group(2), "rotate", rid)
+        self.assertNotIn("abcdefghijklmnop", rid)
+        self.assertTrue(RUN_ID_RE.match(rid), rid)
+
+    def test_a_title_that_is_only_a_key_slugs_to_the_fallback(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("ghp_0123456789abcdefGHIL", "t", now=now)
+        self.assertEqual(RUN_ID_RE.match(rid).group(2), "task", rid)
+
+    def test_an_assigned_secret_in_the_task_does_not_reach_the_slug(self):
+        # a titleless spawn slugs the TASK, and a brief can carry `api_key: …`.
+        # The key is put where the 24-char cap would have taken it whole, so this
+        # test failed before the fix for the reason it names.
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id(None, "api_key: sk-or-v1-999888776655\nfix the router",
+                                   now=now)
+        slug = RUN_ID_RE.match(rid).group(2)
+        self.assertTrue(RUN_ID_RE.match(rid), rid)
+        self.assertNotIn("999888776655", rid)
+        self.assertNotIn("redacted", slug, "the mask token is dropped, not slugged")
+        self.assertIn("fix-the-router", slug)
+
+    def test_a_bearer_token_in_a_multiline_title_does_not_reach_the_slug(self):
+        # Bearer is what the redactor's own pattern leaves behind ("Bearer
+        # [mask]"), so the word may survive the slug - the token may not, and at
+        # 19 characters it sat well inside the 24-char cap.
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        rid = self.cli.mint_run_id("Bearer sk-abcdef123456\nsync the run", "t", now=now)
+        self.assertNotIn("abcdef123456", rid)
+        self.assertTrue(RUN_ID_RE.match(rid), rid)
+        self.assertIn("sync-the-run", RUN_ID_RE.match(rid).group(2), rid)
+
+    def test_the_scrub_leaves_an_ordinary_title_alone(self):
+        now = datetime.datetime(2026, 9, 28, 9, 25, 16, tzinfo=datetime.timezone.utc)
+        self.assertEqual(RUN_ID_RE.match(
+            self.cli.mint_run_id("Fix THE spawner, please", "t", now=now)).group(2),
+            "fix-the-spawner-please")
+
+    # --- a reused sandbox adopts its id only if the id is real (FLEETP0 LOW 7)
+    def test_reusing_a_sandbox_adopts_its_canonical_branch_id(self):
+        reused = {"path": "/tmp/whatever", "branch": "agent/%s" % self.GIVEN_ID}
+        plan = self.cli.build_plan(self._args(title="Retry Leg"), self._cfg(),
+                                   sandbox=reused)
+        self.assertEqual(plan["run_id"], self.GIVEN_ID)
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], self.GIVEN_ID)
+
+    def test_a_non_canonical_branch_suffix_mints_a_fresh_id(self):
+        # FLEETP0 review LOW: the old code took anything after "agent/" as the
+        # run id - a hand-named or pre-FLEET branch (a slug with a dot, an old
+        # local-time stamp, a branch that is not an id at all) was then pasted
+        # into the header, the record id and `ps`, unvalidated.
+        for branch in ("agent/hand-named.branch",
+                       "agent/2026-09-28-092516-fix-the-router-abc123",
+                       "agent/20260928-092516-fix_the_router-abc123",
+                       "agent/"):
+            plan = self.cli.build_plan(self._args(title="Retry Leg"), self._cfg(),
+                                       sandbox={"path": "/tmp/whatever",
+                                                "branch": branch})
+            self.assertTrue(self.cli.is_canonical_run_id(plan["run_id"]),
+                            "%s -> %s" % (branch, plan["run_id"]))
+            self.assertNotEqual(plan["run_id"], branch[len("agent/"):])
+
+    # --- one id, four places ----------------------------------------------
+    def test_one_id_names_the_branch_the_dir_the_record_field_and_the_child_env(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = self.cli.build_plan(
+                self._args(title="Fix The Router", isolate=True,
+                           task="a task whose own words must not be used"), self._cfg())
+        rid = plan["run_id"]
+        self.assertTrue(RUN_ID_RE.match(rid), rid)
+        self.assertEqual(plan["sandbox"]["branch"], "agent/%s" % rid)
+        self.assertEqual(os.path.basename(plan["sandbox"]["path"]),
+                         "%s-%s" % (os.path.basename(self.cli.ROOT), rid))
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], rid)
+        # the slug came from the title, never from the task text
+        self.assertIn("fix-the-router", rid)
+
+    def test_a_non_isolated_run_still_mints_one_id_for_the_child(self):
+        plan = self.cli.build_plan(self._args(title="Plain"), self._cfg())
+        self.assertTrue(RUN_ID_RE.match(plan["run_id"]), plan["run_id"])
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], plan["run_id"])
+
+    # --- item 5: the header ----------------------------------------------
+    def test_the_run_id_header_is_injected_next_to_the_session_tag(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.cli.build_plan(self._args(title="Fix The Router!"), self._cfg())
+        headers = self._overlay(plan)["providers"]["omniroute"]["headers"]
+        self.assertEqual(headers["x-omniroute-session-id"],
+                         "%s/fix-the-router/%s" % (self._lane(), plan["run_id"]))
+        self.assertEqual(headers[self.cli.RUN_ID_HEADER], plan["run_id"])
+
+    def test_a_model_off_the_gateway_gets_neither_header(self):
+        cfg = self._cfg({"other": {"models": {"m": {}}}})
+        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        plan = self.cli.build_plan(self._args(title="T"), cfg)
+        self.assertNotIn("providers", self._overlay(plan))
+
+    def test_the_plan_output_prints_the_run_id(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--title", "My Tag",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        match = re.search(r"run-id: (\S+)", r.stdout)
+        self.assertIsNotNone(match, r.stdout)
+        self.assertTrue(RUN_ID_RE.match(match.group(1)), match.group(1))
+
+    # --- the caller may hand the id in (FLEETP0b, FLEETSPEC §5.1) ----------
+    # The MCP server's `spawn` used to mint its own local-time id for the run
+    # dir while the spawner minted a second canonical one: one spawn, two ids
+    # again. `run --run-id <id>` lets the caller mint once and both sides share.
+
+    GIVEN_ID = "20260928-092516-fix-the-router-abc123"
+
+    def test_a_given_id_names_the_branch_the_dir_the_child_env_and_the_header(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = self.cli.build_plan(
+                self._args(title="Something Else Entirely", isolate=True,
+                           run_id=self.GIVEN_ID), self._cfg())
+        self.assertEqual(plan["run_id"], self.GIVEN_ID)
+        self.assertEqual(plan["sandbox"]["branch"], "agent/%s" % self.GIVEN_ID)
+        self.assertEqual(os.path.basename(plan["sandbox"]["path"]),
+                         "%s-%s" % (os.path.basename(self.cli.ROOT), self.GIVEN_ID))
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], self.GIVEN_ID)
+        headers = self._overlay(plan)["providers"]["omniroute"]["headers"]
+        self.assertEqual(headers[self.cli.RUN_ID_HEADER], self.GIVEN_ID)
+        # the title did not leak in either: the caller owns the whole id
+        self.assertNotIn("else", plan["run_id"])
+
+    def test_run_accepts_a_canonical_id_and_prints_the_one_it_was_given(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--run-id", self.GIVEN_ID,
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("run-id: %s" % self.GIVEN_ID, r.stdout)
+
+    def test_run_refuses_an_id_that_is_not_the_canonical_shape(self):
+        bad = (
+            "not-an-id",
+            "20260928-09251-fix-the-router-abc123",       # stamp too short
+            "2026-09-28-092516-fix-the-router-abc123",    # dashed date
+            "20260928-092516-fix_the_router-abc123",      # underscore in slug
+            "20260928-092516--abc123",                    # no slug
+            "20260928-092516-fix-the-router-abc12",       # tail too short
+            "20260928-092516-fix-the-router-zbc123",      # tail not hex
+            "20260928-092516-fix-the-router-ABC123",      # tail not lowercase
+            "20260928-092516-" + "a" * 25 + "-abc123",    # slug past the cap
+            "20261302-092516-fix-the-router-abc123",      # month 13
+            "20260928-092566-fix-the-router-abc123",      # minute 66
+            self.GIVEN_ID + "/../../etc",                 # a path, not an id
+            self.GIVEN_ID + " ",                          # trailing space
+        )
+        for wrong in bad:
+            r = run_agent("run", "--dry-run", "--tier", "2", "--run-id", wrong, "t",
+                          env=clean_env())
+            self.assertEqual(r.returncode, 2, (wrong, r.stdout, r.stderr))
+            self.assertIn("--run-id", r.stderr, wrong)
+            self.assertIn(wrong, r.stderr, wrong)  # names what it refused
+
+
+class McpCanonicalRunIdTests(unittest.TestCase):
+    """FLEETP0b: the MCP server's `spawn` mints the spawner's own canonical id
+    (tools/autoos-agent.py `mint_run_id`) and hands it to the run it launches,
+    so `logs/agents/<id>`, `logs/workers/<id>.json`, the branch and the child's
+    env are one string (FLEETSPEC §5.1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN",
+                                                   "AUTOOS_AGENT_RUN_ID")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        os.environ.pop("AUTOOS_AGENT_RUN_ID", None)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _job(self, out):
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertIsNotNone(job, out)
+        return job
+
+    def test_spawn_mints_a_canonical_id_for_its_run_dir(self):
+        out = mcp_server.spawn({"task": "t", "title": "Fix The Router", "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        match = RUN_ID_RE.match(out["id"])
+        self.assertIsNotNone(match, out["id"])
+        self.assertEqual(match.group(2), "fix-the-router")  # slug from the title
+        self.assertEqual(os.path.basename(out["dir"]), out["id"])
+        self.assertEqual(out["dir"], os.path.join(self.tmp, "agents", out["id"]))
+
+    def test_spawn_hands_the_id_to_the_run_it_launches(self):
+        out = mcp_server.spawn({"task": "do the thing", "cwd": str(ROOT)})
+        job = self._job(out)
+        self.assertEqual(job["run_id"], out["id"])
+        self.assertEqual(job["id"], out["id"])
+        argv = job["argv"]
+        self.assertEqual(argv[-1], "do the thing")     # the task stays last
+        self.assertEqual(argv[argv.index("--run-id") + 1], out["id"])
+
+    def test_build_argv_places_run_id_before_the_task(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "title": "x"},
+                                        "20260928-092516-fix-the-router-abc123")
+        i = argv.index("--run-id")
+        self.assertEqual(argv[i + 1], "20260928-092516-fix-the-router-abc123")
+        self.assertEqual(argv[-1], "t")
+
+    def test_a_spawn_the_cli_refuses_leaves_no_run_dir(self):
+        # build_argv is given the id before the CLI ever sees it, so a bad id
+        # must not leave a directory behind that status() would list.
+        with mock.patch.object(mcp_server, "preflight", return_value="nope"):
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected")
+        self.assertEqual(mcp_server.status()["runs"], [])
+        root = os.path.join(self.tmp, "agents")
+        self.assertEqual(os.listdir(root) if os.path.isdir(root) else [], [])
+
+    def test_the_caller_run_id_flows_as_the_parent_not_the_child_own(self):
+        """run_job must not stamp the child with the id of the run it is
+        starting: the CLI reads THIS process's AUTOOS_AGENT_RUN_ID as the
+        parent edge, so overwriting it here makes a child its own parent."""
+        parent = "20260928-080000-parent-run-000aaa"
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"], box["env"] = argv, kw.get("env")
+            return 0
+
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": parent}), \
+                mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            self.assertEqual(mcp_server.run_job(out["dir"]), 0)
+        self.assertEqual(box["argv"][-1], "t")
+        self.assertEqual(box["argv"][box["argv"].index("--run-id") + 1], out["id"])
+        self.assertEqual(box["env"]["AUTOOS_AGENT_RUN_ID"], parent)
+        self.assertEqual(box["env"]["AUTOOS_TASK_DIR"], out["dir"])
+
+
+class RunIdRecordTests(_WorkerRecordBase):
+    """FLEETSPEC P0 items 2-4: the worker record carries the canonical run id,
+    its parent edge, the host, and the full route_plan - all redacted."""
+
+    def _plan(self, **over):
+        run_id = "20260928-092516-fix-the-router-abc123"
+        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+                # what build_plan actually hands the child (autoos-agent.py
+                # build_plan: env["AUTOOS_AGENT_RUN_ID"] = run_id)
+                "cmd": [sys.executable, "-c", "pass"],
+                "env": {"AUTOOS_AGENT_DEPTH": "1", "AUTOOS_AGENT_MAX_DEPTH": "3",
+                        "AUTOOS_AGENT_RUN_ID": run_id},
+                "run_id": run_id,
+                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2,
+                          "route_plan": {"route": "t2-worker", "class": "paid",
+                                         "leg": "p/m", "effort": "low", "p": 0.8,
+                                         "expected_cost": 0.1, "bucket": "S2",
+                                         "skipped_legs": [],
+                                         "reason": "picked with sk-ant-abcdefghij"}},
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-test"}
+        plan.update(over)
+        return plan
+
+    def _args(self):
+        return argparse.Namespace(
+            client="opencode", task="do it", free=False, dry_run=False, card=None,
+            clean=False, tier=2, joinable=False, lean=False, isolate=False, auto=True,
+            title="t", model=None, free_model=self.agent.DEFAULT_FREE_MODEL,
+            max_depth=None, allow_training=False, no_defer=False, run_id=None)
+
+    def _cmd_run(self, plan, parent=None, task_dir=None, run_id=None):
+        """Run cmd_run with the client replaced; return (rc, record, child_env).
+
+        `parent`/`task_dir` are what the *spawner's own* environment carries:
+        None removes the variable, so a top-level run is the tested case.
+        `run_id` is `run --run-id`: an id the caller minted and handed in.
+        """
+        seen = {}
+        additions = {}
+        if parent:
+            additions["AUTOOS_AGENT_RUN_ID"] = parent
+        if task_dir:
+            additions["AUTOOS_TASK_DIR"] = task_dir
+
+        def fake_run(cmd, cwd, child_env, **kw):
+            files = [f for f in os.listdir(self.workers) if f.endswith(".json")]
+            self.assertEqual(len(files), 1, files)
+            with io.open(os.path.join(self.workers, files[0]), encoding="utf-8") as fh:
+                seen["rec"] = json.load(fh)
+            seen["env"] = dict(child_env)
+            return self.agent.ClientExit(0)
+
+        args = self._args()
+        args.run_id = run_id
+        with mock.patch.dict(os.environ, additions), \
+                mock.patch.object(self.agent, "build_plan", return_value=plan), \
+                mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
+                mock.patch.object(self.agent, "log_run"), \
+                mock.patch.object(self.agent.clients, "signin_state", return_value=(None, "")), \
+                mock.patch("socket.gethostname", return_value="test-host"):
+            # the suite itself may run inside a spawned worker: start from a
+            # known environment, then add only what the test names
+            for name in ("AUTOOS_AGENT_RUN_ID", "AUTOOS_TASK_DIR"):
+                if name not in additions:
+                    os.environ.pop(name, None)
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = self.agent.cmd_run(args, {})
+        return rc, seen.get("rec"), seen.get("env")
+
+    def test_the_record_id_is_the_canonical_run_id_and_the_child_inherits_it(self):
+        rc, rec, child_env = self._cmd_run(self._plan())
+        self.assertEqual(rc, 0)
+        self.assertEqual(rec["id"], "20260928-092516-fix-the-router-abc123")
+        self.assertEqual(child_env["AUTOOS_AGENT_RUN_ID"], rec["id"])
+        self.assertTrue(os.path.isfile(os.path.join(self.workers, rec["id"] + ".json")))
+
+    def test_no_parent_env_is_a_top_level_run(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        self.assertIsNone(rec["parent_run_id"])
+
+    def test_the_parent_edge_comes_from_the_spawner_own_env(self):
+        # the spawner itself was spawned: its own AUTOOS_AGENT_RUN_ID is the parent
+        _rc, rec, _env = self._cmd_run(
+            self._plan(), parent="20260928-080000-parent-run-000aaa")
+        self.assertEqual(rec["parent_run_id"], "20260928-080000-parent-run-000aaa")
+
+    # --- the caller may hand the id in (FLEETP0b) --------------------------
+    GIVEN_ID = "20260928-092516-fix-the-router-abc123"
+
+    def test_an_id_handed_in_is_still_parented_to_the_caller_not_to_itself(self):
+        _rc, rec, env = self._cmd_run(self._plan(), parent="20260928-080000-parent-run-000aaa",
+                                      run_id=self.GIVEN_ID)
+        self.assertEqual(rec["id"], self.GIVEN_ID)
+        self.assertEqual(rec["parent_run_id"], "20260928-080000-parent-run-000aaa")
+        self.assertEqual(env["AUTOOS_AGENT_RUN_ID"], self.GIVEN_ID)
+
+    def test_an_id_handed_in_by_a_top_level_spawner_leaves_no_parent(self):
+        # the parent is the CALLER's env, never the id this run is starting with:
+        # reading it from there would make a child its own parent.
+        _rc, rec, _env = self._cmd_run(self._plan(), run_id=self.GIVEN_ID)
+        self.assertEqual(rec["id"], self.GIVEN_ID)
+        self.assertIsNone(rec["parent_run_id"])
+
+    def test_a_parent_env_carrying_the_run_s_own_id_leaves_no_parent_edge(self):
+        # FLEETP0 review LOW: the caller's AUTOOS_AGENT_RUN_ID can BE this run's
+        # id - a fallthrough re-run adopts the reused branch's id, a caller can
+        # hand --run-id down to the run it already spawned. A record parented to
+        # itself is a cycle: `ps --tree` prints an edge that does not exist.
+        _rc, rec, _env = self._cmd_run(self._plan(), parent=self.GIVEN_ID)
+        self.assertEqual(rec["id"], self.GIVEN_ID)
+        self.assertIsNone(rec["parent_run_id"], json.dumps(rec))
+
+    def test_a_malformed_handed_in_id_is_refused_before_anything_is_planned(self):
+        args = self._args()
+        args.run_id = "2026-09-28T09:25:16Z"
+        planned = []
+
+        def spy(*a, **k):
+            planned.append(1)
+            return self._plan()
+
+        with mock.patch.object(self.agent, "build_plan", side_effect=spy), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.agent.cmd_run(args, {})
+        self.assertEqual(rc, 2)
+        self.assertEqual(planned, [], "the id must be checked before any clone or start")
+        self.assertIn("--run-id", err.getvalue())
+        self.assertIn(args.run_id, err.getvalue())
+
+    def test_the_run_dir_the_child_asks_back_in_is_recorded(self):
+        _rc, rec, _env = self._cmd_run(
+            self._plan(), task_dir="/tmp/agents/20260928-080000-abcdef")
+        self.assertEqual(rec["task_dir"], "/tmp/agents/20260928-080000-abcdef")
+
+    def test_the_host_is_recorded(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        self.assertEqual(rec["host"], "test-host")
+
+    def test_the_route_plan_is_persisted_and_redacted_like_the_rest(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        plan = rec["route_plan"]
+        self.assertEqual(plan["route"], "t2-worker")
+        self.assertEqual(plan["bucket"], "S2")
+        self.assertEqual(plan["skipped_legs"], [])
+        self.assertNotIn("sk-ant", json.dumps(plan))
+        self.assertIn("[autoos:redacted]", plan["reason"])
+
+    def test_ps_json_rows_carry_the_parent_edge(self):
+        _rc, rec, _env = self._cmd_run(self._plan())
+        r = run_agent("ps", "--all", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = json.loads(r.stdout)["workers"]
+        self.assertIn("parent_run_id", rows[0])
+        self.assertIsNone(rows[0]["parent_run_id"])
+
+    def test_an_old_record_without_the_new_fields_still_lists(self):
+        self.write()  # the pre-FLEET fixture record: no run id, no parent, no host
+        r = run_agent("ps", "--json", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = json.loads(r.stdout)["workers"][0]
+        self.assertEqual(row["id"], "w1")
+        self.assertIsNone(row["parent_run_id"])
+
+
+class PsTreeTests(_WorkerRecordBase):
+    """FLEETSPEC P0 item 2: `ps --tree` shows the spawn tree, not a flat list."""
+
+    def stamp(self, minutes_ago):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (now - datetime.timedelta(minutes=minutes_ago)).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
+    def test_children_are_indented_under_their_parent(self):
+        self.write("orch", started=self.stamp(30))
+        self.write("a", started=self.stamp(20), parent_run_id="orch", title="first leg")
+        self.write("b", started=self.stamp(10), parent_run_id="orch", title="second leg")
+        self.write("top", started=self.stamp(5))
+        r = run_agent("ps", "--tree", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        row = lambda w: next(l for l in lines if l.strip().split()[0] == w)
+        at = lambda w: lines.index(row(w))
+        self.assertFalse(row("orch").startswith(" "))
+        self.assertFalse(row("top").startswith(" "))
+        self.assertTrue(row("a").startswith("  "), r.stdout)
+        self.assertTrue(row("b").startswith("  "), r.stdout)
+        # the children follow their parent, and a second top-level run closes
+        # the subtree rather than appearing inside it
+        self.assertTrue(at("orch") < at("a") < at("b") < at("top"), r.stdout)
+
+    def test_a_child_whose_parent_record_is_gone_is_a_top_level_orphan(self):
+        self.write("a", started=self.stamp(10), parent_run_id="gone-orch")
+        r = run_agent("ps", "--tree", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = next(l for l in r.stdout.splitlines() if l.strip().startswith("a "))
+        self.assertFalse(line.startswith("  "), r.stdout)
+        self.assertIn("(parent gone-orch gone)", line)
+
+    def test_the_tree_is_a_decoration_on_ps_and_the_table_stays_flat(self):
+        self.write("orch", started=self.stamp(10))
+        self.write("a", started=self.stamp(5), parent_run_id="orch")
+        flat = run_agent("ps", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(flat.returncode, 0, flat.stderr)
+        self.assertTrue(flat.stdout.splitlines()[1].startswith("orch"), flat.stdout)
+
+    def test_an_a_to_b_parent_cycle_lists_both_rows_and_returns(self):
+        # FLEETP0 review LOW: two records naming each other (a retried run whose
+        # caller had adopted its branch, or a hand-edited record) made every row
+        # in the cycle a non-root. The walk must enter it once, print both, and
+        # come back - not spin forever and not swallow either one.
+        self.write("a", started=self.stamp(10), parent_run_id="b")
+        self.write("b", started=self.stamp(9), parent_run_id="a")
+        self.write("lonely", started=self.stamp(8))
+        pairs = self.agent.worker_tree(self.agent.list_workers(self.workers))
+        self.assertEqual(sorted(row["id"] for _d, row in pairs),
+                         ["a", "b", "lonely"], pairs)
+        r = run_agent("ps", "--tree", env=clean_env(AUTOOS_WORKERS_DIR=self.workers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [l for l in r.stdout.splitlines()[1:]
+                if l.strip().split() and l.strip().split()[0] in ("a", "b", "lonely")]
+        self.assertEqual(len(rows), 3, r.stdout)
+        roots = [l for l in rows if not l.startswith("  ")]
+        self.assertIn("lonely", " ".join(roots))
+        self.assertEqual(sum(1 for l in roots if l.strip().split()[0] in ("a", "b")), 1,
+                         "one of the cycle is entered as a root, the other hangs under it")
+
+
+class OverlayHomeTests(unittest.TestCase):
+    """OVERLAYHOME (2026-09-28 12:5xZ incident): one machine-wide overlay, a
+    legacy per-checkout fallback, and a loud reason when there is none. Temp
+    dirs only - never the real state dir or the checkout's logs/."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(self.tmp, "state", "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(self.tmp, "repo", "logs", "routing",
+                                                      "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(self.tmp, "track-record.jsonl")
+        self.agent.clients = _FakeClients
+
+    @staticmethod
+    def _unproven_registry():
+        registry = _small_route_registry()
+        for model in registry["models"].values():
+            model["tool_calls"] = "unproven"
+        return registry
+
+    def _cmd_route(self, card):
+        ns = argparse.Namespace(card=card, brief="", explain=True, orchestrator_model="orch",
+                                repo=str(ROOT), now=None)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.object(self.agent, "load_registry",
+                                   lambda path: self._unproven_registry()):
+                rc = self.agent.cmd_route(ns)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_agent_resolves_the_machine_wide_path(self):
+        fresh = load_agent()
+        import autoos_overlay
+        self.assertEqual(fresh.MEASURED_OVERLAY_PATH, autoos_overlay.default_path())
+        self.assertEqual(fresh.LEGACY_OVERLAY_PATH, autoos_overlay.legacy_path(fresh.ROOT))
+
+    def test_a_missing_overlay_is_named_in_the_tool_calls_reason(self):
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 5, err)
+        reason = json.loads(out)["reason"]
+        self.assertIn("no tool_calls overlay found at %s" % self.agent.MEASURED_OVERLAY_PATH,
+                      reason)
+        self.assertIn("AUTOOS_MEASURED_OVERLAY", reason)
+
+    def test_a_present_overlay_keeps_the_plain_reason(self):
+        import autoos_overlay
+        autoos_overlay.save(self.agent.MEASURED_OVERLAY_PATH, {"legs": {}})
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 5, err)
+        self.assertNotIn("no tool_calls overlay found", json.loads(out)["reason"])
+
+    def test_the_legacy_overlay_is_read_with_a_note(self):
+        import autoos_overlay
+        legs = {leg: {"tool_calls": {"value": "proven"}}
+                for route in self._unproven_registry()["routes"].values()
+                for leg in route["legs"]}
+        autoos_overlay.save(self.agent.LEGACY_OVERLAY_PATH, {"legs": legs})
+        rc, out, err = self._cmd_route("kind=implement,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("overlay: using legacy %s" % self.agent.LEGACY_OVERLAY_PATH, err)
+        self.assertTrue(os.path.isfile(self.agent.LEGACY_OVERLAY_PATH))
+
+    def test_the_only_overlay_loader_is_the_one_that_knows_legacy(self):
+        # Muse review (LOW): a single-argument load_overlay dropped the fallback.
+        self.assertFalse(hasattr(self.agent, "load_overlay"))
+
+    def test_the_resolver_flags_a_route_lost_to_tool_calls(self):
+        # Muse review (LOW): gate the loud reason on a structured flag, not a
+        # substring of the reason text.
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        lost = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                         str(ROOT), "orch", now, self._unproven_registry(),
+                                         {}, [], _fake_client_state())
+        self.assertIs(lost.get("unproven_toolcalls"), True)
+        ready = self.agent.route_plan_for("kind=review,paths=tools/registry.py", "",
+                                          str(ROOT), "orch", now, _small_route_registry(),
+                                          {}, [], _fake_client_state())
+        self.assertFalse(ready.get("unproven_toolcalls"))
+
+    def test_the_loud_reason_follows_the_flag_not_the_text(self):
+        now = datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc)
+        path = self.agent.MEASURED_OVERLAY_PATH
+        for flag, loud in ((False, False), (True, True)):
+            fake = {"route": None, "state": "input_required",
+                    "reason": "override r: tool_calls: mentioned in text", "unproven_toolcalls": flag}
+            with mock.patch.object(self.agent.resolver, "plan", lambda *a, **k: dict(fake)):
+                got = self.agent.route_plan_for("kind=implement,paths=tools/registry.py", "",
+                                                str(ROOT), "orch", now, self._unproven_registry(),
+                                                {}, [], _fake_client_state(),
+                                                overlay_missing_at=path)
+            self.assertEqual("no tool_calls overlay found" in got["reason"], loud, flag)
+
+    def test_heartbeat_json_carries_the_overlay_state(self):
+        data, _ = self.agent.heartbeat_state(None, None, [self.tmp], None)
+        self.assertEqual(data["overlay"], {"path": self.agent.MEASURED_OVERLAY_PATH,
+                                           "present": False, "age_hours": None})
+
+
+class _EnvScrubBase(unittest.TestCase):
+    """Shared assertions for FF1 (D-106): the child env is built from an
+    allowlist, so a token in the operator's shell never reaches a worker, and
+    git in the worker can neither prompt nor fetch a stored credential."""
+
+    SECRET_NAMES = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+                    "DEEPSEEK_API_KEY", "FOO_SECRET", "BAR_PASSWORD",
+                    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                    "SSH_AUTH_SOCK", "SSH_ASKPASS"]
+    SENTINEL = "sentinel-must-never-reach-a-worker"
+
+    def secrets(self):
+        return {n: self.SENTINEL for n in self.SECRET_NAMES}
+
+    def assertScrubbed(self, env, has_key):
+        for name in self.SECRET_NAMES:
+            self.assertNotIn(name, env, "%s reached the worker env" % name)
+        for value in env.values():
+            self.assertNotEqual(value, self.SENTINEL,
+                                "a secret value reached the worker env")
+        self.assertIn("PATH", env)
+        self.assertIn("HOME", env)
+        self.assertEqual("0", env.get("GIT_TERMINAL_PROMPT"))
+        self.assertTrue(env.get("GIT_ASKPASS", "").endswith("false"),
+                        "GIT_ASKPASS must name a binary that always fails: %r"
+                        % env.get("GIT_ASKPASS"))
+        self.assertFalse(os.path.exists(env["GIT_ASKPASS"]) and
+                         subprocess.run([env["GIT_ASKPASS"]]).returncode == 0,
+                         "GIT_ASKPASS must fail, not answer a prompt")
+        gitcfg = {v: env.get("GIT_CONFIG_VALUE_" + k[len("GIT_CONFIG_KEY_"):])
+                  for k, v in env.items() if k.startswith("GIT_CONFIG_KEY_")}
+        self.assertIn("credential.helper", gitcfg)
+        self.assertIn("core.askPass", gitcfg)
+        self.assertEqual("", gitcfg["credential.helper"])
+        self.assertEqual("", gitcfg["core.askPass"])
+        self.assertEqual(str(len(gitcfg)), env.get("GIT_CONFIG_COUNT"))
+        # FF1c item 1: the numbered channels cancel two settings, they do not
+        # stop git *reading* a config. GIT_CONFIG_GLOBAL is the one variable
+        # that overrides both $HOME/.gitconfig and $XDG_CONFIG_HOME/git/config,
+        # and NOSYSTEM shuts /etc/gitconfig — without them an inherited HOME
+        # reintroduces url.insteadOf, core.sshCommand and core.hooksPath.
+        self.assertEqual(os.devnull, env.get("GIT_CONFIG_GLOBAL"),
+                         "git's global config must be forced to a dead path")
+        self.assertEqual("1", env.get("GIT_CONFIG_NOSYSTEM"))
+        if has_key:
+            self.assertEqual("test-only-key", env.get("AUTOOS_OMNIROUTE_KEY"))
+        else:
+            self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
+
+
+class WorkerEnvAllowlistTests(_EnvScrubBase):
+    """worker_env() — the one helper both spawn sites build the child env with."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester",
+                     "LOGNAME": "tester", "LANG": "en_US.UTF-8", "LC_ALL": "C",
+                     "TERM": "dumb", "TMPDIR": "/tmp", "SHELL": "/bin/bash",
+                     "XDG_CONFIG_HOME": "/home/tester/.config",
+                     "XDG_CACHE_HOME": "/home/tester/.cache",
+                     "NVM_DIR": "/home/tester/.nvm",
+                     "AUTOOS_STATE_DIR": "/tmp/state",
+                     "AUTOOS_TASK_DIR": "/tmp/task",
+                     "AUTOOS_WORKERS_DIR": "/tmp/workers",
+                     "AUTOOS_AGENT_MAX_DEPTH": "2",
+                     # a Windows worker with no SYSTEMROOT cannot start a thread
+                     "SYSTEMROOT": "C:/Windows", "USERPROFILE": "C:/Users/tester",
+                     "PATHEXT": ".COM;.EXE", "COMSPEC": "C:/Windows/system32/cmd.exe",
+                     # the parent's own key: never inherited, re-added only when
+                     # this run genuinely uses the gateway
+                     "AUTOOS_OMNIROUTE_KEY": "parent-side-key"}
+        self.base.update(self.secrets())
+        self.plan = {"cwd": "/tmp/sandbox", "env": {}}
+
+    def scrub(self, key=None, plan=None):
+        return self.agent.worker_env(plan or self.plan, key, base=self.base)
+
+    def assertGitGuards(self, env):
+        self.assertEqual("0", env["GIT_TERMINAL_PROMPT"])
+        self.assertEqual("credential.helper", env["GIT_CONFIG_KEY_0"])
+        self.assertEqual("", env["GIT_CONFIG_VALUE_0"])
+        self.assertEqual("core.askPass", env["GIT_CONFIG_KEY_1"])
+        self.assertEqual("", env["GIT_CONFIG_VALUE_1"])
+        self.assertEqual("2", env["GIT_CONFIG_COUNT"])
+        self.assertEqual(os.devnull, env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual("1", env["GIT_CONFIG_NOSYSTEM"])
+
+    def test_secrets_absent_and_core_vars_present(self):
+        env = self.scrub()
+        self.assertScrubbed(env, has_key=False)
+        for name in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
+                     "SHELL", "NVM_DIR", "XDG_CACHE_HOME",
+                     "AUTOOS_STATE_DIR", "AUTOOS_TASK_DIR", "AUTOOS_WORKERS_DIR",
+                     "AUTOOS_AGENT_MAX_DEPTH", "SYSTEMROOT", "USERPROFILE"):
+            self.assertIn(name, env, name)
+        self.assertEqual("/tmp/sandbox", env["PWD"])
+        self.assertGitGuards(env)
+
+    def test_the_operators_config_home_is_not_inherited(self):
+        # FF1c item 1: XDG_* was allowlisted wholesale, and $XDG_CONFIG_HOME/
+        # git/config *is* git's global config — an inherited /home/tester/.config
+        # handed the worker the operator's url.insteadOf, core.sshCommand and
+        # core.hooksPath, none of which the two-entry guard can cancel. The plan
+        # puts a private one back, exactly as it does for XDG_RUNTIME_DIR.
+        env = self.scrub()
+        self.assertNotIn("XDG_CONFIG_HOME", env,
+                         "the operator's config home leaked into the worker")
+        self.assertNotIn("/home/tester/.config", env.values())
+
+    def test_a_private_config_home_from_the_plan_is_kept(self):
+        plan = dict(self.plan, env={"XDG_CONFIG_HOME": "/tmp/state/configs/run-1"})
+        env = self.scrub(plan=plan)
+        self.assertEqual("/tmp/state/configs/run-1", env["XDG_CONFIG_HOME"])
+
+    def test_the_parent_key_is_dropped_and_only_the_workers_own_key_is_added(self):
+        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", self.scrub())
+        env = self.scrub(key="the-minted-worker-key")
+        self.assertEqual("the-minted-worker-key", env["AUTOOS_OMNIROUTE_KEY"])
+        self.assertNotIn("parent-side-key", env.values())
+
+    def test_a_secret_named_plan_entry_never_reaches_the_child(self):
+        # Allowlist first, denylist as the belt on top of it: a plan that ever
+        # carried a token-named entry is refused, not forwarded.
+        plan = dict(self.plan, env={"MY_TOKEN": "x", "OPENAI_API_KEY": "y"})
+        env = self.scrub(plan=plan)
+        self.assertNotIn("MY_TOKEN", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_the_plan_still_overrides_what_the_allowlist_kept(self):
+        plan = dict(self.plan, env={"XDG_DATA_HOME": "/tmp/sbx.opencode-data",
+                                    "OPENCODE_CONFIG_CONTENT": "{}",
+                                    "AUTOOS_AGENT_RUN_ID": "run-1"})
+        env = self.scrub(plan=plan)
+        self.assertEqual("/tmp/sbx.opencode-data", env["XDG_DATA_HOME"])
+        self.assertEqual("{}", env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual("run-1", env["AUTOOS_AGENT_RUN_ID"])
+
+    def test_an_unlisted_var_is_absent_because_the_list_is_an_allowlist(self):
+        base = dict(self.base, SUDO_ASKPASS="/bin/x",
+                    GH_CONFIG_DIR="/home/tester/gh", AUTOOS_KEYS_FILE="/x/api-keys.yml",
+                    AWS_PROFILE="prod", ANTHROPIC_AUTH_TOKEN="t")
+        env = self.agent.worker_env(self.plan, None, base=base)
+        for name in ("SUDO_ASKPASS", "GH_CONFIG_DIR", "AUTOOS_KEYS_FILE",
+                     "AWS_PROFILE", "ANTHROPIC_AUTH_TOKEN"):
+            self.assertNotIn(name, env, name)
+
+    def test_ssh_askpass_is_unset_in_the_child(self):
+        self.assertNotIn("SSH_ASKPASS", self.scrub())
+
+    def test_register_secret_env_sees_the_final_env(self):
+        seen = []
+        real = self.agent._OUTPUT_REDACTOR.add_env
+        self.addCleanup(setattr, self.agent._OUTPUT_REDACTOR, "add_env", real)
+        self.agent._OUTPUT_REDACTOR.add_env = lambda env: seen.append(dict(env))
+        self.agent.register_secret_env(self.scrub(key="k"))
+        self.assertEqual(1, len(seen))
+        self.assertEqual("k", seen[0]["AUTOOS_OMNIROUTE_KEY"])
+
+    def test_both_spawn_sites_call_the_helper(self):
+        src = io.open(AGENT, encoding="utf-8").read()
+        self.assertNotIn('env = dict(os.environ, **plan["env"], PWD=plan["cwd"])', src,
+                         "a spawn site still copies os.environ wholesale")
+        self.assertEqual(2, src.count("= worker_env(plan"),
+                         "both the first launch and the fallthrough re-run must scrub")
+
+
+class GitGlobalConfigFenceTests(unittest.TestCase):
+    """FF1c item 1 (D-106): the numbered config channels *cancel* two settings,
+    they do not stop git **reading** a global config file. Inheriting HOME and
+    XDG_CONFIG_HOME therefore handed the worker the operator's own
+    url.insteadOf / core.sshCommand / core.hooksPath — every one of which is a
+    way to run a program of the operator's, or repoint a remote at the parent,
+    and none of which the two-entry guard can reach. Checked with a real git,
+    against a fake global config, in both homes git knows about."""
+
+    EVIL = ("[core]\n"
+            "\tsshCommand = /evil/ssh -i /evil/id_ed25519\n"
+            "\thooksPath = /evil/hooks\n"
+            "[url \"git@parent:\"]\n"
+            "\tinsteadOf = https://parent/\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        io.open(os.path.join(self.home, ".gitconfig"), "w",
+                encoding="utf-8").write(self.EVIL)
+        xdg_git = os.path.join(self.home, ".config", "git")
+        os.makedirs(xdg_git)
+        io.open(os.path.join(xdg_git, "config"), "w",
+                encoding="utf-8").write(self.EVIL)
+        self.base = {"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": self.home,
+                     "USER": "tester", "XDG_CONFIG_HOME": os.path.join(self.home, ".config")}
+
+    def git(self, env, *args):
+        return subprocess.run(["git", "config", *args], env=env,
+                              capture_output=True, text=True)
+
+    def test_the_fake_global_config_is_really_visible_to_a_plain_git(self):
+        # Guards the fixture: if this does not see the evil value, the test
+        # below passes for the wrong reason.
+        plain = {"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": self.home}
+        r = self.git(plain, "--get", "core.sshCommand")
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("/evil/ssh", r.stdout)
+
+    def test_worker_env_hides_the_GLOBAL_gitconfig(self):
+        env = self.agent.worker_env({"cwd": self.home, "env": {}}, None, base=self.base)
+        for key in ("core.sshCommand", "core.hooksPath", "url.git@parent:.insteadOf"):
+            r = self.git(env, "--get", key)
+            self.assertNotEqual(0, r.returncode,
+                                "git read the operator's global config: %s -> %r"
+                                % (key, r.stdout))
+            self.assertNotIn("evil", r.stdout)
+        listed = self.git(env, "--list")
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        self.assertNotIn("evil", listed.stdout,
+                         "a value from the operator's global config reached the worker")
+
+    def test_the_plan_gives_the_worker_a_private_config_home(self):
+        # git is only half of it: gh, npm and the clients read $XDG_CONFIG_HOME
+        # too, so the inherited value must be replaced by the plan, not merely
+        # denied to git.
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0, env_over={
+            "XDG_CONFIG_HOME": os.path.join(self.home, ".config")})
+        self.assertEqual(0, rc, out + err)
+        env = calls["envs"][0]
+        config_home = env.get("XDG_CONFIG_HOME")
+        self.assertTrue(config_home, "the worker got no config home: %s" % sorted(env))
+        self.assertNotIn(os.path.join(self.home, ".config"), env.values())
+        self.assertTrue(os.path.isabs(config_home), config_home)
+        self.assertNotEqual(self.home, os.path.dirname(config_home))
+class SpawnerChildEnvTests(_EnvScrubBase):
+    """FF1 (D-106) through the real cmd_run: the env handed to the client at the
+    first launch and at the provider-stop re-run is the scrubbed one."""
+
+    def run_with_secrets(self, stops):
+        self.agent = load_agent()
+        rc, out, err, calls, names = _fallthrough_run(
+            self, ["r-a", "r-b"], stops, env_over=self.secrets())
+        self.assertEqual(stops + 1, len(calls["envs"]),
+                         "expected one captured env per attempt "
+                         "(rc=%s out=%s err=%s)" % (rc, out, err))
+        return calls["envs"], calls
+
+    def test_first_launch_env_is_scrubbed(self):
+        envs, _ = self.run_with_secrets(stops=0)
+        self.assertScrubbed(envs[0], has_key=True)
+
+    def test_fallthrough_rerun_env_is_scrubbed(self):
+        envs, _ = self.run_with_secrets(stops=1)
+        self.assertScrubbed(envs[1], has_key=True)
+
+    def test_the_run_still_hands_the_worker_its_own_key(self):
+        # The scrub must not eat the one credential the worker legitimately needs:
+        # the gateway key still arrives, and still gets registered for redaction.
+        envs, calls = self.run_with_secrets(stops=0)
+        self.assertEqual("test-only-key", envs[0]["AUTOOS_OMNIROUTE_KEY"])
+        self.assertEqual(1, len(calls["cwds"]))
+
+    def test_extra_is_filtered_by_the_same_deny_and_passlist(self):
+        # FF1c item 2: the CLI-child env scrubbed `base` and then did a bare
+        # `env.update(extra)`, so the one call site that passes an extra entry
+        # was the whole policy — a future `extra={"GH_TOKEN": ...}` or a
+        # repointed PATH would have gone through with no check at all.
+        self.agent = load_agent()
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester"}
+        for name, value in (("GH_TOKEN", "gh-oauth"), ("FOO_API_KEY", "k"),
+                            ("PATH", "/evil/bin"), ("LD_PRELOAD", "/evil.so"),
+                            ("GIT_SSH_COMMAND", "ssh -i /evil/key"),
+                            ("SOMETHING_ELSE", "x")):
+            out = io.StringIO()
+            with contextlib.redirect_stderr(out):
+                env = self.agent.spawner_child_env(base=base, extra={name: value})
+            self.assertNotEqual(value, env.get(name),
+                                "%s reached a CLI child through extra" % name)
+            self.assertIn(name, out.getvalue(),
+                          "%s was refused silently: an unlisted extra is drift "
+                          "in our own code and must be said out loud" % name)
+        self.assertEqual("/usr/bin", env["PATH"])
+
+    def test_the_extra_the_cli_actually_needs_still_arrives(self):
+        # The detached runner passes the task dir; refusing it would silently
+        # move the worker's records somewhere else.
+        self.agent = load_agent()
+        env = self.agent.spawner_child_env(
+            base={"PATH": "/usr/bin", "HOME": "/home/tester"},
+            extra={"AUTOOS_TASK_DIR": "/tmp/task", "AUTOOS_AGENT_RUN_ID": "run-1"})
+        self.assertEqual("/tmp/task", env["AUTOOS_TASK_DIR"])
+        self.assertEqual("run-1", env["AUTOOS_AGENT_RUN_ID"])
+
+    def test_the_filter_lives_in_the_helper_not_in_caller_discipline(self):
+        # The reviewer's finding was exactly this: "currently only safe by
+        # caller discipline". The shape of the helper is what makes it safe.
+        src = io.open(AGENT, encoding="utf-8").read()
+        fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)
+                  and n.name == "spawner_child_env")
+        calls = [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        self.assertFalse([c for c in calls if c.startswith("env.update")],
+                         "spawner_child_env merges extra with a bare dict update")
+        self.assertTrue([c for c in calls if "_worker_env_denied" in c],
+                        "spawner_child_env never consults the deny list for extra")
+        self.assertTrue([c for c in calls if "_child_env_passed" in c],
+                        "spawner_child_env never consults the passlist for extra")
+
+
+class SandboxPushFenceTests(unittest.TestCase):
+    """FF1 item 3 (D-106): a created sandbox cannot push anywhere — neither to a
+    configured remote (pushurl) nor to an absolute path named in its brief (hook)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.sbx = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.sbx, True)
+        self.clone = os.path.join(self.sbx, "clone")
+        subprocess.run(["git", "clone", "-q", "--local", self.root, self.clone],
+                       check=True)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", "-C", cwd or self.clone, *args],
+                              capture_output=True, text=True)
+
+    def test_fencing_a_clone_disables_every_remote(self):
+        self.git("remote", "add", "second", self.root)
+        self.agent.fence_sandbox_push(self.clone)
+        for remote in ("origin", "second"):
+            self.assertEqual(self.agent.ISOLATE_PUSH_DISABLED,
+                             self.git("remote", "get-url", "--push", remote).stdout.strip(),
+                             remote)
+
+    def test_pushing_to_a_configured_remote_fails(self):
+        self.agent.fence_sandbox_push(self.clone)
+        r = self.git("push", "origin", "HEAD")
+        self.assertNotEqual(0, r.returncode, r.stdout + r.stderr)
+
+    def test_pushing_to_an_absolute_path_fails(self):
+        self.agent.fence_sandbox_push(self.clone)
+        r = self.git("push", self.root, "HEAD:refs/heads/stolen")
+        self.assertNotEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertNotEqual(0, self.git("rev-parse", "--verify", "refs/heads/stolen",
+                                        cwd=self.root).returncode,
+                            "the push reached the parent despite the fence")
+
+    def test_a_sandbox_created_by_a_run_is_fenced(self):
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
+        self.assertEqual(0, rc, out + err)
+        sb = calls["cwds"][0]
+        self.assertIn("/sandboxes/", sb)
+        self.assertEqual(self.agent.ISOLATE_PUSH_DISABLED,
+                         self.git("remote", "get-url", "--push", "origin",
+                                  cwd=sb).stdout.strip())
+        self.assertNotEqual(0, self.git("push", "origin", "HEAD", cwd=sb).returncode)
+
+
+class PlanEnvPasslistTests(_EnvScrubBase):
+    """FF1b item 1 (D-106): the allowlist only ever guarded what the *caller*
+    exported. plan["env"] was copied in after it, gated by nothing but the
+    denylist — so a plan that set PATH, LD_PRELOAD or PYTHONPATH owned the
+    child. A plan entry must now name itself on a passlist of the names the
+    spawner's own builders set, and still clear the deny check."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def scrub(self, plan_env, extra_base=None):
+        out = io.StringIO()
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester",
+                "XDG_CACHE_HOME": "/home/tester/.cache"}
+        base.update(extra_base or {})
+        with contextlib.redirect_stderr(out):
+            env = self.agent.worker_env({"cwd": "/tmp/sandbox", "env": plan_env},
+                                        None, base=base)
+        return env, out.getvalue()
+
+    def test_an_unlisted_plan_entry_is_refused_and_named_loudly(self):
+        # The plan is built by our own code, so this is a drift guard, not a
+        # hostile input: a builder that starts setting PATH is refused and said
+        # out loud rather than silently repointing the child's binaries.
+        env, err = self.scrub({"PATH": "/evil/bin", "HOME": "/evil/home",
+                               "LD_PRELOAD": "/evil.so"})
+        self.assertEqual("/usr/bin", env["PATH"])
+        self.assertEqual("/home/tester", env["HOME"])
+        self.assertNotIn("LD_PRELOAD", env)
+        for name in ("PATH", "HOME", "LD_PRELOAD"):
+            self.assertIn(name, err, "a refused plan entry must be announced: %s" % name)
+
+    def test_the_names_a_plan_actually_sets_are_the_passlist(self):
+        # Derive the passlist from the builders: every env[NAME] = ... the plan
+        # builder writes has to be on it, or the child silently loses it.
+        src = io.open(AGENT, encoding="utf-8").read()
+        start = src.index("def build_plan(")
+        body = src[start:src.index("\ndef ", start + 1)]
+        names = set()
+        for expr in re.findall(r'env\[(.+?)\] *=', body):
+            expr = expr.strip()
+            lit = re.fullmatch(r'"([A-Za-z0-9_]+)"', expr)
+            const = re.fullmatch(r"clients\.([A-Z0-9_]+)", expr)
+            if lit:
+                names.add(lit.group(1))
+            elif const:
+                # A named constant is as good as a literal, resolved here rather
+                # than duplicated into the passlist.
+                names.add(getattr(clients, const.group(1)))
+            else:
+                self.fail("plan env key %r is neither a literal nor a clients "
+                          "constant — the passlist cannot be checked against it" % expr)
+        self.assertTrue(names, "the plan builder assigns no env names? read the source")
+        passed = set(self.agent.WORKER_PLAN_ENV_PASSLIST) | {
+            n for n in names if n.startswith(self.agent.WORKER_PLAN_ENV_PASSLIST_PREFIXES)}
+        self.assertEqual(set(), names - passed,
+                         "plan env names not on the passlist: %s" % sorted(names - passed))
+        for name in ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+                     "XDG_CONFIG_HOME", clients.GEMINI_CUSTOM_HEADERS_ENV):
+            self.assertIn(name, names, name)
+            self.assertIn(name, passed, name)
+
+    def test_injection_and_config_names_are_denied_from_both_sides(self):
+        denied = ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                  "PYTHONPATH", "NODE_OPTIONS", "GIT_CONFIG_GLOBAL",
+                  "GIT_PROXY_COMMAND", "GIT_SSH_COMMAND", "GIT_SSH",
+                  "SSH_ASKPASS", "SUDO_ASKPASS", "KUBECONFIG", "DOCKER_CONFIG",
+                  "AUTOOS_KEYS_FILE", "AUTOOS_OMNIROUTE_CONFIG_FILE",
+                  "MYPROVIDER_CREDENTIALS", "GIT_CONFIG_KEY_9"]
+        for name in denied:
+            from_base, _ = self.scrub({}, {name: "/evil/" + name})
+            self.assertNotEqual("/evil/" + name, from_base.get(name),
+                                "%s inherited from the caller" % name)
+            from_plan, err = self.scrub({name: "/evil/" + name})
+            self.assertNotEqual("/evil/" + name, from_plan.get(name),
+                                "%s came from the plan" % name)
+            self.assertIn(name, err, "%s was refused silently" % name)
+        # GIT_CONFIG_GLOBAL is on the deny list *and* on the guards: nobody but
+        # the spawner may name it, and the value it gets must be the dead path.
+        self.assertEqual(os.devnull, self.scrub({})[0]["GIT_CONFIG_GLOBAL"])
+
+    def test_the_passlisted_plan_entries_still_apply(self):
+        env, err = self.scrub({"OPENCODE_CONFIG_CONTENT": "{}",
+                               "XDG_DATA_HOME": "/tmp/sbx.opencode-data",
+                               "XDG_RUNTIME_DIR": "/tmp/state/runtimes/run-1",
+                               "GEMINI_CLI_CUSTOM_HEADERS": "a=b",
+                               "AUTOOS_AGENT_RUN_ID": "run-1"})
+        self.assertEqual("{}", env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual("/tmp/sbx.opencode-data", env["XDG_DATA_HOME"])
+        self.assertEqual("/tmp/state/runtimes/run-1", env["XDG_RUNTIME_DIR"])
+        self.assertEqual("a=b", env["GEMINI_CLI_CUSTOM_HEADERS"])
+        self.assertEqual("run-1", env["AUTOOS_AGENT_RUN_ID"])
+        self.assertEqual("", err, "a passlisted entry must not be announced")
+
+    def test_every_git_config_channel_left_of_the_guards_is_dropped(self):
+        # The operator's own `git -c ...` (what the spawner and the orchestrator
+        # run with) exported GIT_CONFIG_COUNT/KEY_n/VALUE_n/PARAMETERS; git reads
+        # all of it in the child, so a url.insteadof pointing at the parent
+        # survives every remote-level fence.
+        base = {"GIT_CONFIG_COUNT": "5",
+                "GIT_CONFIG_KEY_0": "url.https://parent/.insteadOf",
+                "GIT_CONFIG_VALUE_0": "git@parent:",
+                "GIT_CONFIG_KEY_3": "credential.helper",
+                "GIT_CONFIG_VALUE_3": "store",
+                "GIT_CONFIG_PARAMETERS": "'credential.helper=store'"}
+        env, _ = self.scrub({}, base)
+        cfg = {k: env[k] for k in env if k.startswith("GIT_CONFIG_KEY_")}
+        self.assertEqual({"GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1"}, set(cfg))
+        self.assertEqual("2", env["GIT_CONFIG_COUNT"])
+        self.assertEqual("", env["GIT_CONFIG_VALUE_0"])
+        self.assertEqual("", env["GIT_CONFIG_PARAMETERS"])
+        self.assertNotIn("GIT_CONFIG_KEY_3", env)
+        self.assertNotIn("GIT_CONFIG_VALUE_3", env)
+
+    def test_the_operators_runtime_dir_is_never_inherited(self):
+        env, _ = self.scrub({}, {"XDG_RUNTIME_DIR": "/run/user/4242"})
+        self.assertNotIn("/run/user/4242", env.values())
+
+    def test_no_child_env_value_names_an_agent_socket_or_the_runtime_dir(self):
+        base = {"XDG_RUNTIME_DIR": "/run/user/4242",
+                "SSH_AUTH_SOCK": "/run/user/4242/vscode-ssh-agent.sock",
+                "SSH_AGENT_PID": "4242"}
+        env, _ = self.scrub({"OPENCODE_CONFIG_CONTENT": "{}"}, base)
+        for name, value in env.items():
+            self.assertNotIn("ssh-agent", value,
+                             "%s carries an ssh-agent socket path into the worker" % name)
+            self.assertNotIn("/run/user/4242", value,
+                             "%s carries the operator's private runtime dir" % name)
+
+
+class SandboxGitIdentityTests(unittest.TestCase):
+    """FF1c, opened while closing item 1: forcing `GIT_CONFIG_GLOBAL` at a dead
+    path hides the operator's `user.name` too, and every brief in this lane ends
+    with the *worker* running `git commit`. Without an identity of its own the
+    clone cannot commit at all (“Author identity unknown”), which is a worse
+    failure than the leak it closed: the run exits with uncommitted work. The
+    sandbox therefore carries a local identity — the same author the spawner's
+    own end-of-run commit uses — set where the clone stands up, not inherited."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_a_worker_commits_in_its_sandbox_under_the_worker_env(self):
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        io.open(os.path.join(home, ".gitconfig"), "w", encoding="utf-8").write(
+            "[user]\n\tname = Operator Ostentatious\n"
+            "\temail = operator@example.invalid\n")
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
+        self.assertEqual(0, rc, out + err)
+        sb = calls["cwds"][0]
+        env = dict(calls["envs"][0], HOME=home, USERPROFILE=home)
+        committed = subprocess.run(
+            ["git", "-C", sb, "commit", "--allow-empty", "-q", "-m", "worker work"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(0, committed.returncode,
+                         "a worker cannot commit in its own sandbox: %s%s"
+                         % (committed.stdout, committed.stderr))
+        author = subprocess.run(["git", "-C", sb, "log", "-1", "--format=%an <%ae>"],
+                                capture_output=True, text=True, env=env).stdout.strip()
+        self.assertEqual("autoos-worker <%s>" % self.agent.WORKER_EMAIL, author,
+                         "the commit was authored by the operator's global config")
+
+
+class ChildRuntimeDirTests(unittest.TestCase):
+    """FF1b item 4: XDG_RUNTIME_DIR is the operator's session — bus, sockets,
+    the agent's own dir. A worker gets an empty directory of its own, mode 0700."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_provisioning_creates_an_empty_0700_dir_and_is_idempotent(self):
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "runtimes", "run-1")
+        for _ in range(2):
+            self.agent.provision_runtime_dir(target)
+        self.assertTrue(os.path.isdir(target))
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(target).st_mode))
+        self.assertEqual([], os.listdir(target))
+
+    def test_provisioning_refuses_a_relative_or_empty_path(self):
+        self.assertIsNone(self.agent.provision_runtime_dir(None))
+        self.assertIsNone(self.agent.provision_runtime_dir(""))
+
+    def test_provisioning_refuses_a_pre_existing_symlink(self):
+        # FF1c item 3: on a shared host the state tree is writable by more than
+        # one account, and makedirs(exist_ok=True) walks straight through a leaf
+        # somebody else pre-created as a symlink — the worker's sockets, tokens
+        # and client state would then land wherever that link points, and the
+        # 0700 chmod would punch a hole in a directory it never owned.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = os.path.join(tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        before = stat.S_IMODE(os.stat(elsewhere).st_mode)
+        target = os.path.join(tmp, "run-1")
+        os.symlink(elsewhere, target)
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.islink(target), "the link was replaced, not refused")
+        self.assertEqual([], os.listdir(elsewhere))
+        self.assertEqual(before, stat.S_IMODE(os.stat(elsewhere).st_mode),
+                         "the chmod landed through the symlink on someone "
+                         "else's directory")
+
+    def test_provisioning_refuses_a_leaf_that_is_not_a_directory(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "run-1")
+        io.open(target, "w", encoding="utf-8").write("x")
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.isfile(target))
+
+    def test_provisioning_refuses_a_directory_it_does_not_own(self):
+        # The owner check is the other half of the symlink story: an existing
+        # dir of another uid is never chmod 0700'd (that would be a denial of
+        # service on its real owner) and never written into.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "run-1")
+        os.mkdir(target)
+        with mock.patch.object(os, "getuid", lambda: 999999):
+            self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.isdir(target))
+
+    def test_provisioning_does_not_widen_the_parent(self):
+        # makedirs(mode) applies the mode to the leaf only, so a 0755 parent
+        # beside a 0700 leaf is the shape that let a sibling read in.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "runtimes", "run-1")
+        self.agent.provision_runtime_dir(target)
+        parent = os.path.dirname(target)
+        self.assertTrue(stat.S_IMODE(os.stat(parent).st_mode) & 0o077 == 0,
+                        "the runtimes parent is world-readable: %o"
+                        % stat.S_IMODE(os.stat(parent).st_mode))
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlinks, uid and chmod modes")
+    def test_provisioning_refuses_a_parent_that_is_a_symlink(self):
+        # FF1 Sonnet LOW: the leaf got this treatment in FF1c, the parent did
+        # not — os.path.isdir follows a link, so the create-and-chmod below it
+        # walked straight through a parent somebody else placed in the state
+        # tree and tightened *their* directory from underneath.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = os.path.join(tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        os.chmod(elsewhere, 0o755)
+        link = os.path.join(tmp, "runtimes")
+        os.symlink(elsewhere, link)
+        target = os.path.join(link, "run-1")
+        self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertTrue(os.path.islink(link), "the parent link was replaced")
+        self.assertEqual([], os.listdir(elsewhere),
+                         "the leaf was created through the parent link")
+        self.assertEqual(0o755, stat.S_IMODE(os.stat(elsewhere).st_mode),
+                         "the parent chmod landed through the link, on a "
+                         "directory it never owned")
+
+    def test_provisioning_refuses_a_parent_it_does_not_own(self):
+        # The other half of the same rule: a parent of another uid is somebody
+        # else's tree, and the leaf inside it is the write, not the chmod.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        parent = os.path.join(tmp, "runtimes")
+        os.mkdir(parent)
+        target = os.path.join(parent, "run-1")
+        with mock.patch.object(os, "getuid", lambda: 999999):
+            self.assertIsNone(self.agent.provision_runtime_dir(target))
+        self.assertFalse(os.path.exists(target), "the leaf was created anyway")
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlinks, uid and chmod modes")
+    def test_provisioning_creates_the_leaf_itself_not_through_a_parent_link(self):
+        # os.mkdir is the atomic half: no O_CREAT-after-O_EXCL window on the
+        # leaf, and an existing competitor's dir is caught, not merged into.
+        import stat
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = os.path.join(tmp, "runtimes", "run-1")
+        # pre-create the leaf as a plain dir owned by us: accepted, tightened.
+        os.makedirs(target)
+        os.chmod(target, 0o755)
+        self.assertEqual(target, self.agent.provision_runtime_dir(target))
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(target).st_mode))
+
+    def test_an_isolate_run_gets_a_private_runtime_dir(self):
+        import stat
+        self.agent = load_agent()
+        rc, out, err, calls, names = _fallthrough_run(
+            self, ["r-a"], 0, env_over={"XDG_RUNTIME_DIR": "/run/user/4242",
+                                        "XDG_CONFIG_HOME": "/home/dev/.config"})
+        self.assertEqual(0, rc, out + err)
+        env = calls["envs"][0]
+        runtime = env.get("XDG_RUNTIME_DIR")
+        self.assertTrue(runtime, "the worker got no runtime dir: %s" % sorted(env))
+        self.assertNotEqual("/run/user/4242", runtime)
+        self.assertTrue(os.path.isdir(runtime), runtime)
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(runtime).st_mode))
+        self.assertEqual([], os.listdir(runtime))
+        # FF1c item 1: the config home is provisioned the same way — named in
+        # the plan, created at the launch site, private, and empty.
+        config = env.get("XDG_CONFIG_HOME")
+        self.assertTrue(config, "the worker got no config home: %s" % sorted(env))
+        self.assertNotEqual("/home/dev/.config", config)
+        self.assertTrue(os.path.isdir(config), config)
+        self.assertEqual(0o700, stat.S_IMODE(os.stat(config).st_mode))
+
+    def test_a_fallthrough_rerun_provisions_its_own_dirs(self):
+        # FF1 Sonnet LOW: the re-plan mints a fresh run id, and the private XDG
+        # dirs are named after it — so the dirs that do not exist are exactly
+        # the re-run's. The first launch site provisioned the stopped attempt's
+        # pair and nothing did the second, leaving the fallthrough worker with
+        # an XDG dir it would have to create itself, outside the 0700 rule.
+        # Non-isolate and --free: no clone, so nothing else touched the disk.
+        import stat
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], 1,
+            args_over={"free": True, "free_model": FREE_MODELS[0],
+                       "isolate": False},
+            policy={"free_client_models": {"opencode": FREE_MODELS}})
+        self.assertEqual(0, rc, out + err)
+        self.assertEqual(2, calls["n"], "one stop should mean one re-run: %s" % out)
+        first, rerun = calls["envs"][0], calls["envs"][1]
+        for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+            self.assertTrue(rerun.get(name), "%s missing on the re-run: %s"
+                            % (name, sorted(rerun)))
+            self.assertNotEqual(first[name], rerun[name],
+                                "%s: the re-run reused the stopped attempt's dir"
+                                % name)
+            self.assertTrue(os.path.isdir(rerun[name]),
+                            "%s was never created for the re-run: %s"
+                            % (name, rerun[name]))
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(rerun[name]).st_mode),
+                             "%s: %o" % (name, stat.S_IMODE(
+                                 os.stat(rerun[name]).st_mode)))
+            self.assertEqual([], os.listdir(rerun[name]), name)
+
+
+class WorkerDirRefusalStopsLaunchTests(unittest.TestCase):
+    """FF1d: `provision_runtime_dir` returns None when it REFUSES a path — a
+    symlink, a tree of another uid, a non-dir leaf or parent, a racer still there
+    after the retry. Both launch sites in `cmd_run` dropped that result, so the
+    worker started anyway and ran with the very directory the fence had refused
+    (or with none at all). A refusal now stops the launch: exit 2, no child — at
+    the first attempt and on a provider-stop re-run."""
+
+    RUN_ID = "20260928-000000-refuse-a00001"
+    RERUN_ID = "20260928-000000-refuse-b00002"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        # The state tree is pinned to a private tmp dir so the runtime/config
+        # path the plan names is one this test can pre-plant before cmd_run
+        # reaches it (the run id itself is pinned per test, see pin_run_ids).
+        self.state = tempfile.mkdtemp()
+        self.elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+        self.addCleanup(shutil.rmtree, self.elsewhere, True)
+        patch = mock.patch.object(self.agent.clients, "state_dir",
+                                  lambda *a, **k: self.state)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def pin_run_ids(self, *ids):
+        """Hand `cmd_run`'s plans these run ids, in order (the last repeats)."""
+        box = list(ids)
+
+        def _mint(title, task, now=None):
+            return box.pop(0) if len(box) > 1 else box[0]
+
+        patch = mock.patch.object(self.agent, "mint_run_id", _mint)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def plant_runtime_symlink(self, run_id):
+        """Pre-create the worker's runtime dir as a link out of the state tree."""
+        target = os.path.join(self.state, "runtimes", run_id)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.symlink(self.elsewhere, target)
+        return target
+
+    def run_first_launch(self):
+        # Non-isolate so nothing but the launch site touches the disk.
+        return _fallthrough_run(self, ["r-a"], 0, args_over={"isolate": False})
+
+    def test_a_refused_runtime_dir_refuses_the_launch(self):
+        self.pin_run_ids(self.RUN_ID)
+        target = self.plant_runtime_symlink(self.RUN_ID)
+        rc, out, err, calls, _ = self.run_first_launch()
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(0, calls["n"], "the worker started with a refused XDG dir")
+        self.assertIn(target, err, "the refusal did not name the path")
+        self.assertTrue(os.path.islink(target), "the refused link was replaced")
+        self.assertEqual([], os.listdir(self.elsewhere),
+                         "the refused path was still written through")
+
+    def test_a_refused_parent_dir_refuses_the_launch(self):
+        # The leaf was never there: its PARENT is the link, and isdir() follows
+        # it, so this is the hole the leaf check alone cannot see.
+        self.pin_run_ids(self.RUN_ID)
+        link = os.path.join(self.state, "runtimes")
+        os.symlink(self.elsewhere, link)
+        rc, out, err, calls, _ = self.run_first_launch()
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(0, calls["n"], "the worker started through a linked parent")
+        self.assertIn(os.path.join(link, self.RUN_ID), err)
+        self.assertTrue(os.path.islink(link), "the parent link was replaced")
+        self.assertEqual([], os.listdir(self.elsewhere),
+                         "the runtime dir was created through the parent link")
+
+    def test_a_refused_dir_refuses_the_fallthrough_rerun(self):
+        # The stopped attempt's dirs were fine, so it launched; the re-plan minted
+        # a fresh run id, and THAT dir is the refused one. A fallthrough must not
+        # be the path that launches into a refused directory.
+        self.pin_run_ids(self.RUN_ID, self.RERUN_ID)
+        target = self.plant_runtime_symlink(self.RERUN_ID)
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], 1,
+            args_over={"free": True, "free_model": FREE_MODELS[0],
+                       "isolate": False},
+            policy={"free_client_models": {"opencode": FREE_MODELS}})
+        self.assertEqual(2, rc, out + err)
+        self.assertEqual(1, calls["n"], "the refused re-run was launched: %s" % out)
+        self.assertIn(target, err)
+        self.assertTrue(os.path.isdir(calls["envs"][0]["XDG_RUNTIME_DIR"]),
+                        "the first attempt should still have provisioned its own")
+
+
+class PushFenceHonestyTests(unittest.TestCase):
+    """FF1b item 3: the pre-push hook and the disabled pushurl are an ACCIDENT
+    guard. `--no-verify`, `core.hooksPath` and `git remote set-url` walk past
+    both; the containment is the isolated clone plus an env with no credential
+    to push with. The suite says so, in a test that proves the bypass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.sbx = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.sbx, True)
+        self.clone = os.path.join(self.sbx, "clone")
+        subprocess.run(["git", "clone", "-q", "--local", self.root, self.clone],
+                       check=True)
+        self.agent.fence_sandbox_push(self.clone)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", "-C", cwd or self.clone, *args],
+                              capture_output=True, text=True,
+                              env=dict(os.environ, GIT_CONFIG_COUNT="0"))
+
+    def test_the_hook_and_pushurl_are_documented_as_an_accident_guard(self):
+        hook = os.path.join(self.clone, ".git", "hooks", "pre-push")
+        self.assertTrue(os.path.exists(hook))
+        text = io.open(hook, encoding="utf-8").read()
+        self.assertIn("accident", text.lower(),
+                      "the hook must say what it is: an accident guard, not a fence")
+        src = io.open(AGENT, encoding="utf-8").read()
+        fence_src = src[src.index("def fence_sandbox_push("):
+                        src.index("def isolate_task_prefix(")]
+        for word in ("accident", "--no-verify"):
+            self.assertIn(word, fence_src.lower(),
+                          "the code comment must name the bypass class: %s" % word)
+
+    def test_a_no_verify_push_is_NOT_blocked_by_the_hook(self):
+        # THE LIMITATION, asserted so nobody reads the hook as a security control:
+        # skipping the hook is a flag, and a URL-addressed push never consults
+        # the disabled pushurl. Real containment is items 1, 2 and 4 (no
+        # credential in the env) plus the clone being disposable.
+        self.git("commit", "--allow-empty", "-q", "-m", "worker work")
+        r = self.git("push", "--no-verify", self.root, "HEAD:refs/heads/stolen")
+        self.assertEqual(0, r.returncode,
+                         "this test exists to prove --no-verify gets through; if it\n"
+                         "now fails, the accident guard became something else — update\n"
+                         "the comment and the docs together: %s%s" % (r.stdout, r.stderr))
+        self.assertEqual(0, self.git("rev-parse", "--verify", "refs/heads/stolen",
+                                     cwd=self.root).returncode,
+                         "--no-verify push reached the parent: the guard is a fence now")
+
+    def test_a_run_created_sandbox_actually_gets_the_hook(self):
+        # fence_sandbox_push existed, was tested directly, and was never called:
+        # a real sandbox only had origin's pushurl disabled.
+        rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
+        self.assertEqual(0, rc, out + err)
+        sb = calls["cwds"][0]
+        self.assertIn("/sandboxes/", sb)
+        self.assertTrue(os.path.exists(os.path.join(sb, ".git", "hooks", "pre-push")),
+                        "the sandbox was created without the hook the code claims")
+
+
+class SubprocessEnvAuditTests(unittest.TestCase):
+    """FF1b item 6, extended by FF1c item 4: the scrub is only as good as the
+    sites that use it. Every child that runs our own code (a worker, or a CLI
+    child that goes on to spawn one) must be handed a chosen env, not the
+    caller's.
+
+    Round b's walker looked at five `subprocess.*` names and trusted the first
+    element of a literal argv. Three shapes walked straight past it: `os.system`
+    / `os.popen` / `os.exec*`, which cannot take an env at all; `shell=True`,
+    which hands the whole env to a shell and parses the argv as operator text;
+    and a variable argv, which was only ever checked for the presence of an
+    `env=` keyword, never for what it actually runs."""
+
+    FILES = [AGENT, TOOLS / "autoos_agent_mcp.py"]
+    # A call whose argv starts with one of these is the spawner's own plumbing:
+    # it runs as the spawner, in the operator's context, on purpose. Everything
+    # else is a child that could carry a credential onward. Only a *literal*
+    # argv earns the exemption — a variable called `git` is not git.
+    PLUMBING = ("git", "taskkill")
+    SPAWNERS = ("run", "Popen", "call", "check_output", "check_call")
+    # os.* has no env parameter: the child inherits whatever the process holds.
+    OS_SPAWNERS = ("system", "popen")
+    OS_SPAWNER_PREFIXES = ("exec", "spawn")
+    # A site that genuinely must run outside the audit names itself in a
+    # comment carrying this marker, on the call line or the one above it.
+    ALLOW_MARK = "subprocess-audit:"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def _allowed(self, lines, lineno):
+        for i in (lineno, lineno - 1):
+            if 0 < i <= len(lines) and self.ALLOW_MARK in lines[i - 1]:
+                return True
+        return False
+
+    def _site(self, node, lines):
+        """Classify one call: what it runs, whether the env is chosen, whether
+        it goes through a shell, and whether the argv is readable at all."""
+        fn = node.func
+        rec = {"lineno": node.lineno, "first": None, "dynamic": False,
+               "os_call": False, "shell": False,
+               "has_env": any(k.arg == "env" for k in node.keywords),
+               "allowed": self._allowed(lines, node.lineno)}
+        for k in node.keywords:
+            if k.arg == "shell" and isinstance(k.value, ast.Constant):
+                rec["shell"] = bool(k.value.value)
+        if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) \
+                and fn.value.id == "os":
+            if (fn.attr in self.OS_SPAWNERS or
+                    fn.attr.startswith(self.OS_SPAWNER_PREFIXES)):
+                rec["os_call"] = True
+                rec["first"] = "os." + fn.attr
+                return rec
+            return None
+        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
+                and fn.value.id == "subprocess" and fn.attr in self.SPAWNERS):
+            return None
+        argv = node.args[0] if node.args else None
+        if isinstance(argv, ast.List) and argv.elts and \
+                isinstance(argv.elts[0], ast.Constant):
+            rec["first"] = argv.elts[0].value
+        elif isinstance(argv, ast.Call) and isinstance(argv.func, ast.Attribute) \
+                and argv.func.attr == "join":
+            rec["first"] = "path"
+        else:
+            # a variable, a subscript, a concatenation — the audit cannot read
+            # what it runs, so the plumbing exemption never applies to it.
+            rec["dynamic"] = True
+            rec["first"] = "<dynamic>"
+        return rec
+
+    def scan(self, text):
+        lines = text.splitlines()
+        out = []
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.Call):
+                continue
+            rec = self._site(node, lines)
+            if rec is not None:
+                out.append(rec)
+        return out
+
+    def sites(self, path):
+        return self.scan(io.open(path, encoding="utf-8").read())
+
+    def sites_text(self, text):
+        return self.scan(text)
+
+    def test_the_walker_sees_every_shape_it_claims_to(self):
+        # A detector that silently detects nothing is worse than none: round b's
+        # walker passed because the files were clean, and it was not reading
+        # three of the shapes that matter. Feed it the shapes explicitly.
+        snippet = "\n".join([
+            "import os, subprocess",
+            'subprocess.run(["git", "status"], check=True)',
+            'subprocess.run(cmd, env=env)',
+            'subprocess.run("rm -rf x", shell=True)',
+            'subprocess.Popen(["evil"], shell=True, env=env)',
+            'os.system("echo hi")',
+            'os.popen("id")',
+            'os.execvp("evil", ["evil"])',
+            'os.spawnl(os.P_NOWAIT, "evil")',
+            'os.path.exists("x")',
+            'subprocess.run(os.path.join(d, "x"), env=env)',
+            'open("f")',
+        ])
+        recs = self.sites_text(snippet)
+        got = {r["first"] for r in recs}
+        self.assertIn("git", got, "literal argv no longer read")
+        self.assertTrue(any(r["dynamic"] for r in recs), "variable argv not flagged")
+        self.assertTrue(any(r["shell"] for r in recs), "shell=True not flagged")
+        for name in ("os.system", "os.popen", "os.execvp", "os.spawnl"):
+            self.assertIn(name, got, "%s not audited" % name)
+            self.assertTrue([r for r in recs if r["first"] == name and r["os_call"]])
+        self.assertNotIn("os.path.exists", got,
+                         "an os.path call counted as a child spawn")
+        joined = [r for r in recs if r["first"] == "path"]
+        self.assertEqual(1, len(joined), "os.path.join argv not read as a path")
+        self.assertFalse(joined[0]["os_call"] or joined[0]["dynamic"])
+        self.assertTrue(joined[0]["has_env"])
+        # the plumbing exemption is literal-only
+        literal = [r for r in recs if r["first"] == "git"]
+        self.assertFalse(literal[0]["dynamic"] or literal[0]["shell"])
+
+    def test_every_non_plumbing_child_call_passes_an_env(self):
+        missing = []
+        for path in self.FILES:
+            for rec in self.sites(path):
+                if rec["allowed"]:
+                    continue
+                if not rec["dynamic"] and not rec["shell"] and \
+                        rec["first"] in self.PLUMBING:
+                    continue
+                if rec["os_call"] or not rec["has_env"]:
+                    missing.append("%s:%d argv[0]=%r os_call=%s env=%s"
+                                   % (os.path.basename(path), rec["lineno"],
+                                      rec["first"], rec["os_call"], rec["has_env"]))
+        self.assertEqual([], missing, "these child sites inherit the caller's whole env")
+
+    def test_no_site_spawns_through_the_shell_or_the_os_helpers(self):
+        # Both classes are absent today; the assertion is what keeps them absent
+        # when someone adds a one-liner that "obviously" doesn't need an env.
+        offenders = []
+        for path in self.FILES:
+            for rec in self.sites(path):
+                if rec["allowed"]:
+                    continue
+                if rec["os_call"] or rec["shell"]:
+                    offenders.append("%s:%d %s" % (os.path.basename(path),
+                                                   rec["lineno"], rec["first"]))
+        self.assertEqual([], offenders,
+                          "os.system/popen/exec and shell=True both hand the "
+                          "caller's env onward")
+
+    def test_no_site_copies_the_environment_wholesale(self):
+        for path in self.FILES:
+            src = io.open(path, encoding="utf-8").read()
+            for shape in ("env=dict(os.environ", "env={**os.environ",
+                          'env = dict(os.environ'):
+                self.assertNotIn(shape, src,
+                                 "%s copies os.environ into a child: %s"
+                                 % (os.path.basename(path), shape))
+
+    def test_the_cli_child_env_scrubs_but_keeps_what_the_cli_reads(self):
+        # A CLI child is our own spawner code: it must not see the operator's
+        # tokens, but it does need AUTOOS_OMNIROUTE_KEY to mint the worker's key
+        # and the state/worker dirs it writes into.
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester",
+                "XDG_RUNTIME_DIR": "/run/user/4242", "SSH_AUTH_SOCK": "/run/user/4242/a.sock",
+                "GH_TOKEN": "gh-secret",
+                "AUTOOS_KEYS_FILE": "/x/api-keys.yml",
+                "AUTOOS_OMNIROUTE_KEY": "parent-key",
+                "AUTOOS_STATE_DIR": "/tmp/state", "AUTOOS_TASK_DIR": "/tmp/task",
+                "PYTHONPATH": "/evil"}
+        env = self.agent.spawner_child_env(base=base)
+        self.assertEqual("parent-key", env["AUTOOS_OMNIROUTE_KEY"])
+        for name in ("PATH", "HOME", "AUTOOS_STATE_DIR", "AUTOOS_TASK_DIR"):
+            self.assertIn(name, env, name)
+        for name in ("GH_TOKEN", "SSH_AUTH_SOCK", "AUTOOS_KEYS_FILE",
+                     "XDG_RUNTIME_DIR", "PYTHONPATH"):
+            self.assertNotIn(name, env, name)
+
+    def test_the_mcp_launch_sites_use_the_cli_child_env(self):
+        src = io.open(TOOLS / "autoos_agent_mcp.py", encoding="utf-8").read()
+        self.assertEqual(3, src.count("env=agent.spawner_child_env"),
+                         "preflight, the detached runner and run_job must all scrub")
+
+
+class WorkerEnvAllowlistEndTests(_EnvScrubBase):
+    """FF1b: the shared assertions run over the passlisted plan too."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_scrubbed_env_still_survives_a_passlisted_plan(self):
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester"}
+        base.update(self.secrets())
+        env = self.agent.worker_env({"cwd": "/tmp/sandbox", "env": {
+                                          "OPENCODE_CONFIG_CONTENT": "{}"}},
+                                    "test-only-key", base=base)
+        self.assertScrubbed(env, has_key=True)
+
+
+# CLAUDEBUDGET-b/d/f/g (ccf6f84): the budget's own spawn-path tests follow,
+# ahead of the unittest trailer — they are classes, and a trailer that ran
+# before them would collect nothing when the file is executed directly.
+class ClaudeBudgetSpawnTests(unittest.TestCase):
+    """CLAUDEBUDGET-b item 3(d) + item 1: the spawn-time half of the budget.
+
+    The resolver holds Claude *legs*; nothing stopped a caller from simply
+    naming the client (`--client claude`) or from exporting
+    AUTOOS_CLAUDE_CRITICAL in a worker and passing it down the tree. These are
+    the tests for the two things that close that: one gate at every spawn path,
+    and a spawner that strips its own Claude declaration from every child.
+    """
+
+    # A v1 card, deliberately: this gate belongs to the spawn path, not to the
+    # resolver, and a resolver card cannot plan at all in a checkout with no
+    # measured overlay -- an unrelated environment fact would decide these tests.
+    CARD = "role=implement"
+    CRITICAL = "CI is red on main and only this run can close it"
+
+    def run_(self, *args, env=None):
+        return run_agent("run", *args, "--dry-run", "--card", self.CARD,
+                         "reply with exactly: ack", env=env or clean_env())
+
+    def test_run_client_claude_is_refused_in_budget_mode(self):
+        r = self.run_("--client", "claude")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+
+    def test_the_refusal_is_a_route_refusal_code(self):
+        # Item 3: a refused spawn exits with an existing refusal code, not a new
+        # one callers would have to learn: 2 is "card or route refused".
+        r = self.run_("--client", "claude")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_cards_own_critical_field_does_not_unlock_the_claude_client(self):
+        # The whole point of item 1: the card is written by the worker that wants
+        # the model, so it cannot be the thing that authorises the spend.
+        r = run_agent("run", "--client", "claude", "--dry-run",
+                      "--card", self.CARD + ",critical=true", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_spawn(self):
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude-budget:", r.stderr)
+
+    def test_the_declaration_reason_is_cited_on_the_allowed_spawn(self):
+        # Item 1: the allowed path has to say *why*, in the declared words, or a
+        # DONE line citing Claude is indistinguishable from a violated policy.
+        r = self.run_("--client", "claude",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL))
+        self.assertIn(self.CRITICAL, r.stderr)
+
+    def test_a_non_claude_spawn_is_never_gated(self):
+        r = self.run_("--client", "opencode")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude_budget", r.stderr + r.stdout)
+
+    def test_the_refusal_comes_before_any_planning(self):
+        # Nothing is burned by a refusal: no route line, no depth line, no clone.
+        r = self.run_("--client", "claude")
+        self.assertNotIn("would run:", r.stdout)
+        self.assertNotIn("route:", r.stdout)
+
+    def test_the_spawner_strips_claude_env_from_a_child(self):
+        # Item 1: the declaration is this process's, never a worker's to pass on.
+        r = self.run_("--client", "opencode",
+                      env=clean_env(AUTOOS_CLAUDE_CRITICAL=self.CRITICAL,
+                                    AUTOOS_CLAUDE_OTHER="x"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        env_line = [line for line in r.stdout.splitlines()
+                    if line.startswith("env: ")]
+        self.assertTrue(env_line, r.stdout)
+        self.assertNotIn("AUTOOS_CLAUDE", env_line[0])
+
+    def test_strip_claude_env_drops_the_whole_namespace(self):
+        # The prefix, not one key: an `AUTOOS_CLAUDE_*` added later is stripped
+        # by the same rule, and a second declaration name is exactly how a
+        # worker gets one the spawner forgot to remove.
+        cli = load_agent()
+        out = cli.strip_claude_env({"AUTOOS_CLAUDE_CRITICAL": "x",
+                                   "AUTOOS_CLAUDE_WHATEVER": "y",
+                                   "AUTOOS_AGENT_DEPTH": "1",
+                                   "PATH": "/bin"})
+        self.assertEqual(out, {"AUTOOS_AGENT_DEPTH": "1", "PATH": "/bin"})
+
+    # CLAUDEBUDGET-d item 2: the gate reads the model that will actually answer,
+    # not only the client's name. Naming a non-Claude client was never a claim
+    # that the run is free -- `--client opencode --model sonnet` and `agy`'s own
+    # default model are both Claude spends, and they used to walk straight past
+    # `claude_spawn_refusal`.
+
+    def test_run_named_client_with_a_claude_model_is_refused(self):
+        for model in ("sonnet", "openrouter/anthropic/claude-opus-4-6",
+                      "claude-sonnet-5", "opus"):
+            r = run_agent("run", "--client", "opencode", "--model", model,
+                          "--dry-run", "--card", self.CARD, "t",
+                          env=clean_env())
+            self.assertNotEqual(r.returncode, 0, "%s: %s%s" % (model, r.stdout, r.stderr))
+            self.assertIn("claude_budget", r.stderr, model)
+
+    def test_agy_default_model_is_a_claude_spend(self):
+        # agy answers with clients.AGY_DEFAULT_MODEL when the caller names none,
+        # and that model IS Claude -- the client-name-only gate saw "agy" and
+        # waved it through. CLAUDEBUDGET-f item 6: this is the CLI path, not a
+        # unit call. The old version used a `role=implement` card, which the
+        # capability check (SPAWNCAP: agy declares shell=false, write=false)
+        # refuses before the budget gate is reached -- so it tested the wrong
+        # door and stayed green even if the budget gate vanished. A read-only
+        # card asks for no capability, and the run gets to the budget gate.
+        r = run_agent("run", "--client", "agy", "--dry-run",
+                      "--card", "role=review", "reply with exactly: ack",
+                      env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("claude-opus", r.stderr)
+
+    def test_the_orchestrator_declaration_unlocks_a_claude_defaulted_client(self):
+        cli = load_agent()
+        refusal, note = cli.claude_spawn_refusal(
+            "agy", {cli.resolver.CLAUDE_CRITICAL_ENV: self.CRITICAL},
+            self.shipped_budget())
+        self.assertIsNone(refusal, refusal)
+        self.assertIn(self.CRITICAL, note)
+
+    def shipped_budget(self):
+        # The operator's shipped registry, budget and all: this is the gate as the
+        # host runs it, not a fixture that flatters the code under test.
+        import json
+        import pathlib
+        path = pathlib.Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_named_client_on_a_non_claude_model_is_never_gated(self):
+        # qoder's own default is Qwen3.8-Flash: the name check must not become a
+        # blanket refusal of every client that CAN take a Claude model.
+        # CLAUDEBUDGET-f item 6: assert the door is OPEN, not only that the
+        # budget said nothing -- a run that died at some other check would have
+        # satisfied a `NotIn claude_budget` and hidden the regression.
+        r = run_agent("run", "--client", "qoder", "--dry-run", "--card",
+                      self.CARD, "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
+        self.assertNotIn("claude_budget", r.stderr, r.stdout + r.stderr)
+
+    def test_an_unknown_effective_model_fails_closed(self):
+        # When the gate cannot tell what the client will answer with, and the
+        # budget is on, the answer is "no" -- a clear "no" that says how to ask.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "budget",
+                                                 "weekly_share_left": 0.1,
+                                                 "budget_below": 0.25}},
+                    "clients": {"codex": {"id": "codex"}}, "routes": {}, "models": {}}
+        refusal, note = cli.claude_spawn_refusal("codex", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("--model", refusal)
+
+    def test_the_model_gate_is_inert_when_the_budget_is_off(self):
+        # Non-budget mode unchanged: the same Claude models route as they did.
+        cli = load_agent()
+        registry = {"policy": {"claude_budget": {"mode": "normal",
+                                                 "weekly_share_left": 0.9,
+                                                 "budget_below": 0.25}},
+                    "clients": {}, "routes": {}, "models": {}}
+        for client, model in (("opencode", "sonnet"), ("agy", None),
+                              ("codex", None)):
+            refusal, note = cli.claude_spawn_refusal(client, {}, registry,
+                                                     model=model)
+            self.assertIsNone(refusal, "%s/%s: %s" % (client, model, refusal))
+
+    def test_effective_model_prefers_the_callers_model(self):
+        cli = load_agent()
+        self.assertEqual(cli.effective_spawn_model("agy", model="deepseek-v3"),
+                         ("deepseek-v3", "--model"))
+        # ...and the client's configured default when it names none.
+        model, source = cli.effective_spawn_model("agy")
+        self.assertEqual(model, cli.clients.AGY_DEFAULT_MODEL)
+        self.assertIn("AGY_DEFAULT_MODEL", source)
+
+    def test_the_plan_sees_the_client_that_would_run(self):
+        # Item 3(d): route_plan_for must pass the client. Under the shipped
+        # budget, a card planned for client `claude` is held by the *client*
+        # rule, which only appears in the plan if the client reached the
+        # resolver; the same card planned for opencode never mentions it.
+        claude = run_agent("route", "--client", "claude", "--card",
+                           "kind=implement,mode=balanced,risk=normal,"
+                           "paths=README.md")
+        opencode = run_agent("route", "--client", "opencode", "--card",
+                             "kind=implement,mode=balanced,risk=normal,"
+                             "paths=README.md")
+        blob = lambda r: (r.stdout or "") + (r.stderr or "")
+        self.assertIn("client claude held for finals", blob(claude),
+                      blob(claude))
+        self.assertNotIn("client claude held for finals", blob(opencode))
+
+
+class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
+    """Item 3(e): the MCP `spawn` tool is a spawn path too."""
+
+    def test_spawn_refuses_the_claude_client_in_budget_mode(self):
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "card": {"role": "implement"}, "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("claude_budget", out.get("error", ""))
+
+    def test_spawn_refuses_before_starting_anything(self):
+        # No run dir, no child: the gate is checked ahead of the launch, so a
+        # refused Claude spawn cannot leave a working record behind.
+        before = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        out = mcp_server.spawn({"client": "claude", "task": "t",
+                                "dry_run": True})
+        self.assertIn("claude_budget", out.get("error", ""))
+        after = set(os.listdir(mcp_server.state_root())) \
+            if os.path.isdir(mcp_server.state_root()) else set()
+        self.assertEqual(before, after)
+
+    def test_spawn_allows_claude_with_the_orchestrator_declaration(self):
+        os.environ["AUTOOS_CLAUDE_CRITICAL"] = self.CRITICAL = "critical path"
+        try:
+            out = mcp_server.spawn({"client": "claude", "task": "t",
+                                    "dry_run": True})
+        finally:
+            del os.environ["AUTOOS_CLAUDE_CRITICAL"]
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
+
+    # CLAUDEBUDGET-d item 2/3: the tool call names the model, so the tool call is
+    # where the orchestrator declares it -- `claude_reason` per spawn, instead of
+    # an AUTOOS_CLAUDE_CRITICAL the whole server inherits for every later caller.
+
+    def test_spawn_refuses_a_claude_model_on_a_non_claude_client(self):
+        for model in ("opus", "sonnet", "openrouter/anthropic/claude-opus-4-6"):
+            out = mcp_server.spawn({"client": "opencode", "model": model,
+                                    "task": "t", "card": {"role": "implement"},
+                                    "dry_run": True})
+            self.assertEqual(out.get("state"), "rejected", "%s: %s" % (model, out))
+            self.assertIn("claude_budget", out.get("error", ""), model)
+
+    def test_spawn_per_call_reason_unlocks_that_one_spawn(self):
+        reason = "final review of L1-routing@deadbeef"
+        out = mcp_server.spawn({"client": "claude", "model": "sonnet",
+                                "task": "t", "claude_reason": reason,
+                                "dry_run": True})
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
+        # The reason is part of the record, not only of the decision: the plan
+        # the caller reads back has to cite what let the spend happen.
+        self.assertIn(reason, str(out.get("route", {})), out)
+
+    def test_a_card_cannot_supply_the_spawn_reason(self):
+        # `claude_reason` is a request field the orchestrator sends; a card is
+        # the worker's own text, so the same spelling inside a card buys nothing:
+        # the spawn is still refused (a card field the router does not accept is
+        # refused outright, which is the same outcome for the worker).
+        out = mcp_server.spawn({"client": "opencode", "model": "opus", "task": "t",
+                                "card": {"role": "implement",
+                                         "claude_reason": "trust me"},
+                                "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+
+
+class ClaudeBudgetSameModelTests(unittest.TestCase):
+    """CLAUDEBUDGET-f items 1/2/3/5: the gate judges the model the run launches.
+
+    One resolution, in the runner's own precedence order (an explicit --model,
+    then the tier agent's model for a client that goes through the gateway, then
+    the client's own default, then the card's combo), and that value is what both
+    the gate and the argv carry. Two extra doors HEAD had: a combo the registry
+    does not carry was priced as *free* for a caller-named value (1/5), and a
+    `--free`/`--model` string short-circuited the resolution before the tier was
+    ever consulted (3) -- so the gate could read one model while the run answered
+    with another.
+    """
+
+    UNKNOWN_COMBO = "omniroute/not-a-route-at-all"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.real_cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def cli(self):
+        return self.agent
+
+    def shipped(self, **row):
+        """A deep copy of the shipped registry, optionally with a clients row."""
+        import copy
+        registry = copy.deepcopy(SHIPPED_REGISTRY)
+        for name, value in row.items():
+            registry.setdefault("clients", {}).setdefault(name, {}).update(value)
+        return registry
+
+    def off(self, registry):
+        import copy
+        off = copy.deepcopy(registry)
+        off["policy"]["claude_budget"] = {"mode": "normal",
+                                          "weekly_share_left": 0.9,
+                                          "budget_below": 0.25}
+        return off
+
+    # --- item 1: an unknown combo is not free, it is unknowable ----------------
+
+    def test_an_unknown_combo_named_by_the_caller_is_refused(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, self.shipped(),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+        # The message names the value it could not price, or the operator cannot
+        # tell a typo from a policy change.
+        self.assertIn(self.UNKNOWN_COMBO, refusal)
+
+    def test_an_unknown_combo_is_not_refused_outside_budget_mode(self):
+        cli = self.cli()
+        refusal, note = cli.claude_spawn_refusal("opencode", {},
+                                                 self.off(self.shipped()),
+                                                 model=self.UNKNOWN_COMBO)
+        self.assertIsNone(refusal, note)
+
+    def test_an_unknown_combo_on_the_cli_is_refused(self):
+        r = run_agent("run", "--client", "opencode", "--model", self.UNKNOWN_COMBO,
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.UNKNOWN_COMBO, r.stderr)
+
+    # --- item 2: the tier agent model is consulted before any client default ---
+
+    def claude_tier_cfg(self):
+        """opencode.jsonc whose t2-worker agent answers on an all-Claude route."""
+        import copy
+        cfg = copy.deepcopy(self.real_cfg)
+        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        return cfg
+
+    def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
+        cli = self.cli()
+        # An operator-written clients row is the client's *default*, and a tier
+        # replaces it -- reading the row first is what let a Claude tier agent
+        # walk past the gate wearing a free model's name.
+        registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
+        model, source = cli.effective_spawn_model(
+            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
+        self.assertEqual(model, "omniroute/opus-4-6")
+        self.assertIn("t2-worker", source)
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
+                                                 cfg=self.claude_tier_cfg(), tier=2)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+
+    def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
+        # The same fixture through `cmd_run`: the budget's own refusal, not a
+        # route error further down, and it names the Claude model the tier agent
+        # carries. The live registry on this host is the shipped one (budget ON).
+        cli = self.agent
+        out, err = io.StringIO(), io.StringIO()
+        env = clean_env()
+        env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.cmd_run(self.args(tier=2, card=None), self.claude_tier_cfg())
+        self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("claude_budget", err.getvalue())
+        self.assertIn("opus-4-6", err.getvalue())
+
+    # --- item 5: a mutated registry clients row is refused, not assumed free ---
+
+    def test_a_typo_in_the_registry_clients_row_is_refused(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "Qwen3.8-Flas"})
+        model, source = cli.effective_spawn_model("qoder", registry=registry)
+        self.assertEqual((model, source), ("Qwen3.8-Flas", "registry clients row"))
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("Qwen3.8-Flas", refusal)
+
+    def test_a_registry_row_the_registry_can_price_still_runs(self):
+        cli = self.cli()
+        registry = self.shipped(qoder={"default_model": "deepseek-v4.1-flash"})
+        refusal, note = cli.claude_spawn_refusal("qoder", {}, registry)
+        self.assertIsNone(refusal, note)
+
+    # --- item 3: one resolution, so the gate input IS the launch model ---------
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="role=review", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=None,
+            free=False, free_model=self.cli().DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def launch_model(self, **overrides):
+        """The `--model` value build_plan actually hands the client."""
+        plan = self.agent.build_plan(self.args(**overrides), self.real_cfg)
+        cmd = plan["cmd"]
+        return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
+
+    def gate_model(self, **overrides):
+        cli = self.agent
+        return cli.effective_spawn_model(
+            overrides.get("client", "opencode"), model=overrides.get("model"),
+            card=overrides.get("card"), registry=SHIPPED_REGISTRY,
+            cfg=self.real_cfg, tier=overrides.get("tier"),
+            free=bool(overrides.get("free")),
+            free_model=overrides.get("free_model", cli.DEFAULT_FREE_MODEL),
+            clean=bool(overrides.get("clean")))[0]
+
+    COMBINATIONS = (
+        dict(client="opencode", tier=1),
+        dict(client="opencode", tier=2, clean=True),
+        dict(client="opencode", tier=3),
+        dict(client="opencode", card="role=implement,complexity=hard"),
+        dict(client="opencode", free=True),
+        dict(client="opencode", free=True, tier=2),
+        dict(client="opencode", model="omniroute/t1-orchestrator", tier=2),
+        dict(client="qwen", tier=1),
+        dict(client="qwen", card="role=implement"),
+        dict(client="qoder", tier=2),
+        dict(client="qoder", card="role=review"),
+        dict(client="qoder", model="Efficient", tier=2),
+    )
+
+    def test_a_v2_card_is_not_refused_for_the_client_it_can_price(self):
+        # A v2 card names no combo — the resolver routes it and holds its own
+        # Claude legs — so the spawn gate prices it at the client's configured
+        # default. A gateway client this config says nothing about stays
+        # unpriced, and unpriced under a budget is a refusal, not a free pass.
+        cli = self.agent
+        registry = self.shipped()
+        card = {"kind": "review", "paths": "tools/registry.py"}
+        self.assertIsNone(cli.claude_spawn_refusal("opencode", {}, registry,
+                                                  cfg=self.real_cfg, card=card)[0])
+        self.assertIsNotNone(cli.claude_spawn_refusal("codex", {}, registry,
+                                                     cfg=self.real_cfg, card=card)[0])
+
+    def test_the_gate_reads_the_model_the_launch_carries(self):
+        self.agent = load_agent()
+        for case in self.COMBINATIONS:
+            with self.subTest(**case):
+                gate = self.gate_model(**case)
+                launch = self.launch_model(**case)
+                # Both sides compared as the route/model id the client receives:
+                # a gateway argv carries the bare combo, the gate may spell it
+                # `omniroute/<combo>#<effort>`.
+                norm = lambda v: (v or "").partition("#")[0].replace("omniroute/", "", 1)
+                self.assertEqual(norm(gate), norm(launch),
+                                 "gate %r vs launch %r for %s" % (gate, launch, case))
+
+    def test_a_free_spawn_is_priced_at_the_free_model_not_the_tier(self):
+        # --free replaces the route with the promo model in build_plan, so the
+        # gate must price THAT, and a tier behind it changes nothing.
+        cli = self.agent = load_agent()
+        free = cli.DEFAULT_FREE_MODEL
+        self.assertEqual(self.gate_model(client="opencode", free=True, tier=3), free)
+        self.assertEqual(self.launch_model(client="opencode", free=True, tier=3), free)
+
+
+class ClaudeBudgetLastMileTests(unittest.TestCase):
+    """CLAUDEBUDGET-g item A/B/C: the gate that decides is the one on the FINAL plan.
+
+    The spawn gate reads what the *flags* imply, and `build_plan` then rewrites the
+    model in three places the flags never mention: the reviewer resolution
+    (`reviewer_run_override`), the resolver-routed v2 combo, and the free/clean
+    handling. A gate that proves an earlier resolution is a gate on a value the
+    run will not use. These tests hold the last-mile gate -- one shared helper,
+    run on the final plan immediately before the launch, in `cmd_run` and in the
+    MCP spawn path's preflight -- to be the authority, with the early gate kept
+    only for the fast message.
+    """
+
+    V2_CARD = "kind=review,author=qwen,paths=tools/registry.py"
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track.jsonl")
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        # Budget ON: this is the state the gate exists for.
+        self.registry["policy"]["claude_budget"] = {
+            "mode": "budget", "weekly_share_left": 0.1, "budget_below": 0.25}
+        # One all-Claude route, spelled the way the shipped registry spells Claude:
+        # provider id `cc`, which is Claude whatever the model row says.
+        self.registry["providers"]["cc"] = {"id": "cc", "tier": "paid",
+                                            "trains_on_prompts": False}
+        self.registry["models"]["opus"] = {
+            "id": "opus", "family": "anthropic", "reasoning": True,
+            "effort_ladder": [], "tool_calls": "proven", "price_in": 1e-5,
+            "price_out": 5e-5, "output_max": 100000,
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        for rid in ("claude-route", "claude-route-clean"):
+            self.registry["routes"][rid] = {"id": rid, "class": "smart",
+                                            "legs": ["cc/opus"]}
+        # The reviewer list HEAD picks for an author outside the Claude family:
+        # the Claude reviewer first, so `reviewer_run_override` swaps the model.
+        # The fixture's own rows stay behind it -- the author's family (`qwen`) is
+        # resolved through them, and dropping them fails the walk before the
+        # spawner ever reaches the model.
+        self.registry["policy"]["reviewers"] = [
+            {"client": "opencode", "model": "omniroute/claude-route",
+             "family": "anthropic", "leg": "cc/opus", "paid": True, "source": "test"}
+        ] + self.registry["policy"]["reviewers"]
+        patch = mock.patch.object(self.agent, "load_registry",
+                                 lambda path=None: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        state = mock.patch.object(
+            self.agent.measure_mod, "client_state",
+            lambda *a, **k: {n: {"installed": True, "signed_in": True, "reason": ""}
+                             for n in ("opencode", "gemini", "qoder", "claude")})
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        names = (list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse",
+                                             "claude-route", "claude-route-clean"])
+        return {"model": "omniroute/r-cheap",
+                "agents": {a: {"model": "omniroute/r-cheap"}
+                           for a in self.agent.TIERS.values()},
+                "providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card=self.V2_CARD, allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False, model=None, free=False,
+            free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def plan(self, **overrides):
+        return self.agent.build_plan(self.args(**overrides), self.cfg())
+
+    def last_mile(self, args, plan, env=None):
+        return self.agent.claude_plan_refusal(args, plan, env=env if env is not None
+                                              else {}, registry=self.registry,
+                                              cfg=self.cfg())
+
+    def off(self):
+        import copy
+        off = copy.deepcopy(self.registry)
+        off["policy"]["claude_budget"] = {"mode": "normal", "weekly_share_left": 0.9,
+                                          "budget_below": 0.25}
+        return off
+
+    # --- item A: the reviewer resolution is a post-gate model swap -------------
+
+    def test_the_early_gate_does_not_see_the_reviewer_override(self):
+        # The hole, stated: reading the card's flags prices the route the router
+        # chose, not the reviewer the run actually starts on.
+        cli = self.agent
+        args = self.args()
+        early = cli.claude_spawn_refusal("opencode", {}, self.registry, cfg=self.cfg(),
+                                         card=args.card)
+        self.assertIsNone(early[0], early[0])
+
+    def test_a_reviewer_override_to_a_claude_model_is_refused(self):
+        plan = self.plan()
+        cmd = plan["cmd"]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "omniroute/claude-route",
+                         "the fixture must reproduce the swap: the reviewer's model "
+                         "is what the argv carries")
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude_budget", refusal)
+        self.assertIn("claude-route", refusal)
+
+    def test_cmd_run_refuses_the_reviewer_override_before_launching(self):
+        # The gate is in the CLI's own launch path, not only in a helper a caller
+        # may or may not call: a dry run prints no `would run:` line.
+        out, err = io.StringIO(), io.StringIO()
+        env = clean_env()
+        env.pop("AUTOOS_CLAUDE_CRITICAL", None)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(), self.cfg())
+        self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("claude_budget", err.getvalue())
+        self.assertNotIn("would run:", out.getvalue())
+
+    def test_the_declaration_unlocks_the_overridden_reviewer_model(self):
+        # The gate is a budget, not a ban: what the orchestrator declares runs.
+        refusal, note = self.last_mile(self.args(), self.plan(),
+                                       env={self.agent.resolver.CLAUDE_CRITICAL_ENV:
+                                            "final review of this diff"})
+        self.assertIsNone(refusal, refusal)
+        self.assertIn("final review of this diff", note)
+
+    # --- item A: a resolver-routed v2 combo is priced by its legs --------------
+
+    def test_the_last_mile_prices_the_v2_route_legs_not_the_client_default(self):
+        # `_resolve_route_v2` replaces the card's combo with the resolver's route;
+        # the early gate reads the client default and never sees it. This is the
+        # final plan that route produces.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "model": "omniroute/claude-route",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/claude-route", "--title", "t", "x"],
+                "route": {"combo": "claude-route", "resolver": True}, "env": {}}
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    # --- item A: an unknown model for a Claude-capable client fails closed -----
+
+    def test_an_unknown_native_model_is_refused_on_the_cli(self):
+        # `--model Efficient` on qoder is a string no registry row describes, and
+        # qoder answers with whatever the caller names, on the operator's own
+        # account. HEAD priced it by name, saw no Claude marker, and allowed it.
+        r = run_agent("run", "--client", "qoder", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("Efficient", r.stderr)
+        self.assertIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+
+    def test_an_unknown_native_model_is_refused_on_agy_too(self):
+        r = run_agent("run", "--client", "agy", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_a_declared_unknown_native_model_keeps_its_argv(self):
+        r = run_agent("run", "--client", "qoder", "--model", "Efficient",
+                      "--dry-run", "--card", "role=review", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--model Efficient", r.stdout)
+
+    def test_a_known_non_claude_leg_is_never_refused(self):
+        # A provider/model the registry can read stays free: fail-closed on the
+        # unknown is not fail-closed on everything.
+        r = run_agent("run", "--client", "qoder", "--model", "qwen/qwen3.8-flash",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude_budget", r.stderr)
+
+    def test_the_client_compiled_default_is_priced_by_name(self):
+        # qoder's default is Qwen3.8-Flash, a name no registry row carries. It is
+        # code this host reviewed, not a caller's string, so the name decides and
+        # the run is not refused -- otherwise every qoder worker benches.
+        r = run_agent("run", "--client", "qoder", "--dry-run", "--card", "role=review",
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
+
+    # --- item A: the joint free/clean cases agree with the argv ----------------
+
+    def test_free_plus_a_claude_model_is_refused(self):
+        # --free replaces the argv model with the promo model, but a caller that
+        # names Claude alongside it is refused, not quietly re-priced.
+        r = run_agent("run", "--client", "opencode", "--free", "--model", "opus",
+                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+
+    def test_a_plain_free_spawn_passes_the_last_mile_gate(self):
+        # The promo model is what the argv carries, so the promo model is what the
+        # gate prices -- and it is not Claude.
+        plan = self.plan(free=True, card="role=review")
+        self.assertEqual(plan["cmd"][plan["cmd"].index("--model") + 1],
+                         self.agent.DEFAULT_FREE_MODEL)
+        self.assertIsNone(self.last_mile(self.args(free=True, card="role=review"),
+                                        plan)[0])
+
+    def test_a_clean_plan_with_a_claude_model_is_refused(self):
+        # --clean rewrites the spelling (`<route>-clean`) between the resolution
+        # the early gate read and the argv the client receives. The last-mile gate
+        # prices what the launch carries, so the clean variant of a Claude route is
+        # a Claude spend even though no earlier value named one.
+        args = self.args(tier=2, clean=True, model="omniroute/claude-route", card=None)
+        plan = self.agent.build_plan(args, self.cfg())
+        argv = plan["cmd"][plan["cmd"].index("--model") + 1]
+        self.assertEqual(argv, "omniroute/claude-route-clean")
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route-clean", refusal)
+
+    # --- item A: the MCP spawn path reaches the same gate ----------------------
+
+    def test_the_mcp_spawn_path_reports_the_last_mile_refusal(self):
+        out = mcp_server.spawn({"client": "qoder", "model": "Efficient", "task": "t",
+                                "card": {"role": "review"}, "dry_run": True})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("claude_budget", out.get("error", ""))
+        self.assertIn("Efficient", out.get("error", ""))
+
+    # --- item B: a refused card is a routing error, budget or not --------------
+
+    def test_a_bad_card_outside_budget_mode_is_the_ordinary_routing_error(self):
+        # HEAD answered a card the router refuses with a `claude_budget:` refusal,
+        # which is a different door, hides the next steps, and changes behavior
+        # for every non-budget host.
+        cli = self.agent
+        with self.assertRaises(ValueError) as got:
+            cli.claude_spawn_refusal("opencode", {}, self.off(), card="role=bogus")
+        self.assertNotIn("claude_budget", str(got.exception))
+        self.assertIn("role", str(got.exception))
+
+    def test_a_bad_card_in_budget_mode_is_labelled_a_routing_error(self):
+        cli = self.agent
+        refusal, note = cli.claude_spawn_refusal("opencode", {}, self.registry,
+                                                 card="role=bogus")
+        self.assertIsNotNone(refusal)
+        self.assertIn("routing error", refusal)
+
+    def test_the_cli_still_prints_the_router_words_for_a_bad_card(self):
+        r = run_agent("run", "--dry-run", "--card", "role=bogus", "t", env=clean_env())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("expected one of", r.stderr)
+        self.assertNotIn("cannot read the Claude budget", r.stderr)
+
+    # --- item C: one normaliser for the gate and the launch --------------------
+
+    def test_one_normaliser_reads_prefix_and_effort_spelling(self):
+        cli = self.agent
+        for spelling in ("omniroute/opus-4-6", "opus-4-6", "omniroute/opus-4-6#high",
+                         "opus-4-6#high", "  omniroute/opus-4-6  "):
+            self.assertEqual(cli.model_route_id(spelling), "opus-4-6", spelling)
+        self.assertEqual(cli.model_route_id("google/gemini-3.8-flash"),
+                         "google/gemini-3.8-flash")
+        self.assertEqual(cli.model_route_id(None), "")
+
+    def test_the_gate_matches_the_argv_through_the_normaliser(self):
+        # The launch spells `omniroute/<combo>#<effort>`, the resolution may name
+        # the bare combo. One normaliser decides they are one value -- with two
+        # spellings an already-priced route reads as a caller's unknown model.
+        args = self.args(tier=2, card=None)
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "model": "omniroute/r-cheap#high",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap#high", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
+        self.assertTrue(pairs, pairs)
+        self.assertNotIn("--model", [source for _, source in pairs], pairs)
+        self.assertIsNone(self.last_mile(args, plan)[0])
+
+    # --- CLAUDEBUDGET-h item 1: an unpriceable plan refuses, it does not pass ---
+
+    def test_a_plan_that_names_no_readable_model_is_refused(self):
+        # Muse#high finding 3: nothing in this plan says what the client answers
+        # with — no argv token, no route combo, no agent the config can read. HEAD
+        # fell back to the early resolution, which is the value this gate exists to
+        # replace, and launched. Under a budget, "unpriceable" is the spend side.
+        plan = {"client": "opencode", "agent": "no-such-agent",
+                "cmd": ["opencode", "run", "--standalone", "--title", "t", "x"],
+                "route": {}, "env": {}}
+        self.assertEqual([("", "no model in the final plan")],
+                         self.agent.plan_launch_models(plan, self.args(), self.cfg(),
+                                                       self.registry))
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, "an unpriced plan must not launch: %s" % note)
+        self.assertIn("claude_budget", refusal)
+        self.assertIn("no model", refusal)
+
+    def test_a_bad_card_at_the_last_mile_is_a_routing_error_not_a_budget_label(self):
+        # Finding 5: `plan_launch_models` swallowed the router's ValueError and
+        # priced the argv strictly, so a card the router refuses left as a
+        # `claude_budget:` refusal — wrong door, next steps hidden.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(card="role=bogus")
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, "a refused card must not launch")
+        self.assertTrue(refusal.startswith("routing error:"), refusal)
+        self.assertIn("expected one of", refusal)
+        self.assertFalse(refusal.startswith("claude_budget"), refusal)
+
+    def test_a_bad_card_outside_budget_mode_still_launches_the_ordinary_error(self):
+        # Out of budget the last-mile gate has no opinion and stays out of the way:
+        # the router's own ValueError is cmd_run's business (its CLI words are
+        # asserted by test_the_cli_still_prints_the_router_words_for_a_bad_card).
+        cli = self.agent
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = cli.claude_plan_refusal(self.args(card="role=bogus"), plan,
+                                                env={}, registry=self.off(),
+                                                cfg=self.cfg())
+        self.assertIsNone(refusal, refusal)
+        self.assertIsNone(note)
+
+    # --- CLAUDEBUDGET-h item 2: price the model each client really receives -----
+
+    def test_a_clients_row_that_names_claude_is_refused_behind_a_free_argv(self):
+        # Finding 2: the registry clients row is a model this host resolves and
+        # hands the client (`effective_spawn_model` reads it first), and an
+        # operator swapping it to a Claude model was never priced, because the
+        # gate read the argv token and stopped there.
+        self.registry["clients"]["qoder"] = {"id": "qoder", "default_model": "cc/opus",
+                                             "capabilities": {"shell": True,
+                                                              "write": True}}
+        plan = {"client": "qoder", "agent": "qoder",
+                "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                        "--model", "Qwen3.8-Flash", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = self.last_mile(self.args(client="qoder"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("cc/opus", refusal)
+        self.assertIn("clients row", refusal)
+
+    def test_the_config_overlay_the_launcher_injects_is_priced_too(self):
+        # Finding 4, and it is not hypothetical: `free_overlay` is written into the
+        # child's OPENCODE_CONFIG_CONTENT (build_plan), where it OVERRIDES the jsonc
+        # and the argv for opencode. A model named there is a model the process
+        # receives, and a `--model` scan never saw it.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"},
+                "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
+                    {"model": "omniroute/claude-route",
+                     "agents": {"t2-worker": {"model": "omniroute/claude-route"}}})}}
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_that_names_its_model_with_another_flag_is_priced(self):
+        # Finding 4: the flag is not the gate's to assume. This row says qwen's
+        # model arrives as `-m`, and the gate follows the row — which is what makes
+        # the row, not a literal scan, the authority.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertIn("qwen", table)
+        with mock.patch.dict(table, {"qwen": (("flag", "-m"),)}):
+            plan = {"client": "qwen", "agent": "qwen",
+                    "cmd": ["omniroute", "run", "qwen", "--model", "omniroute/r-cheap",
+                            "--", "-m", "omniroute/claude-route", "-p", "x"],
+                    "route": {"combo": "r-cheap"}, "env": {}}
+            pairs = self.agent.plan_launch_models(plan, self.args(client="qwen"),
+                                                 self.cfg(), self.registry)
+            self.assertIn("omniroute/claude-route", [v for v, _ in pairs], pairs)
+            self.assertNotIn("omniroute/r-cheap", [v for v, _ in pairs], pairs)
+            refusal, note = self.last_mile(self.args(client="qwen"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_the_table_does_not_describe_is_refused_not_the_early_value(self):
+        # A client with no row has no readable model input, so nothing here can say
+        # the run is free — and falling back to the early resolution is exactly the
+        # fail-open finding 4 names. The argv spelling a free model is not evidence
+        # from a process nobody describes.
+        plan = {"client": "mystery", "agent": "mystery",
+                "cmd": ["mystery", "--model", "omniroute/r-cheap", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(client="mystery")
+        pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
+        self.assertEqual([("", "no model in the final plan")], pairs, pairs)
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("mystery", refusal)
+
+    def test_the_table_covers_every_client_the_adapter_can_build(self):
+        # One home, and it cannot drift: every client `clients.CLIENTS` can build a
+        # command for has a model-input row, or the gate would bench it as
+        # unpriceable. Derived from the same table that builds the argv.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertEqual(sorted(self.agent.clients.CLIENTS), sorted(table),
+                         "MODEL_INPUT rows vs CLIENTS rows")
+
+    def test_every_flag_row_names_the_flag_the_builder_actually_emits(self):
+        # The coverage test above proves each client HAS a row; it says nothing
+        # about the token a row names. A builder renaming its model flag
+        # (`--model` -> `--m`) keeps the gate scanning a flag that never reaches
+        # the argv, so the plan prices no model and every run of that client
+        # benches as unpriceable -- refused loudly, but pointing nowhere. So build
+        # the argv from the code that builds it, and read it back through the very
+        # extractor the gate uses (`_argv_flag_values`): if either side moves, this
+        # fails.
+        sentinel = "omniroute/drift-sentinel"
+        clients_mod = self.agent.clients
+        cfg = self.cfg()
+        # declared_models() prefixes the provider id, so the row is the bare id.
+        cfg["providers"]["omniroute"]["models"]["drift-sentinel"] = {}
+        for name, entries in sorted(clients_mod.MODEL_INPUT.items()):
+            flags = [key for entry in entries
+                     for (kind, key) in [entry if len(entry) == 2 else (entry[0], "")]
+                     if kind == "flag"]
+            self.assertTrue(flags, "%s: MODEL_INPUT row names no flag" % name)
+            if name == "opencode":
+                # opencode's argv is the CLI's own, not the adapter's (build_command
+                # says so), so the drift guard reads build_plan's product instead.
+                argv = self.agent.build_plan(
+                    self.args(client="opencode", model=sentinel), cfg)["cmd"]
+            else:
+                argv = clients_mod.build_command(clients_mod.CLIENTS[name], "x", None,
+                                                 "edit", model=sentinel)
+            for flag in flags:
+                self.assertEqual([sentinel],
+                                 self.agent._argv_flag_values(argv, flag),
+                                 "%s: MODEL_INPUT says %s carries the model, the "
+                                 "builder disagrees: %r" % (name, flag, argv))
+
+    # --- CLAUDEBUDGET-h item 4: the undeclared Claude path refuses on its own ---
+
+    def test_an_undeclared_claude_model_on_qoder_is_refused(self):
+        # The declared path keeps its argv (test_a_declared_qoder_explicit_model_is_
+        # kept); this is the other half, with NO AUTOOS_CLAUDE_CRITICAL in the
+        # environment: a caller naming a Claude model on an own-account client is
+        # refused whatever the client is.
+        env = {k: v for k, v in clean_env().items()
+               if not k.startswith(self.agent.CLAUDE_ENV_PREFIX)}
+        self.assertNotIn(self.agent.resolver.CLAUDE_CRITICAL_ENV, env)
+        r = run_agent("run", "--client", "qoder", "--model", "opus", "--dry-run",
+                      "--card", "role=review", "t", env=env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("opus", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
 
 
 if __name__ == "__main__":

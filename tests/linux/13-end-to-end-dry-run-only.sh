@@ -5,8 +5,110 @@
 # ─── End-to-end plan stability ──────────────────────────────────────────────
 describe "end-to-end (dry run only)"
 
+# e2e_setup <setup.sh args...> — the real entry point, for a machine that has
+# nothing on it. HOME is a scratch dir and SUDO_USER a name with no passwd entry,
+# so SYS_HOME falls back to HOME (lib/linux/detect.sh:200; the same device as
+# tests/linux/22-herdr-sessions.sh:1049). Against the developer's own home a run
+# answers for that machine instead of for the plan: here
+# ~/.local/bin/graphify-mcp is uv's link, the graphify post-install refuses to
+# move it, and the dry run exits 1 for a reason no check here has anything to do
+# with. Prints the output, returns the exit code.
+e2e_setup() {
+    local home out rc
+    home="$(mktemp -d)"
+    out="$(SUDO_USER='autoos-no-such-user-e2e' HOME="$home" \
+        bash setup.sh "$@" 2>&1)"; rc=$?
+    rm -rf "$home"
+    printf '%s\n' "$out"
+    return "$rc"
+}
+
+# ─── Memoised dry runs (WS-PART13) ───────────────────────────────────────────
+# Part 13 alone was the slowest CI shard (~3m49s): 11 full `setup.sh --dry-run`
+# processes with the same argv repeated (--profile ai-coding in 2 tests,
+# --profile workstation in 2, --profile light in 3). memo_dry_run runs each
+# unique key once and serves repeats read-only (the caller gets output + rc,
+# nothing else: no new process, no HOME, no file touched).
+#
+# Per-test decision — a test may use the memo ONLY when it inspects nothing but
+# the printed output and rc:
+# - "a dry run exits cleanly" (light, real HOME): memo (output + rc only).
+# - "a dry run executes no commands at all" (workstation, real HOME): memo.
+# - "a dry run creates none of the files its installers would": REAL run (it
+#   checks a marker file under $SYS_HOME after the run, which a cached run
+#   could neither create nor prove absent).
+# - the four retirement tests ("--only agent-skills ...", "--profile never
+#   plans the retired agent-skills id", "from-state: ...", "the ai-coding plan
+#   carries ..."): moved to tests/linux/41-end-to-end-retirement.sh, all memo
+#   e2e. The ai-coding pair shares one entry; from-state's argv holds a mktemp
+#   path, so its key is unique per run (always a miss, but a safe one: the file
+#   it names still exists while the memo runs it).
+# - "two consecutive dry runs produce the same plan": two REAL runs, bypassing
+#   the memo explicitly (it tests determinism; a hit would prove nothing).
+# - "a dry run for --create-usb ... leaves the filesystem untouched": REAL run
+#   (it inspects a scratch cache dir after the run and discards the output).
+# - "an unknown component id is rejected": memo (output + rc only).
+# - "--check-catalog succeeds" / "--check-catalog validates ...": memo, sharing
+#   one entry (the second is a hit; both inspect only output + rc).
+# - "catalog_probe_installed identifies installed components": no setup.sh run.
+# - "--list shows installed components with a checkmark": memo (unique key).
+# - the guard test below uses the memo directly to pin its keying.
+#
+# Parts are sourced in number order into one shell (tests/run-tests.sh), so a
+# helper defined here in part 13 is already defined when part 41 is sourced:
+# part 41 calls memo_dry_run without redefining it. That also holds for an
+# isolated `AUTOOS_TEST_PARTS=41` run — every part file is still sourced, only
+# the `it` lines outside the selection are skipped.
+declare -A E2E_MEMO_OUT=()
+declare -A E2E_MEMO_RC=()
+E2E_MEMO_RUNS=0
+
+# memo_dry_run <outvar> <rcvar> <e2e|real> [--] <setup.sh args...>
+# Run `setup.sh <args...>` once per unique key; a repeat prints the cached
+# output into <outvar> and sets <rcvar> without starting setup.sh. The key is
+# the full argv plus every input that can change the result: every AUTOOS_*
+# variable, PATH, and the e2e|real home mode. An e2e miss runs through
+# e2e_setup, which makes a FRESH scratch HOME for that key and deletes it, so
+# no two keys ever share a home and no hit ever makes one. Call as a plain
+# command, never inside $(...): the cache lives in this shell.
+memo_dry_run() {
+    local _outvar="$1" _rcvar="$2" _mode="$3"
+    shift 3
+    if [[ "${1:-}" == "--" ]]; then shift; fi
+    local _key _v _val _a
+    _key="mode=${_mode}"$'\x1f'"PATH=${PATH-}"
+    while IFS= read -r _v; do
+        case "$_v" in
+            AUTOOS_*)
+                _val="${!_v-__unset__}"
+                _key+=$'\x1f'"${_v}=${_val}"
+                ;;
+        esac
+    done < <(compgen -v | sort)
+    for _a in "$@"; do
+        _key+=$'\x1f'"argv:${_a}"
+    done
+    if [[ -n "${E2E_MEMO_OUT["$_key"]+x}" ]]; then
+        printf -v "$_outvar" '%s' "${E2E_MEMO_OUT["$_key"]}"
+        printf -v "$_rcvar" '%s' "${E2E_MEMO_RC["$_key"]}"
+        return 0
+    fi
+    local _out _rc
+    if [[ "$_mode" == "e2e" ]]; then
+        _out="$(e2e_setup "$@")"; _rc=$?
+    else
+        _out="$(bash setup.sh "$@" 2>&1)"; _rc=$?
+    fi
+    E2E_MEMO_OUT["$_key"]="$_out"
+    E2E_MEMO_RC["$_key"]="$_rc"
+    E2E_MEMO_RUNS=$((E2E_MEMO_RUNS + 1))
+    printf -v "$_outvar" '%s' "$_out"
+    printf -v "$_rcvar" '%s' "$_rc"
+    return 0
+}
+
 if it "a dry run exits cleanly"; then
-    out="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1)"; rc=$?
+    memo_dry_run out rc real -- --profile light --dry-run --yes --no-color
     if [[ $rc -eq 0 ]]; then pass; else fail "exit $rc: $(printf '%s' "$out" | tail -5)"; fi
 fi
 
@@ -14,7 +116,7 @@ if it "a dry run executes no commands at all"; then
     # Asserts the property directly rather than sampling mtimes, which slid with
     # the clock and made this flaky: every action must be announced as "would
     # run:", and none may appear as an executed "run:".
-    out="$(bash setup.sh --profile workstation --dry-run --yes --no-color 2>&1)"; rc=$?
+    memo_dry_run out rc real -- --profile workstation --dry-run --yes --no-color
     executed="$(printf '%s' "$out" | grep -c '^run:' || true)"
     planned="$(printf '%s' "$out" | grep -c 'would ' || true)"
     # rc too: a prompt the dry run never asks must not fail it (review 2026-09-25).
@@ -23,6 +125,8 @@ if it "a dry run executes no commands at all"; then
 fi
 
 if it "a dry run creates none of the files its installers would"; then
+    # REAL run on purpose: this checks a marker file under $SYS_HOME after the
+    # run, so it must really run (a memo hit touches nothing by design).
     marker="$SYS_HOME/.autoos-omnigraph.env"
     had_marker=0; [[ -e "$marker" ]] && had_marker=1
     bash setup.sh --only omnigraph-client --dry-run --yes --no-color >/dev/null 2>&1
@@ -30,66 +134,17 @@ if it "a dry run creates none of the files its installers would"; then
     assert_eq "$now_marker" "$had_marker"
 fi
 
-if it "the retired agent-skills step plans no work of its own"; then
-    # A7b: agent-skills' duties moved to agent-skill-links, omnigraph-client and
-    # the mcp-* components. The retired id must still run (its postInstall is
-    # the retirement notice) and must plan nothing: these three phrases are the
-    # work it used to do, and none of them belongs to the other components this
-    # selection pulls in (git, nodejs).
-    out="$(bash setup.sh --only agent-skills --dry-run --yes --no-color 2>&1)"; rc=$?
-    problems=""
-    (( rc == 0 )) || problems+="[exit $rc] "
-    [[ "$out" == *"agent-skills is retired"* ]] || problems+="[no retirement notice in the run] "
-    for gone in 'would link skills from' 'would approve project MCP server' \
-                'omnigraph image, network and token' 'would write'; do
-        if grep -qF -- "$gone" <<<"$out"; then problems+="[$gone is still planned] "; fi
-    done
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "the ai-coding plan carries the agent-skill-links and omnigraph-client homes"; then
-    # The machine this suite runs on has the retired clone or does not; either
-    # way the plan must never send anyone to fetch it, and the two components
-    # that inherited agent-skills' work must both be in the profile that used to
-    # carry agent-skills alone.
-    #
-    # The plan is taken from a scratch home (HOME plus a SUDO_USER with no passwd
-    # entry, so SYS_HOME falls back to HOME — lib/linux/detect.sh:200; the same
-    # device as tests/linux/22-herdr-sessions.sh:1049). Against the developer's
-    # own home the run answers for that machine instead of for the plan: here
-    # ~/.local/bin/graphify-mcp is uv's link, the graphify post-install refuses to
-    # move it, and the dry run exits 1 for a reason this check has nothing to do with.
-    e2e_home="$(mktemp -d)"
-    out="$(SUDO_USER='autoos-no-such-user-e2e' HOME="$e2e_home" \
-        bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"; rc=$?
-    rm -rf "$e2e_home"
-    problems=""
-    (( rc == 0 )) || problems+="[exit $rc] "
-    for want in 'agent-skill-links' 'omnigraph-client'; do
-        grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$out" || problems+="[$want is not in the ai-coding plan] "
-    done
-    # Only the RETIRED repo may never be fetched. A machine that has not been set
-    # up yet plans clones of its own and legitimately so — measured on a scratch
-    # home: the two oh-my-zsh plugins and powerlevel10k
-    # (lib/linux/install.sh:638-647), plus the LazyVim starter. Grepping the whole
-    # output for `git clone` failed CI 36391119133 for exactly that reason. Both
-    # fetch shapes count: the clone's URL or destination names the retired repo, and
-    # so does the target of a `git -C <dir> pull` on a clone that is already there.
-    grep -qiE '\bgit (clone|pull|-C)[[:space:]].*agent-skills' <<<"$out" \
-        && problems+="[the plan fetches the retired agent-skills repo] "
-    # The retired clone is never a skills source any more: the checkout is.
-    grep -qE 'link skills from .*(Documents|\.autoos)/.*agent-skills' <<<"$out" \
-        && problems+="[the retired clone is still named as the skills source] "
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
 if it "two consecutive dry runs produce the same plan"; then
+    # Two REAL runs on purpose, bypassing the memo explicitly: this tests
+    # determinism, and a cache hit would prove nothing about the second run.
     a="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1 | grep -E '^\s+[0-9]+\.')"
     b="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1 | grep -E '^\s+[0-9]+\.')"
     assert_eq "$a" "$b"
 fi
 
 if it "a dry run for --create-usb (usb write plan) leaves the filesystem untouched"; then
+    # REAL run on purpose: this inspects a scratch cache dir after the run and
+    # discards the output, so the memo (output + rc only) does not apply.
     # Task 6 Step 6: the same property every other dry-run test in this
     # block proves, for the USB feature specifically — a scratch cache dir
     # (never the real one) must come out exactly as it went in, proving
@@ -106,14 +161,14 @@ if it "a dry run for --create-usb (usb write plan) leaves the filesystem untouch
 fi
 
 if it "an unknown component id is rejected"; then
-    out="$(bash setup.sh --only definitely-not-a-thing --dry-run --yes --no-color 2>&1)"; rc=$?
+    memo_dry_run out rc real -- --only definitely-not-a-thing --dry-run --yes --no-color
     if [[ $rc -ne 0 && "$out" == *"Unknown component"* ]]; then pass
     else fail "rc=$rc out=$(printf '%s' "$out" | tail -3)"; fi
 fi
 
 if it "--check-catalog succeeds"; then
-    bash setup.sh --check-catalog >/dev/null 2>&1
-    assert_ok $?
+    memo_dry_run out rc real -- --check-catalog
+    assert_ok "$rc"
 fi
 
 if it "--check-catalog validates all five catalogs by type, not just component catalogs"; then
@@ -121,8 +176,9 @@ if it "--check-catalog validates all five catalogs by type, not just component c
     # component-catalog validator, which rejects images.json and
     # engines.json outright (they have no 'categories' key). Assert every
     # file is actually reported valid, not just that the overall rc is 0 —
-    # rc could go green for the wrong reason (e.g. an empty glob).
-    out="$(bash setup.sh --check-catalog 2>&1)"; rc=$?
+    # rc could go green for the wrong reason (e.g. an empty glob). A memo hit
+    # on the previous test's entry: same argv, same env, same real home.
+    memo_dry_run out rc real -- --check-catalog
     if [[ $rc -eq 0 && "$out" == *"engines.json is valid"* && "$out" == *"images.json is valid"* \
         && "$out" == *"linux.json is valid"* && "$out" == *"macos.json is valid"* && "$out" == *"windows.json is valid"*         && "$out" == *"agent-harness.json is valid"* \
         && "$out" == *"ai-registry.json is valid"* ]]; then
@@ -173,8 +229,33 @@ EOS
 fi
 
 if it "--list shows installed components with a checkmark"; then
-    out="$(bash setup.sh --list 2>&1)"; rc=$?
+    memo_dry_run out rc real -- --list
     if [[ $rc -eq 0 && "$out" == *"✓"* ]]; then pass
     else fail "rc=$rc out=$(printf '%s' "$out" | head -10)"; fi
 fi
 
+if it "memoised dry runs key on argv, AUTOOS_* env and home mode (guard)"; then
+    # Guards the memo itself, with fast argv on purpose: e2e --check-catalog
+    # and e2e --list, keys no other test uses (every other --check-catalog /
+    # --list here runs in real mode, so the mode half of the key differs).
+    # A runs; B (one flag apart) runs again with different output; C (A
+    # repeated) is a hit — no new run, same output + rc; D (A's argv under a
+    # different AUTOOS_* value) runs again — the env is in the key — with the
+    # same output (that variable changes nothing setup.sh reads).
+    _guard_runs="$E2E_MEMO_RUNS"
+    AUTOOS_E2E_MEMO_GUARD="one" memo_dry_run _a_out _a_rc e2e -- --check-catalog
+    _problems=""
+    (( _a_rc == 0 )) || _problems+="[A exit $_a_rc] "
+    [[ "$E2E_MEMO_RUNS" -eq $((_guard_runs + 1)) ]] || _problems+="[A ran $((E2E_MEMO_RUNS - _guard_runs)) times, expected 1] "
+    AUTOOS_E2E_MEMO_GUARD="one" memo_dry_run _b_out _b_rc e2e -- --list
+    (( _b_rc == 0 )) || _problems+="[B exit $_b_rc] "
+    [[ "$E2E_MEMO_RUNS" -eq $((_guard_runs + 2)) ]] || _problems+="[B was served from A's entry] "
+    [[ "$_b_out" != "$_a_out" ]] || _problems+="[one flag apart gave identical output] "
+    AUTOOS_E2E_MEMO_GUARD="one" memo_dry_run _c_out _c_rc e2e -- --check-catalog
+    [[ "$E2E_MEMO_RUNS" -eq $((_guard_runs + 2)) ]] || _problems+="[repeat of A ran again] "
+    [[ "$_c_out" == "$_a_out" && "$_c_rc" == "$_a_rc" ]] || _problems+="[hit served different output+rc] "
+    AUTOOS_E2E_MEMO_GUARD="two" memo_dry_run _d_out _d_rc e2e -- --check-catalog
+    [[ "$E2E_MEMO_RUNS" -eq $((_guard_runs + 3)) ]] || _problems+="[AUTOOS_* change shared A's entry] "
+    [[ "$_d_out" == "$_a_out" && "$_d_rc" == "$_a_rc" ]] || _problems+="[unrelated AUTOOS_* var changed the result] "
+    if [[ -z "$_problems" ]]; then pass; else fail "$_problems"; fi
+fi
