@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the `omnigraph-client` gate compares the values it would write; the retire step is contained and byte-safe (A3 review S2, 2026-09-28)
+
+- **`lib/linux/install.sh`**: `omnigraph_client_is_current` (the skip gate
+  `install_component` asks *before* any postInstall runs) compared "a token is in
+  the file" and an unanchored `grep -F` of the URL — so a **rotated token stayed
+  stale forever**, and a commented `# OMNIGRAPH_BASE_URL=…` or a
+  `…invalid.evil` suffix URL read as current. It now compares the resolved URL
+  *and* token, as whole `KEY=value` lines, plus the `environment.d` link, the rc
+  line this run would write, and no retired line left; the env-file half is asked
+  of `omnigraph_env_state … check`, the writer's own code path in a new mode, so
+  the gate and the write cannot disagree, and the values reach python in the
+  environment — never printed. A bridge pin with an empty `@version` (`name@`)
+  no longer equals an empty installed version, and a **symlink** at the wrapper
+  path is refused instead of counting as the copy it promises (a `cp` through
+  such a link writes into the tracked checkout).
+- **`lib/linux/install.sh`** (`omnigraph_retire_rc_token_lines`): the heredoc ran
+  unguarded under the runner's `set -euo pipefail` and in text mode, so an
+  undecodable dotfile printed a python traceback into the log, *claimed the line
+  was removed* and left it there, and a read-only file aborted the step; the
+  whole file was also re-encoded (CRLF neighbours converted to LF). It now edits
+  bytes, is contained like every other step (warn +
+  `autoos_record_failure omnigraph-client`, the run continues), and leaves every
+  other line untouched.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: hand-edited env lines —
+  `export KEY=value`, an indent, `"…"`/`'…'` round a value — were kept literally
+  or skipped, so the bridge started with no or wrong token; both twins now strip
+  those forms (one layer of matching quotes, nothing else), ignore every key but
+  the three, are CRLF-safe and still never evaluate a value. The env-file writer
+  recognises the same forms, so a stale hand line is normalised rather than left
+  to shadow the resolved value.
+- **Disproved, not fixed**: `exec "$bridge" "$@"` with no arguments under
+  `set -u` on bash 3.2 (stock macOS) — measured on real `bash:3.2.57` (the
+  `bash:3.2` image): the wrapper starts the bridge with `argc=0`, token exported,
+  exit 0, and `set -u; printf %s "$@"` with no positional parameters exits 0.
+  The bash-4.4 nounset entry that is usually cited here covers `${a[@]}` on an
+  *empty array* (which does fail on 3.2, verified), not `$@`; the portable
+  `${1+"$@"}` form would be noise. A zero-arg case is now tested as a guard.
+- **`tests/linux/38-omnigraph-client.sh`**: 11 cases added, each written against
+  the bug first — env rotation via `$OMNIGRAPH_TOKEN` and via `api-keys.yml`,
+  commented/suffix URL, deleted rc line, reappeared retired line, lost
+  environment.d link, CRLF and non-UTF-8 rc files, unwritable rc file through
+  `run_post_install` (the production shape), decorated env rows normalised,
+  empty-pin refusal, symlinked wrapper refusal, export/quoted/CRLF/injection
+  parsing and the zero-arg start.
+
 ### Added — `omnigraph-client`: a pinned bridge, the env file, and the wrapper that reads it (A3, 2026-09-27)
 
 - **`catalog/linux.json`**, **`catalog/macos.json`**: new `custom` component
