@@ -27,6 +27,380 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
   a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
   both, inside the functions too. A second run is `skipped` with no second record.
+### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
+
+Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
+the identity FLEETP0/FLEETP0b had just added, and router D-063 asked for one more
+carrier. All of them are in `tools/autoos-agent.py` unless named.
+
+- **HIGH — the slug is scrubbed before it is cut.** `mint_run_id` slugified the raw
+  title/task, and `RUN_ID_SLUG_CAP` is 24 characters — *shorter* than a vendor key,
+  so the cap that was supposed to keep task text out of the id kept a pasted key in
+  it whole, into the branch, the sandbox dir, the printed `run-id:` line and the
+  gateway header. The slug now comes from `slug_source`: the shared
+  `redact.Redactor` masks first, the mask token is dropped rather than slugged, and
+  only then does `slugify` cut. A title that is nothing but a key yields `task`.
+  `session_tag` — the other half of that header, cut at 40 — is scrubbed through
+  the same helper, because the cap missed the leak on both sides.
+- **D-063 — `x-omniroute-session-id` is now `<tag>/<run-id>`,** so OmniRoute threads
+  one Conversation per run (`X-AutoOS-Run-Id` rides beside it unchanged). Measured
+  read-only in the running gateway: `resolveConversationId` takes
+  `header.trim().slice(0, 128)` with **no charset check** — the limit is a length,
+  and it truncates silently, which would cut the run id off the end. `session_header_value`
+  therefore sends the tag alone when the pair would not fit, with one warning line,
+  instead of sending a value the gateway would chew.
+- **`tools/autoos_usage.py` — `--by lane` is the part before the FIRST `/`,** so an
+  old `<lane>/<title>` row and a new `<lane>/<title>/<run-id>` row group together,
+  and **`--by run`** is the part after the last `/` when `is_run_id` recognises it
+  (`(no run id)` otherwise — a tag's tail is a title slug, not a run). The run-id
+  shape is written a second time here because the spawner delegates `usage` *to* this
+  module and cannot be imported back; `test_the_run_id_shape_matches_the_one_the_spawner_mints`
+  pins the two copies, `test_every_id_the_spawner_mints_is_a_run_to_usage` checks them
+  against real mints. The key column is capped at one whole id (48), not 40.
+- **MEDIUM — the two headers go to every gateway client that can stamp a request,**
+  not to opencode alone. `omniroute run` has no header option (`omniroute run
+  --help`), so each launched CLI has to carry them itself; measured 2026-09-28 by
+  pointing the launcher at a local listener (`--remote http://127.0.0.1:<port>`)
+  and reading the headers back off the request — no gateway spend, no completion:
+  `codex` takes `-c 'model_providers.omniroute.http_headers.<name>="<value>"'`,
+  and only *before* its `exec` subcommand (after it the override replaces the
+  whole `model_providers` table and codex dies on "provider name must not be
+  empty"; a quoted key segment is dropped without a word); `gemini` takes env
+  `GEMINI_CLI_CUSTOM_HEADERS="name:value,name2:value2"`. Carriers live in
+  `tools/autoos_clients.py` (`HEADER_CLIENTS`, `gateway_header_args`,
+  `gemini_custom_headers`) and the plan's `session_tag` is set for both, so their
+  dry run prints the tag it really sends. **`qwen` cannot**: its `customHeaders`
+  exists only in a `settings.json` inside the temporary `QWEN_HOME` the launcher
+  writes and deletes, and the one env hook (`QWEN_CODE_SYSTEM_SETTINGS_PATH`) is
+  the machine-wide system file — not something one spawn may write. Those rows
+  stay `session_tag = null` (`(untagged)` / `(no run id)`), are attributable
+  host-side only, and get no `session-tag:` line, so nothing claims an
+  attribution the gateway never received. `docs/routing.md` carries the table.
+  The only gateway call the spawner makes itself is the `/api/health` probe, which
+  is not a completion and has no conversation.
+- **LOW — `_redact_value` recurses tuples, sets and frozensets** (it walked dicts and
+  lists only, so `skipped_legs` as a tuple reached the record with its key intact) and
+  **a fallthrough re-run adopts the reused clone's `agent/<suffix>` only when the suffix
+  is canonical** (`is_canonical_run_id`) — before, any branch tail became a run id
+  unvalidated. **A record whose caller's `AUTOOS_AGENT_RUN_ID` equals its own id now
+  stores no parent edge**, which is what a self-parent is.
+- **Tests** (`tests/test_autoos_spawner.py`): header value shape, the tag/run split
+  back apart, the 128-char fallback and its warning, key-shaped titles, reuse of a
+  non-canonical branch, the self-parent record, and a **parent-cycle `ps --tree` case**
+  (A↔B: both rows listed, one entered as a root, the walk returns); plus the two
+  new carriers (codex argv prefix and its position before `exec`, gemini's env value
+  re-parsed with the CLI's own split rule) and the negative that keeps `qwen` honest.
+- **Test hermeticity** (`tests/test_autoos_spawner.py`): `clean_env` now drops an
+  ambient `AUTOOS_SESSION_TAG` the way it already dropped the ambient key, and the
+  two tag classes `pop` it in `setUp`. A spawn inherits the caller's tag, so two
+  `SessionTagTests` failed only inside a lane session and passed on a bare checkout
+  — the suite measured the machine it ran on, not the code (R-worker-02).
+
+### Added - `run --run-id`, so an MCP spawn and its run share one id (FLEETP0b, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: FLEET left one open item - the MCP server's `spawn`
+  still minted `logs/agents/<id>` with its own local-time `stamp-hex6` (no slug),
+  so an MCP spawn had two ids again (FLEETSPEC §5.1 says one). `run` now takes
+  `--run-id <id>`: the caller's id is used instead of a mint, and names the same
+  four places a minted one does - `agent/<id>`, the `--isolate` clone dir,
+  `logs/workers/<id>.json`, the child's `AUTOOS_AGENT_RUN_ID` (and so the
+  `X-AutoOS-Run-Id` header). A run id is a filename, a branch and a header value,
+  so a shape that is not the canonical one is refused with exit 2 by
+  `is_canonical_run_id` (a real UTC stamp, a slug within `RUN_ID_SLUG_CAP`, a
+  6-hex tail) before any clone, record or client start. The `parent_run_id` edge
+  is unchanged and stays the caller's own `AUTOOS_AGENT_RUN_ID`: a handed-in id
+  is never read from that variable, or the child would name itself its parent.
+- **`tools/autoos_agent_mcp.py`**: `spawn` mints with the agent module's own
+  `mint_run_id` (the module it already loads via importlib for `route`), keeps the
+  collision retry, names its run dir with that id, records it in `job.json`
+  (`run_id`, beside the `id` `status()` reads) and passes it to the CLI as
+  `--run-id` - built into the argv *before* the dry-run preflight, so the CLI
+  checks the id it will actually be started with and a refusal still creates no
+  run dir. `run_job`'s environment is untouched, so the server's own
+  `AUTOOS_AGENT_RUN_ID` (when the MCP client is itself a spawned run) stays the
+  parent of everything it spawns. Its local-time mint and the `secrets` import
+  that only it used are gone.
+- **`tests/test_autoos_spawner.py`**: `McpCanonicalRunIdTests` (canonical id for
+  the run dir, `--run-id` in the argv with the task still last, `job.json`
+  carrying `run_id`, a refused spawn leaving no dir, the caller's id flowing as
+  the parent), plus `run --run-id` cases in `CanonicalRunIdTests` (one id in
+  branch + dir + child env + header, the CLI printing the id it was given, 13
+  malformed shapes refused at exit 2) and in `RunIdRecordTests` (a handed-in id
+  is parented to the caller, not to itself; a top-level one leaves no parent; a
+  malformed one is refused before `build_plan`). Red before: **8 failed**; green
+  after: **700 passed / 111 subtests** on `tests/test_autoos_spawner.py
+  tests/test_autoos_heartbeat.py`, with `test_agent_harness.py`,
+  `test_autoos_context.py`, `test_autoos_inbox.py`, `test_autoos_tokenrate.py`,
+  `test_autoos_track.py` and `test_autoos_usage.py` at 227 passed. An MCP dry-run
+  spawn end to end prints one id: its run dir, the argv and the CLI's `run-id:`
+  line agree (`20260928-102313-mcp-id-check-9362d5`).
+
+### Added - one canonical run id per spawn, its parent edge, and the route it was scored on (FLEET, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: a spawn minted **two** ids from **two** clocks and nothing tied them
+  together - the `--isolate` clone and its branch were stamped from `datetime.now()` (local time, a
+  slug of the *task*), the worker record minted a separate UTC `stamp-hex6`, and the `logs/agents/`
+  run dir a third, so a console could not say which record, clone, branch and request belonged to one
+  run (FLEETSPEC §5.1/§10 P0). `mint_run_id` mints `YYYYMMDD-HHMMSS-<slug>-<hex6>` **once, in UTC**,
+  the slug the run's title capped at 24 chars of `[a-z0-9-]` (never task text past it: a brief can
+  carry a key), and it is now the clone dir suffix, `agent/<id>`, `logs/workers/<id>.json`, the
+  child's `AUTOOS_AGENT_RUN_ID` and the `X-AutoOS-Run-Id` header sent beside
+  `x-omniroute-session-id` (a fallthrough re-run keeps the first attempt's clone, branch and id - one
+  spawn is one id). A record stores `parent_run_id` (the `AUTOOS_AGENT_RUN_ID` this spawner was
+  itself spawned with, `None` at top level), `host` (`socket.gethostname()`, in the git-ignored
+  record only - never in a committed fixture), `task_dir` (the `AUTOOS_TASK_DIR` run dir the child
+  asks back in, which links the third id) and the resolver's whole `route_plan`; `redact_record` now
+  walks nested values, because the resolver's `reason` carries whatever a probe line said.
+  `ps --tree` prints the spawn tree - children indented under the run that spawned them, an orphan
+  whose parent record is gone a top-level row marked `(parent <id> gone)`, an unvisited row still
+  emitted so a cycle never swallows a run - and `ps --json` rows carry `parent_run_id` untruncated.
+  Old records with none of these fields still list; nothing else renames.
+- **`tests/test_autoos_spawner.py`**: `CanonicalRunIdTests`, `RunIdRecordTests`, `PsTreeTests`
+  (22 cases: the id's shape, its UTC stamp and 24-char cap, no task text past the slug, one id in
+  branch + dir + record + child env, the parent inherited from the spawner's own env, `ps --tree`
+  ordering and the gone-parent row, the host (a fake one, patched in), `route_plan` persisted and
+  redacted, the header injected next to the session tag, an old record still listing). Red before:
+  **20 failed / 584 passed** on `tests/test_autoos_spawner.py tests/test_autoos_track.py`; green
+  after: **604 passed / 0**, with `test_agent_harness.py`, `test_autoos_context.py`,
+  `test_autoos_heartbeat.py`, `test_autoos_usage.py`, `test_autoos_measure.py` and
+  `test_autoos_resolver.py` at 415 passed / 1 skipped. Six pre-existing fakes of `build_plan`'s
+  output gained the `run_id` the plan now carries, `SandboxUniquenessTests` its `t2-` prefix (the
+  slug is the title, and a titleless spawn's title *is* `tN <task head>`), and the MCP server's own
+  `logs/agents/<id>` naming is deliberately untouched - it is a second file, and the record's
+  `task_dir` is what links the two ids meanwhile.
+### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
+
+- **`catalog/ai-registry.json`** `policy.handoff_caps.claude-sonnet-1m` (window 1M, 0.25 = 250k) and
+  **`tools/autoos_context.py`** `DEFAULT_CAPS`: a sonnet L2 no longer falls into the 200k-class row.
+  Measured: L1-backlog handed off every ~15 min at 150k with a 55.5k fresh-session baseline. Temporary
+  until the RESTART packs land; lowered again if a measured relaunch costs < ~20k. Haiku and unknown
+  models keep 150k.
+### Fixed — `codestral-latest` counts as training until a source says otherwise (MISTRALFIX3, Muse review of MISTRALFIX2, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `models.codestral-latest.trains_on_prompts: true` (operator 12:0xZ
+  "Mistral trains -> never in -clean tiers"), so `private_safe()` keeps it out of every `-clean`
+  route; its limits row names both sources (10:5xZ direct headers for rpm/tpm, 11:5xZ gateway
+  answers); the Mistral provider note counts three limits rows. Guard tests in `MistralReplaceTests`.
+
+### Fixed — the codestral pair replaces `mistral-small`; the `-clean` twins stay non-training (MISTRALFIX2, 2026-09-28)
+
+- **Operator brief (via L1-main 11:5xZ)**: `mistral-small` does not work — replace it
+  with Mistral Codestral wherever it was a leg, and where both codestral siblings
+  answer, take `mistral-code-latest`. Measured through the gateway (3 calls each,
+  `max_tokens 4096`, `work/L1-routing/MISTRALREPL.probe.jsonl`):
+  `mistral/mistral-code-latest` 3/3 200 p50 0.3 s, `mistral/codestral-latest` 3/3 200
+  p50 0.3 s, `mistral/mistral-small-latest` 0/3 (429) — the gateway agrees with the
+  10:5xZ direct probe (MISTRALFIX).
+- **`catalog/ai-registry.json:models.codestral-latest` +
+  `providers.mistral.limits.codestral-latest`**: registered with the measured 125 rpm /
+  625k tpm row and the gateway-probe source, and **not** made a leg of any route — it is
+  the tested alternative, which is what the brief's tie-break left it. `context_advertised`
+  / `output_max` / `reasoning` are inherited from the provider's other records, not
+  measured here, and the `$comment` says so; `trains_on_prompts` stays unset (inherits
+  `providers.mistral`, the shape `mistral-small-latest` carried) because nobody has
+  measured whether codestral trains. `mistral-code-latest` already had its measured row.
+- **The requested `-clean` swap was measured and refused, not skipped**: putting
+  `mistral/mistral-code-latest` in `t2-worker-clean` / `t3-driver-clean` (the position
+  `mistral-small` held, which would have given each twin two live legs) makes
+  `tools/registry.py validate` exit 1 twice — `privacy: <route> leg
+  mistral/mistral-code-latest model trains on prompts` (spec 3.1 rule 3, `private_safe()`).
+  Those are the routes a `privacy=sensitive` card lands on
+  (`tests/test_autoos_spawner.py`), and `tests/linux/33-documentation.sh` independently
+  bans `mistral/mistral-code` in any `-clean` combo, so the leg would have routed private
+  prompts into a training pool. The twins keep MISTRALFIX's legs and their one live leg,
+  the native `deepseek/deepseek-flash` head, which satisfies the route-liveness invariant.
+- **`t3-driver`** needed no change and no new leg: `mistral/mistral-code-latest` was
+  already its head, so the dead model's slot is covered without duplicating the leg
+  (`MistralReplaceTests` pins the count at 1).
+- **Tests, `tests/test_registry.py:MistralReplaceTests` (written first, red, then made
+  green)**: codestral's measured row and source, codestral in no route, the probe recorded
+  in the registry, `mistral-small` in no route, `t3-driver`'s single mistral-code leg — and
+  the guard that the `-clean` twins carry no training leg and exactly one live leg, so a
+  later lane cannot "finish" this swap by adding it. The route-liveness invariant now reads
+  through the new `live_legs()` helper, shared with the count tests instead of restating the
+  filter.
+- **Docs**: `docs/models.md` records the gateway probe and the refused swap next to the
+  MISTRALFIX plan-limits table; `docs/models-proposed.md`'s three rows for the affected
+  combos stop listing `mistral-small` as a leg and name the reason. All five `render
+  --check` surfaces pass unchanged — no route's legs moved and a route-less model renders
+  nowhere, so `combos.json`, the litellm block, `ide-models.json` and the OpenHands
+  profiles had nothing to re-derive.
+
+### Fixed — Mistral plan limits are measured and gate the route; no route routes into a dead leg (MISTRALFIX, 2026-09-28)
+
+- **`catalog/ai-registry.json:providers.mistral.limits`**: the plan itself, not the
+  provider's uptime, is what killed `mistral-small-latest` — a direct probe
+  (2026-09-28T10:5xZ, `x-ratelimit` headers on `api.mistral.ai`) returns 429 at
+  **0 req/min** for it while `mistral-code-latest` serves 125 rpm / 625k tpm on the
+  same key. The measured rows now live in the registry's one home for plan caps
+  (`rpm`/`tpm`/`source`), and the bare-spelling models that were never registered
+  (`devstral-latest`, `mistral-medium-latest`, `magistral-medium-latest`,
+  `codestral-latest`, `open-mistral-nemo`, `ministral-8b-latest`, and
+  `mistral-large-latest` at 403) are recorded in the provider `$comment` only —
+  rule 10 rejects a limits key that does not resolve to a model of that provider.
+  The gateway agrees: `mistral-small-latest` failed 51/51 calls over 7 days.
+- **`tools/registry.py:plan_dead_reasons()`** (new, alongside
+  `provider_plan_limits()`): a leg is plan-dead when its row says `rpm: 0` or
+  `plan_available: false`; no row is never a deny. `plan_available` joined
+  `$defs.provider_limits` in the schema and `_LIMITS_ENTRY_KEYS`, so rule 10 now
+  rejects a non-boolean (a string would read as available).
+- **`tools/autoos_resolver.py:usable_legs()`** had no plan gate at all — only a
+  request-size `tpm` check — so a 0-rpm leg survived every filter and got served.
+  `plan_dead_reasons` now runs immediately after the availability hard check,
+  naming the reason `"plan: 0 rpm"`. The stale "rpm/rpd/tpd are data only" claims
+  in that module are corrected: `rpm` gates, but only for its zero.
+- **`routes.t3-driver` / `t2-worker-clean` / `t3-driver-clean`**: `mistral/
+  mistral-small-latest` is out of all three (13→12, 4→3, 3→2 legs). The `-clean`
+  twins do not need marking unavailable — after DSBACK they head on native
+  `deepseek/deepseek-flash`, which is live and plan-ungated, so each keeps a
+  serving leg. `t3-driver` keeps its paid `mistral/mistral-code-latest` leg.
+- **Invariant, `tests/test_registry.py:MistralPlanLimitsTests`**: every route that
+  serves traffic (`servable_route_ids`) keeps at least one leg that is
+  gateway-servable *and* plan-alive, over the real registry — the check that would
+  have caught this on the day the leg was added. A route with zero servable legs
+  renders no combo and so serves nothing, which is why `t1-orchestrator-clean` is
+  correctly outside the rule rather than exempt from it.
+- **Renders** re-derived from the registry: `sync-router-tiers.py` rewrote the
+  litellm managed block, `docs/models.md`'s managed block plus its mermaid chains
+  and provider table, `configuration/omniroute/combos.json` by minimal hand-edit
+  of the three leg arrays (its hand-written `$comment` is an intentional equality
+  exception and stays); `validate` and all five `render --check` surfaces pass.
+- **Stale pins re-derived, not loosened (R-worker-01)**: `RuleThreePrivacyTests`
+  read the live head leg from the registry instead of hard-coding mistral-small,
+  and three resolver tests that called it "the proven leg" now use
+  `test_autoos_resolver.py:clean_head_leg()`; `PlanLimitsGateTests` seeds the dead
+  plan inline so the gate is tested without `measured.json`.
+
+### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (HIGH): R5A4's `Totals.add` lets a second copy
+  of one response add no usage and still move it *into* the subagent view — and
+  the move carried the **duplicate's** numbers. The two are only equal while every
+  copy of a response repeats the same usage, which this client does not do:
+  measured over the R5a window, 872 of the 13,691 collapsed duplicates carry a
+  different usage than the record that got counted (the growing partial usage of
+  a streaming response, R5A4's own "first-wins, measured" note), so a promotion
+  could put more into `subagent_weighted` than `weighted` holds for that response
+  and break D-045's rule that the subagent columns are a *view onto* the
+  numerator. `counted` now stores what was summed beside the claim —
+  `(sidechain, weighted, naive)` per identity — and a promotion re-uses exactly
+  those. **Latent on this host**: 0 promotions occur over the whole R5a window
+  (parent and `subagents/` files share no response id, as R5A3 measured), so all
+  three rows re-ran to R5A4's numbers to the token — L1-routing 4,964 records /
+  104,768,807.8 weighted / 24,380,131.1 subagent / 23.3 % / 28 merges /
+  3,741,743.1 per merge, L1-backlog 6,205 / 135,999,291.6 / 62,663,439.9 /
+  46.1 % / 34 / 3,999,979.2, L1-main 4,034 / 107,119,446.4 / 45,288,117.6 /
+  42.3 % / 76 / 1,409,466.4. No before-number moved; R5b still compares against
+  the R5A4 table.
+- **`--json`**: an unnamed `--repo` prints `"default"` instead of the resolved
+  current directory. That was the same leak R5A3 closed for `--projects-dir`
+  (hard rule 1 — the path carries the operator's username), reached by a
+  different flag; a named `--repo` is still echoed as given, and `--no-git` still
+  reports no repo at all.
+- **`tests/test_autoos_tokenrate.py`**: 6 new cases — the promotion across the two
+  depths with a deliberately *larger* duplicate (the streaming shape), a property
+  sweep over the fixture usages at both depths asserting
+  `subagent_weighted <= weighted` and `subagent_naive <= naive` for every
+  ordering, and four `--json` repo cases (report-level and CLI-level, defaulted
+  and named). 15 red before the fix (the promotion case, 12 of its sweep
+  subtests, and the two repo echoes), **66 green + 32 subtests** after;
+  `python3 -m pytest -q tests/` 2,245 passed / 4 skipped,
+  `bash tests/run-tests.sh --filter token-rate` 1 passed / 0 failed.
+
+### Changed — `token-rate` counts each API response once (RESTART R5A4, the metric owner's answer to R5A3's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: R5A3 left the numerator counting *turns x
+  content blocks*, because a record's identity was its transcript `uuid` and this
+  client writes one record per content block, each repeating the same
+  `message.id`, the same top-level `requestId` and (usually) the same usage. The
+  decision — the metric counts one **API response** — moves identity into a new
+  `response_identity`: `message.id` plus `requestId` when the record carries one
+  (a retried response repeats the message id and is billed again), falling back
+  to the `uuid` only when there is no `message.id`, and to no identity at all
+  (never deduped) when there is neither. The first record of a response wins and
+  a later duplicate may only move it *into* the subagent view, which is unchanged
+  from R5A3: `isSidechain` or `subagents/`-file provenance still decides
+  membership, and `weighted` still contains `subagent_weighted`. Measured over
+  the R5a window (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`, same
+  `--repo`/`--branch`/prefixes as R5A3; every response id is unique to one
+  session and no response id ever spans two files, so the collapse is entirely
+  same-file blocks — 1.96 / 1.94 / 1.76 records per response — and the
+  cross-file dedup stays defensive):
+
+  | row | records (before → after) | weighted (before → after) | naive (before → after) | subagent weighted (before → after) | share | merges | weighted-per-merge |
+  |---|---|---|---|---|---|---|---|
+  | L1-routing | 9,745 → **4,964** | 202,093,981.4 → **104,768,807.8** | 1,748,832,653 → 932,606,194 | 53,589,959.0 → 24,380,131.1 | 26.5 % → **23.3 %** | 28 | 7,217,642.2 → **3,741,743.1** |
+  | L1-backlog | 12,060 → **6,205** | 262,700,682.6 → **135,999,291.6** | 2,279,918,775 → 1,201,840,938 | 124,163,141.7 → 62,663,439.9 | 47.3 % → **46.1 %** | 34 | 7,726,490.7 → **3,999,979.2** |
+  | L1-main | 7,089 → **4,034** | 190,405,176.5 → **107,119,446.4** | 1,733,132,396 → 989,705,170 | 85,499,036.7 → 45,288,117.6 | 44.9 % → **42.3 %** | 76 | 2,505,331.3 → **1,409,466.4** |
+
+  The denominators are untouched, so every row drops ~43–49 % and R5b must
+  compare against these numbers, not R5A3's. L1-backlog's subagent weighted
+  tokens grouped by `message.model` (counts only, never message text):
+  3,343 responses / 61,138,502.0 weighted = **97.6 %** `claude-sonnet-5` plus
+  212 / 1,524,937.9 = 2.4 % `claude-haiku-4-5` — R5A3's reading survives the
+  re-key: the share is the Sonnet reviewer legs, not Haiku first passes.
+- **first-wins, measured**: 242 of the 4,964 L1-routing responses do *not*
+  repeat their usage — the client writes the growing partial usage as blocks
+  land, so the last record of a message carries the most. The rule stays
+  first-wins (a duplicate never adds usage); keying on the largest copy instead
+  would move the L1-routing numerator by 132,582.0 weighted, 0.13 %.
+- **`tests/test_autoos_tokenrate.py`**: `ResponseDedupTests` (new, 10 cases) and
+  R5A3's `test_the_blocks_of_one_turn_are_not_deduped…` reversed to pin the new
+  rule. Covers three records sharing a message id counting once, distinct message
+  ids counting separately, the same message id under another request id being
+  *two* responses, the uuid fallback, a record with neither id staying its own
+  response, first-wins against a growing duplicate, and a subagent copy of a
+  parent message counting once and landing in the subagent view. The fixture
+  `usage_line` now writes a `requestId` (derived from the message id, as the real
+  transcript always agrees; `rid=` sets it explicitly) — 8 red before the change,
+  **60 green** after.
+
+### Changed — `token-rate` discovery reaches `<session>/subagents/*.jsonl` (RESTART R5A3, the router's answer to D-045's open caveat, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: D-045 kept an in-session subagent turn in the
+  numerator and reported its share, but all three measured rows printed `0.0%`
+  because this host's client writes those turns one level below the session
+  files `discover_transcripts` scanned. Discovery reads both depths now, so the
+  subagent records are in `records`/`weighted`/`naive` *and* in the subagent
+  columns: a record is a subagent turn when its own `isSidechain` flag is set
+  **or** it was read out of a `subagents/` file — the flag is the record's claim,
+  the directory is the client's. A turn written to both depths is still one cost:
+  `Totals.add` dedups by transcript `uuid`, falling back to `message.id` for a
+  record that carries none, counts it once, and lets the second copy move it
+  *into* the subagent view only. Measured over the R5a window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`): L1-routing 5,462 → 9,745
+  records / 148,504,022.4 → 202,093,981.4 weighted / share 26.5 %, L1-backlog
+  4,907 → 12,060 / 138,537,540.9 → 262,700,682.6 / 47.3 %, L1-main 2,959 → 7,089
+  / 104,906,139.8 → 190,405,176.5 / 44.9 %. The before-numbers still reproduce to
+  the token and nothing deduped on this host — parent and subagent files share
+  neither uuid nor message id, so the dedup is defensive. That corrects the third
+  row of the R5a caveat (417 records / 4.6 %): that probe counted only
+  `subagents/` dirs sitting beside a same-named session file in the *same*
+  project dir, and an L1-main subagent turn routinely runs in a worktree under
+  the main checkout while its parent session is filed under a lane's dir — its
+  records belong to the main row by `cwd`, and the real figure is 4,130.
+- **`--json`**: an unnamed `--projects-dir` prints `"default"` instead of the
+  resolved transcript root. That path carries the operator's username, and the
+  repository is public (hard rule 1); an explicit flag is echoed as it was given.
+- **`tests/test_autoos_tokenrate.py`**: `SubagentFileDiscoveryTests` (new, 11
+  cases) plus 3 CLI cases, on a fixture tree holding a session file and its
+  `subagents/` dir — both depths in the numerator, provenance alone counts as a
+  subagent turn, a shared uuid (or message id, without a uuid) counts once and
+  lands in the subagent view, the blocks of one turn keep their own uuids, an
+  agent file invents no session of its own, the window and `cwd` filters still
+  apply one level down, and `--json` says `default`. Fixtures now give every
+  record its own uuid, as the real transcript does; they had keyed the uuid off
+  the token count, which is exactly what the dedup now collapses. 9 red before
+  the change, 50 green after.
+### Fixed — OpenCode no longer loads a managed skill twice (WS-HARNESS)
+
+- **`lib/agent_harness.py`**: `desired_opencode` drops a managed skill's
+  `SKILL.md` entry that still points into an `agent-skills` clone (the skills
+  home before `.agents/skills`, retired 2026-09-25) when it writes the
+  replacement entry. Before, the merge appended the new entry and kept the old
+  one, so OpenCode loaded two diverged copies of the same skill. Only the
+  harness's own skills are touched: a user's other `agent-skills` paths, and any
+  entry at all when there is no skills source to replace it, are kept.
 
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 

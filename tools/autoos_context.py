@@ -27,12 +27,14 @@ from pathlib import Path
 
 # Spec 8.3, exactly: (lowercased substring, window, hand off at).
 # Opus 600k/1M, Fable 600k/1M (operator 2026-09-27, was 400k), Muse Spark 300k/1M, Gemini 200k/1M,
+# Sonnet 250k/1M (routing-00 D-085 2026-09-28: sonnet L2s handed off every ~15 min at 150k),
 # 200k-class default 150k.
 DEFAULT_CAPS = [
     ("opus", 1000000, 600000),
     ("fable", 1000000, 600000),
     ("spark", 1000000, 300000),
     ("gemini", 1000000, 200000),
+    ("sonnet", 1000000, 250000),
     ("*", 200000, 150000),
 ]
 
