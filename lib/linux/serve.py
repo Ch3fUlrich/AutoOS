@@ -468,6 +468,39 @@ def service_action_response(body) -> tuple:
     return 202, {"started": True, "action": key}
 
 
+def state_components(catalog: dict, platform: str, platforms: dict, arch: str,
+                     headless: bool, installed: dict) -> list:
+    """The catalog rows the browser is served, filtered for this machine.
+
+    Pure so a test can ask the same question the server asks without starting a
+    server or touching a machine. `tombstone` and `note` are in the payload
+    because the page resolves dependencies, pre-ticks profiles and collects
+    prompts in the browser: it can only honour a retired id if the row says so.
+    """
+    rows = []
+    for grp in catalog.get("categories", []):
+        if grp.get("requiresDisplay") and headless:
+            continue                      # hide, never show-and-fail
+        for c in grp.get("components", []):
+            if c.get("arch") and arch not in c["arch"]:
+                continue
+            status = installed.get(c["id"], "unknown")
+            rows.append({
+                "id": c["id"], "name": c["name"], "description": c["description"],
+                "provider": c["provider"], "package": c["package"],
+                "profiles": c.get("profiles", []), "prompt": c.get("prompt"),
+                "category": grp["name"],
+                "requires": c.get("requires", []), "homepage": c.get("homepage"),
+                "verify": c.get("verify"), "notes": c.get("notes"),
+                "platforms": platforms.get(c["id"], [platform]),
+                "installed": status == "installed",
+                "installedStatus": status,
+                "tombstone": c.get("tombstone") is True,
+                "note": c.get("note"),
+            })
+    return rows
+
+
 def build_state() -> dict:
     """System info + catalog, produced by the same shell code the CLI uses."""
     probe = r"""
@@ -514,29 +547,9 @@ PY
     platforms = component_platforms()
     arch = info["system"]["architecture"]
     headless = info["system"]["display"] == "headless"
-    installed_ids = {key for key, value in info["installed"].items() if value == "installed"}
-    installed_names = []
-    components = []
-    for grp in catalog.get("categories", []):
-        if grp.get("requiresDisplay") and headless:
-            continue
-        for c in grp.get("components", []):
-            if c.get("arch") and arch not in c["arch"]:
-                continue
-            is_inst = c["id"] in installed_ids
-            if is_inst:
-                installed_names.append(c["name"])
-            components.append({
-                "id": c["id"], "name": c["name"], "description": c["description"],
-                "provider": c["provider"], "package": c["package"],
-                "profiles": c.get("profiles", []), "prompt": c.get("prompt"),
-                "category": grp["name"],
-                "requires": c.get("requires", []), "homepage": c.get("homepage"),
-                "verify": c.get("verify"), "notes": c.get("notes"),
-                "platforms": platforms.get(c["id"], [platform]),
-                "installed": info["installed"].get(c["id"]) == "installed",
-                "installedStatus": info["installed"].get(c["id"], "unknown"),
-            })
+    components = state_components(catalog, platform, platforms, arch, headless,
+                                  info["installed"])
+    installed_names = [c["name"] for c in components if c["installed"]]
     info["system"]["installed applications"] = (
         "✓ " + ", ".join(installed_names) + f" ({len(installed_names)} detected)"
         if installed_names else "none detected"

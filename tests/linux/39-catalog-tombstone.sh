@@ -401,7 +401,7 @@ if it "catalog tombstone: the serve payload carries the retirement facts"; then
     # The page resolves dependencies in the browser, so it can only honour a
     # retired id if the payload says which ids are retired. state_components is
     # build_state's own projection — the same function the server calls.
-    failures="$(python3 - "$TOMBSTONE_FIXTURE" <<'PY'
+    failures="$(python3 - "$TOMBSTONE_FIXTURE" <<'PY' 2>&1
 import json, sys
 sys.path.insert(0, "lib/linux")
 from serve import state_components
@@ -437,6 +437,9 @@ if it "catalog tombstone: the web page reads the retirement fields"; then
 fi
 
 if it "end-to-end: --only an entry that requires a retired id fails loudly, not green"; then
+    # No --dry-run here, and nothing is installed by it either: the refused
+    # component never reaches install_component, so the run touches no disk but
+    # the state file — which is what has to carry the failure.
     tree="$(tombstone_tree '
 import json, sys
 p = sys.argv[1]; d = json.load(open(p))
@@ -445,7 +448,7 @@ for g in d["categories"]:
         if c["id"] == "prompted-demo": c["requires"] = ["retired-demo"]
 json.dump(d, open(p, "w"))
 ')"
-    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only prompted-demo --yes --no-color --dry-run \
+    out="$(HOME="$tree/home" bash "$tree/setup.sh" --only prompted-demo --yes --no-color \
         --save-state "$tree/state.json" 2>&1)"; rc=$?
     saved="$(tombstone_state_results "$tree/state.json")"
     rm -rf "$tree"
@@ -454,7 +457,13 @@ json.dump(d, open(p, "w"))
     [[ "$out" == *"requires retired retired-demo"* ]] \
         || problems+="[nothing named the refusal: $(printf '%s\n' "$out" | tail -5)] "
     [[ "$out" != *"Asks A Question done"* ]] || problems+="[the refused component reported itself done] "
-    [[ "$saved" == *"failed=[prompted-demo]"* ]] || problems+="[the state file says: $saved] "
+    [[ "$out" != *"DEMO PROMPT"* ]] || problems+="[its prompt was asked, for a run that will not install it] "
+    # The retired row stays in the plan and reports its own honest outcome —
+    # skipped, not installed and not a failure — beside the dependent it blocked.
+    [[ "$out" == *"Retired Component: skipped: retired"* ]] \
+        || problems+="[the retired row reported no skip: $(printf '%s\n' "$out" | tail -5)] "
+    [[ "$saved" == "installed=[] skipped=[retired-demo] failed=[prompted-demo] answers={}" ]] \
+        || problems+="[the state file says: $saved] "
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 

@@ -253,10 +253,24 @@ catalog_profile_defaults() {
 # id list. Dependencies always precede the components that need them.
 PLAN_IDS=""
 PLAN_AUTO=""
+# What the last resolve refused, as component id -> reason. The validator rejects
+# a `requires` that names a tombstone, but a normal run never validates, so
+# resolve records it here and the entry point announces and fails it — rather
+# than dropping the unsatisfiable dependency and installing the dependent green.
+declare -A PLAN_BLOCKED=()
+
+# catalog_resolve_blocked <id> — why the last resolve refused <id>, or nothing.
+# One home for the question: the plan warning, the execute loop and the tests all
+# ask it instead of each re-reading the map.
+catalog_resolve_blocked() {
+    printf '%s' "${PLAN_BLOCKED[${1:-}]:-}"
+}
+
 catalog_resolve() {
     local requested=("$@")
     local -a wanted=() queue=("$@")
-    local id dep i
+    local id dep i di deps
+    PLAN_BLOCKED=()
 
     while ((${#queue[@]})); do
         id="${queue[0]}"; queue=("${queue[@]:1}")
@@ -270,9 +284,39 @@ catalog_resolve() {
         if [[ -n "${CAT_REQUIRES[i]}" ]] && ! catalog_is_tombstone "$i"; then
             IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
             for dep in "${deps[@]}"; do
-                [[ -n "$dep" ]] && queue+=("$dep")
+                [[ -n "$dep" ]] || continue
+                di="$(catalog_index_of "$dep")" || di=""
+                # The dependent is refused, but the retired row stays in the plan:
+                # it is what the plan and the report both get to point at, and it
+                # installs nothing either way.
+                if [[ -n "$di" ]] && catalog_is_tombstone "$di"; then
+                    PLAN_BLOCKED["$id"]="requires retired $dep"
+                fi
+                queue+=("$dep")
             done
         fi
+    done
+
+    # A component that needed one of those refused components cannot be installed
+    # either, and quietly dropping only the first would repeat the same defect
+    # one level up — so the refusal spreads until the set stops growing.
+    local grew=1
+    while (( grew )); do
+        grew=0
+        for id in "${wanted[@]}"; do
+            [[ -n "${PLAN_BLOCKED[$id]:-}" ]] && continue
+            i="$(catalog_index_of "$id")" || continue
+            catalog_is_tombstone "$i" && continue
+            IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]:-}"
+            for dep in "${deps[@]}"; do
+                [[ -n "$dep" ]] || continue
+                if [[ -n "${PLAN_BLOCKED[$dep]:-}" ]]; then
+                    PLAN_BLOCKED["$id"]="requires $dep, which cannot be installed"
+                    grew=1
+                    break
+                fi
+            done
+        done
     done
 
     local -a done_list=() visiting=()

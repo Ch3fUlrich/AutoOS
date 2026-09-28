@@ -596,6 +596,12 @@ for id in $PLAN_IDS; do
     if [[ " $PLAN_AUTO " == *" $id "* ]]; then tag="$(_c muted)(dependency)$(_c reset)"; fi
     if catalog_is_tombstone "$i"; then tag="$tag $(_c muted)(retired)$(_c reset)"; fi
     printf '  %2d. %-22s %-8s %s %s\n' "$n" "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "$tag"
+    # Announced while there is still nothing on the disk to undo: a requirement
+    # that installs nothing can never be satisfied, so this row will fail.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_warn "${CAT_NAME[i]} $blocked_reason - it cannot be installed"
+    fi
     if (( CAT_INSTALLED[i] )); then
         if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}"; then
             ui_ok "✓ Already installed - checking for a newer version (--update)"
@@ -618,8 +624,10 @@ for id in $PLAN_IDS; do
     i="$(catalog_index_of "$id")"
     # Nothing installs, so nothing needs to be known first: a retired entry that
     # still carries its old prompt asks a question whose answer would be thrown
-    # away.
+    # away. Same for a component resolve refused - it will not be installed
+    # either, and its prompt can never be answered in time to matter.
     if catalog_is_tombstone "$i"; then continue; fi
+    if [[ -n "$(catalog_resolve_blocked "$id")" ]]; then continue; fi
     raw_prompts="${CAT_PROMPT[i]}"
     [[ -z "$raw_prompts" ]] && continue
     for key in ${raw_prompts//,/ }; do
@@ -691,6 +699,16 @@ for id in $PLAN_IDS; do
         fi
         AUTOOS_RESULT_SKIPPED+=("$id")
         progress_update skipped 1
+        continue
+    fi
+    # Resolve already announced this one and said why; the plan is not the
+    # report, so it is recorded as the failure it is rather than installed
+    # without the dependency it asked for.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_err "${CAT_NAME[i]}: $blocked_reason"
+        AUTOOS_RESULT_FAILED+=("$id")
+        progress_update failed 1
         continue
     fi
     install_rc=0
