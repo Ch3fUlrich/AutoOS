@@ -308,7 +308,7 @@ if it "the omnigraph rc line loads values literally and replaces the old sourcin
         got_z="$(env -i HOME="$tmp" zsh -f -c ". \"$tmp/.zshrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
     fi
     v1="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
-    v2="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
+    ours="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc" || true)"
     pwned="$(ls "$tmp"/pwned* 2>/dev/null | wc -l)"
     rm -rf "$tmp"
     want='http://x$(touch '"${tmp}"'/pwned)|tok=with=equals'
@@ -316,29 +316,29 @@ if it "the omnigraph rc line loads values literally and replaces the old sourcin
     [[ "$pwned" == 0 ]] || { ok=0; echo "a value was executed" >&2; }
     [[ "$got_b" == "$want" ]] || { ok=0; echo "bash got: $got_b" >&2; }
     [[ -z "$got_z" || "$got_z" == "$want" ]] || { ok=0; echo "zsh got: $got_z" >&2; }
-    [[ "$v1" == 0 && "$v2" == 1 ]] || { ok=0; echo "v1=$v1 v2=$v2 (old line not replaced)" >&2; }
+    [[ "$v1" == 0 && "$ours" == 1 ]] || { ok=0; echo "v1=$v1 ours=$ours (old line not replaced)" >&2; }
     if (( ok )); then pass; else fail "the omnigraph rc line is not a literal reader"; fi
 fi
 
 # Re-review 2026-09-25: CRLF values, a last line without a newline, and a file
-# that carries BOTH the v1 sourcing line and the v2 reader (v1 must go).
-if it "the omnigraph rc reader copes with CRLF and a missing last newline, and purges v1 next to v2"; then
+# that carries BOTH the v1 sourcing line and the current reader (v1 must go).
+if it "the omnigraph rc reader copes with CRLF and a missing last newline, and purges v1 next to the current line"; then
     tmp="$(mktemp -d)"
     printf 'OMNIGRAPH_BASE_URL=http://crlf\r\nOMNIGRAPH_TOKEN=last-line-no-newline' >"$tmp/.autoos-omnigraph.env"
     v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
     printf '%s\n' "$v1" >"$tmp/.bashrc"
-    # First write_omnigraph_env run adds v2 by replacing v1; then plant v1 again
-    # next to v2 (a stale copy) and run once more: v1 must be purged.
+    # The first call adds the current line by replacing v1; then plant v1 again
+    # next to it (a stale copy) and call once more: v1 must be purged.
     ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN=""; docker() { return 1; }
-      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$(omnigraph_rc_line)" ) >/dev/null 2>&1
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "$(omnigraph_rc_marker)" "$(omnigraph_rc_line)" ) >/dev/null 2>&1
     printf '%s\n' "$v1" >>"$tmp/.bashrc"
     ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
-      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "unused" ) >/dev/null 2>&1
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "$(omnigraph_rc_marker)" "unused" ) >/dev/null 2>&1
     got="$(env -i HOME="$tmp" bash -c ". \"$tmp/.bashrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
     v1n="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
-    v2n="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
+    oursn="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc" || true)"
     rm -rf "$tmp"
-    assert_eq "$got|$v1n|$v2n" "http://crlf|last-line-no-newline|0|1"
+    assert_eq "$got|$v1n|$oursn" "http://crlf|last-line-no-newline|0|1"
 fi
 
 if it "the omnigraph token falls back to the local server container, else is reported missing"; then

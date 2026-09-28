@@ -339,7 +339,7 @@ if it "omnigraph-client: a retired agent-skills token line is removed after a ba
     first_state="$(md5sum <"$tmp/.bashrc")"
     second="$(oh_run_client "$tmp")"
     second_state="$(md5sum <"$tmp/.bashrc")"
-    v2lines="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc" || true)"
+    ourlines="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc" || true)"
     rm -rf "$tmp"
     ok=1
     [[ "$gone" == 0 && "$gone_z" == 0 ]] || { ok=0; echo "the retired line survived (bashrc $gone, zshrc $gone_z)" >&2; }
@@ -351,7 +351,7 @@ if it "omnigraph-client: a retired agent-skills token line is removed after a ba
     [[ "$out" == *"agent-skills"* ]] || { ok=0; echo "the removal was not announced" >&2; }
     [[ "$second" == *"CHANGED 0"* ]] || { ok=0; echo "the second run changed something again" >&2; }
     [[ "$second_state" == "$first_state" ]] || { ok=0; echo "the second run rewrote the rc file" >&2; }
-    [[ "$v2lines" == 1 ]] || { ok=0; echo "the current rc line appears $v2lines times" >&2; }
+    [[ "$ourlines" == 1 ]] || { ok=0; echo "the current rc line appears $ourlines times" >&2; }
     (( ok )) && pass || fail "the recognised-only rc removal is wrong"
 fi
 
@@ -451,7 +451,7 @@ if it "omnigraph-client: a deleted rc line, a reappeared retired line and a lost
     grep -v 'AutoOS:omnigraph-env' "$tmp/.bashrc" >"$tmp/.bashrc.new" && mv "$tmp/.bashrc.new" "$tmp/.bashrc"
     gate_rc="$(oh_gate "$tmp")"
     out_rc="$(oh_run_client "$tmp")"
-    v2="$(grep -c 'AutoOS:omnigraph-env-v2' "$tmp/.bashrc")"
+    ours="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc")"
     # (2) a retired agent-skills token line came back (a restored dotfile).
     retired='export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")'
     printf '%s\n' "$retired" >>"$tmp/.bashrc"
@@ -469,7 +469,7 @@ if it "omnigraph-client: a deleted rc line, a reappeared retired line and a lost
     [[ "$gate_fresh" == current ]] \
         || { ok=0; echo "a machine the run just configured is not current ([$gate_fresh])" >&2; }
     [[ "$gate_rc" == open ]] || { ok=0; echo "a deleted rc line is invisible to the gate" >&2; }
-    [[ "$out_rc" == *"CHANGED 1"* && "$v2" == 1 ]] || { ok=0; echo "the rc line was not re-added ($v2)" >&2; }
+    [[ "$out_rc" == *"CHANGED 1"* && "$ours" == 1 ]] || { ok=0; echo "the rc line was not re-added ($ours)" >&2; }
     [[ "$gate_retired" == open ]] || { ok=0; echo "a reappeared retired line is invisible to the gate" >&2; }
     [[ "$out_retired" == *"CHANGED 1"* && "$gone" == 0 ]] || { ok=0; echo "the reappeared retired line stayed ($gone)" >&2; }
     [[ "$gate_link" == open ]] || { ok=0; echo "a missing environment.d link is invisible to the gate" >&2; }
@@ -510,7 +510,7 @@ if it "omnigraph-client: a retire step that cannot write the rc file warns, reco
     tmp="$(oh_client_sandbox)"
     printf '# my shell\n' >"$tmp/.bashrc"
     oh_run_client "$tmp" >/dev/null
-    # The rc file is now AutoOS-configured (the v2 line is in it), so the only
+    # The rc file is now AutoOS-configured (the current line is in it), so the only
     # step left that wants to write it is the retirement of this line — and the
     # file is read-only, so that write fails.
     printf 'export OMNIGRAPH_TOKEN=$(cat "$HOME/Documents/code/agent-skills/secrets/omnigraph.token")\n' >>"$tmp/.bashrc"
@@ -691,7 +691,9 @@ if it "omnigraph-client: one env file yields the same values for the rc line, th
     # writer emits the canonical KEY=value form.
     printf 'OMNIGRAPH_BASE_URL=  https://spaced.example  \n' >"$tmp/.autoos-omnigraph.env"
     printf 'OMNIGRAPH_TOKEN=" spaced-token "\n' >>"$tmp/.autoos-omnigraph.env"
-    printf "OMNIGRAPH_GRAPH_ID='\tgraph-tabs\t'\n" >>"$tmp/.autoos-omnigraph.env"
+    # Tabs count as surrounding whitespace; the whitespace a quoted value keeps
+    # inside its quotes (the token above) does not.
+    printf 'OMNIGRAPH_GRAPH_ID=\tgraph-tabs\t\n' >>"$tmp/.autoos-omnigraph.env"
     printf 'OTHER=nope\n' >>"$tmp/.autoos-omnigraph.env"
     want='B=[https://spaced.example] T=[ spaced-token ] G=[graph-tabs] O=[UNSET]'
     # The rc line, read the way a login shell reads it.

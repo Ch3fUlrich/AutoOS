@@ -149,6 +149,59 @@ append_line_once() {
     ui_ok "updated ${file}"
 }
 
+# autoos_rc_edit_lines <file> <mode> <needle> <second>
+# The one editor of a user's rc file. Modes:
+#   drop_with     a line holding <needle> AND <second> is removed
+#   drop_without  a line holding <needle> but NOT <second> is removed
+#   replace       the FIRST line holding <needle> becomes <second>, keeping that
+#                 line's own newline so a CRLF file stays a CRLF file, and any
+#                 further match goes — one marker, one line, the same invariant
+#                 append_line_once keeps
+# Bytes, not decoded text: a dotfile is not necessarily UTF-8, and a text-mode
+# read either fails on one or re-encodes the whole file to edit one line of it.
+# Contained like every other step — setup.sh runs under `set -euo pipefail`, so a
+# python that dies must hand its status back, not take the run down. Exit 0 means
+# the file is as asked (nothing matched is a success), 1 that it could not be read
+# or written, 2 that the caller asked for a mode that does not exist. The path
+# belongs in the caller's message; the file's contents never reach the log.
+autoos_rc_edit_lines() {
+    local rc=0
+    AUTOOS_RC_MODE="$2" AUTOOS_RC_A="$3" AUTOOS_RC_B="$4" python3 - "$1" <<'PY' || rc=$?
+import os, sys
+path = sys.argv[1]
+mode = os.environ["AUTOOS_RC_MODE"]
+a = os.environ["AUTOOS_RC_A"].encode()
+b = os.environ["AUTOOS_RC_B"].encode()
+try:
+    with open(path, "rb") as f:
+        parts = f.read().split(b"\n")
+    if mode == "drop_with":
+        kept = [p for p in parts if not (a in p and b in p)]
+    elif mode == "drop_without":
+        kept = [p for p in parts if not (a in p and b not in p)]
+    elif mode == "replace":
+        kept, placed = [], False
+        for p in parts:
+            if a in p:
+                if placed:
+                    continue
+                placed = True
+                p = b + (b"\r" if p.endswith(b"\r") else b"")
+            kept.append(p)
+    else:
+        sys.exit(2)
+    if kept == parts:
+        sys.exit(0)
+    with open(path, "wb") as f:
+        f.write(b"\n".join(kept))
+except OSError:
+    # The caller announces this: it names the file, and a traceback in a
+    # provisioning log reads like a crash. Anything else stays loud.
+    sys.exit(1)
+PY
+    return "$rc"
+}
+
 apt_update_once() {
     (( APT_UPDATED )) && return 0
     run $AUTOOS_SUDO apt-get update -y
@@ -4251,25 +4304,37 @@ write_omnigraph_env() {
     # shellcheck disable=SC2016
     local rc_line
     rc_line="$(omnigraph_rc_line)"
-    local shell_rc
+    local shell_rc marker
+    marker="$(omnigraph_rc_marker)"
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
-        # The rc line still has to land (or a stale v1 still has to go) -> this
+        # The rc line still has to land (or a stale one still has to go) -> this
         # call changed the user's shell startup, whatever the file said before.
-        if ! grep -qF -- "AutoOS:omnigraph-env-v2" "$shell_rc" \
-            || grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "AutoOS:omnigraph-env-v2"; then
+        if ! grep -qF -- "$marker" "$shell_rc" \
+            || grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "$marker"; then
             OMNIGRAPH_ENV_STATE="written"
         fi
-        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "AutoOS:omnigraph-env-v2" "$rc_line"
+        replace_or_append_marked_line "$shell_rc" "AutoOS:omnigraph-env" "$marker" "$rc_line"
     done
 }
+
+# omnigraph_rc_marker: the tag that marks an rc line as AutoOS's, versioned.
+# Bump the version whenever the line below changes shape: the writer recognises a
+# line by this tag alone, so an unchanged tag would leave every machine already
+# carrying the old line sitting on it forever (and the gate, which compares the
+# whole line, would never read current again). "AutoOS:omnigraph-env" — the tag
+# without its -vN tail — is the older-line marker the writer purges, so one bump
+# covers every version at once.
+omnigraph_rc_marker() { printf '%s\n' 'AutoOS:omnigraph-env-v3'; }
 
 omnigraph_rc_line() {
     # The rc-file line write_omnigraph_env installs (one place, so the suite
     # tests the exact text). Literal $HOME/${...}: it expands in the rc file at
     # shell start-up, not here.
     # shellcheck disable=SC2016
-    printf '%s\n' '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) export "${_ag_l%%=*}=${_ag_l#*=}" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l  # AutoOS:omnigraph-env-v2'
+    printf '%s  # %s\n' \
+        '[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && while IFS= read -r _ag_l || [ -n "$_ag_l" ]; do _ag_l=${_ag_l%$'"'"'\r'"'"'}; case "$_ag_l" in OMNIGRAPH_TOKEN=*|OMNIGRAPH_BASE_URL=*|OMNIGRAPH_GRAPH_ID=*) _ag_k=${_ag_l%%=*}; _ag_v=${_ag_l#*=}; _ag_v=${_ag_v#"${_ag_v%%[![:space:]]*}"}; _ag_v=${_ag_v%"${_ag_v##*[![:space:]]}"}; for _ag_q in $'"'"'\042'"'"' $'"'"'\047'"'"'; do if [ "${_ag_v#$_ag_q}" != "$_ag_v" ] && [ "${_ag_v%$_ag_q}" != "$_ag_v" ]; then _ag_v=${_ag_v#$_ag_q}; _ag_v=${_ag_v%$_ag_q}; fi; done; export "$_ag_k=$_ag_v" ;; esac; done < "$HOME/.autoos-omnigraph.env"; unset _ag_l _ag_k _ag_v _ag_q' \
+        "$(omnigraph_rc_marker)"
 }
 
 # ─── omnigraph-client (spec 2026-09-27 §A/§C, plan A3) ──────────────────────
@@ -4364,7 +4429,7 @@ omnigraph_client_is_current() {
     local env_file="$SYS_HOME/.autoos-omnigraph.env"
     local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
     local wrapper="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
-    local src rc_line shell_rc status rc=0
+    local src rc_line shell_rc status rc=0 marker
     src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
     [[ -n "$base" && -n "$token" ]] || return 1
     status="$(omnigraph_env_state "$env_file" "$base" "$token" check)" || rc=$?
@@ -4382,11 +4447,11 @@ omnigraph_client_is_current() {
     # and carry neither an older AutoOS line nor the retired agent-skills token
     # line this component removes.
     rc_line="$(omnigraph_rc_line)"
+    marker="$(omnigraph_rc_marker)"
     for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
         [[ -f "$shell_rc" ]] || continue
         grep -qF -- "$rc_line" "$shell_rc" || return 1
-        if grep -F -- "AutoOS:omnigraph-env" "$shell_rc" \
-            | grep -qvF -- "AutoOS:omnigraph-env-v2"; then
+        if grep -F -- "AutoOS:omnigraph-env" "$shell_rc" | grep -qvF -- "$marker"; then
             return 1
         fi
         if grep -F -- '/agent-skills/' "$shell_rc" | grep -qF -- 'OMNIGRAPH_TOKEN'; then
@@ -4512,31 +4577,11 @@ omnigraph_retire_rc_token_lines() {
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
             continue
         fi
-        # Bytes, not decoded text: a dotfile is not necessarily UTF-8, and a
-        # text-mode read would re-encode the whole file (CRLF endings included)
-        # while editing one line of it. Contained like every other step — a file
-        # this cannot write is a warning and a recorded failure, never a repair
-        # this claims to have made.
+        # Contained like every other step — a file this cannot write is a warning
+        # and a recorded failure, never a repair this claims to have made. The
+        # bytes-not-text editing itself lives in autoos_rc_edit_lines.
         local rc=0
-        AUTOOS_RETIRE_PATH='/agent-skills/' AUTOOS_RETIRE_KEY='OMNIGRAPH_TOKEN' python3 - "$file" <<'PY' || rc=$?
-import os, sys
-path = sys.argv[1]
-a = os.environ["AUTOOS_RETIRE_PATH"].encode()
-b = os.environ["AUTOOS_RETIRE_KEY"].encode()
-try:
-    with open(path, "rb") as f:
-        parts = f.read().split(b"\n")
-    kept = [p for p in parts if not (a in p and b in p)]
-    if len(kept) == len(parts):
-        sys.exit(0)
-    with open(path, "wb") as f:
-        f.write(b"\n".join(kept))
-except OSError:
-    # A file that cannot be read or written is the caller's to announce: the
-    # path is in its message, the file's contents are not, and a traceback in a
-    # provisioning log reads like a crash. Anything else is a bug and stays loud.
-    sys.exit(1)
-PY
+        autoos_rc_edit_lines "$file" drop_with '/agent-skills/' 'OMNIGRAPH_TOKEN' || rc=$?
         if (( rc != 0 )); then
             ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
@@ -4600,8 +4645,12 @@ install_omnigraph_client() {
 
 replace_or_append_marked_line() {
     # replace_or_append_marked_line <file> <old marker> <new marker> <line>
-    # Current line present -> nothing. A line with the OLD marker (and not the
-    # new one) -> replaced in place, after a backup. Otherwise appended once.
+    # Current line present -> nothing, except that a stale old line next to it
+    # still runs first and is purged. A line with the OLD marker and not the new
+    # one -> replaced in place. Neither -> appended once. Every write is preceded
+    # by a backup, and a file that cannot be backed up or written is a warning and
+    # a recorded failure — never a repair this announces as made (A3 review 2,
+    # the same containment the retire step above has).
     local file="$1" old_marker="$2" new_marker="$3" line="$4"
     if grep -qF -- "$new_marker" "$file" 2>/dev/null; then
         # A stale old line next to the current one still runs first: purge it.
@@ -4612,18 +4661,16 @@ replace_or_append_marked_line() {
             fi
             if ! backup_file "$file" >/dev/null; then
                 ui_warn "could not back up ${file} - left unchanged"
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
                 return 0
             fi
-            AUTOOS_OLD="$old_marker" AUTOOS_NEW="$new_marker" python3 - "$file" <<'PY'
-import os, sys
-path = sys.argv[1]
-old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_NEW"]
-with open(path, encoding="utf-8") as f:
-    lines = f.read().split("\n")
-lines = [l for l in lines if not (old in l and new not in l)]
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
-PY
+            local rc=0
+            autoos_rc_edit_lines "$file" drop_without "$old_marker" "$new_marker" || rc=$?
+            if (( rc != 0 )); then
+                ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+                autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+                return 0
+            fi
             ui_ok "removed the stale '${old_marker}' line from ${file}"
             return 0
         fi
@@ -4640,18 +4687,16 @@ PY
     fi
     if ! backup_file "$file" >/dev/null; then
         ui_warn "could not back up ${file} - left unchanged"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
         return 0
     fi
-    AUTOOS_OLD="$old_marker" AUTOOS_LINE="$line" python3 - "$file" <<'PY'
-import os, sys
-path = sys.argv[1]
-old, new = os.environ["AUTOOS_OLD"], os.environ["AUTOOS_LINE"]
-with open(path, encoding="utf-8") as f:
-    lines = f.read().split("\n")
-lines = [new if (old in l) else l for l in lines]
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
-PY
+    rc=0
+    autoos_rc_edit_lines "$file" replace "$old_marker" "$line" || rc=$?
+    if (( rc != 0 )); then
+        ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+        return 0
+    fi
     ui_ok "replaced the '${old_marker}' line in ${file}"
 }
 

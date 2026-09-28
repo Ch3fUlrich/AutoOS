@@ -84,8 +84,9 @@ Never from a tracked file. The installers keep **one** per-user copy:
   lines (`OMNIGRAPH_BASE_URL`, `OMNIGRAPH_TOKEN`; other keys you add are
   kept). It is linked as `~/.config/environment.d/60-autoos-omnigraph.conf`,
   which the systemd user manager and desktop sessions load at login, and
-  sourced from `~/.bashrc`/`~/.zshrc` when `OMNIGRAPH_TOKEN` is not already
-  set (marker `AutoOS:omnigraph-env`). The value comes from
+  read by a line in `~/.bashrc`/`~/.zshrc` when `OMNIGRAPH_TOKEN` is not
+  already set (marker `AutoOS:omnigraph-env-v3`; the versioned tail is what lets
+  an older line be recognised and replaced). The value comes from
   `$OMNIGRAPH_TOKEN`, else from the local `omnigraph-server` container's
   `OMNIGRAPH_SERVER_BEARER_TOKEN`, else stays what the file had.
 - **Windows:** `%USERPROFILE%\.autoos-omnigraph.env` plus the
@@ -146,7 +147,8 @@ not a failure, because nothing on the machine was wrong yet.
    the checkout can move; a symlink is refused, because copying *through* one
    would write into whatever it points at). It reads
    `~/.autoos-omnigraph.env` itself — only the three `OMNIGRAPH_*` keys, an
-   optional indent, `export ` prefix or one layer of matching quotes stripped,
+   optional indent, `export ` prefix, whitespace round the value or one layer of
+   matching quotes stripped,
    CRLF endings tolerated, values assigned literally so a value shaped like
    `$(…)` never runs, an exported value winning — and `exec`s the pre-installed
    bridge with whatever arguments the client passed. With no bridge it exits

@@ -26,9 +26,12 @@ if [[ -r "$env_file" ]]; then
     # run here (the same rule as the rc-file line install.sh writes). Only the
     # three keys the bridge uses, and a value the caller already exported wins.
     # A file that a person edited by hand is read the way they meant it: an
-    # optional indent, an optional `export `, and one layer of matching quotes
-    # round a value are stripped — nothing else, so a value that only starts with
-    # a quote keeps its own text.
+    # optional indent, an optional `export `, whitespace round the value (which
+    # is never part of it), and one layer of matching quotes round a value are
+    # stripped — nothing else, so a value that only starts with a quote keeps its
+    # own text, and a quote inside one survives. The same rule as the PowerShell
+    # twin and the rc line install.sh writes, so one env file yields one set of
+    # tokens whichever reader gets there first.
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line%$'\r'}"
         line="${line#"${line%%[![:space:]]*}"}"
@@ -42,6 +45,7 @@ if [[ -r "$env_file" ]]; then
         esac
         key="${line%%=*}"
         value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
         case "$value" in
             \"*\") value="${value#\"}"; value="${value%\"}" ;;

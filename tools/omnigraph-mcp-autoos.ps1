@@ -24,9 +24,11 @@ if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     $dq = [char]34
     $sq = [char]39
     foreach ($line in [System.IO.File]::ReadAllLines($envFile)) {
-        # The same forms the shell twin reads: an indent, an 'export ' prefix,
-        # and one layer of matching quotes round a value. Nothing else is
-        # stripped, so a value that merely starts with a quote keeps its text.
+        # One rule, shared by the shell twin and the rc line install.sh writes:
+        # whitespace round a value is not part of it, then one layer of matching
+        # quotes goes. Nothing else is stripped, so a value that merely starts
+        # with a quote keeps its text and a quote inside one survives - one env
+        # file yields one set of tokens whichever reader gets there first.
         $text = $line.Trim()
         # -ceq, not -eq: PowerShell's default string compare is case-insensitive
         # and `Export FOO=bar` is not something a shell reads as an export.
