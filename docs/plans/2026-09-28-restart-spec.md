@@ -57,8 +57,10 @@ code from state the session keeps small at every wave. Then the context cap drop
   and `→ doneX PAUSE` are orders, while `→ main: merged` and `→ done 12:00 …` are
   acknowledgements (R2a3 review, MEDIUM: a bare prefix match swallowed the first two).
   **Speaker prefix:** at most one, and only what its own delimiter allows. A speaker word
-  contains no `:`, no `→` and no parentheses — so a prefix always ends at its colon or at
-  its `(<note>)`, and can never eat the marker that follows it. The shapes: `<name>:` with
+  looks like a name — letters, digits and `-`, `_`, `.`, with at least one letter, so a
+  bare count (`4 lanes: → main merged`) is prose — and it carries no `:`, no `→` and no
+  parentheses: a prefix always ends at its colon or at its `(<note>)`, and can never eat
+  the marker that follows it. The shapes: `<name>:` with
   up to **3** words, colon required (a bare first word without a colon is never a speaker,
   so `notes → done: PAUSE lifted` stays an order); `from <name>` with one word and the colon
   optional (the real inboxes write `from <name>` 254 times with no colon); `from <words…>`
@@ -66,7 +68,15 @@ code from state the session keeps small at every wave. Then the context cap drop
   `:`. So `operator on duty: → done: PAUSE lifted` and `from L1-main relay (x): → done: PAUSE
   lifted` are acknowledgements (R2a3 review, LOW: a two-word speaker was not stripped, so a
   quoted PAUSE read as a fresh stop), `from L0 (operator): → done 12:00 PAUSE lifted` is one,
-  and `from L0 (operator): PAUSE NOW` is an order. Elsewhere in the line a marker is
+  and `from L0 (operator): PAUSE NOW` is an order. **Order words:** one list, `ORDER_WORDS`
+  in `tools/autoos_heartbeat.py` (`PAUSE`, `RESUME`, `STOP`, `HOLD`, `FREEZE`, `HALT`,
+  `ABORT`), and a speaker prefix may never name one (case-insensitive, whole word, its
+  `(<note>)` included) nor run past **40 characters** — otherwise an order wears its own
+  first clause as its speaker and a marker after the colon silently un-stops the run, so
+  `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and `PAUSE: → main …` are all
+  orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
+  wide list costs a spurious order at worst, and `hold on: → main merged` is one).
+  Elsewhere in the line a marker is
   vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say so` is still an
   order (R2a review, MEDIUM). §1 and §3 cite that one list.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that

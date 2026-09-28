@@ -44,6 +44,18 @@ ACK_MARKERS = ("lesson:", "→ done", "→ ack", "→ relaunched", "→ operator
 # (R2a3 review, MEDIUM: `→ mainline PAUSE all lanes` was swallowed as an ack).
 _MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)(?=[:\s]|$)"
                                 % "|".join(re.escape(marker) for marker in ACK_MARKERS))
+# The order words — one list, RESTART spec §0, and the bound on what may pose as a
+# speaker. An inbox line that *gives* an order usually opens with the order word, and
+# a clause ending in a colon is also exactly what the speaker shape looks like, so
+# `PAUSE all lanes: → main is held` was one colon away from reading as `PAUSE all
+# lanes` *speaking* — a hard stop that held nothing (R2a4, the Muse review of R2a3;
+# a lost order is the one unacceptable outcome here). Case-insensitive and whole
+# word, so `hold on:` is ruled out as well as `HOLD:`. Deliberately wider than the
+# two words the pause filter keys on (which are case-sensitive): over-ruling a
+# prefix costs a spurious order — one wasted heartbeat and a RESUME — while under-
+# ruling one costs a lane running against an operator's stop.
+ORDER_WORDS = ("PAUSE", "RESUME", "STOP", "HOLD", "FREEZE", "HALT", "ABORT")
+_ORDER_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(ORDER_WORDS), re.IGNORECASE)
 # The speaker prefix an inbox writer puts in front of its own line, at most one
 # per record. The shapes are what the real inboxes actually contain
 # (logs/handoff-sessions/20260925/inbox, read-only survey): `→ done:` 579 times,
@@ -51,10 +63,12 @@ _MARKER_AT_HEAD_RE = re.compile(r"\A(?:%s)(?=[:\s]|$)"
 # `from L0 (operator) PAUSE NOW`. The `from` form therefore takes the colon
 # optionally; a bare `<name>` needs it, so an ordinary first word is not read as
 # a speaker.
-# A speaker word excludes `:` (so a prefix always ends at its colon), `→` (so the
-# prefix can never swallow the marker that follows it) and parentheses (so a
+# A speaker word must look like a name: letters, digits and `-`, `_`, `.`, with at
+# least one letter so a bare count (`4 lanes: → main merged`) is prose, not a
+# speaker. It carries no `:` (so a prefix always ends at its colon), no `→` (so the
+# prefix can never swallow the marker that follows it) and no parentheses (so a
 # `(<note>)` delimits the name rather than being eaten as one more word).
-_SPEAKER_WORD = r"[^\s→:()]+"
+_SPEAKER_WORD = r"(?=[A-Za-z0-9._-]*[A-Za-z])[A-Za-z0-9._-]+"
 # More than one word is allowed only while the prefix is still delimited by its own
 # `(<note>)` or colon, and at most 3 words for the bare `<name>:` shape — so
 # `operator on duty: → done: …` and `from L1-main relay (x): → done: …` are both
@@ -69,24 +83,49 @@ _SPEAKER_PREFIX_RE = re.compile(r"\A(?:from\s+%s%s\s*:|from\s+%s\s*\([^)]*\)|fro
                                 % (_SPEAKER_WORDS, _SPEAKER_PAREN, _SPEAKER_WORDS,
                                    _SPEAKER_WORD, _SPEAKER_WORD, _SPEAKER_WORD,
                                    _SPEAKER_PAREN))
+# …and a prefix is bounded in length as well as in shape: past this many characters
+# (its colon and its `(<note>)` counted, its trailing space not) what stands before
+# the colon is a clause, not a name. The longest live speaker prefix in the real
+# corpus is 30 (`from L1-backlog (relaunch #3)`).
+_SPEAKER_PREFIX_MAX = 40
 # What an acknowledgement check ignores at the head of a body: a BOM a writer left
 # there, and any space, tab or CR remnant before the marker (R2a3 review, LOW —
 # `  → done: PAUSE lifted` read as a fresh order).
 _HEAD_JUNK = "\ufeff\u200b \t\r\n"
 
 
+def _speaker_prefix(text: str) -> int | None:
+    """The index just past `text`'s speaker prefix, or None when it has none.
+
+    A `_SPEAKER_PREFIX_RE` match is a speaker only while it names no `ORDER_WORD`
+    and stays within `_SPEAKER_PREFIX_MAX`. The order-word check reads the whole
+    match, its `(<note>)` included — a note that quotes an order word is the order
+    talking, not a speaker parenthesising. Rejected, nothing is stripped: the line
+    keeps its own head, so a marker that merely followed the colon stops being an
+    acknowledgement and the line is classified as an order (R2a4).
+    """
+    match = _SPEAKER_PREFIX_RE.match(text)
+    if match is None:
+        return None
+    if len(match.group().rstrip()) > _SPEAKER_PREFIX_MAX:
+        return None
+    if _ORDER_WORD_RE.search(match.group()):
+        return None
+    return match.end()
+
+
 def _acknowledgement(text: str) -> bool:
     """True when `text` (a record body, timestamp already removed) opens with an
     acknowledgement marker — at its head (after any `_HEAD_JUNK`), or at the head
-    after one `_SPEAKER_PREFIX_RE` prefix. Anywhere else in the line a marker is
+    after one `_speaker_prefix`. Anywhere else in the line a marker is
     only vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say
     so` is an order that happens to name `→ main` (R2a review, MEDIUM).
     """
     text = text.lstrip(_HEAD_JUNK)
     if _MARKER_AT_HEAD_RE.match(text):
         return True
-    prefix = _SPEAKER_PREFIX_RE.match(text)
-    return bool(prefix and _MARKER_AT_HEAD_RE.match(text[prefix.end():]))
+    at = _speaker_prefix(text)
+    return bool(at and _MARKER_AT_HEAD_RE.match(text[at:]))
 
 
 _TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
@@ -174,9 +213,10 @@ def pause_state(inbox_path: str | None, since=None) -> dict:
     RESUME line at all. A line older than `since` (the session start, see
     session_start()) and an acknowledgement line — one that opens with an
     `ACK_MARKERS` marker, at the head of its body or at the head after one
-    `_SPEAKER_PREFIX_RE` prefix (see `_acknowledgement`) — never counts as a
-    PAUSE: the relaunch after a pause is its resume. Elsewhere in the line a
-    marker is vocabulary, not an acknowledgement.
+    `_speaker_prefix` (see `_acknowledgement`) — never counts as a PAUSE: the
+    relaunch after a pause is its resume. A prefix that names an `ORDER_WORD` is no
+    prefix at all, so `PAUSE all lanes: → main is held` is the order it reads like
+    (R2a4). Elsewhere in the line a marker is vocabulary, not an acknowledgement.
     Lines are ordered by their own parsed timestamp, not file order, so an
     inbox is read correctly even if a line was appended
     out of order. A missing/unreadable inbox, or one with no PAUSE line

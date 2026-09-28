@@ -298,6 +298,103 @@ class PauseStateTests(unittest.TestCase):
                      "2026-09-28T10:01:00Z → main: merged, PAUSE lifted\r\n")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
+    # R2a4 (the Muse review of R2a3, HIGH, safety): `(?:WORD\s+){0,2}WORD(\(note\))?\s*:`
+    # absorbs *any* short clause that ends in a colon, so an order whose first clause
+    # *is* the order became that order's own speaker prefix and its marker-headed
+    # remainder read as an acknowledgement — `PAUSE all lanes: → main is held` held
+    # nothing. A speaker prefix may therefore never name an order word (one list,
+    # `ORDER_WORDS`, beside `ACK_MARKERS`); the line is then not stripped and is an
+    # order. A lost order is the one unacceptable outcome, a spurious one is the safe
+    # direction. A speaker word must also look like a name, and the whole prefix is
+    # bounded, so prose that merely ends in a colon cannot pose as a speaker either.
+
+    def test_a_pause_clause_that_ends_in_a_colon_is_still_an_order(self):
+        for text in ("PAUSE all lanes: → main is held",
+                     "PAUSE lanes: → main is held until I say so",
+                     "PAUSE: → main is held"):
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_speaker_prefix_never_names_an_order_word(self):
+        for word in hb.ORDER_WORDS:
+            for clause in ("%s the lanes:" % word,
+                           "%s every lane right now:" % word,
+                           "from L0 %s:" % word):
+                text = "%s → main: merged while the PAUSE holds" % clause
+                self.assertFalse(hb._acknowledgement(text), text)
+                write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+                state = hb.pause_state(self.inbox)
+                self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_an_order_word_is_rejected_in_any_case(self):
+        # ORDER_WORDS match case-insensitively: a lower-case clause is the same risk.
+        for clause in ("pause the pack lanes:", "Stop every lane now:", "freeze:"):
+            text = "%s → main: merged while the PAUSE holds" % clause
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_order_word_inside_the_note_rejects_the_prefix_too(self):
+        # The guard reads the whole prefix, its `(<note>)` included — a note that
+        # names an order word is the order talking, not a speaker parenthesising.
+        text = "from L0 (after the PAUSE): → main: merged, hold everything"
+        self.assertFalse(hb._acknowledgement(text), text)
+
+    def test_a_named_speaker_with_a_bounded_prefix_is_still_an_ack(self):
+        # The other side of the same rule: a real speaker names no order word, so
+        # these acknowledgements of a finished PAUSE must keep reading as acks.
+        for text in ("L1-main: → done: PAUSE lifted",
+                     "operator on duty: → done 12:00 PAUSE lifted"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_speaker_clause_that_reads_like_an_order_is_a_spurious_order(self):
+        # `hold on:` names HOLD, so the prefix is not trusted and the line is
+        # classified as an order — deliberate, and the accepted cost of the fix:
+        # ORDER_WORDS is wide on purpose because a *spurious* order only holds a
+        # lane (the operator RESUMEs, one heartbeat is wasted), while a *lost*
+        # PAUSE lets workers run on against a stop that was really given.
+        self.assertFalse(hb._acknowledgement("hold on: → main merged"))
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z hold on: → main merged, PAUSE lifted")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_speaker_word_must_look_like_a_name(self):
+        # letters, digits, - _ . — and not a bare count.
+        self.assertTrue(hb._acknowledgement(
+            "L1-routing.coordinator_x: → done: PAUSE lifted"))
+        for text in ("4 lanes: → main merged, PAUSE still on",
+                     "2026: → main merged, PAUSE still on",
+                     "state=held: → main merged, PAUSE still on",
+                     "L1/routing: → main merged, PAUSE still on",
+                     "[operator]: → main merged, PAUSE still on"):
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_speaker_prefix_is_bounded(self):
+        # The cap is what a *prefix* is; a long clause before a colon is prose.
+        long_clause = "from the coordinator who owns every lane in this batch:"
+        self.assertGreater(len(long_clause), hb._SPEAKER_PREFIX_MAX)
+        text = "%s → main: merged while the PAUSE holds" % long_clause
+        self.assertFalse(hb._acknowledgement(text), text)
+        # the real corpus's longest live speaker prefix stays well inside the cap
+        self.assertTrue(hb._acknowledgement(
+            "from L1-backlog (relaunch #3): → done: PAUSE lifted"))
+
+    def test_order_words_are_the_one_list_the_speaker_guard_uses(self):
+        # §0: one home, the same discipline as ACK_MARKERS — the guard is built from
+        # the list, never restated, and it covers the two words the filter keys on.
+        self.assertIn("|".join(hb.ORDER_WORDS), hb._ORDER_WORD_RE.pattern)
+        for word in ("PAUSE", "RESUME"):
+            self.assertIn(word, hb.ORDER_WORDS)
+        for word in hb.ORDER_WORDS:
+            self.assertIsNotNone(hb._ORDER_WORD_RE.search(word), word)
+            self.assertIsNotNone(hb._ORDER_WORD_RE.search(word.lower()), word)
+            self.assertIsNone(hb._ORDER_WORD_RE.search(word + "D"), word)
     def test_a_body_with_no_timestamp_is_not_a_record(self):
         # §0: a record opens with its ISO timestamp; a bare line (a
         # continuation) is never scanned for an order, marker or no marker.

@@ -106,9 +106,14 @@ only as a whole marker: what follows it must be `:`, whitespace or the end of
 the text, so `→ mainline PAUSE all lanes` still stops the run while
 `→ main: merged` does not. At most one speaker prefix may stand in front of the
 marker — `<name>:` (up to 3 words, colon required), `from <name>` (colon
-optional) or `from <words> (<note>):` — and a speaker word never contains `:`,
-`→` or parentheses, so a prefix cannot eat the marker it precedes and an order
-that only names a marker mid-sentence still stops the run.
+optional) or `from <words> (<note>):` — a speaker word is name-shaped (letters,
+digits, `-`, `_`, `.`, no `:`, `→` or parentheses) and the whole prefix is at most
+40 characters, so a prefix cannot eat the marker it precedes and an order that only
+names a marker mid-sentence still stops the run. A prefix may also never name one of
+spec §0's other one-list rule, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUME`,
+`STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
+is held` is an order wearing its own first clause as a speaker, not an acknowledgement
+(R2a4).
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;

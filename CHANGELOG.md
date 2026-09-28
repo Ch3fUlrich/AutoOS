@@ -5,6 +5,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a speaker prefix never names an order word, so a PAUSE clause is never the speaker (RESTART R2a4, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a3, HIGH, safety): the
+  speaker shape `(?:WORD\s+){0,2}WORD(\(<note\))?\s*:` absorbs *any* short clause that
+  ends in a colon, and an order that opens a record usually opens with its order
+  word — so `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and
+  `PAUSE: → main …` stripped `PAUSE …` as the *speaker*, found `→ main` at the head of
+  what was left, and reported `active: False`: the stop that was really given held
+  nothing. A prefix may now never name one of the new `ORDER_WORDS` (`PAUSE`,
+  `RESUME`, `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT` — case-insensitive, whole word,
+  read over the whole match including its `(<note>)`), and a rejected prefix strips
+  nothing (`_speaker_prefix` returns the split index or None, `_acknowledgement` asks
+  it instead of matching the regex directly). Two tightenings close the same door from
+  the other side: a speaker word must look like a name (letters, digits and `-`, `_`,
+  `.`, at least one letter — a bare count like `4 lanes:` is prose, and a token with
+  any other punctuation no longer poses as a name), and the whole prefix is bounded at
+  `_SPEAKER_PREFIX_MAX = 40` characters, past which a clause before a colon is a
+  sentence. The wide, case-insensitive list is the deliberate asymmetry: over-ruling a
+  prefix costs a spurious order — `hold on: → main merged` is classified as one, and
+  `UN-HOLD:` blocks its own prefix — which only holds a lane until a RESUME, one
+  wasted heartbeat; under-ruling one lets workers run against the operator's stop.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, both classifiers in memory from `git show HEAD:` so nothing was copied or
+  written; one pass over 7 files / **1913 records**, 816 acks before and after, 12 of
+  them resting on a speaker prefix over 3 shapes: `from L1-backlog:` ×10,
+  `from L1-routing:` ×1, `from L1-backlog (relaunch #3)` ×1 — the inboxes are live and
+  grew from 1896 records at the first census to 1913 at this pass, so the pair of
+  classifiers is always read in the same pass):
+  **0 records changed classification, 4 orders before and 4 after, 3 marker-headed
+  PAUSE mentions before and after, and `pause_state` identical on all 7 files** — each
+  active file's winning text exactly 80 chars, i.e. truncated as specified. The risk
+  class is counted rather than assumed: **5** records open with a colon-terminated
+  clause that names an order word (`PAUSE (operator, via L0 router): the host reboots
+  soon …`, `from L1-main HOLD Q-001 (L0 routing-00): …`, `from L0 (operator) A8
+  UN-HOLD: …`) and **0** of them have a marker after that colon — so today's writers
+  never produced the losing shape and every one of these was already an order, which is
+  why R2a3 shipped green while the bug sat in it (AGENTS.md §5: the fixtures carry the
+  case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `ORDER_WORDS` list next to `ACK_MARKERS`, the name-shaped speaker word and the
+  40-character bound; `docs/routing.md` cites the same three constraints instead of the
+  old character-exclusion clause alone.
+- **Tests** (red before the code: 8 failed, 195 passed):
+  `tests/test_autoos_heartbeat.py` 70 → 79 — the three `PAUSE …: → main …` lines →
+  order (the reproduced defect, failing on the assertion, not on a missing symbol),
+  one case per `ORDER_WORDS` word in three prefix shapes and the same words
+  lower-cased, an order word inside the `(<note>)` rejecting the prefix, the brief's
+  two named acks (`L1-main: → done: PAUSE lifted`,
+  `operator on duty: → done 12:00 PAUSE lifted`) still acks, `hold on:` documented as
+  the accepted spurious order, the name shape (`L1-routing.coordinator_x:` ack against
+  `4 lanes:`, `2026:`, `state=held:`, `L1/routing:`, `[operator]:` as orders), the
+  bound (a 55-char clause rejected, the corpus's 30-char prefix kept), and the §0
+  one-home guard that `_ORDER_WORD_RE` is built from `ORDER_WORDS` and covers PAUSE and
+  RESUME as whole words. Green: **203 passed** over `test_autoos_card.py
+  test_autoos_inbox.py test_autoos_heartbeat.py test_suite_wiring.py` (194 at the
+  branch point), 746 passed + 124 subtests over `test_autoos_report.py
+  test_autoos_spawner.py test_agent_harness.py test_autoos_track.py` (unchanged).
+
 ### Fixed — an ack marker needs a boundary, a speaker may be 3 words, the body head is normalised (RESTART R2a3, 2026-09-28)
 
 - **`tools/autoos_heartbeat.py`** (the Muse review of R2a2, 1 MEDIUM + 3 LOWs,
