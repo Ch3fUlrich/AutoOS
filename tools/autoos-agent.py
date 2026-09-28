@@ -70,6 +70,7 @@ Usage:
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
+    python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
 
 --free maps every tier agent to one of opencode's own free models (default
@@ -116,6 +117,17 @@ deferred), 5 input_required (no route survived the filters, or a removed
 override), 2 bad input (a bad card, a bad --now, an unknown
 --orchestrator-model, or any other measure()/plan() ValueError - fail closed,
 message on stderr).
+
+`inbox <name>|--file PATH` (RESTART spec §0/§2, lane R1) prints one inbox's
+records whole, oldest first, each headed by its `<timestamp>#<ordinal>` position
+so a reader can write that position into its card as `last-event`. The window is
+required: `--since-card <card>` (a successor's resume point, the form a relaunch
+prompt uses), `--since <position|UTC>`, or `--all`; `--max-records N` (default
+30) cuts the oldest and says how many. Records print on stdout, notices on stderr,
+so a pack can embed stdout verbatim. The RUN dir is `$AUTOOS_RUN_DIR` only - an
+unset variable with no `--file` is an error, never an empty read. Exit codes: 0
+read, 1 the file holds no timestamped record (an inbox of another shape is never
+"no events"), 2 no window named, a bad position, or an unreadable file.
 """
 from __future__ import annotations
 
@@ -141,6 +153,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
+import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
@@ -3641,22 +3654,113 @@ def cmd_run(args, cfg: dict) -> int:
     return rc
 
 
-def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
-        return usage_mod.main(list(argv[1:]))
-    ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+def cmd_inbox(args) -> int:
+    """Print one inbox's records since a position (RESTART spec §2, lane R1).
+
+    The record shapes live in tools/autoos_inbox.py (§0, one home); this is the
+    window and the printing. Records go to stdout with their continuations,
+    every notice to stderr, so a context pack can embed stdout verbatim.
+
+    Exit 0 read, 1 the file holds no timestamped record (an inbox of another
+    shape is never read as "no events"), 2 no window named, a bad position, or
+    an unreadable file."""
+    if args.file and args.name:
+        print("inbox: name one source -- an <name> under the RUN dir or --file, "
+              "not both", file=sys.stderr)
+        return 2
+    try:
+        path = args.file or inbox.inbox_path(args.name)
+    except inbox.InboxError as exc:
+        print("inbox: %s" % exc, file=sys.stderr)
+        return 2
+    if args.all and (args.since or args.since_card):
+        print("inbox: --all reads the whole file; drop --since/--since-card",
+              file=sys.stderr)
+        return 2
+    if not args.all and not args.since and not args.since_card:
+        print("inbox: name the window -- --since-card <card>, --since "
+              "<position|UTC> or --all", file=sys.stderr)
+        return 2
+    if args.max_records < 1:
+        print("inbox: --max-records must be at least 1", file=sys.stderr)
+        return 2
+    since = None
+    if args.since_card:
+        try:
+            position = inbox.card_last_event(args.since_card)
+        except inbox.InboxError as exc:
+            print("inbox: %s" % exc, file=sys.stderr)
+            return 2
+        if position is None:
+            print("inbox: %s has no last-event -- reading from the start"
+                  % args.since_card, file=sys.stderr)
+        else:
+            since = position
+            source = args.since_card
+    elif args.since:
+        since, source = args.since, "--since"
+    if isinstance(since, str):
+        try:
+            since = inbox.parse_position(since)
+        except ValueError as exc:
+            print("inbox: %s: %s" % (source, exc), file=sys.stderr)
+            return 2
+    try:
+        records, malformed = inbox.parse_file(path)
+    except inbox.InboxError as exc:
+        print("inbox: %s" % exc, file=sys.stderr)
+        return 2
+    if not records:
+        print("inbox: no timestamped records in %s" % path, file=sys.stderr)
+        return 1
+    for line in malformed:
+        print("inbox: malformed at line %d: the line looks like a UTC timestamp "
+              "but is not one, so it is neither a record nor a continuation"
+              % line, file=sys.stderr)
+    selected = inbox.window(records, since)
+    if len(selected) > args.max_records:
+        cut = len(selected) - args.max_records
+        selected = selected[cut:]
+        print("inbox: cut %d earlier records" % cut, file=sys.stderr)
+    if not selected:
+        print("inbox: nothing since %s (%d records in %s)"
+              % (since or "the start", len(records), path), file=sys.stderr)
+    for record in selected:
+        print("%s%s %s" % (record.position, " (late)" if record.late else "",
+                           record.text))
+        for extra in record.continuations:
+            print(extra)
+    return 0
+
+
+# ── verbs: one table builds the parsers, one table dispatches ────────────────
+# What this replaces is the old last line of main(),
+# `cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)`: every verb that
+# was not `list` fell through into `run`, so a verb added to the parser but not
+# to the dispatch silently spawned an agent, and a mistyped verb spawned one too.
+# A verb now has to be in BOTH tables; one without a handler is refused (RESTART
+# spec R1, "it freezes the dispatch").
+
+def _parser_usage(sub):
     sub.add_parser("usage", help="usage report by provider/combo/lane from the OmniRoute "
                                  "gateway (OR4); its own flags follow `usage`, e.g. "
                                  "`usage --since 1h --by provider,lane`")
+
+
+def _parser_list(sub):
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
+
+
+def _parser_ps(sub):
     ps = sub.add_parser("ps", help="live table of every spawned worker on this host (all "
                                    "worktrees and clones); deletes records that ended "
                                    "(or died) more than 7 days ago")
     ps.add_argument("--all", action="store_true",
                     help="also show exited workers from the last 24 h")
     ps.add_argument("--json", action="store_true", help="print the rows as JSON")
+
+
+def _parser_run(sub):
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
                      help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
@@ -3685,10 +3789,16 @@ def main(argv=None) -> int:
     run.add_argument("--title")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
+
+
+def _parser_context(sub):
     context = sub.add_parser("context", help="print this session's context fill")
     context.add_argument("--transcript", help="a Claude Code transcript JSONL (default: discover)")
     context.add_argument("--model", help="override the model the cap is looked up for")
     context.add_argument("--json", action="store_true", help="print the fill as JSON")
+
+
+def _parser_heartbeat(sub):
     heartbeat_p = sub.add_parser("heartbeat", help="read-only pause/branch/context check "
                                  "(R-heartbeat-02/03, R-pause-01, R-handoff-07)")
     heartbeat_p.add_argument("--inbox", help="an inbox file to scan for the newest PAUSE/RESUME line")
@@ -3697,6 +3807,9 @@ def main(argv=None) -> int:
                              help="a git repo to check for unpushed/dirty state (default: cwd); repeatable")
     heartbeat_p.add_argument("--cap", type=int, help="override the model's hand-off cap (tokens)")
     heartbeat_p.add_argument("--json", action="store_true", help="print the report as one JSON object")
+
+
+def _parser_route(sub):
     route = sub.add_parser("route", help="print the resolver v2 route_plan for a task card")
     route.add_argument("--card", required=True,
                        help="task card, e.g. kind=review,paths=tools/registry.py (or JSON)")
@@ -3708,6 +3821,9 @@ def main(argv=None) -> int:
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+
+
+def _parser_review_status(sub):
     review_status_p = sub.add_parser(
         "review-status", help="read a lane record and report whether it carries both "
                               "reviews a ready lane needs: a cross-family review and the "
@@ -3716,6 +3832,9 @@ def main(argv=None) -> int:
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+
+
+def _parser_ready(sub):
     ready_p = sub.add_parser(
         "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
                       "hand: gate on review-status and on --sha being the tip of "
@@ -3727,7 +3846,7 @@ def main(argv=None) -> int:
     ready_p.add_argument("--sha", required=True,
                          help="the commit the lane is ready at; must equal origin's tip for --branch")
     ready_p.add_argument("--inbox", required=True,
-                         help="the controller's inbox file to append the ready line to "
+                         help="the controller's inbox to append the ready line to "
                               "(created if missing, never rewritten)")
     ready_p.add_argument("--registry",
                          help="registry to resolve model families against "
@@ -3736,21 +3855,75 @@ def main(argv=None) -> int:
                          help="git checkout to ask origin about (default: the cwd)")
     ready_p.add_argument("--dry-run", action="store_true",
                          help="print the line, append nothing")
+
+
+def _parser_inbox(sub):
+    inbox_p = sub.add_parser(
+        "inbox", help="read an inbox window instead of the whole file (RESTART §2): "
+                      "records print whole with their positions, so a successor "
+                      "resumes at `last-event` and never opens a 50k-token inbox")
+    inbox_p.add_argument("name", nargs="?",
+                         help="the inbox name, read as <RUN>/inbox/<name>.md "
+                              "(RUN = $AUTOOS_RUN_DIR)")
+    inbox_p.add_argument("--file", help="read this inbox file instead (wins over <name>)")
+    inbox_p.add_argument("--since-card", metavar="CARD",
+                         help="resume at the `last-event <position>` in this card's header")
+    inbox_p.add_argument("--since", metavar="POSITION_OR_UTC",
+                         help="read after this `<timestamp>#<ordinal>` position, or after "
+                              "this UTC second (a bare stamp reads the whole second)")
+    inbox_p.add_argument("--all", action="store_true", help="read every record in the file")
+    inbox_p.add_argument("--max-records", type=int, default=30, metavar="N",
+                         help="print at most N records, cutting the oldest (default: %(default)s)")
+
+
+VERB_PARSERS = {
+    "usage": _parser_usage,
+    "list": _parser_list,
+    "ps": _parser_ps,
+    "run": _parser_run,
+    "context": _parser_context,
+    "heartbeat": _parser_heartbeat,
+    "route": _parser_route,
+    "review-status": _parser_review_status,
+    "ready": _parser_ready,
+    "inbox": _parser_inbox,
+}
+
+# Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
+# verbs read, loaded for those two and None for the rest. `usage` is the one
+# registered verb with no entry here: main() hands it to autoos_usage before
+# argparse runs, because every flag after it belongs to that module.
+VERB_HANDLERS = {
+    "context": lambda args, cfg: cmd_context(args),
+    "heartbeat": lambda args, cfg: cmd_heartbeat(args),
+    "inbox": lambda args, cfg: cmd_inbox(args),
+    "list": lambda args, cfg: cmd_list(cfg),
+    "ps": lambda args, cfg: cmd_ps(args),
+    "ready": lambda args, cfg: cmd_ready(args),
+    "review-status": lambda args, cfg: cmd_review_status(args),
+    "route": lambda args, cfg: cmd_route(args),
+    "run": lambda args, cfg: cmd_run(args, cfg),
+}
+
+CFG_VERBS = frozenset({"list", "run"})
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
+        return usage_mod.main(list(argv[1:]))
+    ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for build_parser in VERB_PARSERS.values():
+        build_parser(sub)
     args = ap.parse_args(argv)
-    if args.cmd == "context":
-        return cmd_context(args)
-    if args.cmd == "heartbeat":
-        return cmd_heartbeat(args)
-    if args.cmd == "route":
-        return cmd_route(args)
-    if args.cmd == "review-status":
-        return cmd_review_status(args)
-    if args.cmd == "ready":
-        return cmd_ready(args)
-    if args.cmd == "ps":
-        return cmd_ps(args)
-    cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
-    return cmd_list(cfg) if args.cmd == "list" else cmd_run(args, cfg)
+    handler = VERB_HANDLERS.get(args.cmd)
+    if handler is None:
+        print("autoos-agent: verb '%s' is registered but has no handler -- refusing "
+              "rather than falling through to `run`" % args.cmd, file=sys.stderr)
+        return 2
+    cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc")) if args.cmd in CFG_VERBS else None
+    return handler(args, cfg)
 
 
 if __name__ == "__main__":

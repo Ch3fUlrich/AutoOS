@@ -57,6 +57,16 @@ registry's per-token `price_in`/`price_out`; the JSON names its source and how
 many models it had no price for, so a 0 row reads as free or unknown. Off by
 default — `--json` readers get the same shape as before.
 
+Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
+<position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).
+It prints the records after a position, oldest first, each headed by its
+`<timestamp>#<ordinal>` position, so a relaunched orchestrator resumes at its
+card's `last-event` instead of opening a 50k-token inbox. The RUN dir is
+`$AUTOOS_RUN_DIR` only (`<RUN>/inbox/<name>.md`, or `--file PATH`); a bare UTC
+stamp re-reads its whole second and a late append (an older timestamp written
+after a newer one) is returned and flagged `(late)`, because reading is
+at-least-once. An inbox with no timestamped record exits 1 — never "no events".
+
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;
 tag = env `AUTOOS_SESSION_TAG` when valid, else `<lane worktree basename>/<slugified title>`).
