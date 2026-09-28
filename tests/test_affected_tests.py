@@ -177,6 +177,8 @@ LONGER_ID_CASE = "the t1-orchestrator-clean route drops the dead leg"
 LITE_ONLY_CASE = "a case naming only the lite flash model"
 ZERO_TOKEN_CASE = "✓ ✗ ✗"
 COMMA_CASE = "✓ ✗, ✗"
+UNBAL_PHANTOM_CASE = "phantom opus-4-6 the fallback lets through"
+UNBAL_REAL_CASE = "the real case that names muse-spark after it"
 
 SH_TAB_TEXT = '''\
 if it "the tab-strip case"; then
@@ -241,6 +243,79 @@ PY
 fi
 )"
     assert_eq "z" "muse-spark"
+fi
+
+if it "the case after it"; then
+    assert_eq "y" "y"
+fi
+'''
+
+# A `<<` inside `(( … ))` or `$(( … ))` is bash's shift operator, and the `=` of
+# `<<=` is in the heredoc-delimiter character class, so `((x<<=1))` used to open a
+# heredoc named `=1` (and `$((1<<4))` one named `4`): every line after it read as
+# that heredoc's body, the file's remaining cases vanished, and nothing was said
+# (review AFFFIX3, the CRITICAL). The last shape is the space-separated shift, which
+# only the arithmetic state - not a `<<=` guard - can recognise.
+SH_ARITH_TEXT = '''\
+if it "the case that shifts in arithmetic"; then
+    ((x<<=1))
+    width=$((1<<4))
+    mask=$((VAR<<COUNT))
+    y=2
+    ((y <<= 1))
+    assert_eq "z" "muse-spark"
+fi
+
+if it "the case after it"; then
+    assert_eq "y" "y"
+fi
+'''
+
+# The fail-safe's own shape: a heredoc whose delimiter never arrives, so the scan
+# reaches EOF still looking for it. Discarding the masking for this one file makes
+# the phantom a case too - over-inclusion, which is what this tool is allowed to be.
+SH_UNBALANCED_TEXT = '''\
+if it "the case whose heredoc never closes"; then
+    cat <<EOS
+    assert_eq "x" "x"
+
+if it "phantom opus-4-6 the fallback lets through"; then
+    assert_eq "w" "w"
+fi
+
+if it "the real case that names muse-spark after it"; then
+    assert_eq "z" "muse-spark"
+fi
+'''
+
+PS_UNBALANCED_TEXT = '''\
+Test-Case 'the case whose here-string never closes' {
+    $t = @'
+    Assert-Equal $t 'x'
+}
+
+Test-Case 'the real case that names muse-spark after it' {
+    Assert-Equal $t 'muse-spark'
+    Pass
+}
+'''
+
+# The known boundary, deliberately unfixed (review AFFFIX3, item 3): inside a
+# `$( … )` substitution a `case` pattern's `)` is at depth 1, so it pops the
+# substitution frame early and this parser and bash part company from there. See
+# the pinning test below for what that costs today.
+SH_CASE_IN_SUB_TEXT = '''\
+if it "the case whose substitution holds a case pattern"; then
+    out="$(
+    case "$1" in
+        *) echo "pattern" ;;
+    esac
+    python3 - <<'PY'
+if it "phantom the early close exposes"; then
+    print("muse-spark")
+PY
+)"
+    assert_contains "$out" "opus-4-6"
 fi
 
 if it "the case after it"; then
@@ -585,16 +660,21 @@ class RealRepoTests(unittest.TestCase):
         # per-line quote reset hid every one of its bodies, so a header-shaped line
         # in a Python body cut the case above it. Measured rather than asserted per
         # file, so the count says how much of the suite the shape covers.
-        openers, missed = 0, []
+        openers, missed, unbalanced = 0, [], []
         for path in sorted((ROOT / "tests" / "linux").glob("*.sh")):
             text = path.read_text(encoding="utf-8", errors="replace")
             lines = text.split("\n")
-            masked = at.masked_lines(text, "sh")
+            masked, balanced = at.masked_lines(text, "sh")
+            if not balanced:
+                unbalanced.append(path.name)
             for index, line in enumerate(lines):
                 if self.SUB_HEREDOC.search(line):
                     openers += 1
                     if index + 1 not in masked:
                         missed.append("%s:%d %s" % (path.name, index + 1, line.strip()))
+        self.assertEqual(unbalanced, [],
+                         "these suites end mid-construct, so their masking is discarded "
+                         "and every phantom header in a heredoc body becomes a case")
         self.assertGreaterEqual(openers, 60,
                                 "the suite no longer uses the idiom this test measures")
         self.assertEqual(missed, [],
@@ -709,6 +789,107 @@ class RegionSyntaxTests(unittest.TestCase):
         self.assertEqual(list(blocks), ["the case that writes a trailing at sign",
                                          "the case that must still be found"])
         self.assertIn("muse-spark", blocks["the case that must still be found"])
+
+    def test_arithmetic_shift_operators_do_not_open_a_heredoc(self):
+        # Review AFFFIX3 (the CRITICAL): `<<` is a shift inside `(( … ))` and
+        # `$(( … ))`, and `=` is in the delimiter charset, so `((x<<=1))` opened a
+        # heredoc named `=1` and masked the rest of the file - every case after it
+        # disappeared, silently.
+        masked, balanced = at.masked_lines(SH_ARITH_TEXT, "sh")
+        self.assertEqual(masked, set())
+        self.assertTrue(balanced)
+        blocks = self.blocks(SH_ARITH_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the case that shifts in arithmetic",
+                                        "the case after it"])
+        self.assertIn("muse-spark", blocks["the case that shifts in arithmetic"])
+
+    def test_a_left_shift_assignment_is_never_a_heredoc_opener(self):
+        # The `=` guard on its own, so the arithmetic state is not the only thing
+        # standing between `<<=` and a whole file read as one heredoc body.
+        self.assertIsNone(at.SHELL_OPENER.search("((x<<=1))"))
+        self.assertIsNone(at.SHELL_OPENER.search("((y <<=1))"))
+        self.assertIsNotNone(at.SHELL_OPENER.search("cat <<EOS"))
+        self.assertIsNotNone(at.SHELL_OPENER.search("cat <<-EOS"))
+
+    def test_an_unbalanced_shell_scan_drops_its_masking_and_says_so(self):
+        masked, balanced = at.masked_lines(SH_UNBALANCED_TEXT, "sh")
+        self.assertTrue(masked)
+        self.assertFalse(balanced, "a heredoc left open at EOF must not read as balanced")
+        blocks = self.blocks(SH_UNBALANCED_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the case whose heredoc never closes",
+                                        UNBAL_PHANTOM_CASE, UNBAL_REAL_CASE])
+        self.assertIn("muse-spark", blocks[UNBAL_REAL_CASE])
+
+    def test_an_unbalanced_here_string_scan_drops_its_masking_too(self):
+        masked, balanced = at.masked_lines(PS_UNBALANCED_TEXT, "ps1")
+        self.assertTrue(masked)
+        self.assertFalse(balanced)
+        blocks = self.blocks(PS_UNBALANCED_TEXT, "ps1")
+        self.assertEqual(list(blocks), ["the case whose here-string never closes",
+                                        UNBAL_REAL_CASE])
+
+    def test_a_case_pattern_inside_a_substitution_closes_the_substitution_early(self):
+        # PIN OF A KNOWN LIMIT, not an aspiration (review AFFFIX3 item 3): inside a
+        # `$( … )` the `)` ending a `case` pattern is at paren depth 1, so it pops
+        # the substitution frame and the `<<'PY'` two lines later is no longer read
+        # as opening inside a substitution. Today the cost is a phantom case and the
+        # outer case's own mention credited to it - over-inclusion in one direction
+        # and a lost mention in the other. A fix would change bash grammar tracking,
+        # which this round deliberately does not touch; it must flip this test on
+        # purpose, with the phantom disappearing and `opus-4-6` landing back in the
+        # case that greps for it.
+        masked, balanced = at.masked_lines(SH_CASE_IN_SUB_TEXT, "sh")
+        self.assertEqual(masked, set())
+        self.assertTrue(balanced)
+        blocks = self.blocks(SH_CASE_IN_SUB_TEXT, "sh")
+        self.assertEqual(list(blocks), ["the case whose substitution holds a case pattern",
+                                        "phantom the early close exposes",
+                                        "the case after it"])
+        self.assertNotIn("opus-4-6",
+                         blocks["the case whose substitution holds a case pattern"])
+        self.assertIn("opus-4-6", blocks["phantom the early close exposes"])
+
+
+class FailSafeTests(unittest.TestCase):
+    """An unfinished scan degrades one file, not the run (review AFFFIX3 item 1).
+
+    Whole-file blindness is the failure this tool must never emit: a file whose scan
+    ends with a delimiter, quote or substitution still open is re-read with plain
+    header matching, and the one stderr line says so.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        make_fixture(self.root)
+        (self.root / "tests" / "linux" / "20-unbalanced.sh").write_text(
+            SH_UNBALANCED_TEXT, encoding="utf-8")
+
+    def tool(self, *args):
+        return run_tool(list(args) + ["--root", str(self.root)])
+
+    def test_the_stray_heredoc_no_longer_blinds_the_file_that_follows(self):
+        result = self.tool("muse-spark", "--format", "filter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(UNBAL_REAL_CASE, affected_in("sh", self.root, ["muse-spark"]))
+        terms = filter_terms(result.stdout)
+        self.assertTrue(any(t in UNBAL_REAL_CASE for t in terms),
+                        "filter %r cannot select %r" % (terms, UNBAL_REAL_CASE))
+
+    def test_the_unbalanced_file_is_named_on_stderr_and_stdout_stays_the_filter(self):
+        result = self.tool("opus-4-6", "--format", "filter")
+        self.assertIn("affected-tests: tests/linux/20-unbalanced.sh: unbalanced scan "
+                      "at EOF, masking disabled for this file", result.stderr)
+        self.assertNotIn("affected-tests", result.stdout)
+
+    def test_the_fallback_costs_the_balanced_files_nothing(self):
+        # Masking is per file: 10-fake.sh ends balanced, so its heredoc bodies keep
+        # hiding their phantoms while the unbalanced one over-includes.
+        hit = affected_in("sh", self.root, ["opus-4-6"])
+        self.assertIn(HEREDOC_SH_CASE, hit)
+        self.assertNotIn(PHANTOM_SH_CASE, hit)
+        self.assertIn(UNBAL_PHANTOM_CASE, hit)
 
 
 if __name__ == "__main__":

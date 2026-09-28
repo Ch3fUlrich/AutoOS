@@ -31,7 +31,28 @@ heredoc may open inside a double-quoted command substitution
 (`out="$(python3 - <<'PY'` ... `PY` ... `)"`) - the suites' dominant shape - which
 is why the quote and substitution state is carried across lines rather than reset
 by each one: bash reads a substitution's contents as code even while an outer `"`
-is still open.
+is still open. A `<<` inside `(( … ))` or `$(( … ))`, or one immediately followed
+by `=` (`x<<=1`), is bash's shift operator and opens nothing, so arithmetic
+contexts are carried across lines the same way.
+
+If a file's scan ends with state still open - a heredoc delimiter that never
+arrives, a quote or substitution left unterminated - the masking for that one file
+is discarded and its headers matched plain, with a single line on stderr naming it.
+An unfinished scan means this parser and bash disagree about where the data is, and
+the disagreement that hurts reads the rest of the file as one heredoc body, so
+every real case below the bad construct goes missing. Plain matching can only add
+phantom cases, and over-inclusion costs one extra test run: it is the safe side to
+fail on (review AFFFIX3).
+
+Known limits, accepted rather than fixed
+    * A `case` pattern's `)` inside a `$( … )` substitution sits at paren depth 1,
+      so it closes the substitution early and everything after it is read outside.
+      A test pins what that costs today, so a grammar fix flips it deliberately.
+    * `<<$var` names its delimiter at run time and is left untracked, so its body
+      is read as code.
+    * The deprecated `$[expr]` arithmetic form is not a recognised context, so a
+      shift written there still opens a heredoc - and, because the delimiter it
+      invents is never found, the fallback above catches it as an unbalanced file.
 
 Outputs
     --format filter       one comma-separated string for run-tests.sh --filter /
@@ -92,8 +113,10 @@ PS_GROUP = re.compile(r"^[ \t]*Describe-Group[ \t]", re.M)
 # them in a here-string (`@'` ... `'@`), and every one of those body lines is
 # data: a header-shaped line in it used to end the real case above, hiding that
 # case's own mentions (review F1). `(?<!<)<<(?!<)` is a heredoc opener and never
-# the one-line `<<<` here-string; PowerShell's opener must end its line.
-SHELL_OPENER = re.compile(r"(?<!<)<<(?!<)")
+# the one-line `<<<` here-string; `(?!=)` excludes the `<<=` left-shift
+# assignment, whose `=` the delimiter charset would otherwise swallow as the
+# whole delimiter name (review AFFFIX3). PowerShell's opener must end its line.
+SHELL_OPENER = re.compile(r"(?<!<)<<(?!<)(?!=)")
 HEREDOC_NAME = re.compile(r"[A-Za-z0-9_@%+=:,./-]+")
 PS_OPENER = re.compile(r"""(?:^|[\s=(,{$])@(['"])$""")
 
@@ -137,12 +160,13 @@ def _code_view(line: str, frames=()):
     """The line with quoted content and the trailing comment blanked out.
 
     Same length, same offsets, so a match found in it is still the right place in
-    the original: `echo "<<"` and `# see <<EOF` must not read as heredocs.
+    the original: `echo "<<"` and `# see <<EOF` must not read as heredocs, and
+    neither must the `<<` of an arithmetic shift.
 
     `frames` is the lexical state carried in from the previous line - a list of
-    open contexts, innermost last, each one `("q", quote_char)` or
-    `("sub", delimiter, paren_depth)`. It is returned updated, because a quote
-    really does span lines: the suites' dominant idiom is
+    open contexts, innermost last, each one `("q", quote_char)`,
+    `("sub", delimiter, paren_depth)` or `("arith", paren_depth)`. It is returned
+    updated, because a quote really does span lines: the suites' dominant idiom is
 
         out="$(python3 - 2>&1 <<'PY'
         ...
@@ -168,6 +192,12 @@ def _code_view(line: str, frames=()):
                 if ch == "\\" and index + 1 < size:
                     out[index + 1] = " "
                     index += 1
+                elif (ch == "$" and index + 2 < size and line[index + 1] == "("
+                      and line[index + 2] == "("):
+                    # `$(( ))` inside a string is arithmetic, not a substitution.
+                    out[index], out[index + 1] = "$", "("
+                    stack.append(("arith", 2))
+                    index += 2
                 elif ch == "$" and index + 1 < size and line[index + 1] == "(":
                     # The substitution is code, not string data.
                     out[index], out[index + 1] = "$", "("
@@ -180,6 +210,12 @@ def _code_view(line: str, frames=()):
             continue
         if ch == "#" and (not index or line[index - 1] in " \t"):
             return "".join(out[:index]), stack       # the rest is a comment
+        if frame and frame[0] == "arith" and ch == "<":
+            # Inside an arithmetic expression `<<` is the shift operator, and bash
+            # reads no heredoc there at all (review AFFFIX3).
+            out[index] = " "
+            index += 1
+            continue
         if ch in "'\"":
             out[index] = " "
             stack.append(("q", ch))
@@ -193,9 +229,24 @@ def _code_view(line: str, frames=()):
                 stack.pop()
             else:
                 stack.append(("sub", "`", 0))
+        elif (ch == "$" and index + 2 < size and line[index + 1] == "("
+              and line[index + 2] == "("):
+            stack.append(("arith", 2))
+            index += 2
         elif ch == "$" and index + 1 < size and line[index + 1] == "(":
             stack.append(("sub", "(", 1))
             index += 1
+        elif ch == "(" and index + 1 < size and line[index + 1] == "(":
+            # `(( ))` is an arithmetic expression, and its `<<` is a shift.
+            stack.append(("arith", 2))
+            index += 1
+        elif ch == "(" and frame and frame[0] == "arith":
+            stack[-1] = ("arith", frame[1] + 1)
+        elif ch == ")" and frame and frame[0] == "arith":
+            if frame[1] > 1:
+                stack[-1] = ("arith", frame[1] - 1)
+            else:
+                stack.pop()
         elif ch == "(" and frame and frame[0] == "sub" and frame[1] == "(":
             stack[-1] = ("sub", "(", frame[2] + 1)
         elif ch == ")" and frame and frame[0] == "sub" and frame[1] == "(":
@@ -250,7 +301,7 @@ def _ps_opener(line: str) -> str:
 
 
 def masked_lines(text: str, syntax: str):
-    """The 0-based line numbers this runner's parser reads as data, not code.
+    """The masked lines of one file's text, and whether the scan ended balanced.
 
     sh: each heredoc body, from the line after the opener through the line
     carrying its delimiter; a line may open two heredocs, so openers queue and
@@ -259,6 +310,12 @@ def masked_lines(text: str, syntax: str):
     while a body is being read, since body text is not shell.
     ps1: each here-string body, closed by the delimiter at column 0 - PowerShell
     lets nothing precede it.
+
+    The second value is False when the scan reaches the end of the file with a
+    heredoc delimiter, a here-string quote, a quote or a substitution still open:
+    one construct left unfinished means the parser no longer knows where bash
+    reads data, so the caller must not trust the masking it just computed
+    (regions() re-reads the file plainly).
     """
     lines = text.split("\n")
     masked = set()
@@ -272,7 +329,7 @@ def masked_lines(text: str, syntax: str):
                     open_quote = ""
                 continue
             open_quote = _ps_opener(line)
-        return masked
+        return masked, not open_quote
     pending, frames = [], []
     for index, raw in enumerate(lines):
         line = raw.rstrip("\r")
@@ -287,10 +344,11 @@ def masked_lines(text: str, syntax: str):
             opener = _heredoc_opener(line, match.end())
             if opener:
                 pending.append(opener)
-    return masked
+    return masked, not pending and not frames
 
 
-def regions(text: str, header: re.Pattern, group: re.Pattern, syntax: str):
+def regions(text: str, header: re.Pattern, group: re.Pattern, syntax: str,
+            source: str = ""):
     """Yield (name, line, body) for every test block in one runner's source text.
 
     A block starts where its own comment block starts - this suite writes the
@@ -300,11 +358,24 @@ def regions(text: str, header: re.Pattern, group: re.Pattern, syntax: str):
     A header or group heading inside a heredoc / here-string body is data, so it
     neither opens a block nor closes one; its text still counts toward the block
     that contains it.
+
+    `source` names the file on stderr. When this file's scan ends unbalanced
+    (masked_lines), its masking is thrown away and the headers are matched plain:
+    the far more dangerous failure of a mis-tracked construct is the reader sitting
+    inside a phantom heredoc to the end of the file, which hides *every* case below
+    it - one real bug report in the suites is worth more phantoms than silence
+    (review AFFFIX3). `source` empty means the caller cannot name a file, so the
+    fallback happens without a word.
     """
     lines = text.split("\n")
     starts = _line_starts(text)
     line_of = lambda offset: bisect.bisect_right(starts, offset) - 1
-    masked = masked_lines(text, syntax)
+    masked, balanced = masked_lines(text, syntax)
+    if not balanced:
+        if source:
+            sys.stderr.write("affected-tests: %s: unbalanced scan at EOF, "
+                             "masking disabled for this file\n" % source)
+        masked = set()
     found = [m for m in header.finditer(text) if line_of(m.start()) not in masked]
     if not found:
         return
@@ -329,7 +400,8 @@ def parse_runner_text(rel: Path, text: str, runner: str):
     """The Test list one file contributes to the shell or the Pester runner."""
     header, group = (SH_HEADER, SH_GROUP) if runner == "sh" else (PS_HEADER, PS_GROUP)
     return [Test(runner=runner, name=name, path=rel, line=line, body=body)
-            for name, line, body in regions(text, header, group, runner)]
+            for name, line, body in regions(text, header, group, runner,
+                                            rel.as_posix())]
 
 
 def parse_pytest_file(rel: Path, text: str):
