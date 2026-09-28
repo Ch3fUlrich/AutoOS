@@ -903,7 +903,11 @@ def review_run_refusal(review: dict | None):
 # paste-ready one, so the format is never something you have to go looking for.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
 REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
-READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm"))
+READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
+                            # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
+                            # final signs its lanes "SHIP"; "fix-first" is the same
+                            # vocabulary's OPEN finding and stays refused.
+                            "ship"))
 # The final check is the operator's unchanged decision (Q-003 2026-09-27): a
 # cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
 # registry route -- it is the orchestrator's own interactive model -- so this one
@@ -915,28 +919,11 @@ FINAL_REVIEWER = "sonnet"
 # the client, so it counts too; anything else does not.
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
-                     "reviewer=<model> verdict=<ready|pass|lgtm|...>")
+                     "reviewer=<model> verdict=<ready|pass|ship|lgtm|...>")
 
 
-def reviewer_family(spelling, registry):
-    """The model FAMILY of a reviewer named in a lane record, or None.
-
-    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
-    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
-    keeps its ``family`` honest against ``models``. Then the registry's own model
-    ids, whole and after a client/provider prefix. The answer is in
-    ``resolver.family_key`` form, so a record's "Meta" and the registry's "meta"
-    are one family wherever it is compared (REVFIX S2).
-
-    Unknown returns None rather than a guess. An invented *reviewer* name would
-    differ from every author family and read as an independent review that never
-    happened -- which is also why ``author_family`` no longer guesses at an
-    unknown *author* (REVFIX S2: both halves must be known before they may
-    disagree).
-    """
-    if not isinstance(spelling, str) or not spelling.strip():
-        return None
-    name = spelling.strip()
+def _family_of_one_spelling(name, registry):
+    """The family the registry declares for exactly one reviewer spelling, or None."""
     key = resolver.family_key(name)
     for entry in ((registry.get("policy") or {}).get("reviewers") or []):
         if isinstance(entry, dict) and resolver.family_key(entry.get("model")) == key:
@@ -946,6 +933,44 @@ def reviewer_family(spelling, registry):
         entry = resolver.ci_value(models, candidate)
         if isinstance(entry, dict):
             return resolver.family_key(entry.get("family"))
+    return None
+
+
+# A client reports its own models by full id, so the Claude pass that policy
+# .reviewers spells "haiku" signs "claude-haiku-4-5" (SPAWNFIX3 (S3) item 5,
+# work/L1-routing/LEAKFP2.record.md). The vendor's prefix and the version tail
+# are not a different reviewer; the name between them is what the registry may
+# know. Same tail shape as FINAL_REVIEWER_RE.
+_CLAUDE_MODEL_ID_RE = re.compile(r"^claude-([a-z]+)(?:-[0-9][0-9a-z.-]*)?$")
+
+
+def reviewer_family(spelling, registry):
+    """The model FAMILY of a reviewer named in a lane record, or None.
+
+    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
+    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
+    keeps its ``family`` honest against ``models``. Then the registry's own model
+    ids, whole and after a client/provider prefix; then that spelling again with a
+    client's own model-id prefix and version tail removed, which is how a finished
+    pass reports the reviewer the operator named ("claude-haiku-4-5" == "haiku").
+    The answer is in ``resolver.family_key`` form, so a record's "Meta" and the
+    registry's "meta" are one family wherever it is compared (REVFIX S2).
+
+    Unknown returns None rather than a guess. An invented *reviewer* name would
+    differ from every author family and read as an independent review that never
+    happened -- which is also why ``author_family`` no longer guesses at an
+    unknown *author* (REVFIX S2: both halves must be known before they may
+    disagree).
+    """
+    if not isinstance(spelling, str) or not spelling.strip():
+        return None
+    key = spelling.strip()
+    family = _family_of_one_spelling(key, registry)
+    if family is not None:
+        return family
+    bare = _CLAUDE_MODEL_ID_RE.match(resolver.family_key(key) or "")
+    if bare:
+        return _family_of_one_spelling(bare.group(1), registry)
     return None
 
 

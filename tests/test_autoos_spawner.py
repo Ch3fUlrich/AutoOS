@@ -7243,6 +7243,45 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertIn("FIX-FIRST", report["cross_family"]["detail"])
         self.assertIn("FIX-FIRST", report["final"]["detail"])
 
+    def test_ship_is_a_ready_verdict_and_fix_first_still_is_not(self):
+        # SPAWNFIX3 (S3) item 5 (work/L1-routing/REVGATE.record.md): a Sonnet
+        # final signs its lanes "verdict=SHIP"; the gate only knew
+        # ready/pass/approve/lgtm, so a signed-off lane read as unreviewed.
+        # "fix-first" is the same vocabulary's OPEN finding, so it stays refused.
+        self.assertIn("ship", self.agent.READY_VERDICTS)
+        self.assertNotIn("fix-first", self.agent.READY_VERDICTS)
+        for verdict in ("SHIP", "ship"):
+            with self.subTest(verdict=verdict):
+                report = self.status(
+                    "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                    "reviewer=omniroute/muse verdict=%s\n"
+                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
+                    % (verdict, verdict))
+                self.assertTrue(report["ready"], report)
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=SHIP\n"
+                             "AutoOS-Review: kind=final reviewer=sonnet verdict=fix-first")
+        self.assertFalse(report["ready"], report)
+
+    def test_a_claude_model_id_is_the_policy_reviewers_reviewer_it_spells(self):
+        # SPAWNFIX3 (S3) item 5 (work/L1-routing/LEAKFP2.record.md): the cheap
+        # cross-family pass writes the id its client reports, `claude-haiku-4-5`,
+        # while policy.reviewers spells the same reviewer `haiku`. The client's
+        # own prefix and a version tail are not a different family.
+        self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
+                         "anthropic")
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=claude-haiku-4-5 verdict=ship\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+        # An id whose name the list does not carry stays unknown: a reviewer
+        # nobody can place is not an independent review (fail closed).
+        self.assertIsNone(self.agent.reviewer_family("claude-kimi-9-1", self.registry))
+        self.assertIsNone(self.agent.reviewer_family("claude-haikux", self.registry))
+        # The final checker is still the one spelled with the vendor's full id.
+        self.assertTrue(self.agent.is_final_reviewer("claude-sonnet-4-6"))
+        self.assertEqual(self.agent.reviewer_family("claude-sonnet-4-6", self.registry),
+                         None)
+
     def test_an_entry_missing_a_reviewer_is_listed_as_malformed(self):
         report = self.status("AutoOS-Review: kind=cross-family author=qwen\n" + FINAL_LINE)
         self.assertFalse(report["ready"])
@@ -7293,6 +7332,13 @@ class ReviewStatusTests(unittest.TestCase):
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
         self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
+        # ... and the real catalog carries the client's own id for it, which is
+        # what a finished cheap pass actually writes (SPAWNFIX3 item 5).
+        self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", real), "anthropic")
+        self.assertTrue(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+            "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
         # REVFIX S2 measured against the real catalog, not a fixture: the
