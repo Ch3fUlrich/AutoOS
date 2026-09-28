@@ -244,6 +244,272 @@ ids become tombstones is a separate, catalog-only edit.
 - Docs: **`docs/catalog.md`** gained the two Fields rows and a
   *Retiring a component (tombstone)* section — the rules above, and why `note` and
   `notes` are different fields.
+### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
+
+- **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the
+  matcher used `fnmatch.fnmatchcase`, which binds a rule to the one casing it was
+  written in. `deny-deepseek-pro` (`*deepseek*pro*`) therefore did not match
+  `samba/DeepSeek-V4-Pro` — the same model, spelled with capitals — and matched
+  nothing else either, so the leg fell through to the *no-match = allowed*
+  default and the catch-all `deny-deepseek` never saw it. `openrouter/deepseek/
+  DeepSeek-V4-PRO` was only ever caught by the unrelated `deny-openrouter`.
+  Pattern and leg are now both casefolded before the match, first-match-wins
+  order unchanged. One matcher, so every consumer moved with it (R-orch-11):
+  `_check_leg_rules` (rule 9), the gateway renders via `gateway_legs`,
+  `autoos_resolver.usable_legs` and `probe_common._skip_reason` all import
+  `leg_denied`/`leg_rule_for` from here — none re-implements the comparison, and
+  `audit-router.py` / `sync-*.py` do not match legs at all. `resolve_leg` stays
+  case-sensitive: it is the providers catalog's own contract, not this matcher's.
+- **No verdict moves for any leg the registry names.** Swept over every route
+  leg, every `unavailable_legs` key and every provider spelling × model id
+  (1421 legs, 30 of them real): the rule that fires and its `allow` are identical
+  before and after, for the one mixed-case leg `samba/MiniMax-M3` included — the
+  fold only closes spellings that previously matched *nothing*. Kept as
+  `LegRulesTests.test_no_committed_verdict_changes_when_matching_folds_case`.
+- **`tests/test_autoos_resolver.py`** (review 2, LOW):
+  `test_only_deepseek_v41_flash_survives_of_the_deepseek_family` asserted
+  `"deepseek/deepseek-v4-flash" not in models` — a *leg* string tested against a
+  map keyed by model id, so that limb could never fail. It now asserts what
+  DSAMEND actually left behind: the bare `deepseek-v4-flash` row still exists for
+  its reseller leg and carries **no** native `direct` block.
+- Tests: `LegRulesTests.test_matching_is_case_insensitive` (was red: the three
+  Pro spellings above came back allowed); `validate` and all five
+  `render --check` surfaces unchanged.
+
+### Fixed — the native DeepSeek id is `deepseek-flash` only, and V4 Pro is denied by name (DSAMEND, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: routing-00 measured `GET /models` on
+  `api.deepseek.com` at 10:0xZ — the live catalog is exactly
+  `['deepseek-flash', 'deepseek-v4-pro']` — so the `direct` row that used to
+  hang off `models.'deepseek-v4-flash'` (`model: deepseek/deepseek-v4-flash`,
+  `base_url: https://api.deepseek.com`) was sending an **alias**, not a catalog
+  model: it answers 200 but `served=deepseek-flash`, while the v4.1 spelling is a
+  flat 400. The native `direct` block now belongs to `models.'deepseek-flash'`,
+  the only entry that names a model the vendor actually serves, and
+  `models.'deepseek-v4-flash'` keeps its reseller leg
+  (`cheaperinference/deepseek-v4-flash`) with no native row. The other
+  providers' spellings — `openrouter/deepseek/deepseek-v4.1-flash`,
+  opencode-zen's bare `deepseek-v4.1-flash` — are their ids, not ours, and were
+  left alone.
+- **`policy.leg_rules`**: a new **first** rule `deny-deepseek-pro`
+  (`match: *deepseek*pro*`, `allow: false`) makes the operator's standing "never
+  route or fall back to V4 Pro" a structural gate instead of a side effect of
+  rule order. Before this, `deepseek/deepseek-v4-pro` was denied only by the
+  catch-all `deny-deepseek`, which sits *after* `allow-deepseek-native-flash` —
+  one future allow rule (a wildcard, a BYOK exception) would have opened the
+  paid model. First in the list, no DeepSeek allow can reach it: it denies the
+  native, `openrouter/`, `cheaperinference/` and `opencode-zen/` spellings alike
+  (`source`: operator via routing-00 2026-09-28T10:0xZ; Server 719cee9).
+- **Consumers of that row** moved with it (R-orch-11: an id change is grepped
+  through every reader): `openhands/profiles/deepseek-v4-flash.json` →
+  `deepseek-flash.json` with the native model's real window (131072/32768,
+  `reasoning_effort: high`), `lib/linux/install.sh` and
+  `lib/windows/AutoOS.Install.psm1` (`_profile_for('deepseek-flash', …)`),
+  `openhands/agent-profiles/worker.json` and `catalog/agent-harness.json`
+  (`leaf-reviewer`: opencode `deepseek/deepseek-flash`, profile ref
+  `deepseek-flash`), and the two fixtures that pin those projections
+  (`tests/fixtures/legacy-models.golden.json`,
+  `tests/fixtures/agent-harness/opencode.expected.json`).
+- **Effort ladder, measured rather than assumed** (19 charged one-word calls
+  plus one rejected value, ~0.0005 USD total): the wire parameter for `models.'deepseek-flash'.effort_ladder` is
+  `reasoning_effort`, and a bad value names the accepted set — `none, minimal,
+  low, medium, high, xhigh, ultra, max` — so all four declared rungs are real
+  and the ladder needed no re-mapping. What the measurement *did* overturn is
+  the assumption behind expressing rung `none` as an omission: with no parameter
+  the model **reasons** (20 of 22 completion tokens), and it is
+  `reasoning_effort: "none"` (or `thinking: {"type": "disabled"}`) that turns
+  thinking off. Recorded on the leg, pinned by
+  `tests/test_registry.py::DeepSeekNativeEffortLadderTests`, and left as an open
+  item for the emitter (see below).
+- **`tests/`**: `DeepSeekNativeIdAndProDenialTests` (13 cases) — no render or
+  config sends a non-canonical id to the native API (registry `direct` rows,
+  route legs, the vendored profiles, and every render and committed config
+  scanned as text), `deny-deepseek-pro` exists, precedes every DeepSeek allow,
+  is the rule that answers for each pro spelling, and no pro id appears in any
+  render, `router_settings.fallbacks` stays empty and DeepSeek-free, and the
+  registry still passes `check` with the new rule. Written failing first: 8 of
+  the 13 red before the change, green after, no other case moved.
+
+
+### Added — the usage report prices the operator's DeepSeek cap (DSGUARD, 2026-09-28)
+
+- **`tools/autoos_usage.py`** (spend guard): a `paid_spend` section, asked for
+  by `--spend-since [DATE]` (bare flag: the 1st of the current month UTC) or
+  `--balance-usd N` — `autoos-agent.py usage --since 1h --spend-since
+  --balance-usd 19.99`. It bills the watched paid provider's rows at the
+  registry's per-token `price_in`/`price_out`
+  (`catalog/ai-registry.json:234-235`: 3e-07 / 1.2e-06, i.e. $0.30 in / $1.20
+  out per 1M — the data was already there, nothing was added to the registry)
+  times the factor of `providers.deepseek.windows`
+  (`catalog/ai-registry.json:1857-1955`, source
+  `https://api-docs.deepseek.com/quick_start/pricing`) **at each row's own
+  timestamp**, through `autoos_resolver.price_factor` — the same function the
+  router uses to pick a cheap hour, so the guard and the router cannot
+  disagree about what an hour costs. `WARN` at spend >= 20 USD (the operator's
+  monthly cap) or a caller-measured balance below 5 USD, in the text and in
+  `warnings`. The spend window reaches the row fetch back past `--since` (the
+  month so far versus the last hour of traffic); when the walk stops at the
+  page cap the block says `incomplete`, so a partial window reads as a floor
+  and not as a total. The threshold comparison uses the rounded, reported
+  figure: a cap missed by 1e-15 of float drift is a cap the operator believed
+  was held. Still opt-in — `usage --json` without either flag keeps the shape
+  it has always had, and no deeper paging happens for nothing.
+  `load_prices` became `price_source_name` + `prices_from_registry` +
+  `read_registry` so the price table and the windows come from one parse.
+- **`docs/routing.md`**: the two flags and what they warn about.
+- **`tests/`**: `SpendTests` in `tests/test_autoos_usage.py` (21 cases, injected
+  rows only — the gateway is never contacted, and no test reads a real key):
+  the factor math below/at/above 20 USD, the off-peak half price versus the
+  peak hour, an uncovered hour billed at full price, another provider's rows
+  excluded, an unpriced model counted as a gap rather than as free, the default
+  month-start window, a spend window deeper than `--since`, the paging cap
+  making the figure a floor, the balance floor at and above 5 USD, both warnings
+  at once, bad `--spend-since`/`--balance-usd` exiting 2 before any fetch, the
+  key never echoed, and two pins on the shipped registry (the per-token price
+  and the `price_factor` window set).
+- Lesson: the unit is the whole bug in a spend guard — the registry is USD
+  *per token*, so the off-peak factor is what a naive per-1M reading would
+  silently double or halve, and only a test that names the peak hour and its
+  complement catches it.
+- Open: only DeepSeek is guarded (the provider is a constant, `SPEND_PROVIDER`);
+  `price_cache_read` is not billed; the balance must be measured by the caller —
+  the gateway's own `GET /user/balance` is not read here.
+### Fixed — DeepSeek answers again, and the resolver's effort rung finally reaches the client (DSBACK, 2026-09-28)
+
+- **`catalog/ai-registry.json`**: `providers.deepseek.available` flips
+  `false` → `true` — operator top-up 2026-09-28T07:4xZ, the router's
+  `GET /user/balance` measured `is_available=true` at 19.99 USD, reversing the
+  402 Insufficient Balance of 2026-09-27T16:4xZ. Nothing else moved: every
+  deepseek model keeps its `effort_ladder` (`deepseek-v4-flash` keeps the empty
+  one and `reasoning: false`), the per-leg `opencode-zen/deepseek-v4.1-flash`
+  gate stays `available: false` (measured 402/429 by
+  `tools/probe-toolcalls.py`), and `providers.openrouter` stays off (DSMAX).
+- Renders regenerated by the repo's own commands and re-checked at rc 0
+  (`render <target> --check`, `tools/sync-router-tiers.py`,
+  `tools/sync-ide-models.py`): `configuration/omniroute/combos.json` (the
+  `deepseek-v4.1-flash` combo returns, `deepseek/deepseek-flash` heads
+  `t2-worker-clean`/`t3-driver-clean` and joins `t2-worker`/`t3-driver`, and it
+  leaves `omitted`), `configuration/litellm/config.yaml` (managed block back,
+  deployments re-added to those four routes), `catalog/ide-models.json`,
+  `configuration/openhands/tier-profiles.json`, `docs/models.md` and
+  `opencode.jsonc` (the `#low`/`#high`/`#max` `variants` return with the leg).
+  `fallbacks: []` stays empty — re-adding a chain is an operator call, not a
+  dead-leg verdict.
+- **`tools/autoos-agent.py`**: **`apply_effort_rung()`** / `declared_variants()`
+  (new) and one call in `_resolve_route_v2`. The rung the resolver scored used
+  to reach only the track record (`track_entry`), so `opencode run --model
+  omniroute/deepseek-v4.1-flash` was the same argv at `low` and at `max` and the
+  generated `variants` were dead weight. It is now stamped as the opencode model
+  variant that carries it (`…#high` → `settings.reasoningEffort` →
+  `reasoning_effort=high`); `none`/None emit no suffix — no reasoning param at
+  all — a rung the model declares no variant for is dropped rather than
+  invented, and an explicit `--model x#low` keeps the operator's rung. Gateway
+  clients are unchanged on purpose: an OmniRoute combo has no per-effort alias
+  (pinned in `tests/test_registry_render.py`), so their argv stays the bare
+  combo and the rung stays record-only.
+- **`tools/autoos_resolver.py`**: `_score_candidates` honours spec 4's
+  `override.effort` — normalize_v2 parsed and validated the pin, then nothing
+  read it, so a card pinning `effort=max` ran the bucket's rung. The pin
+  replaces it, clamped to the answering leg's ladder like any other wanted rung,
+  so a pin cannot invent a rung and cannot make a non-reasoning leg reason.
+- Tests: **`DeepSeekBackTests`** (`tests/test_registry.py`, new, 10 cases — the
+  flip, the source note, every ladder unchanged, the zen leg still gated,
+  `t2-worker-clean` heading with the native leg, the models-doc row, validate
+  clean), **`EffortRungPlumbingTests`** (`tests/test_autoos_spawner.py`, new, 7
+  cases — one per rung, none/None, the clamp, the explicit-variant precedence,
+  the v1 path carrying no hard-coded rung, the gateway argv staying bare) and
+  four pinned-effort cases in `PlanTests`
+  (`tests/test_autoos_resolver.py`). Stale "deepseek is unavailable" pins were
+  re-derived from the render, not loosened:
+  `tests/test_registry_render.py`, `tests/test_sync_ide_models.py`,
+  `tests/linux/33-documentation.sh`, `tests/linux/34-ai-services.sh` and
+  `tests/run-tests.ps1` (whose `apply prune` orphan example moved to
+  `t1-orchestrator-clean`); `test_autoos_spawner.py`'s provider-attribution case
+  now derives the provider from the registry instead of hard-coding a name.
+  1209 passed, 1 skipped, 150 subtests on the six suites (baseline before the
+  work: 1078 passed on four of them).
+- Docs: `docs/models.md` — the `deepseek-v4.1-flash` bullet, the three-doors
+  table, the mermaid direct legs and the funded-provider row now say what
+  answers; the effort section documents that the suffix is applied by the
+  spawner, not only chosen by a caller, and corrects the render's derivation
+  (the served head leg, not `legs[0]`).
+### Changed — four orchestration rules: L0 never executes, the ready window, the worktree-copy trap, corpus-accepted detectors (FOLD5, 2026-09-28)
+
+- **`.agents/skills/unattended-orchestration/SKILL.md`**: 31 rules → 33. New `R-router-03` — *Route, decide, ask, verify; never run project work, cleanups or setup - hand them to the L1 coordinator* (operator 2026-09-28T10:4xZ via routing-00: a router that picks up a shovel stops routing). The Levels table's **L0** Job cell and the levels paragraph after the table name that target too — **L1 coordinator**, not "main orchestrator", which `references/main-orchestrator.md` reserves for a different level. Replaced `R-coord-01` to pin the **ready order** — merge main before spawn and CI, *not* between green CI and `ready` (L1-backlog 2026-09-28T08:52:57Z: a lane was marked `ready` on a tip CI had never tested; `mutex` and `freeze parent` survive from the old line, `2c3e4f7`). Replaced `R-worker-08`: verify on a detached copy — `git clone --no-hardlinks` **or** `git worktree add --detach` — while `cp -r` of a worktree is forbidden outright, because the copy shares the original's index: a reviewer's `cp -r` plus `git checkout` mutated it (L1-backlog/ci7, Sonnet final 08:53:30Z). New `R-worker-10`: a detector or redactor is accepted against the **real output corpus**, and every new consumer of raw data gets its own redaction test (REDACTFIX3 07:24:13Z, SPAWNFIX3d 08:18:21Z: fixtures stayed green while seven real reports and one secret went out).
+- **Every rule line is under the 200-character gate `tools/skill-rules.py check` enforces** — `R-router-03` 198, `R-coord-01` 199, `R-worker-08` 190 — so each text carries the shortest wording that still states the lesson, and each `source:` pointer keeps only the form that resolves (lane, file or sha). `check` reports `ok: 33 rules`.
+- **Muse's review of FOLD5 (FOLD5b)**: `R-worker-10` moved to the end of the worker block so the ids read in numeric order; the "`tar` only if no test reads git" clause came back into `R-worker-08` (dropping it discarded the 37-fixture lesson, which `R-tests-14` still records); the L0 hand-off target is spelled **L1 coordinator** in the rule, the Levels row and the paragraph; `R-coord-01` went back to "before spawn and CI, not between green CI and `ready`" once that wording measured 199. Two FOLD4 rows in **`references/rule-map.md`** that restate these rules were updated to the new meaning — `R-coord-01` (the ready window, `2c3e4f7`) and `R-worker-08` (`worktree add --detach`, the cp-shares-index trap, `ci7`, tar/37-fixture history kept). No id was retired or renumbered.
+
+### Fixed — Muse's slow first byte: a 180 s response-start ceiling, and the combo probe streams (MUSETIME, 2026-09-28)
+
+- **`configuration/docker/ai-stack/compose.yml`**: the gateway gives up on a provider call whose response has not *started* within `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS`, and unset resolves to 30000 (`resolveDirectHeadersTimeoutMs` reads the env and returns 3e4 when absent — `autoos-omniroute:/app/.build/next/server/chunks/_0117s88._.js` @900, the env name @965; `directFetchWithBoundedResponseStart` is exported at @758 and its `code: "DIRECT_RESPONSE_START_TIMEOUT"` const at @47, carrying the text "Direct response did not start within 30000ms"). Muse spark-1.3's first byte runs 3-32 s at minimal/low/medium and 4-58 s straight to the provider (routing-00 09:2xZ, image `autoos/omniroute:3.8.50-autoos2`), so the `high` leg 504'd. That 504 is also what opened the breaker for the *next* call: `shouldTripProviderBreakerForResult` requires the status to be in `new Set([408,500,502,503,504])` (all three in one module: the set `_0gq2i23._.js` @54054, `isProviderBreakerFailureStatus` @54261, `shouldTripProviderBreakerForResult` @54549), so two slow legs at the apikey `failureThreshold=2` `apply.sh` pins produced the measured `503 ALL_TARGETS_SKIPPED`. compose now pins 180000, operator-overridable, documented as a commented default in `stack.env.example`. **An `ai-stack` recreate of the omniroute service is required for the env to take effect.**
+- **No per-provider breaker threshold exists, so `apply.sh`'s resilience block is unchanged**: `providerBreaker` validates as `z.object({oauth:…,apikey:…}).strict()` (`src_shared_validation_1g05z7_._.js` @55692) — only the two auth-kind profiles, and `.strict()` rejects a provider id as a key. The `circuitBreakerThreshold` that looks per-connection is a field of those profiles (`OMNIROUTE_CIRCUIT_BREAKER_{API_KEY,OAUTH,LOCAL}_THRESHOLD`, defaults 12/8/2, `[root-of-the-server]__0qa-6gn._.js` @3307/@4015/@4742) and the settings→profile resolver feeds it back as `providerBreaker.apikey.failureThreshold` (`src_lib_resilience_settings_ts_1cmviqa._.js` @8531). Breaker *instances* are keyed by provider name (`getCircuitBreaker(name, opts)` accepts a `failureThreshold` in `opts`, `[root-of-the-server]__01edmvm._.js`), but every call site in the server bundle passes the name only — the four `getCircuitBreaker(…)` calls are all `getCircuitBreaker(provider)` — so nothing operator-settable reaches one. Slowing the 504 down is therefore the whole fix; the global 2 stays (it is there for the dead free promo, not for Muse).
+- **`configuration/omniroute/apply.sh`**: the `--probe` request is `"stream": true`, and `first_model(resp)` returns the model of the first chunk that names one (an SSE `data:` line, or a single JSON document if a gateway ignores `stream`) instead of blocking on `resp.read()`. Clients stream; the probe measured the one path nobody uses, and waited out the whole generation for a one-word answer. Proven against a local stand-in gateway: the SSE leg, a non-stream leg and a 503 leg all report correctly and the server sees `stream=True` on every request. The spawner (`tools/autoos-agent.py`) sends no chat request at all — its only HTTP call is `GET /api/health` (:660) — so worker and reviewer legs are the CLI clients' own request shape, which is not ours to set.
+- **`tests/linux/34-ai-services.sh` + `tests/linux/33-documentation.sh`**: the compose case (retitled so `--filter omniroute` reaches it) pins the new `OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: ${…:-180000}` line inside the omniroute service block, a new case pins the commented default in `stack.env.example`, and a new case pins the probe's streaming body, its SSE read and the absence of the whole-body read. Red before the fix: `--filter omniroute` 24 passed / **3 failed** (the two compose/env cases and the probe case). Green after: **27 / 0**; `--filter aistack,compose` 129 / 0, `--filter apply,combos,resilience,registry` 63 / 0, `--filter static,shellcheck` 16 / 0; shellcheck clean at `-S warning` on `configuration/omniroute/apply.sh`, all four of its python heredoc blocks compile.
+
+### Added — `token-rate`: orchestrator tokens per merged change (RESTART R5a, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (new, stdlib, read-only): the §5 metric the
+  before/after cap comparison needs. Its numerator iterates **every** usage
+  record of the orchestrator's Claude Code transcripts and weights them
+  `input + output + cache_creation + 0.1 * cache_read` (`CACHE_READ_WEIGHT`);
+  the naive unweighted sum is printed beside it as a labelled diagnostic.
+  `tools/autoos_context.py` `fill_from_transcript` is deliberately not reused —
+  it keeps only the last usage record, which is a *snapshot*, and a rate needs
+  the sum over all of them. The denominator is first-parent merges into `main`
+  in the same window (by committer date) whose subject names the orchestrator's
+  branch prefix, so numerator and denominator are the same actor; sessions are
+  selected by the record's `cwd` on whole path segments, which keeps
+  `/home/s/code/AutoOS` and `/home/s/code/AutoOS-lanes/...` apart. The output
+  states the known bias: it rewards shorter sessions and prices the
+  orchestrator only.
+- **`tools/autoos-agent.py`**: a `token-rate` verb forwards to it, the way
+  `usage` forwards to `autoos_usage` — the metric needs no gateway.
+- **`tests/test_autoos_tokenrate.py`** (new, 27 cases, wired into
+  `tests/linux/33-documentation.sh`): fixtures reproduce the real transcript
+  record key-for-key (including `usage.iterations`, which must *not* be summed
+  twice) against a throwaway projects dir and a temp git repo. Covers the four
+  summed fields, the all-records-vs-last-record regression guard, the
+  half-open window, cwd scoping, merge attribution by prefix, and the
+  zero-merge window printing `n/a` instead of dividing. 27 red before the tool
+  existed, green after.
+
+### Changed — `token-rate` reports the in-session subagent share (RESTART R5a follow-up, router D-045, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`**: an `isSidechain` record — a turn of an
+  in-session subagent the orchestrator spawned — is orchestrator cost, so D-045
+  keeps it in the numerator and reports how big that part is instead of
+  filtering it out. Four new labelled lines in the text report and four keys in
+  `--json` (`subagent_records`, `subagent_weighted`, `subagent_naive`,
+  `subagent_share_pct`, the share over the *weighted* numerator, `n/a`/None when
+  the numerator is empty). The split is a view onto the same records:
+  `weighted` still includes `subagent_weighted`, so the R5a before-numbers are
+  unchanged — re-measured over the same 48 h window
+  (`2026-09-26T07:23:17Z .. 2026-09-28T07:23:17Z`), L1-routing 5,462 records /
+  148,504,022.4 weighted / 28 merges, L1-backlog 4,907 / 138,537,540.9 / 34,
+  L1-main 2,959 / 104,906,139.8 / 76 — every row reproduced the R5a report to
+  the token. The measured caveat the operator has to decide: this client writes
+  sidechain usage records to `<project>/<session>/subagents/*.jsonl`, one level
+  below what `discover_transcripts` scans, so all three rows print `0.0%` while
+  those files hold 4,283 / 7,153 / 417 in-window records (26.5 % / 47.3 % /
+  4.6 % of their numerator *if* discovery reached them). Widening discovery is a
+  before-number change and therefore an operator call, not a metric-reporting
+  one.
+- **`tests/test_autoos_tokenrate.py`**: `SidechainTests` (new, 6 cases) plus
+  three report/CLI assertions, on fixtures that mix `isSidechain` true and false
+  records in one transcript — the flag parses, the sidechain turn is *not*
+  dropped from the numerator, the split is exact, the share is over weighted,
+  and an empty numerator prints `n/a` rather than dividing. 10 red before the
+  change (9 new cases + the `--json` key test), 36 green after.
+### Fixed — the REST temp files are removed on every exit path, and the gateway's reason survives to the log (MUSEFIX, 2026-09-28)
+
+- **`configuration/omniroute/apply.sh`**: `omni_rest` writes the manage key into a `mktemp` curl `--config` file and the response into a second `mktemp` — a `GET /api/providers` answer is every provider's live `apiKey` — and both were removed only by the statement *after* the call. A run interrupted while a call was in flight therefore left a 0600 file holding the key in `/tmp` on the user's machine, which is what an onboarding run a user gets impatient with looks like. The removal is now trapped for the duration of the call (`trap 'rm -f -- "$cfg" "$out"' INT TERM EXIT`, cleared immediately after — the script sets no trap of its own, so clearing restores "no trap") in the shape `ai-stack.sh` uses for its edge-webhook header file. Measured against the interrupt case, with two temp files live mid-call: before the trap, a `SIGTERM` to the run's process group — the shape of Ctrl-C — killed it at rc 143 with **both files on disk**; with the trap, nothing survives, in either signal shape (a `SIGTERM` aimed at only the script's pid is cleaned up too, by the call's own shell finishing behind it). Outside a call the script still has no trap, so Ctrl-C keeps the default disposition there, exactly as in `ai-stack.sh`.
+  The same change also had to undo the callers' `$( )`: `provider_node_id`, `provider_connection_exists` and `ensure_provider_node` read their helpers by command substitution, so `omni_rest` ran in a *subshell* — the key file belonged to a process the script itself was not, and a command substitution one level up silently swallowed `REST_ERROR` as well. The helpers now hand back through globals (`REST_BODY`, `NODE_ID`, `NODE_NOTE`) and are called in the caller's own shell. That is what the reserved-prefix case tests: with the trap alone it still failed, because a refused create printed only the fallback `the gateway refused the request` instead of what the gateway said; it now prints `HTTP 400 for /api/provider-nodes: … is a reserved provider prefix` through `print_cli_error`, with the key redacted. Comments and the changelog entry below claimed `createProviderNodeSchema` *demands* `baseUrl`: it does not — the schema requires it only of the `vibeproxy-openai` preset. apply sends it anyway (a node without the endpoint the registry names routes nowhere), and the wording now says so.
+- **`tests/linux/34-ai-services.sh`**: three cases on the existing stand-in CLI + stand-in curl. The interrupt case points `TMPDIR` at a directory only it owns, holds the stand-in's first `provider-nodes` answer for two seconds, asserts the temp files *exist* mid-call (so the case cannot pass vacuously), sends `SIGTERM` to the run's whole process group — monitor mode around the launch, because signalling only the script's pid lets the call finish and clean up behind a dead parent, which proves nothing — and asserts the directory is empty once the window closes. The REST-error case has the stand-in answer the POST with the reserved-prefix refusal *and the bearer token it read out of apply's own curl config file* — the worst case the redaction has to survive, a 4xx body that repeats the request's credential — and pins that the reason is printed, both keys are absent from the output and from every recorded argv, and nothing was stored. The third case seeds the state a dashboard leaves behind (node present, no connection bound) and requires the key to be bound to *that* node with no second node POSTed. Red before: `--filter apply` 46 passed / **2 failed** (the interrupt case, and the reserved-prefix case failing on the swallowed reason). Green after: **48 / 0**; shellcheck clean at `-S style` on the touched `.sh`.
+
+### Fixed — a non-built-in OpenAI-compatible provider becomes a gateway provider node; the CLI's reason is no longer discarded (MUSEREG, 2026-09-28)
+
+- **`configuration/omniroute/apply.sh`**: a live run printed `! meta-api registration failed - register it in the dashboard` and threw the CLI's stderr away (`>/dev/null 2>&1`), so the reason never reached the log (routing-00 04:5xZ). The failure path now prints the CLI's own words through `print_cli_error` — ANSI stripped, three lines at 200 chars, every secret replaced by `[REDACTED]` by `redact_secrets`, whose *quoted* bash pattern substitution matters: a key containing `*` or `?` is stripped literally instead of being read as a glob. The reason itself: `catalog/ai-registry.json` gives `meta_api` the `omniroute_id` `meta-api` and an `api_base` of its own, and `meta-api` is not one of the built-ins `omniroute providers available` knows (352 ids and aliases, measured against omniroute 3.8.51) — so `providers add meta-api` had nothing to attach a credential to. Such a provider now reaches the gateway as a **provider node**: `builtin_provider` reads the CLI's catalog once per run and caches it, `ensure_provider_node` GETs `/api/provider-nodes` first and POSTs what `createProviderNodeSchema` asks for — name and prefix, an `apiType` for `type: "openai-compatible"`, and a `baseUrl` that the schema requires only of the `vibeproxy-openai` preset but apply always sends, because a node without the endpoint the registry names routes nowhere (omniroute `src/shared/validation/schemas/provider.ts:307-385`; the CLI's own `post-api-provider-nodes` sends *no* body at all, `bin/cli/api-commands/provider-nodes.mjs:18-25`, so this has to be the REST call) — then binds the key to the node the gateway reports back. The created node is read from the list rather than trusted from the POST response, and a prefix that collides with a built-in is the gateway's own refusal (`reservedProviderPrefixes.ts`), which is why an id is only ever a node when the catalog says it is not a built-in. The manage key travels in a private `mktemp` curl `--config` file (0600) and the body on stdin — never argv, where `ps` reads it for the lifetime of the call. Idempotency is measured against the gateway, not against `providers list`: a node-bound connection's provider is the node's `<type>-<uuid>` id (`src/lib/db/providers/nodes.ts:61-71`), which the existing hex-id scan can never match, so `provider_connection_exists` reads `GET /api/providers` (`{"connections":[…],"total":N}`, measured live 2026-09-28) and the second run prints `= meta-api already registered` — reading only the id and the name, never the `apiKey` every row carries. `--dry-run` prints both plan lines and calls nothing.
+- **`tests/linux/34-ai-services.sh`**: five bash cases on a fake `omniroute` + fake `curl` in a sandbox directory (`_node_sandbox`) that reproduce the measured contract — the CLI's real `providers list` column shape, its `.env` banner before the JSON, the gateway's `{"nodes":[…]}` and `{"connections":[…]}` bodies: the redacted stderr (a key with glob characters, asserted absent from the output *and* from every recorded argv), node-create-then-connection-add for a non-built-in, a second run reporting `already registered` with exactly one node row, `--dry-run` creating and adding nothing, and an unreadable catalog treated as all-built-in (never a node created on a guess). Built-ins keep the byte-identical call they made before. The pwsh twin runs the real `apply.ps1` in a child shell against a loopback stand-in gateway (`Start-AutoOSNodeGateway`, a `TcpListener` job) and pins the same contract in text for Windows, where the stand-in CLI needs `sh`. Red before: `--filter apply` 40 passed / **5 failed**, `-Filter 'keeps the provider-node path'` 0 / **1 failed** (`no provider-node request`). Green after: 45 / 0 and the wider `--filter 'svc:,apply,combo,routing,registry'` 130 / 0 on bash; `-Filter apply.ps1` 53 / 0 on pwsh. shellcheck clean at `-S style` on both touched `.sh`; PSScriptAnalyzer reports nothing new on `apply.ps1` beyond the categories the suite already excludes.
 ### Fixed - parsed `uv` output is read colour-free (GFX, 2026-09-28)
 
 - **`lib/linux/install.sh`**: new **`uv_plain()`** (`NO_COLOR=1 uv --color never "$@"`),
@@ -445,6 +711,7 @@ configured through, not a leftover to clean up.
   suite `2060 passed, 4 skipped, 4596 subtests passed`, exit 0.
 
 ### Fixed — the leak check stays strict; only another worktree's own branch move is exempt (LEAKFP2, 2026-09-28)
+
 
 - **`tools/autoos-agent.py`**: 75f2866 required three signals before blaming a commit on the worker — a write visible in this worktree's HEAD reflog, the worker's own identity, and a committer timestamp inside the run window — and then exempted anything that looked like another lane's work (made on a ref created during the run, or contained in a new or sibling-worktree ref). Sonnet's review of that commit demonstrated each as an *evasion of a real leak* against live repositories: a decoy `git branch` laid on the worker's own tip, a backdated `GIT_COMMITTER_DATE`, a `git switch -c` + commit + fast-forward back. The window and both exemptions are gone and the 75f2866~1 detection is back — HEAD first-parent range, the checked-out branch's own reflog for a commit-then-reset, every ref that existed at the snapshot and moved, author OR committer = the worker, plus the new-dirt porcelain leg — and one narrow exemption is kept, the measured cause of false positive B: a ref that is the checked-out branch of ANOTHER worktree of the same repository at *both* the snapshot and the check, and is neither this worktree nor this run's sandbox (`_lane_worktree_moved`). False positive A — the orchestrator fast-forwarding this parent onto another lane while the child runs — is deliberately not exempted in code, because nothing distinguishes it from a worker write; the exit-7 report now says so on its own line (`if you moved this branch yourself during the run (merge/ff), this is expected - do not move a parent while its child runs (skill R-coord-01)`). Consequence, and intended: a pre-run lane commit brought in mid-run and a moved ref checked out in no worktree (another writer's *clone*) report LEAK 7 where 75f2866 stayed silent.
 - **`tests/test_autoos_spawner.py`**: **`LeakStrictnessTests`** (new, 8 cases) drives the real `parent_snapshot`/`parent_leak` against real temp repositories across the exemption boundary — a sibling worktree's own branch moving is exempt; a worktree added mid-run is not; a worktree inside the sandbox is not; a commit on a branch created during the run is a leak either way HEAD then goes. `IsolateContainmentTests` gains four fake-worker modes for the evasions (decoy branch, backdated committer date, `switch -c` + ff back, commit on a new branch) and the three flipped expectations above. 13 red before the fix, 417 green after on the file; `python3 -m pytest -q tests/` 1831 passed, 4 skipped.

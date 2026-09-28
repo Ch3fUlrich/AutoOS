@@ -20,18 +20,19 @@
     },
     {
       "cache_read_price": 6e-09,
-      "context": 1048576,
+      "context": 131072,
       "direct": {
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "deepseek/deepseek-flash",
         "npm": "@ai-sdk/openai",
         "provider": "deepseek"
       },
-      "id": "deepseek-v4-flash",
+      "id": "deepseek-flash",
       "input_price": 3e-07,
-      "name": "DeepSeek V4 Flash",
-      "output": 393216,
-      "output_price": 1.2e-06
+      "name": "deepseek-flash",
+      "output": 32768,
+      "output_price": 1.2e-06,
+      "reasoning": true
     },
     {
       "context": 200000,

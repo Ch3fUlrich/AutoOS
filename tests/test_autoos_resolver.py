@@ -1816,6 +1816,42 @@ class PlanTests(unittest.TestCase):
         for line, leg in zip(result["explain"], legs_in_order):
             self.assertIn(leg, line)
 
+    # --- the operator-pinned effort rung (spec 4: route/client/effort is
+    #     "pinned by the operator (optional; logged)") ----------------------
+    # DSBACK item 3 measured the pin being parsed and validated by
+    # normalize_v2 and then dropped: only override.route reached apply_override,
+    # so a card pinning effort=max silently ran the bucket's rung.
+
+    def test_a_pinned_effort_rung_replaces_the_buckets_one(self):
+        # S0/implement on the frontier leg scores "low"; the pin says "max".
+        unpinned = self.s0_plan(override={"route": "r-frontier"})
+        self.assertEqual(unpinned["effort"], "low")
+        pinned = self.s0_plan(override={"route": "r-frontier", "effort": "max"})
+        self.assertEqual(pinned["effort"], "max")
+        # and the pin is what the output cap follows, not the bucket
+        self.assertEqual(pinned["max_tokens"], 64000)
+        self.assertNotEqual(unpinned["max_tokens"], pinned["max_tokens"])
+
+    def test_a_pinned_rung_is_clamped_to_the_legs_ladder_never_invented(self):
+        # r-mid's ladder tops out at xhigh: pinning max asks for a rung the
+        # answering leg does not have.
+        result = self.s0_plan(override={"route": "r-mid", "effort": "max"})
+        self.assertEqual(result["effort"], "xhigh")
+
+    def test_a_pinned_rung_cannot_make_a_non_reasoning_leg_reason(self):
+        # free-model has an empty ladder and reasoning False: effort() returns
+        # None for it, and a pin must not fabricate a rung out of nothing.
+        result = self.s0_plan(override={"route": "r-free", "effort": "high"})
+        self.assertIsNone(result["effort"])
+        self.assertIsNone(result["max_tokens"])
+
+    def test_a_pinned_none_rung_is_a_rung_not_an_absence(self):
+        # "none" is a real rung on these ladders: pinning it must land on
+        # "none" (the client then sends no reasoning param at all) rather than
+        # falling back to the bucket's rung.
+        result = self.s0_plan(override={"route": "r-frontier", "effort": "none"})
+        self.assertEqual(result["effort"], "none")
+
     # --- no survivor -------------------------------------------------------
 
     def test_no_survivor_is_input_required_with_bucket(self):
@@ -2105,10 +2141,16 @@ class GatewayOrderTests(unittest.TestCase):
         # v4.1-flash (the two BYOK/zen V4.1 paths) are the only ones left
         # servable.
         registry = self.registry()
-        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro",
-                          "deepseek/deepseek-v4-flash")
+        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro")
         for mid in rejected_models:
             self.assertNotIn(mid, registry["models"])
+        # DSAMEND2 (review 2): the third entry used to be the *leg* string
+        # "deepseek/deepseek-v4-flash", and `models` is keyed by model id, not by
+        # leg, so that limb could never fail. What DSAMEND actually left of that
+        # snapshot is a reseller row with no native `direct` block — assert that.
+        self.assertNotIn("direct", registry["models"].get("deepseek-v4-flash") or {})
+        self.assertIn("deepseek-v4-flash", registry["models"],
+                      "the reseller row keeps its model entry, only not a native one")
         for route_id, route in registry["routes"].items():
             for leg in route.get("legs") or []:
                 if leg == "cheaperinference/deepseek-v4-flash":
@@ -2992,6 +3034,48 @@ class ReviewerSelectionTests(unittest.TestCase):
 
     def test_explain_is_empty_when_the_head_of_the_list_was_usable(self):
         self.assertEqual(r.reviewer_explain_lines(self.pick("qwen")), [])
+
+    # --- REVFREE: the free Zen reviewers, on the real registry --------------
+
+    FREE_ZEN_MODELS = ["opencode/longcat-2.5-preview-free",
+                       "opencode/nemotron-3-ultra-free",
+                       "opencode/mimo-v2.6-flash-free"]
+
+    def real_registry(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def all_clients_up(self):
+        return {c: {"installed": True, "signed_in": True, "reason": ""}
+                for c in ("opencode", "gemini", "qoder", "claude")}
+
+    def test_a_free_zen_reviewer_never_stands_alone_at_high_risk(self):
+        # Their quality is unmeasured (L2-general 2026-09-28T08:12:44Z), so they
+        # may take a normal-risk first pass but must never close a high-risk
+        # review: with ONLY them on the list, a high-risk card resolves to
+        # nothing and says why, while the same card at normal risk is served.
+        reg = self.real_registry()
+        reg["policy"]["reviewers"] = [e for e in reg["policy"]["reviewers"]
+                                      if e["model"] in self.FREE_ZEN_MODELS]
+        self.assertEqual([e["model"] for e in reg["policy"]["reviewers"]],
+                         self.FREE_ZEN_MODELS)
+        # The author is a registry model id, not the reviewer-list spelling
+        # "qwen3.8-flash": with the list sliced down to the three, only a model
+        # id still places the author's family (REVFIX S2 fails closed on an
+        # unplaceable author, and that is not what this test is about).
+        author = "qwen/qwen3.8-flash"
+
+        normal = r.reviewer_for(author, reg, self.all_clients_up(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertEqual(normal["reviewer"]["model"], self.FREE_ZEN_MODELS[0], normal)
+
+        high = r.reviewer_for(author, reg, self.all_clients_up(), self.NOW,
+                              risk="high", privacy="public")
+        self.assertIsNone(high["reviewer"], high)
+        self.assertEqual(high["state"], "unresolved", high)
+        for skipped in high["skipped"]:
+            self.assertIn("first-pass", skipped["reasons"][0], skipped)
 
 
 class PlanReviewCardTests(unittest.TestCase):

@@ -48,7 +48,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `auto/smart` | mid | 131,072 | (none) |
 | `cheaperinference/glm-5.2` | cheap | 128k | ~~cheaperinference `glm-5.2`~~ (unavailable) |
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
-| `deepseek-v4.1-flash` | cheap | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `deepseek-v4.1-flash` | cheap | 128k | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) |
 | `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
@@ -59,12 +59,12 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t1-orchestrator-free-only` | free | 128k | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` |
 | `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` |
-| `t2-worker-clean` | mid | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` |
+| `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → mistral `mistral-small-latest` |
 | `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
-| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~deepseek `deepseek-flash`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
-| `t3-driver-clean` | cheap | 128k | ~~deepseek `deepseek-flash`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → deepseek `deepseek-flash` → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
+| `t3-driver-clean` | cheap | 128k | deepseek `deepseek-flash` → mistral `mistral-small-latest` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `t3-driver-free-only` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → free_ai `qwen7b` |
 | `t3-driver-paid` | cheap | 131,072 | (none) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
@@ -122,12 +122,17 @@ generated table above already shows it):
   exhausted), leaving the free `gemini/gemini-3.8-flash` head as this route's only
   currently-usable leg. No 3.7 legs in this pinned route or the native gemini head
   — version mixing is a defect here.
-- **`deepseek-v4.1-flash`**: FAILS CLOSED since 2026-09-27T16:4xZ
-  (`providers.deepseek` 402 Insufficient Balance, `available: false`) — the
-  combo is omitted until the balance is topped up. (`t1`/spark failed closed
-  the same way on 2026-09-27 and came back the same day: MUSEAPI gave
-  `meta_api` a paid contributor leg, which is a servable head again. DeepSeek
-  has no such second leg, so it is the only pinned route still omitted.)
+- **`deepseek-v4.1-flash`**: BACK ON since 2026-09-28T07:4xZ (DSBACK: the
+  operator topped the balance up and the router's `GET /user/balance` measured
+  `is_available=true` at 19.99 USD, so `providers.deepseek` is
+  `available: true` and the managed combo is regenerated, not hand-restored).
+  Before that it FAILS CLOSED 2026-09-27T16:4xZ (`providers.deepseek` 402
+  Insufficient Balance, `available: false`) and the combo was omitted until the
+  top-up. (`t1`/spark failed closed the same way on 2026-09-27 and came back the
+  same day: MUSEAPI gave `meta_api` a paid contributor leg, which is a servable
+  head again. DeepSeek has no such second leg — the `opencode-zen` leg keeps its
+  own 402/429 gate and openrouter stays off at the provider level — so this
+  route's servability is the direct leg alone.)
   History:
   the direct `deepseek/deepseek-flash` head was the operator-restored lead
   (L0 2026-09-27T12:55:16Z; measured 200 through the gateway
@@ -135,9 +140,11 @@ generated table above already shows it):
   catalog" note. Exact model only (no `v4-flash` suffix leg — different
   snapshot). The `opencode-zen` leg 402s until the Zen balance is topped up,
   and the OpenRouter leg is gone entirely (DSMAX 2026-09-27: no OpenRouter
-  credit). While it lasted, this route carried the native
-  `#low`/`#high`/`#max` effort aliases (from `deepseek-flash`'s ladder) as
-  `legs[0]`; the aliases return with the leg.
+  credit). The route carries the native
+  `#low`/`#high`/`#max` effort aliases again (the served head leg's
+  `deepseek-flash` ladder, `none` stripped); since DSBACK the spawner stamps
+  the rung the resolver scored on the opencode model id itself, so the aliases
+  are no longer only a caller-side choice.
 - **`opus-4-6`**: pinned on purpose — `t1-orchestrator` never carries Opus, it is
   the meta_api contributor head with a free gemini fallback; Opus is addressable
   directly rather than smuggled into the orchestrator chain.
@@ -166,9 +173,12 @@ degrades along its own chain, cheapest leg first, exactly:
   twin (the bare spelling 400s — probe-falsified) is now off (DSMAX
   2026-09-27), so the free head is this route's only usable leg. Ack-proven
   2026-09-22.
-- `deepseek-v4.1-flash`: **omitted — fails closed** (deepseek 402,
-  2026-09-27T16:4xZ; zen 402; OpenRouter leg dropped DSMAX 2026-09-27). When
-  funded it runs **deepseek direct `#low`/`#high`/`#max` → zen paid**,
+- `deepseek-v4.1-flash`: **back on** — DSBACK 2026-09-28T07:4xZ (operator
+  top-up, router balance 19.99 USD measured `is_available=true`). It failed
+  closed 2026-09-27T16:4xZ (deepseek 402) and the combo stayed omitted until
+  that top-up; the zen 402 and the OpenRouter leg (dropped by DSMAX
+  2026-09-27) stay gated.
+  Funded it runs **deepseek direct `#low`/`#high`/`#max` → zen paid**,
   cheapest-first (direct head restored L0 2026-09-27T12:55:16Z, measured 200
   through the gateway 2026-09-27T14:5xZ). Exact model only.
 - Credit-burn chains (`t2-worker-credit` / `t3-driver-credit`) REMOVED
@@ -193,17 +203,18 @@ chain truncated at that model — no separate config is required.
 `t2-worker` carried `cheaperinference/deepseek-v4-flash`, then
 `openrouter/deepseek/deepseek-v4.1-flash`, then `deepseek/deepseek-flash` —
 same family, **three different doors with three different bills**, ordered
-cheapest-first per the sync contract. All three are currently gated (the
-generated table above shows them struck through): the first two by
-`unavailable_legs`/provider-off, the direct door by the 2026-09-27T16:4xZ
-402 (`providers.deepseek` off until topped up) — so none of the three
-answers today and the tier serves gemini → antigravity → kimi-k3:
+cheapest-first per the sync contract. Two are still gated (the generated table
+above shows them struck through): the first two by
+`unavailable_legs`/provider-off, and the direct door was gated by the
+2026-09-27T16:4xZ 402 until the DSBACK top-up of 2026-09-28T07:4xZ — so the
+direct leg answers again and the tier serves gemini → antigravity → **deepseek
+direct** → meta_api contributor → free-ai:
 
 | Leg | Door | Billing |
 |---|---|---|
 | `cheaperinference/deepseek-v4-flash` | partner resale (OpenAI-compatible, own `ci_live_…` key) | your cheap-inference balance; sits between free and paid, never in `*-clean`. Currently gated unavailable. |
 | `openrouter/deepseek/deepseek-v4.1-flash` | OpenRouter resale | your OpenRouter credits (last-resort pool). Off entirely — DSMAX 2026-09-27, no credit. |
-| `deepseek/deepseek-flash` | DeepSeek API direct | your DeepSeek key (`$13` bulk). Off until topped up — 402 since 2026-09-27T16:4xZ. |
+| `deepseek/deepseek-flash` | DeepSeek API direct | your DeepSeek key (`$13` bulk). 402 since 2026-09-27T16:4xZ, topped up 2026-09-28T07:4xZ (DSBACK, router balance 19.99 USD) — answers again. |
 
 The `v4-flash` vs `flash` ids are the providers' own snapshot names, not a
 good-vs-bad ranking — the gateway tries them top-down and hops on
@@ -233,9 +244,37 @@ replaces that default, so it lists every rung. The rung is sent as body
 
 `tools/sync-ide-models.py` renders the array into the repo `opencode.jsonc`
 `providers` blocks from `catalog/ide-models.json`'s `effort_ladder`, which
-`tools/registry.py render_ide()` takes from the route's **first leg's** model
-`effort_ladder` minus `none`. Later legs may lack a rung; what a fallback
+`tools/registry.py render_ide()` takes from the model of the route's **served
+head leg** (the leg that answers, not `legs[0]` — PROVFIX3 finding 8) minus
+`none`. Later legs may lack a rung; what a fallback
 leg does with it is unmeasured (spec 5.5: clamp to the leg's ladder).
+
+DSBACK 2026-09-28 closed the last gap in that chain: the suffix is no longer
+only a *caller-side* choice, the spawner applies it. `apply_effort_rung()`
+(`tools/autoos-agent.py`) stamps the rung the resolver scored (`plan["effort"]`,
+spec 5.5 — the bucket's, or the card's `override.effort` pinned over it, clamped
+to that leg's ladder) onto the **opencode** model id, so a `S3` card routed to
+`deepseek-v4.1-flash` reaches the gateway as `#high` instead of the bare combo.
+`none` and None emit no suffix — the base model entry carries no reasoning
+settings, so the request goes out with no `reasoning_effort` at all — and a rung
+the model declares no variant for is dropped rather than invented. A gateway
+client (`omniroute run qwen --model <combo>`, `tools/autoos_clients.py`) still
+cannot carry it: a combo has no per-effort alias, so there the rung stays
+record-only.
+
+**That omission is not "off" on DeepSeek's own API** (DSAMEND, measured
+2026-09-28T10:0xZ against `api.deepseek.com` as `deepseek-flash`): a call with
+no `reasoning_effort` reasons (20 of 22 completion tokens were
+`reasoning_tokens`), because thinking is enabled by default there. The off
+switches are the literal `reasoning_effort: "none"` — the vendor's accepted set,
+named by its own 422, is `none, minimal, low, medium, high, xhigh, ultra, max`,
+so all four rungs of `models.'deepseek-flash'.effort_ladder` are real wire
+values — or `thinking: {"type": "disabled"}`; both return no
+`completion_tokens_details` and answer immediately. So `#low`/`#high`/`#max` are
+faithful for this leg and `none` is the one rung the chain above cannot express:
+a resolver that scores `none` for a DeepSeek card still pays for reasoning.
+`tests/test_registry.py::DeepSeekNativeEffortLadderTests` pins the rung set
+against the measured enum.
 
 Measured 2026-09-27 via `tools/autoos-agent.py run --model
 omniroute/t1-orchestrator#xhigh`: before the render `Variant unavailable for
@@ -587,14 +626,14 @@ flowchart TB
         T2D["5 · sambanova gpt-oss-120b\nPAID $10 credit · UNAVAILABLE"]
         T2E["6 · cheaperinference kimi-k3 (deepseek-v4-flash / glm-4.5-air DENIED)\nPAID $15 partner pool · own key"]
         T2F["7 · openrouter deepseek/deepseek-v4.1-flash\nPAID · UNAVAILABLE (DSMAX)"]
-        T2G["8 · deepseek deepseek-flash\nPAID $13 bulk · direct · UNAVAILABLE (402, 2026-09-27)"]
+        T2G["8 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
         T2H["9 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
         T2A --> T2A2 --> T2B --> T2C --> T2D --> T2E --> T2F --> T2G --> T2H
     end
 
     subgraph t2c["t2-worker-clean · paid legs only, no training"]
         direction TB
-        T2CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · UNAVAILABLE (402, 2026-09-27)"]
+        T2CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
         T2CB["2 · openrouter deepseek/deepseek-v4.1-flash\nPAID · UNAVAILABLE (DSMAX)"]
         T2CC["3 · zen deepseek-v4.1-flash\nPAID · UNAVAILABLE"]
         T2CD["4 · mistral mistral-small-latest\nPAID direct"]
@@ -608,14 +647,14 @@ flowchart TB
         T3C["3 · cerebras qwen-3.8-27b\nPAID $10 credit overflow · UNAVAILABLE"]
         T3D["4 · cheaperinference glm-5.2 / minimax-m2.7 (glm-4.5-air DENIED)\nPAID $15 partner pool · own key"]
         T3E["5 · mistral mistral-small-latest\nPAID direct"]
-        T3F["6 · deepseek deepseek-flash\nPAID $13 bulk · direct · UNAVAILABLE (402, 2026-09-27)"]
+        T3F["6 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
         T3G["7 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
         T3A --> T3B --> T3C --> T3D --> T3E --> T3F --> T3G
     end
 
     subgraph t3c["t3-driver-clean · paid legs only, no training"]
         direction TB
-        T3CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · UNAVAILABLE (402, 2026-09-27)"]
+        T3CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
         T3CB["2 · mistral mistral-small-latest\nPAID direct"]
         T3CC["3 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
         T3CA --> T3CB --> T3CC
@@ -673,7 +712,7 @@ The routes still name every funded provider's legs, but several are gated
 |---|---|
 | cerebras ($10 credit) | `t2-worker` gpt-oss-120b · `t3-driver` qwen-3.8-27b — both UNAVAILABLE (402/401 credits exhausted 2026-09-26) |
 | sambanova ($10 credit) | `t2-worker` gpt-oss-120b (UNAVAILABLE — policy) |
-| deepseek ($13 bulk) | `t2-worker`/`t3-driver`/`t3-driver-clean`/`t2-worker-clean` `deepseek-flash` direct — UNAVAILABLE (402 Insufficient Balance 2026-09-27T16:4xZ, `providers.deepseek.available: false`); the pinned `deepseek-v4.1-flash` combo is omitted until topped up |
+| deepseek ($13 bulk) | `t2-worker`/`t3-driver`/`t3-driver-clean`/`t2-worker-clean` `deepseek-flash` direct — AVAILABLE again (DSBACK 2026-09-28T07:4xZ: operator top-up, router balance 19.99 USD, `providers.deepseek.available: true`, reversing the 402 Insufficient Balance of 2026-09-27T16:4xZ) · the pinned `deepseek-v4.1-flash` combo is back in every render |
 | cheap-inference ($15 partner pool) | allows only `kimi-k3`, `glm-5.2`, `minimax-m2.7`: `t2-worker` kimi-k3 · `t3-driver` glm-5.2/minimax-m2.7. `deepseek-v4-flash`/`glm-4.5-air` are DENIED by `deny-cheaperinference` |
 | meta ($10) | `meta_api` direct (OpenAI-compatible, `providers.meta_api`) at the `t1-orchestrator` / `t1-orchestrator-paid` / `spark-1.3-contributor` heads and the `t2-worker` / `t3-driver` tails (MUSEAPI 2026-09-27) · the openrouter contributor leg at `t1-orchestrator-clean` is UNAVAILABLE (openrouter off, DSMAX 2026-09-27) · also reachable outside the gateway, via the opencode `meta` provider |
 | openrouter ($1, last resort) | OFF entirely (DSMAX 2026-09-27: 401 even for BYOK); every openrouter leg is gated by `providers.openrouter.available: false` |

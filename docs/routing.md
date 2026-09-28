@@ -56,6 +56,34 @@ config dir. Heartbeats print `usage --since 1h --by provider,lane`.
 registry's per-token `price_in`/`price_out`; the JSON names its source and how
 many models it had no price for, so a 0 row reads as free or unknown. Off by
 default — `--json` readers get the same shape as before.
+`--spend-since [DATE]` (bare: the 1st of the current month UTC) and
+`--balance-usd N` add a `paid_spend` block for the one provider the operator
+budgets in dollars — DeepSeek. It costs each of that provider's rows at the
+registry's per-token price times the factor in `providers.deepseek.windows` at
+the row's own timestamp (`autoos_resolver.price_factor`, the same function the
+router uses to pick a cheap hour), reaches the row fetch back as far as that
+date even when `--since` is an hour, and prints `WARN` at 20 USD of spend
+(the monthly cap) or when `--balance-usd` — a balance the caller measured at
+the gateway — is below 5 USD. A window that hit the paging cap says
+`incomplete`: the figure is a floor, not a total.
+
+Inbox read: `autoos-agent.py inbox <name> --since-card <card>` (or `--since
+<position|UTC>`, `--all`, `--max-records N`, default 30 — RESTART spec §0/§2).
+It prints the records after a position, oldest first, each headed by its
+`<timestamp>#<ordinal>` position, so a relaunched orchestrator resumes at its
+card's `last-event` instead of opening a 50k-token inbox. The RUN dir is
+`$AUTOOS_RUN_DIR` only (`<RUN>/inbox/<name>.md`, or `--file PATH`); a bare UTC
+stamp re-reads its whole second and a late append (an older timestamp written
+after a newer one) is returned and flagged `(late)`, because reading is
+at-least-once. An inbox with no timestamped record exits 1 — never "no events".
+A line that looks like a stamp but does not parse (a minute-precision one, say
+`2026-09-27T03:55Z → done: …`) is still an acknowledgement, so it prints on
+stdout too, in file order, tagged `(malformed line N)` with the lines under it —
+no position, because it is not a record — beside a stderr notice that counts
+them. The notice is made only for an entry the window actually printed: one
+behind `--since` says nothing, and one dropped with the record it rode on by
+`--max-records` is named in the cut line instead ("cut N earlier records and M
+malformed entries").
 
 Attribution: every spawned opencode run whose model sits on the omniroute provider sends the request
 header `x-omniroute-session-id: <tag>` (provider `headers` in the `OPENCODE_CONFIG_CONTENT` overlay;

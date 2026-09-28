@@ -491,6 +491,252 @@ class CostTests(UsageCliTests):
         self.assertAlmostEqual(rep["totals"]["cost_in"], 0.0001, places=12)
 
 
+class SpendTests(UsageCliTests):
+    """DSGUARD: the paid-spend section — DeepSeek spend since a date, and the
+    two WARN lines (20 USD of spend, 5 USD of remaining balance).
+
+    What these tests exist to pin:
+
+    - the UNIT again. The registry stores USD PER TOKEN (3e-07 is $0.30/1M),
+      so a month of spend is tokens * price * the window factor. A spend guard
+      that is off by 1e6 either never warns or always warns.
+    - the WINDOW. providers.deepseek.windows carries the vendor's off-peak
+      half price; a Sunday row must not be billed at the weekday-peak factor.
+      The factor lookup is autoos_resolver.price_factor — the same code the
+      router uses to decide when to send work there, so the guard and the
+      router can never disagree about what an hour costs.
+    - the FLOOR. The month-to-date window is fetched even when --since is 1h:
+      a spend guard that only looks at the last hour reports ~$0 in September
+      and reads as safe.
+    """
+
+    PEAK_FACTOR = 1.0
+    OFF_PEAK_FACTOR = 0.5
+
+    def setUp(self):
+        super().setUp()
+        self.registry = Path(self.tmp.name) / "ai-registry.json"
+        self.registry.write_text(json.dumps({
+            "models": {
+                # $1 per 1M in, $1 per 1M out: token counts map to dollars in
+                # round numbers (10M in + 10M out = 20 USD at factor 1.0).
+                "deepseek-v4.1-flash": {"id": "deepseek-v4.1-flash",
+                                        "price_in": 1e-06, "price_out": 1e-06},
+                "deepseek-snapshot-without-a-price": {
+                    "id": "deepseek-snapshot-without-a-price"},
+            },
+            "providers": {"deepseek": {"windows": [
+                {"days": ["mon", "tue", "wed", "thu", "fri"],
+                 "utc_from": "06:00", "utc_to": "10:00",
+                 "kind": "price", "price_factor": self.PEAK_FACTOR},
+                {"days": ["mon", "tue", "wed", "thu", "fri"],
+                 "utc_from": "10:00", "utc_to": "23:59",
+                 "kind": "price", "price_factor": self.OFF_PEAK_FACTOR},
+                {"days": ["sat", "sun"], "utc_from": "00:00", "utc_to": "23:59",
+                 "kind": "price", "price_factor": self.OFF_PEAK_FACTOR},
+            ]}},
+        }), encoding="utf-8")
+
+    def spend_report(self, rows, extra=(), argv=("--since", "1h")):
+        rc, out, err = self.run_cli(list(argv) + ["--json", "--registry", str(self.registry)]
+                                    + list(extra), FakeFetch({0: (200, rows)}))
+        self.assertEqual(rc, 0, err)
+        return json.loads(out)
+
+    def ds(self, ts, tin=0, tout=0, rid="s", provider="deepseek",
+           model="deepseek-v4.1-flash"):
+        return [row(ts, rid=rid, provider=provider, model=model, tin=tin, tout=tout)]
+
+    # --- the math -----------------------------------------------------------
+
+    def test_spend_is_tokens_times_price_times_window_factor(self):
+        # Fri 2026-09-25T07:00Z is inside the peak window (factor 1.0).
+        rep = self.spend_report(
+            self.ds(iso(datetime.datetime(2026, 9, 25, 7, 0, tzinfo=datetime.timezone.utc)),
+                    tin=1_000_000, tout=500_000),
+            ["--spend-since", "2026-09-01T00:00:00Z"])
+        self.assertAlmostEqual(rep["paid_spend"]["spend_usd"], 1.5, places=9)
+        self.assertEqual(rep["paid_spend"]["tokens_in"], 1_000_000)
+        self.assertEqual(rep["paid_spend"]["tokens_out"], 500_000)
+        self.assertEqual(rep["paid_spend"]["calls"], 1)
+
+    def test_the_off_peak_window_halves_the_bill(self):
+        # The same 1.5M/0.5M tokens, Fri 11:00Z (factor 0.5) vs Fri 07:00Z (1.0).
+        peak = self.spend_report(
+            self.ds(iso(datetime.datetime(2026, 9, 25, 7, 0, tzinfo=datetime.timezone.utc)),
+                    tin=1_000_000, tout=500_000),
+            ["--spend-since", "2026-09-01T00:00:00Z"])["paid_spend"]["spend_usd"]
+        off_peak = self.spend_report(
+            self.ds(iso(datetime.datetime(2026, 9, 25, 11, 0, tzinfo=datetime.timezone.utc)),
+                    tin=1_000_000, tout=500_000),
+            ["--spend-since", "2026-09-01T00:00:00Z"])["paid_spend"]["spend_usd"]
+        self.assertAlmostEqual(off_peak, peak * self.OFF_PEAK_FACTOR / self.PEAK_FACTOR,
+                               places=9)
+
+    def test_a_time_no_window_covers_bills_at_full_price(self):
+        # Fri 05:00Z matches no fixture window. The fallback must be 1.0, never
+        # a missing row read as free money.
+        rep = self.spend_report(
+            self.ds(iso(datetime.datetime(2026, 9, 25, 5, 0, tzinfo=datetime.timezone.utc)),
+                    tin=1_000_000, tout=0),
+            ["--spend-since", "2026-09-01T00:00:00Z"])
+        self.assertAlmostEqual(rep["paid_spend"]["spend_usd"], 1.0, places=9)
+
+    def test_only_deepseek_rows_count_and_unpriced_models_say_so(self):
+        rows = (self.ds(iso(NOW - datetime.timedelta(minutes=1)), rid="a",
+                        tin=1_000_000, tout=0)
+                + self.ds(iso(NOW - datetime.timedelta(minutes=2)), rid="b",
+                          tin=1_000_000, tout=0, provider="openrouter")
+                + self.ds(iso(NOW - datetime.timedelta(minutes=3)), rid="c",
+                          tin=1_000_000, tout=0,
+                          model="deepseek-snapshot-without-a-price"))
+        rep = self.spend_report(rows, ["--spend-since", "2026-09-01T00:00:00Z"])
+        spend = rep["paid_spend"]
+        self.assertEqual(spend["calls"], 2)  # the openrouter row is another provider's money
+        self.assertAlmostEqual(spend["spend_usd"], 0.5, places=9)  # 1 priced row, weekend 0.5
+        self.assertEqual(spend["models_unpriced"], 1)
+
+    # --- the window ---------------------------------------------------------
+
+    def test_spend_default_since_is_the_first_of_the_month_utc(self):
+        rep = self.spend_report(self.ds(iso(NOW - datetime.timedelta(minutes=1))),
+                                ["--spend-since"])
+        self.assertEqual(rep["paid_spend"]["since"], "2026-09-01T00:00:00Z")
+
+    def test_the_spend_window_reaches_back_past_since(self):
+        # --since 1h, but a September row: the spend section must see it, and
+        # the token report must keep ignoring it.
+        old = datetime.datetime(2026, 9, 3, 7, 0, tzinfo=datetime.timezone.utc)
+        argv = ["--since", "1h", "--by", "provider", "--spend-since", "2026-09-01T00:00:00Z"]
+        fetch = FakeFetch({0: (200, self.ds(iso(old), rid="old", tin=1_000_000, tout=0))})
+        rc, out, err = self.run_cli(argv + ["--json", "--registry", str(self.registry)], fetch)
+        self.assertEqual(rc, 0, err)
+        rep = json.loads(out)
+        self.assertEqual(rep["totals"]["calls"], 0)
+        self.assertEqual(rep["paid_spend"]["calls"], 1)
+        self.assertAlmostEqual(rep["paid_spend"]["spend_usd"], 1.0, places=9)
+        q = parse_qs(urlparse(fetch.calls[0]["url"]).query)
+        self.assertNotIn("since", q)  # the gateway has no such param; we page deeper
+
+    def test_a_paging_cap_makes_the_spend_say_it_is_a_floor(self):
+        def endless(url, headers, timeout):
+            offset = int(parse_qs(urlparse(url).query).get("offset", ["0"])[0])
+            rows = [row(iso(NOW - datetime.timedelta(seconds=60 + i)), rid="r-%d-%d" % (offset, i),
+                        provider="deepseek", tin=1000, tout=0) for i in range(500)]
+            return 200, json.dumps(rows).encode("utf-8")
+
+        rc, out, err = self.run_cli(["--since", "1h", "--registry", str(self.registry),
+                                     "--spend-since"], endless)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cap", out)
+        self.assertIn("incomplete", out.lower())
+
+    # --- the warnings -------------------------------------------------------
+
+    def test_spend_below_20_does_not_warn(self):
+        rep = self.spend_report(self.ds(iso(NOW - datetime.timedelta(minutes=1)),
+                                        tin=1_000_000, tout=0), ["--spend-since"])
+        self.assertEqual(rep["paid_spend"]["spend_usd"], 0.5)  # 1M * 1e-06 * 0.5
+        self.assertEqual(rep["paid_spend"]["warnings"], [])
+
+    def test_spend_at_exactly_20_warns(self):
+        # 40M tokens in at $1/1M, weekend factor 0.5 -> exactly 20.00 USD.
+        rep = self.spend_report(self.ds(iso(NOW - datetime.timedelta(minutes=1)),
+                                        tin=40_000_000, tout=0), ["--spend-since"])
+        self.assertAlmostEqual(rep["paid_spend"]["spend_usd"], 20.0, places=9)
+        self.assertEqual(len(rep["paid_spend"]["warnings"]), 1)
+        self.assertIn("20", rep["paid_spend"]["warnings"][0])
+
+    def test_spend_above_20_warns(self):
+        rep = self.spend_report(self.ds(iso(NOW - datetime.timedelta(minutes=1)),
+                                        tin=42_000_000, tout=0), ["--spend-since"])
+        self.assertGreater(rep["paid_spend"]["spend_usd"], 20.0)
+        self.assertEqual(len(rep["paid_spend"]["warnings"]), 1)
+
+    def test_balance_below_5_warns_without_any_spend(self):
+        rep = self.spend_report([], ["--balance-usd", "4.99"])
+        self.assertEqual(rep["paid_spend"]["balance_usd"], 4.99)
+        self.assertEqual(len(rep["paid_spend"]["warnings"]), 1)
+        self.assertIn("balance", rep["paid_spend"]["warnings"][0].lower())
+
+    def test_balance_at_5_does_not_warn(self):
+        rep = self.spend_report([], ["--balance-usd", "5"])
+        self.assertEqual(rep["paid_spend"]["warnings"], [])
+
+    def test_both_conditions_warn_together(self):
+        rep = self.spend_report(self.ds(iso(NOW - datetime.timedelta(minutes=1)),
+                                        tin=60_000_000, tout=0),
+                                ["--spend-since", "--balance-usd", "1.0"])
+        self.assertEqual(len(rep["paid_spend"]["warnings"]), 2)
+
+    def test_no_balance_means_no_balance_warning(self):
+        rep = self.spend_report([], ["--spend-since"])
+        self.assertIsNone(rep["paid_spend"]["balance_usd"])
+        self.assertEqual(rep["paid_spend"]["warnings"], [])
+
+    # --- the shape and the text --------------------------------------------
+
+    def test_no_spend_block_unless_asked_for(self):
+        fetch = FakeFetch({0: (200, self.ds(iso(NOW - datetime.timedelta(minutes=1))))})
+        rep = self.json_report(["--since", "1h", "--by", "provider",
+                                "--registry", str(self.registry)], fetch)
+        self.assertNotIn("paid_spend", rep)
+        self.assertEqual(set(rep), {"since", "pages", "truncated", "totals", "by"})
+        self.assertEqual(fetch.offsets(), [0])  # and no deeper paging for nothing
+
+    def test_the_bad_spend_since_exits_2(self):
+        rc, out, err = self.run_cli(["--since", "1h", "--spend-since", "whenever",
+                                     "--registry", str(self.registry)], FakeFetch())
+        self.assertEqual(rc, 2)
+        self.assertIn("--spend-since", err)
+
+    def test_the_bad_balance_exits_2(self):
+        rc, out, err = self.run_cli(["--since", "1h", "--balance-usd", "nineteen",
+                                     "--registry", str(self.registry)], FakeFetch())
+        self.assertEqual(rc, 2)
+        self.assertIn("--balance-usd", err)
+
+    def test_the_text_shows_the_section_and_warns_in_caps(self):
+        rc, out, err = self.run_cli(
+            ["--since", "1h", "--registry", str(self.registry),
+             "--spend-since", "--balance-usd", "2"],
+            FakeFetch({0: (200, self.ds(iso(NOW - datetime.timedelta(minutes=1)),
+                                        tin=60_000_000, tout=0))}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("paid spend", out.lower())
+        self.assertIn("DeepSeek", out)
+        self.assertIn("2026-09-01T00:00:00Z", out)
+        self.assertEqual(out.count("WARN"), 2)
+        self.assertNotIn(FIXTURE_KEY, out)
+
+    def test_the_text_hides_the_section_when_not_asked(self):
+        rows = self.ds(iso(NOW - datetime.timedelta(minutes=1)))
+        rc, out, err = self.run_cli(["--since", "1h"], FakeFetch({0: (200, rows)}))
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("paid spend", out.lower())
+        self.assertNotIn("WARN", out)
+
+    # --- the shipped registry ----------------------------------------------
+
+    def test_the_shipped_registry_prices_deepseek_per_token(self):
+        # The number a reader of this guard sees for the real DeepSeek leg is
+        # the registry's, in USD per token ($0.30 in / $1.20 out per 1M).
+        prices = usage.load_registry_prices(ROOT / "catalog" / "ai-registry.json")
+        self.assertEqual(prices["deepseek-v4.1-flash"], (3e-07, 1.2e-06))
+
+    def test_the_shipped_registry_carries_deepseek_price_windows(self):
+        with (ROOT / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            registry = json.load(fh)
+        windows = registry["providers"]["deepseek"]["windows"]
+        self.assertTrue(windows)
+        kinds = {w["kind"] for w in windows}
+        factors = {w["price_factor"] for w in windows}
+        self.assertEqual(kinds, {"price"})
+        self.assertEqual(factors, {1.0, 0.5})
+        for w in windows:
+            self.assertIn("api-docs.deepseek.com/quick_start/pricing", w["source"])
+
+
 class DelegationTests(unittest.TestCase):
     """tools/autoos-agent.py `usage` delegates the remaining argv to autoos_usage.main."""
 
