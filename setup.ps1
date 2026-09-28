@@ -535,6 +535,16 @@ if (-not $selectedIds -or @($selectedIds).Count -eq 0) {
     exit 0
 }
 
+# A selection named by ids - a replayed state file, -Only, or the browser's
+# payload arriving as -Only - may still name a retired id, and the ids that took
+# its work over cannot be in a file written before the retirement. Expand once
+# here, so the plan, the run and the saved state all read the same list.
+if ($statePayload -or $Only) {
+    $expanded = Expand-AutoOSTombstoneReplacements -Available $available -SelectedIds $selectedIds
+    foreach ($line in @($expanded.Lines)) { Write-AutoOSLine $line -Level muted }
+    $selectedIds = @($expanded.Ids)
+}
+
 # ─── 4. Plan ────────────────────────────────────────────────────────────────
 $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds $selectedIds)
 

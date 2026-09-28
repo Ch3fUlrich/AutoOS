@@ -223,9 +223,12 @@ function Get-AutoOSServeState {
             platforms = @($platforms[$c.Id])
             # The page resolves dependencies, pre-ticks profiles and collects
             # prompts in the browser, so it can only honour a retired id if the
-            # row says so - the same two facts setup.ps1's own menu reads.
+            # row says so - the same two facts setup.ps1's own menu reads. The
+            # browser's selection comes back to setup.ps1 as -Only, where the
+            # same replacement expansion runs before anything plans.
             tombstone = [bool]$c.Tombstone
             note = $c.RetireNote
+            replaced_by = @($c.ReplacedBy)
         }
     }
     [ordered]@{

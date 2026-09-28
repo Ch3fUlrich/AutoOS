@@ -106,6 +106,25 @@ function Test-AutoOSCatalogSchema {
                     [void]$problems.Add("$where : 'note' is only meaningful on a tombstone entry")
                 }
             }
+            # 'replaced_by' is what keeps a retirement's work on a replay: the ids
+            # the catalog says took it over. They have to exist and install
+            # something, because expanding an old state file plans exactly these
+            # ids - a name that resolves to another tombstone would replay into a
+            # row that can only report skipped, which is the defect this field
+            # exists to close.
+            if ($c.PSObject.Properties.Name -contains 'replaced_by') {
+                $rb = Get-AutoOSComponentProperty $c 'replaced_by' $null
+                if (-not (Test-AutoOSTombstone -Component $c)) {
+                    [void]$problems.Add("$where : 'replaced_by' is only meaningful on a tombstone entry")
+                }
+                if ($rb -isnot [System.Array] -or @($rb | Where-Object { $_ }).Count -eq 0) {
+                    [void]$problems.Add("$where : 'replaced_by' must be a non-empty list of component ids")
+                }
+                foreach ($r in @($rb | Where-Object { $_ })) {
+                    if ($r -notin $allIds)     { [void]$problems.Add("$where : 'replaced_by' names unknown component '$r'") }
+                    if ($r -in $retiredIds)    { [void]$problems.Add("$where : 'replaced_by' names '$r', a tombstone that installs nothing") }
+                }
+            }
             if ($c.PSObject.Properties.Name -contains 'homepage') {
                 if ($c.homepage -notmatch '^https?://') {
                     [void]$problems.Add("$where : 'homepage' must be an http(s) URL")
@@ -172,6 +191,95 @@ function Format-AutoOSTombstoneSkip {
     if ($note) { "skipped: retired ($note)" } else { 'skipped: retired' }
 }
 
+function Get-AutoOSTombstoneReplacements {
+    <#
+      .SYNOPSIS
+        The ids a retired entry names as taking its work on, as a plain array.
+      .DESCRIPTION
+        Reads 'ReplacedBy' on the flattened projection and 'replaced_by' on the
+        raw JSON entry, the same pair Get-AutoOSTombstoneNote reads, so the
+        expansion asks one question rather than two.
+    #>
+    param([Parameter(Mandatory)][psobject]$Component)
+    $rb = Get-AutoOSComponentProperty $Component 'ReplacedBy' $null
+    if ($null -eq $rb) { $rb = Get-AutoOSComponentProperty $Component 'replaced_by' @() }
+    @($rb | Where-Object { $_ })
+}
+
+function Format-AutoOSTombstoneReplacement {
+    <#
+      .SYNOPSIS
+        The muted line a replay prints when a retired id stands for other work.
+      .DESCRIPTION
+        One home for the wording, as with the skip line: setup.ps1 and the suite
+        read the same string rather than each spelling it out.
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Component,
+        [Parameter(Mandatory)][string[]]$Replacements
+    )
+    "$($Component.Id) is retired: replaced by $($Replacements -join ', ')"
+}
+
+function Expand-AutoOSTombstoneReplacements {
+    <#
+      .SYNOPSIS
+        A selection with every retired id followed by the ids that replaced it.
+      .DESCRIPTION
+        A state file saved before a component was retired names the retired id and
+        none of its successors, so replaying it booked the retirement and installed
+        nothing - the work the user had simply stopped happening. Every selection
+        built from explicit ids is expanded here: -FromState, -Only, and a browser
+        run, whose -Serve passes the selection through as -Only. A profile never
+        names a tombstone, so a profile run never comes through.
+
+        Returns @{ Ids; Lines }. The retired row stays in Ids - it is what still
+        reports 'skipped: retired' - and Lines is one announcement per retired id
+        that has successors in the plan. A successor this machine does not offer is
+        left out, so the line and the plan can never disagree, and a successor the
+        selection already lists is not added twice. A successor that is itself
+        retired is expanded in turn, which is how a second retirement of the same
+        work still lands.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Available,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$SelectedIds
+    )
+
+    $byId = @{}
+    foreach ($c in $Available) { if (-not $byId.ContainsKey($c.Id)) { $byId[$c.Id] = $c } }
+
+    $seen = @{}
+    $queue = New-Object System.Collections.Queue
+    foreach ($id in $SelectedIds) {
+        if (-not $id -or $seen.ContainsKey($id)) { continue }
+        $seen[$id] = $true
+        [void]$queue.Enqueue($id)
+    }
+
+    $ids   = New-Object System.Collections.ArrayList
+    $lines = New-Object System.Collections.ArrayList
+    while ($queue.Count -gt 0) {
+        $id = $queue.Dequeue()
+        [void]$ids.Add($id)
+        if (-not $byId.ContainsKey($id)) { continue }
+        $c = $byId[$id]
+        if (-not (Test-AutoOSTombstone -Component $c)) { continue }
+        $named = @()
+        foreach ($r in @(Get-AutoOSTombstoneReplacements -Component $c)) {
+            if ($seen.ContainsKey($r)) { $named += $r; continue }
+            if (-not $byId.ContainsKey($r)) { continue }   # not offered on this machine
+            $seen[$r] = $true
+            [void]$queue.Enqueue($r)
+            $named += $r
+        }
+        if (-not $named.Count) { continue }
+        [void]$lines.Add((Format-AutoOSTombstoneReplacement -Component $c -Replacements $named))
+    }
+
+    [pscustomobject]@{ Ids = @($ids); Lines = @($lines) }
+}
+
 function Get-AutoOSAvailableComponents {
     <#
       .SYNOPSIS
@@ -219,6 +327,7 @@ function Get-AutoOSAvailableComponents {
                 Notes       = Get-AutoOSComponentProperty $c 'notes' $null
                 Tombstone   = (Test-AutoOSTombstone -Component $c)
                 RetireNote  = Get-AutoOSComponentProperty $c 'note' $null
+                ReplacedBy  = @(Get-AutoOSComponentProperty $c 'replaced_by' @())
                 Category    = $cat.name
                 CategoryId  = $cat.id
             })
@@ -391,4 +500,5 @@ Export-ModuleMember -Function `
     Get-AutoOSCatalog, Test-AutoOSCatalogSchema, Get-AutoOSAvailableComponents,
     New-AutoOSMenuItem, Resolve-AutoOSPlan, Get-AutoOSComponentProperty,
     Test-AutoOSTombstone, Get-AutoOSTombstoneNote, Format-AutoOSTombstoneSkip,
-    Get-AutoOSProfileDefaults
+    Get-AutoOSTombstoneReplacements, Format-AutoOSTombstoneReplacement,
+    Expand-AutoOSTombstoneReplacements, Get-AutoOSProfileDefaults
