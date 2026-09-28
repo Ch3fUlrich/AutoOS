@@ -274,12 +274,28 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   registry as the provider's `unavailable_until` — `unavailable_now` already skips it and lets it
   expire on its own, so nothing is ever hand-undone. The renders and `registry.py validate` keep
   reading the plain registry: a dated observation must not move a drift gate.
+- **Ready is read off the record, not off a claim (REVROUTE, S2 item 5).** A lane is ready when its
+  record carries two review entries: one `kind=cross-family` — a reviewer whose registry `family`
+  differs from the author's — and one `kind=final` naming the Sonnet sign-off. They are two
+  requirements because they are two different jobs: Sonnet shares the orchestrator's family, so it can
+  never satisfy the cross-family rule, and a cross-family review that said FIX-FIRST must not satisfy
+  the sign-off either. An entry is one line in the record's markdown
+  (`AutoOS-Review: kind=… author=… reviewer=… verdict=…`) and `run` prints the same line, unfilled, as
+  `record-line:` — a gate nobody can write to is a gate nobody passes. Families resolve against the
+  registry (`policy.reviewers` first, then `models`), and a reviewer spelling nothing resolves is
+  refused rather than guessed: `author_family` reads an unknown *author* as a bare family name
+  (cross-family to everyone is the safe answer for who wrote a diff), but the same reading of an
+  unknown *reviewer* would certify a review that never happened.
 
 ## 6. Interfaces
 
 ### 6.1 CLI
 
 - `tools/autoos-agent.py route --card … [--explain]` prints the `route_plan`; `run` takes card v2.
+- `tools/autoos-agent.py review-status <record> [--registry PATH]` (or `-` for stdin) reads a lane
+  record and prints which of the two review entries §5.7 requires: exit 0 ready, 1 a review is
+  missing or still open, 2 the record could not be read — a typo'd path is not a lane that needs
+  reviewing, and a caller that waits on 1 would wait forever on that mistake.
 - `tools/autoos-agent.py context [--transcript PATH]` prints the calling session's context fill:
   tokens = input + cache-read + cache-creation of the latest assistant usage record in the Claude Code
   transcript JSONL (other clients: their own session log, or `unknown`), the cap for the model (§8.3)

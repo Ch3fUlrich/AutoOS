@@ -5904,6 +5904,15 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertIn("--model omniroute/muse", out.replace("'", ""))
         self.assertIn("reviewer: opencode omniroute/muse (family meta, author qwen)", out)
 
+    def test_the_run_prints_the_record_entry_the_lane_record_needs(self):
+        # REVROUTE (S2) item 5: readiness is read off the record, so the spawn
+        # that did the review has to hand over the line that goes in it --
+        # otherwise the gate asks for something nobody writes.
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("record-line: AutoOS-Review: kind=cross-family "
+                      "author=qwen reviewer=omniroute/muse", out)
+
     def test_a_reviewer_model_that_opencode_json_does_not_declare_is_refused(self):
         # REVROUTE (S2) item 4: the paid Muse reviewer must be DECLARED as a
         # spawnable heading. Until it is, the run fails loudly instead of
@@ -6314,6 +6323,153 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
         self.assertEqual(model, "opencode/deepseek-v4.1-flash")
         self.assertIsNone(combo, "no gateway combo to rename: the route stands")
         self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
+
+
+CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                     "reviewer=omniroute/muse verdict=PASS")
+FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+
+
+class ReviewStatusTests(unittest.TestCase):
+    """REVROUTE (S2) item 5: a lane is not ready because the orchestrator says so.
+
+    A lane record must carry two review entries before it can be called ready --
+    one cross-family review (a reviewer whose model FAMILY differs from the
+    author's, the rule items 1-2 made data) and the Sonnet final check (the
+    operator's unchanged decision). This reads the record, not a person's
+    summary of it, and says which of the two is missing and why.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # The command reads a registry file, so the fixture has to be one: the
+        # alternative is pointing the command at the real catalog and having it
+        # fail on a fixture spelling for a reason the test is not about.
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def status(self, text):
+        return self.agent.review_status(text, self.registry)
+
+    def cmd(self, path):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_review_status(
+                argparse.Namespace(record=path, registry=self.registry_path))
+        return rc, out.getvalue(), err.getvalue()
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    # --- what counts -------------------------------------------------------
+
+    def test_a_record_with_both_entries_is_ready(self):
+        # Prose around the entries is the norm: a record is a markdown report,
+        # and an entry may sit in a bullet or under a heading.
+        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n"
+                             % (CROSS_FAMILY_LINE, FINAL_LINE))
+        self.assertTrue(report["ready"], report)
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertTrue(report["final"]["ok"])
+
+    def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
+        report = self.status(CROSS_FAMILY_LINE)
+        self.assertFalse(report["ready"])
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertFalse(report["final"]["ok"])
+        self.assertIn("sonnet", report["final"]["detail"].lower())
+
+    def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
+        report = self.status(FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("kind=cross-family", report["cross_family"]["detail"])
+
+    def test_a_same_family_reviewer_is_not_a_cross_family_review(self):
+        # The author reviewing its own family is the exact case this gate exists
+        # for, even with a PASS on the line.
+        report = self.status("AutoOS-Review: kind=cross-family author=gem-flash "
+                             "reviewer=gem-flash verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_reviewer_is_not_guessed_into_a_family(self):
+        # author_family() takes an unknown AUTHOR name as a bare family (the
+        # safe reading of who wrote it). A REVIEWER must be known: an invented
+        # spelling would otherwise differ from every author family and read as
+        # an independent review that never happened.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=not-a-model-anywhere verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("not-a-model-anywhere", report["cross_family"]["detail"])
+
+    def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
+        # "Reviewed, said FIX-FIRST" and "never reviewed" need different next
+        # actions; collapsing them to "missing" would hide an open finding.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=FIX-FIRST\n"
+                             "AutoOS-Review: kind=final reviewer=sonnet verdict=FIX-FIRST")
+        self.assertFalse(report["ready"])
+        self.assertIn("FIX-FIRST", report["cross_family"]["detail"])
+        self.assertIn("FIX-FIRST", report["final"]["detail"])
+
+    def test_an_entry_missing_a_reviewer_is_listed_as_malformed(self):
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertEqual(len(report["malformed"]), 1)
+
+    def test_a_record_with_no_entries_says_so_with_the_line_format(self):
+        report = self.status("# Lane x\n\nSTATUS: DONE. Gate green, shipped it.\n")
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["entries"], 0)
+        # The hint is the whole usability of the gate: nobody reads the source.
+        self.assertIn("AutoOS-Review: kind=", report["hint"])
+
+    # --- the command's contract -------------------------------------------
+
+    def test_the_command_exits_0_on_a_ready_record(self):
+        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 0)
+        self.assertIn("ready", out)
+
+    def test_the_command_exits_1_and_names_the_missing_review(self):
+        path = self.write_record("# Lane x", FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 1)
+        self.assertIn("cross-family", out)
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        # rc 1 is "not ready yet"; rc 2 is "the gate could not run" — a caller
+        # that treats 1 as "wait" must not wait forever on a typo'd path.
+        rc, _out, err = self.cmd(os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+
+    # --- reality, not the fixture -----------------------------------------
+
+    def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "meta")
+        # Haiku is the fallback first pass: it counts as a cross-family reviewer
+        # for a non-anthropic author, and the same anthropic family as Sonnet's
+        # final check — which is why the two entries are different requirements.
+        self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
 
 
 def _reviewer_client_state():

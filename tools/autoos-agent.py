@@ -878,6 +878,173 @@ def review_run_refusal(review: dict | None):
     return refuse("reviewer unavailable: %s" % review["reason"])
 
 
+# REVROUTE (S2) item 5: what a lane record must SAY before the lane is ready.
+# A line, not a section: the record is free-form markdown a person writes, so
+# the gate looks for one machine-readable line per review and ignores the prose
+# around it. `review-status` prints the same hint it parses, and `run` prints a
+# paste-ready one, so the format is never something you have to go looking for.
+REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
+READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm"))
+# The final check is the operator's unchanged decision (Q-003 2026-09-27): a
+# cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
+# registry route -- it is the orchestrator's own interactive model -- so this one
+# matches the NAME, while the cross-family half is decided by registry families.
+FINAL_REVIEWER = "sonnet"
+REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
+                     "reviewer=<model> verdict=<ready|pass|lgtm|...>")
+
+
+def reviewer_family(spelling, registry):
+    """The model FAMILY of a reviewer named in a lane record, or None.
+
+    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
+    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
+    keeps its ``family`` honest against ``models``. Then the registry's own model
+    ids, whole and after a client/provider prefix.
+
+    Unknown returns None rather than a guess. ``author_family`` deliberately
+    reads an unknown *author* as a bare family name -- cross-family to everyone is
+    the safe answer for who wrote a diff -- but an invented *reviewer* name would
+    differ from every author family the same way, and that would read as an
+    independent review that never happened.
+    """
+    if not isinstance(spelling, str) or not spelling.strip():
+        return None
+    name = spelling.strip()
+    for entry in ((registry.get("policy") or {}).get("reviewers") or []):
+        if entry.get("model") == name:
+            return entry.get("family")
+    models = registry.get("models") or {}
+    for candidate in (name, name.rpartition("/")[2]):
+        entry = models.get(candidate)
+        if isinstance(entry, dict):
+            return entry.get("family")
+    return None
+
+
+def _review_entry_verdict(entry):
+    """``(ok, reason)`` for one entry's verdict field."""
+    verdict = (entry.get("verdict") or "").strip()
+    if verdict.lower() in READY_VERDICTS:
+        return True, None
+    return False, "verdict %s" % (verdict or "missing")
+
+
+def _cross_family_review(entries, registry):
+    """The record's independent review: a reviewer from a DIFFERENT family."""
+    wanted = [e for e in entries if e.get("kind") == "cross-family"]
+    if not wanted:
+        return {"ok": False, "family": None,
+                "detail": "no AutoOS-Review: kind=cross-family entry"}
+    reasons = []
+    for entry in wanted:
+        reviewer = entry["reviewer"]
+        family = reviewer_family(reviewer, registry)
+        if family is None:
+            reasons.append("%s is not a known reviewer (policy.reviewers or models)"
+                           % reviewer)
+            continue
+        author, why = resolver.author_family(entry.get("author") or "", registry)
+        if author is None:
+            reasons.append("author: %s" % why)
+            continue
+        if author == family:
+            reasons.append("%s is the same family as the author (%s)" % (reviewer, family))
+            continue
+        ok, reason = _review_entry_verdict(entry)
+        if not ok:
+            reasons.append("%s %s" % (reviewer, reason))
+            continue
+        return {"ok": True, "family": family,
+                "detail": "%s reviewed by %s (%s)" % (entry.get("author"), reviewer, family)}
+    return {"ok": False, "family": None, "detail": "; ".join(reasons)}
+
+
+def _final_review(entries):
+    """The record's sign-off: a kind=final entry naming the final checker."""
+    wanted = [e for e in entries if e.get("kind") == "final"]
+    if not wanted:
+        return {"ok": False,
+                "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
+    named = [e for e in wanted if FINAL_REVIEWER in e["reviewer"].lower()]
+    if not named:
+        return {"ok": False,
+                "detail": "the final entries name %s, not %s"
+                          % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
+    reasons = []
+    for entry in named:
+        ok, reason = _review_entry_verdict(entry)
+        if ok:
+            return {"ok": True,
+                    "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
+        reasons.append("%s %s" % (entry["reviewer"], reason))
+    return {"ok": False, "detail": "; ".join(reasons)}
+
+
+def review_status(text, registry):
+    """Which of the two reviews a lane record carries, read off the record itself.
+
+    An item 2 spawn has already proved a reviewer EXISTS for this card; this is
+    the other half -- proof it RAN and said something, in the file that gets
+    merged. A same-family reviewer, an unknown reviewer spelling and a verdict
+    that says FIX-FIRST all fail, and each says which, because "missing" would
+    send someone to book a review that already happened and did not pass.
+    """
+    entries, malformed = [], []
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        fields = {}
+        for token in match.group("body").split():
+            key, _sep, value = token.partition("=")
+            if value and key.lower() in REVIEW_ENTRY_FIELDS:
+                fields[key.lower()] = value
+        if fields.get("kind") and fields.get("reviewer"):
+            entries.append(fields)
+        else:
+            malformed.append(match.group("body").strip())
+    cross = _cross_family_review(entries, registry)
+    final = _final_review(entries)
+    return {"entries": len(entries), "malformed": malformed,
+            "cross_family": cross, "final": final,
+            "ready": cross["ok"] and final["ok"],
+            "hint": REVIEW_ENTRY_HINT}
+
+
+def cmd_review_status(args) -> int:
+    """Report whether a lane record carries both reviews a ready lane needs.
+
+    Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
+    read -- a typo'd path is not a lane that needs reviewing, and a caller that
+    waits on 1 would wait forever on that mistake.
+    """
+    path = args.record
+    try:
+        if path == "-":
+            text, label = sys.stdin.read(), "<stdin>"
+        else:
+            with io.open(path, encoding="utf-8") as fh:
+                text, label = fh.read(), path
+    except OSError as exc:
+        print("review-status: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print("review-status: %s -- %d review entr%s"
+          % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
+    for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
+        item = report[key]
+        print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+    for line in report["malformed"]:
+        print("  note: entry without a kind= or reviewer= ignored: %s" % line)
+    if not report["entries"]:
+        print("  note: write one line per review, e.g.: %s" % report["hint"])
+    print("ready: %s" % ("yes" if report["ready"] else "no"))
+    return 0 if report["ready"] else 1
+
+
 def reviewer_run_override(review, client, cfg, tier, model, override, free):
     """``(model, combo, note)`` -- the run this reviewer resolution implies.
 
@@ -2822,6 +2989,11 @@ def cmd_run(args, cfg: dict) -> int:
         print("reviewer: %s %s (family %s, author %s)" % (
             reviewer["client"], reviewer["model"], reviewer["family"],
             route["review_plan"]["author_family"]))
+        # Item 5: the line that has to end up in the lane record for the lane to
+        # read as reviewed. Filling in the verdict is the reviewer's job at the
+        # end of the run, not the spawner's guess at the start of it.
+        print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
+              "verdict=<fill in>" % (route["card"].get("author"), reviewer["model"]))
         for line in resolver.reviewer_explain_lines(route["review_plan"]):
             print(line)
     if route.get("reviewer_note"):
@@ -3196,6 +3368,14 @@ def main(argv=None) -> int:
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+    review_status_p = sub.add_parser(
+        "review-status", help="read a lane record and report whether it carries both "
+                              "reviews a ready lane needs: a cross-family review and the "
+                              "final check (REVROUTE)")
+    review_status_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
+    review_status_p.add_argument("--registry",
+                                 help="registry to resolve model families against "
+                                      "(default: catalog/ai-registry.json)")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
@@ -3203,6 +3383,8 @@ def main(argv=None) -> int:
         return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
+    if args.cmd == "review-status":
+        return cmd_review_status(args)
     if args.cmd == "ps":
         return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
