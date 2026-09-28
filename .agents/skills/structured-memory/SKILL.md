@@ -216,10 +216,10 @@ graphs from a project session. What you can do, in one cheap query, is prove the
 right:
 
 ```gq
-query whoami() { match { $p: Project } return { $p.slug, $p.repository } }
+query whoami() { match { $p: Project  $d: Decision  $d.slug = "autoos-adr-0006-launch-time-routing-resolver"  $d decidedIn $p } return { $p.slug, $d.slug } }
 ```
 
-If `repository` does not match your `origin`, the bridge is serving **another repository's
+If the query returns 0 rows (it must return exactly one, `autoos` + the ADR slug; `Project` has no `repository` property in the live schema, so it keys on a decision only this repo's graph holds), the bridge is serving **another repository's
 graph**, and every recall you are about to act on describes a different codebase. That is
 the `~/.claude.json` user-scope override CLAUDE.md documents at length — and until this
 property existed it had no cheap detector, because a graph that is merely *the wrong one*
