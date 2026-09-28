@@ -24,8 +24,10 @@ here):
 
 - ``Bash(cmd:*)`` - a matcher of exactly ``<cmd>:*`` with no other wildcard
   - is a prefix match: the command equals ``<cmd>`` or starts with
-  ``<cmd> `` (one trailing space). ``Bash(git push:*)`` is the coordinator
-  lane-push grant.
+  ``<cmd> `` (one trailing space). ``Bash(git push origin *)`` is an
+  example whole-line glob grant (the round-8 L1 lane-push shape);
+  the pre-round-8 ``Bash(git push:*)`` prefix grant is kept in the
+  model tests below only as a prefix-form example.
 - A rule matcher without ``:*`` and without ``*`` is an exact match: only
   that exact command matches (``env`` matches ``env``, not ``env FOO=1`` -
   hence the harness carries both ``env`` and ``env *``).
@@ -41,6 +43,12 @@ here):
   launch flags, the Phase 2 concern noted in the generator docstring).
 - ``deny`` is evaluated before ``allow`` (the precedence rule the
   contradiction test pins).
+
+Assumptions taken from the Claude Code documentation and pinned ONLY in
+this model (re-verify when the CLI changes): deny-before-allow
+precedence, and ``*`` crossing ``/`` in path rules. If the CLI ever
+stops evaluating deny first, or stops letting ``*`` span ``/``, the
+tables below prove nothing until this model is updated.
 
 KNOWN divergences of this model from the real CLI (each pinned by a deny
 test, so the gap fails closed, never open):
@@ -349,11 +357,14 @@ BRANCH_DENY_COMMANDS = (
 # forms, so the fence must let them through. main2 pins the no-over-deny
 # boundary (a branch merely containing "main" is not main). The -u and
 # uppercase spellings pin the coordinator grant's explicit-refspec pushes.
+# Round 8: the L1 grant requires an explicit origin ref, so non-origin
+# remotes (e.g. `git push upstream wt-example-1`) are no longer pre-granted
+# - they fall to the permission prompt (none), tested in the round-8
+# falls-to-prompt table, not here.
 BRANCH_LANE_COMMANDS = (
     "git push origin wt-example-1",
     "git push origin agent/20260928-120000-example-task-a1b2c3",
     "git push origin main2",
-    "git push upstream wt-example-1",
     "git push origin WS-FOO",
     "git push -u origin L1-backlog/x",
 )
@@ -468,8 +479,11 @@ BRANCH_L2_LEADING_OPTION_DENY_COMMANDS = (
     "git push --prune origin L2-x",
 )
 
-# Round-5 commands with the other roles' decisions pinned (unchanged by this
-# round - the new shape denies render ONLY into l2-orchestrator):
+# Round-5 commands with the other roles' decisions pinned (round 8
+# restatement for one row - the L1 grant now requires an explicit origin
+# ref, so `git push --prune origin L2-x` matches no L1 allow and falls to
+# prompt instead of allowing as before; the new shape denies still render
+# ONLY into l2-orchestrator):
 # (command, l1-decision, l0-decision). Leaf is deny for every row (the leaf
 # push fence catches every `git push`); l2 is deny for every row (asserted
 # in the l2 tests above, not here).
@@ -487,7 +501,7 @@ BRANCH_L2_ROUND5_OTHER_ROLES = (
     ("git push -u origin L2-x --prune", "allow", "none"),
     ("git push --force origin L2-x", "deny", "deny"),
     ("git push -f origin L2-x", "deny", "deny"),
-    ("git push --prune origin L2-x", "allow", "none"),
+    ("git push --prune origin L2-x", "none", "none"),
 )
 
 # L2 workflow dispatch (round 3, D-138): only --ref on the own prefix is
@@ -589,6 +603,116 @@ ROUND6_L1_ALLOW_COMMANDS = (
     "git push origin L1-routing/x",
     "git push -u origin L1-routing/x",
     "gh workflow run ci.yml --ref L1-routing/x",
+)
+
+# Round 8, no-ref / matching / @ forms (spec 3.3): each allowed on l1
+# before this round under `Bash(git push:*)` (measured with decide() on
+# the rendered l1-coordinator profile) - a bare remote pushes the
+# checked-out branch (main in a root checkout), `:` / `+:` match every
+# same-named branch including main, `@` is HEAD. Each must deny on EVERY
+# profile now, including the trailing-space spellings the narrowed
+# `git push origin *` / `-u` / `-q` allow globs could still reach.
+ROUND8_PUSH_NOREF_DENY_COMMANDS = (
+    "git push origin",
+    "git push origin ",
+    "git push -u origin",
+    "git push -u origin ",
+    "git push -q origin",
+    "git push -q origin ",
+)
+ROUND8_PUSH_MATCHING_AT_DENY_COMMANDS = (
+    "git push origin :",
+    "git push origin : ",
+    "git push origin +:",
+    "git push origin +: ",
+    "git push origin @",
+    "git push origin @ ",
+)
+
+# Round 8, default-branch / other-repo dispatch (spec Q4): `gh workflow
+# run ci.yml` with no --ref dispatches on the default branch (main) and
+# `-R` / `--repo` dispatches on another repo - each allowed on l1 before
+# this round under `Bash(gh workflow run:*)` (measured). The bare run
+# falls to prompt after narrowing (no allow matches); the `-R`/`--repo`
+# forms must deny on EVERY profile now.
+ROUND8_GH_REPO_DENY_COMMANDS = (
+    "gh workflow run ci.yml -R other/repo --ref x",
+    "gh workflow run ci.yml --repo other/repo --ref x",
+    "gh workflow run ci.yml --ref x --repo other/repo",
+)
+
+# Round 8, trailing-separator class: each allowed on l1 before this round
+# (measured - the split leaves one part and decide() matches the raw
+# text, whose ` main` fences are end/space-anchored and miss `main;`).
+# A trailing `;` is never needed, so each must deny on EVERY profile now.
+ROUND8_TRAILING_SEMI_DENY_COMMANDS = (
+    "git push origin main;",
+    "git push origin main;;",
+    "git push origin main; ",
+)
+
+# Round 8, comment class: bash drops `#...` and pushes the checked-out
+# branch - each allowed on l1 before this round (measured). Each must
+# deny on EVERY profile now. `git push ` (trailing space) and `git push ;`
+# are not allow after narrowing either (none and deny respectively) -
+# pinned in the not-allow test below, not here.
+ROUND8_COMMENT_DENY_COMMANDS = (
+    "git push origin #x",
+    "git push #x",
+)
+ROUND8_BARE_PUSH_NOT_ALLOW_COMMANDS = (
+    "git push ",
+    "git push ;",
+)
+
+# Round 8, last-flag-wins class for dispatch: pflag takes the LAST
+# `--ref`, and `-r` is gh's short `--ref`. `... --ref L2-x --ref wt-y`
+# allowed on l2 before this round (measured); `... --ref L1-x -r main`
+# already denied via the `*main*` fence and gains the `-r` fence as
+# defence in depth. Any double-`--ref` or any `-r` must deny on EVERY
+# profile now, plus the tab/CR/LF whitespace class push got in round 6.
+ROUND8_GH_DOUBLEREF_DENY_COMMANDS = (
+    "gh workflow run ci.yml --ref L2-x --ref wt-y",
+    "gh workflow run ci.yml --ref L1-x -r main",
+    "gh workflow run ci.yml --ref L2-x -r L2-y",
+)
+ROUND8_GH_SHORTREF_DENY_COMMANDS = (
+    "gh workflow run ci.yml -r main",
+    "gh workflow run ci.yml -r",
+    "gh workflow run ci.yml -r=main",
+)
+ROUND8_GH_WHITESPACE_DENY_COMMANDS = (
+    "gh workflow run ci.yml\t--ref L2-x",
+    "gh workflow run ci.yml\r--ref L2-x",
+    "gh workflow run ci.yml\n--ref L2-x",
+)
+
+# Round 8, L1 falls to prompt (decide() == "none", not "allow"): forms
+# the narrowed grant no longer pre-grants and no fence denies - a
+# non-origin remote, and a bare dispatch with no --ref. (A bare
+# `git push --force-with-lease origin L1-x` stays deny via the
+# `*--force*` fence, so it is not in this table.)
+ROUND8_L1_FALLS_TO_PROMPT_COMMANDS = (
+    "git push upstream L1-x",
+    "gh workflow run ci.yml",
+)
+
+# Round 8, allow-stays: the intended shapes still allow after narrowing
+# (checked: none matches a new deny). The `L1-routing/x:refs/heads/...`
+# refspec form is NOT pinned here - it is left to whatever the existing
+# refs/ fence says.
+ROUND8_L1_ALLOW_COMMANDS = (
+    "git push origin L1-routing/x",
+    "git push -u origin L1-routing/x",
+    "git push -q origin L1-routing/x",
+    "gh workflow run ci.yml --ref L1-routing/x",
+    "gh workflow run ci.yml --ref=L1-routing/x",
+)
+ROUND8_L2_ALLOW_COMMANDS = (
+    "git push origin L2-x",
+    "git push -u origin L2-x",
+    "gh workflow run ci.yml --ref L2-x",
+    "gh workflow run ci.yml --ref=L2-x",
 )
 
 
@@ -1072,6 +1196,164 @@ class Round7MetacharRefTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# round 8: the L1 grant requires an explicit origin ref; no-ref,
+# matching, @, default-branch, trailing ;, comment and last-ref-wins
+# forms deny (or fall to prompt) on every role
+
+
+class Round8ExplicitRefTests(unittest.TestCase):
+    def test_noref_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_PUSH_NOREF_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_matching_and_at_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_PUSH_MATCHING_AT_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_other_repo_dispatch_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_GH_REPO_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_trailing_separator_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_TRAILING_SEMI_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_comment_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_COMMENT_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_bare_push_forms_are_not_allow(self):
+        # `git push ` (trailing space) strips to the bare command but
+        # matches no allow after narrowing (none); `git push ;` carries
+        # the round-8 `;` class fence (deny). Either way, not allow.
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_BARE_PUSH_NOT_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertNotEqual(
+                        decide(profile, "Bash", command),
+                        "allow",
+                        "%s is allowed by %s" % (command, role),
+                    )
+
+    def test_doubleref_and_shortref_dispatch_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in (
+                ROUND8_GH_DOUBLEREF_DENY_COMMANDS + ROUND8_GH_SHORTREF_DENY_COMMANDS
+            ):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_gh_whitespace_dispatch_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_GH_WHITESPACE_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_l1_falls_to_prompt_for_unlisted_shapes(self):
+        # Narrowing never blocks: forms matching no allow fall to the
+        # permission prompt (none), they only stop being pre-granted.
+        # `git push --force-with-lease origin L1-x` stays deny via the
+        # `*--force*` fence, so it is asserted deny, not none.
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_L1_FALLS_TO_PROMPT_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "none",
+                        "%s is not unlisted on %s" % (command, role),
+                    )
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            with self.subTest(role=role):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", "git push --force-with-lease origin L1-x")
+                )
+
+    def test_l1_allow_stays(self):
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in ROUND8_L1_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertFalse(decide_deny(profile, "Bash", command))
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l2_allow_stays(self):
+        profile = load_profile("l2-orchestrator")
+        for command in ROUND8_L2_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l2_trailing_dispatch_is_denied(self):
+        # Anything after the L2 ref denies on l2 (mirrors round 5 for
+        # push); the double---ref rows above already deny on every
+        # profile, this pins the trailing-option shape on l2.
+        profile = load_profile("l2-orchestrator")
+        for command in (
+            "gh workflow run ci.yml --ref L2-x --job build",
+            "gh workflow run ci.yml --ref=L2-x --job build",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", command),
+                    "%s is not denied by l2-orchestrator" % command,
+                )
+
+    def test_no_allow_rule_contains_semi_hash_or_tab(self):
+        # The fences deny the ;/# / whitespace classes; no pre-grant may
+        # smuggle one back in through an allow entry.
+        for role in ROLES:
+            allow = perms_of(load_profile(role))["allow"]
+            for rule in allow:
+                with self.subTest(role=role, rule=rule):
+                    self.assertNotIn(";", rule)
+                    self.assertNotIn("#", rule)
+                    self.assertNotIn("\t", rule)
+                    self.assertNotIn("\r", rule)
+                    self.assertNotIn("\n", rule)
+
+
+# ---------------------------------------------------------------------------
 # wrapper/option forms and compound commands (H3), prefix divergences (M1)
 
 
@@ -1446,6 +1728,47 @@ CONTRADICTION_TARGETS = {
     "Bash(*gh workflow run*&*)": "gh workflow run ci.yml --ref main&",
     "Bash(*gh workflow run*>*)": "gh workflow run ci.yml --ref main>/dev/null",
     "Bash(*gh workflow run*<*)": "gh workflow run ci.yml --ref main</dev/null",
+    # Round-8 no-ref / matching / @ exact shapes (MAIN_FENCE, every
+    # role): each target is the bare or trailing-space form the
+    # narrowed `git push origin *` / `-u` / `-q` allows could still
+    # reach through whitespace.
+    "Bash(*git push origin)": "git push origin",
+    "Bash(*git push origin )": "git push origin ",
+    "Bash(*git push -u origin)": "git push -u origin",
+    "Bash(*git push -u origin )": "git push -u origin ",
+    "Bash(*git push -q origin)": "git push -q origin",
+    "Bash(*git push -q origin )": "git push -q origin ",
+    "Bash(*git push * :)": "git push origin :",
+    "Bash(*git push * : *)": "git push origin : ",
+    "Bash(*git push * +:)": "git push origin +:",
+    "Bash(*git push * +: *)": "git push origin +: ",
+    "Bash(*git push * @)": "git push origin @",
+    "Bash(*git push * @ *)": "git push origin @ ",
+    # Round-8 trailing-separator and comment classes (MAIN_FENCE,
+    # every role).
+    "Bash(*git push*;*)": "git push origin main;",
+    "Bash(*git push*#*)": "git push origin #x",
+    # Round-8 default-branch / other-repo shapes (GH_REF_MAIN, every
+    # role).
+    "Bash(*gh workflow run* -R *)": "gh workflow run ci.yml -R other/repo --ref x",
+    "Bash(*gh workflow run* --repo*)": "gh workflow run ci.yml --repo other/repo --ref x",
+    # Round-8 last-flag-wins class (GH_REF_MAIN, every role): the
+    # double---ref target matches an L1 allow glob too, so the
+    # contradiction test proves the fence beats the allow; the -r
+    # targets match the L1 allow as well (`*` spans `-r main`).
+    "Bash(*gh workflow run*--ref*--ref*)": "gh workflow run ci.yml --ref L2-x --ref wt-y",
+    "Bash(*gh workflow run* -r *)": "gh workflow run ci.yml --ref L1-x -r main",
+    "Bash(*gh workflow run* -r)": "gh workflow run ci.yml -r",
+    "Bash(*gh workflow run* -r=*)": "gh workflow run ci.yml -r=main",
+    # Round-8 whitespace class for dispatch (GH_REF_MAIN, every role).
+    "Bash(*gh workflow run*\t*)": "gh workflow run ci.yml\t--ref L2-x",
+    "Bash(*gh workflow run*\r*)": "gh workflow run ci.yml\r--ref L2-x",
+    "Bash(*gh workflow run*\n*)": "gh workflow run ci.yml\n--ref L2-x",
+    # Round-8 L2 dispatch trailing shape (l2 only, mirrors round 5 for
+    # push): each target matches an L2 allow glob, so the contradiction
+    # test proves the shape fence beats the allow.
+    "Bash(gh workflow run * --ref L2-* *)": "gh workflow run ci.yml --ref L2-x --job build",
+    "Bash(gh workflow run * --ref=L2-* *)": "gh workflow run ci.yml --ref=L2-x --job build",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that
@@ -1544,15 +1867,20 @@ class RenderTests(unittest.TestCase):
 
     def test_grant_sets_are_shared_not_copied(self):
         # One template per role name, rendered from shared grant sets so they
-        # cannot drift: only the L1 roles carry the full lane-push /
-        # workflow pre-grants, l1-routing extends them with exactly the
+        # cannot drift: only the L1 roles carry the lane-push /
+        # workflow pre-grants (round 8: an explicit origin ref for push
+        # and an explicit --ref for dispatch - never the bare prefix
+        # grants), l1-routing extends them with exactly the
         # apply.sh grant, l2-orchestrator carries exactly the narrower
-        # own-prefix set (round 3, D-138 - never the bare L1 grants), and
+        # own-prefix set (round 3, D-138 - never the L1 grants), and
         # every other role carries no pre-grant.
         profiles = {role: perms_of(load_profile(role))["allow"] for role in ROLES}
         base = profiles["l1-coordinator"]
         self.assertEqual(base, list(lp.COORDINATOR_ALLOW))
-        self.assertIn("Bash(gh workflow run:*)", base)
+        self.assertIn("Bash(gh workflow run * --ref *)", base)
+        self.assertIn("Bash(gh workflow run * --ref=*)", base)
+        self.assertNotIn("Bash(git push:*)", base)
+        self.assertNotIn("Bash(gh workflow run:*)", base)
         routing = profiles["l1-routing"]
         self.assertEqual(routing[:-1], base)
         self.assertEqual(routing[-1], "Bash(bash configuration/omniroute/apply.sh:*)")

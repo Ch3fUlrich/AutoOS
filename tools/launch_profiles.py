@@ -60,15 +60,29 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    class fences (spec 3.3): any git push whose text contains a
    backslash, a brace, an ampersand, a `>` or a `<` is denied on every
    role (the ref must be plain literal text - any bash metacharacter
-   that rewrites or ends a word next to it denies, fail closed).
+   that rewrites or ends a word next to it denies, fail closed);
+   plus the round-8 exact-shape fences (spec 3.3): the no-ref forms
+   (`git push origin`, `git push -u origin`, `git push -q origin`,
+   bare and trailing-space), the matching pushes (`:` / `+:` bare
+   and spaced) and `@` (HEAD, bare and spaced) - a push must name
+   its ref so the fences can see it; plus the trailing-`;` class
+   (a `;` after `git push` is never needed) and the `#` comment
+   class (bash drops the comment and pushes the checked-out
+   branch) - each denied on every role, fail closed.
 2. the ``gh workflow run --ref main`` fence (spec Q4): the L1
-   ``gh workflow run`` grant stays, an explicit ``--ref main`` (or
-   ``--ref=main``) dispatch does not - and the round-6 class fence: a
+   ``gh workflow run ... --ref ...`` grant stays, an explicit
+   ``--ref main`` (or ``--ref=main``) dispatch does not - and the round-6 class fence: a
    dispatch whose text contains a quote, a dollar sign or a backtick
    denies on every role (the fences see literal refs only) - and the
    round-7 class fence: a dispatch whose text contains a backslash, a
    brace, an ampersand, a `>` or a `<` denies on every role (the ref
-   must be plain literal text, fail closed).
+   must be plain literal text, fail closed) - and the round-8 fences:
+   a bare run (default branch = main) and any `-R`/`--repo`
+   (another repo) deny on every role, any dispatch carrying two
+   `--ref` flags or any `-r` (gh's short `--ref`, last-flag-wins)
+   denies on every role, and any dispatch containing a tab, CR or
+   LF denies on every role (the whitespace class push got in
+   round 6).
 3. the secret/credential entries of ``fences.bash_deny_all``, selected by
    ``bash_secret_patterns``: an entry is secret-relevant when its
    ``*``-stripped core contains a ``*``-stripped core of some
@@ -121,9 +135,14 @@ Two deny-precedence consequences a reviewer must know (both pinned by
 Role table (spec 2 launch identities; the Q2 default - the ``role`` field
 carries the launch identity, the MCP document rides as ``mcpConfig``):
 
-- ``l1-coordinator`` and ``l1-routing`` are the only roles with the full
-  pre-grants (review round 1, spec 3.2): the lane-branch push and
-  ``gh workflow run`` grants, with ``l1-routing`` alone extending them
+- ``l1-coordinator`` and ``l1-routing`` are the only roles with the
+  lane-branch push and workflow-dispatch pre-grants (review round 1,
+  spec 3.2; narrowed round 8): the push grant requires an explicit
+  origin ref - ``Bash(git push origin *)`` plus the ``-u``/``-q``
+  spellings - and the dispatch grant requires an explicit ``--ref``
+  (``Bash(gh workflow run * --ref *)`` plus the ``--ref=`` spelling),
+  so a push/dispatch must name its ref for the fences to see it;
+  with ``l1-routing`` alone extending them
   with the gateway ``apply.sh`` run grant (A1-D4, the MISTRALFIX precedent
   - the model may run the script but stays denied reading its key, which
   the script reads in its own process).
@@ -179,14 +198,21 @@ ROLES = {
 }
 
 # The shared grant sets, rendered per role so they cannot drift: only the L1
-# roles share the full lane-push / workflow pre-grants, l1-routing extends
+# roles share the lane-push / workflow pre-grants, l1-routing extends
 # them with exactly the apply.sh grant, l2-orchestrator carries exactly the
 # narrower L2-*-only set (plus its L2-only same-name-push deny fences, not
 # part of the allow set), every other role carries no pre-grant (spec 3.2
-# as fixed in review round 1 and narrowed in round 3, A1-D4, Q9).
+# as fixed in review round 1 and narrowed in round 3, A1-D4, Q9; L1
+# narrowed round 8: a push/dispatch must name its ref so the fences can
+# see it - forms not matching an allow are not blocked, they fall to the
+# permission prompt (fail safe), so narrowing never breaks a legitimate
+# unusual push, it only stops pre-granting it).
 COORDINATOR_ALLOW = (
-    "Bash(git push:*)",
-    "Bash(gh workflow run:*)",
+    "Bash(git push origin *)",
+    "Bash(git push -u origin *)",
+    "Bash(git push -q origin *)",
+    "Bash(gh workflow run * --ref *)",
+    "Bash(gh workflow run * --ref=*)",
 )
 APPLY_ALLOW = "Bash(bash configuration/omniroute/apply.sh:*)"
 # L2 lane-branch prefix (round 3, D-138; tightened round 4, shaped round
@@ -238,6 +264,14 @@ L2_ALLOW = L2_PUSH_ALLOW + L2_WORKFLOW_ALLOW
 # fences cannot shadow anything the L1 roles need. The ` -d` forms carry
 # a leading space so a branch merely ending in `-d` (`L2-x-d`) stays
 # outside the fence.
+# Round 8, L2 dispatch trailing shape (mirrors round 5 for push): the
+# L2 workflow allow globs' trailing `*` spans the space after the ref,
+# so `gh workflow run ci.yml --ref L2-x <anything>` (a second `--ref`
+# - last-flag-wins - or any trailing option) matches the allow. A
+# space after the L2 ref means a second argument of any kind and
+# denies on l2 only; the every-role double-`--ref` fence above is
+# defence in depth. Plain `... --ref L2-x` / `--ref=L2-x` (nothing
+# after the ref) still allow.
 L2_PUSH_DENY = (
     "*git push * *:*",
     "*git push *refs/*",
@@ -249,6 +283,8 @@ L2_PUSH_DENY = (
     "git push --* origin L2-*",
     "git push -f origin L2-*",
     "git push -d origin L2-*",
+    "gh workflow run * --ref L2-* *",
+    "gh workflow run * --ref=L2-* *",
 )
 
 GRANT_SETS = {
@@ -306,7 +342,8 @@ MAIN_FENCE = (
     "Bash(*git push*\n*)",
     # Round 6, quoting/expansion class: the fences match command text
     # literally, so `git push origin "main"` (or `'main'`, `$REF`,
-    # `$(...)`, backticks) allowed under `Bash(git push:*)` - no fence
+    # `$(...)`, backticks) allowed under the pre-round-8
+    # `Bash(git push:*)` grant - no fence
     # entry carries a literal ` main`. A push never needs quoting or
     # expansion here; the ref must be literal text so the fences can see
     # it, so any `git push` whose text contains a double quote, a single
@@ -336,6 +373,43 @@ MAIN_FENCE = (
     "Bash(*git push*&*)",
     "Bash(*git push*>*)",
     "Bash(*git push*<*)",
+    # Round 8, no-ref / matching / @ exact shapes (spec 3.3): the L1
+    # grant now requires an explicit origin ref (`git push origin *`
+    # and the -u/-q spellings), so a push naming only a remote
+    # (`git push origin`, `git push -u origin`, `git push -q origin`
+    # - push.default=simple pushes the checked-out branch, main in a
+    # root checkout), a matching push (`:` / `+:` pushes every
+    # same-named branch, main included) or `@` (HEAD) must deny
+    # outright on every role. The bare-token and trailing-space
+    # spellings are both fenced because the new allow globs'
+    # trailing `*` spans trailing whitespace. None of these denies
+    # the intended allows (`git push [-u/-q] origin <lane>` carries
+    # a ref after the space, so neither the bare nor the
+    # space-colon/@ shape matches).
+    "Bash(*git push origin)",
+    "Bash(*git push origin )",
+    "Bash(*git push -u origin)",
+    "Bash(*git push -u origin )",
+    "Bash(*git push -q origin)",
+    "Bash(*git push -q origin )",
+    "Bash(*git push * :)",
+    "Bash(*git push * : *)",
+    "Bash(*git push * +:)",
+    "Bash(*git push * +: *)",
+    "Bash(*git push * @)",
+    "Bash(*git push * @ *)",
+    # Round 8, trailing-separator class (spec 3.3): a trailing `;`
+    # is never needed; a real compound is split before matching, so
+    # its push part carries no `;`. The split leaves one part for a
+    # trailing `;` and decide() matches the raw text, whose ` main`
+    # fences are end/space-anchored and miss `main;` - so any
+    # `git push` whose text contains `;` after `git push` denies on
+    # every role (fail closed).
+    "Bash(*git push*;*)",
+    # Round 8, comment class (spec 3.3): bash drops `#...` and pushes
+    # the checked-out branch, so any `git push` whose text contains
+    # `#` after `git push` denies on every role (fail closed).
+    "Bash(*git push*#*)",
 )
 
 # gh workflow run naming main stays denied under the L1 grant. Round 6,
@@ -361,6 +435,32 @@ GH_REF_MAIN = (
     "Bash(*gh workflow run*&*)",
     "Bash(*gh workflow run*>*)",
     "Bash(*gh workflow run*<*)",
+    # Round 8, default-branch / other-repo shapes (spec 3.3): the L1
+    # grant now requires an explicit `--ref` (`gh workflow run *
+    # --ref *` and the `--ref=` spelling), so a bare run dispatches
+    # on the default branch (main) and `-R`/`--repo` dispatches on
+    # another repo - both deny outright on every role. Neither
+    # denies the intended allows (`--ref <lane>` carries no `-R`
+    # and no `--repo`).
+    "Bash(*gh workflow run* -R *)",
+    "Bash(*gh workflow run* --repo*)",
+    # Round 8, last-flag-wins class (spec 3.3): pflag takes the LAST
+    # `--ref`, so a second `--ref` decides the dispatch, and `-r`
+    # is gh's short `--ref` - either can smuggle main past a fence
+    # that sees only the first ref. Any dispatch carrying two
+    # `--ref` flags or any `-r` flag denies on every role (fail
+    # closed). None denies the intended single-`--ref` allows.
+    "Bash(*gh workflow run*--ref*--ref*)",
+    "Bash(*gh workflow run* -r *)",
+    "Bash(*gh workflow run* -r)",
+    "Bash(*gh workflow run* -r=*)",
+    # Round 8, whitespace class for dispatch (spec 3.3): same rule
+    # push got in round 6 - bash splits on tab/CR/LF while the
+    # fences match spaces only, so any dispatch containing one
+    # denies on every role (fail closed).
+    "Bash(*gh workflow run*\t*)",
+    "Bash(*gh workflow run*\r*)",
+    "Bash(*gh workflow run*\n*)",
 )
 
 # Shell-only secret-disclosure vectors with no read_deny_all counterpart,
