@@ -740,6 +740,36 @@ ROUND8_L1_FALLS_TO_PROMPT_COMMANDS = (
     "gh workflow run ci.yml",
 )
 
+# Workstation L1 lane (WS-*) pushes and dispatches (ORCH-A1 phase 1
+# round 10): the WS-* prefix is a workstation L1 lane branch prefix,
+# equivalent to the L1-* / agent/* lanes for fleet coordinators.
+# These pushes/dispatches are pre-granted on l1-coordinator and
+# l1-routing (the full lane-push grant already covers any non-main
+# ref on origin), denied on every role when they target main, and
+# NOT pre-granted on l2-orchestrator (decide() == "none") while
+# leaves and l0-router deny outright as before.
+WS_LANE_ALLOW_COMMANDS = (
+    "git push origin WS-OMNIREMOTE",
+    "git push -u origin WS-OMNIREMOTE",
+    "git push -q origin WS-OMNIREMOTE",
+    "git push -q origin FETCH_HEAD:refs/heads/WS-x",
+    "gh workflow run ci.yml --ref WS-OMNIREMOTE",
+    "gh workflow run ci.yml --ref=WS-OMNIREMOTE",
+)
+
+WS_LANE_MAIN_DENY_COMMANDS = (
+    "git push origin WS-x:main",
+    "git push origin WS-x:refs/heads/main",
+    "git push origin +WS-x:main",
+    "gh workflow run ci.yml --ref WS-x --ref main",
+)
+
+WS_LANE_L2_UNLISTED_COMMANDS = (
+    "git push origin WS-OMNIREMOTE",
+    "git push -u origin WS-OMNIREMOTE",
+    "gh workflow run ci.yml --ref WS-OMNIREMOTE",
+)
+
 # Round 8, allow-stays: the intended shapes still allow after narrowing
 # (checked: none matches a new deny). The `L1-routing/x:refs/heads/...`
 # refspec form is NOT pinned here - it is left to whatever the existing
@@ -838,6 +868,89 @@ class BranchScopeTests(unittest.TestCase):
             command = "gh workflow run ci.yml --ref wt-example-1"
             with self.subTest(role=role, command=command):
                 self.assertEqual(decide(profile, "Bash", command), "none")
+
+
+# ---------------------------------------------------------------------------
+# workstation L1 lane (WS-*) scope (ORCH-A1 phase 1 round 10): WS-*
+# is a workstation L1 lane branch prefix, equivalent to the L1-* /
+# agent/* lanes for fleet coordinators. The L1 coordinator grant
+# already covers any non-main ref on origin (spec 3.2, A1-D4), so
+# WS-* pushes/dispatches are pre-granted on l1-coordinator and
+# l1-routing. They deny on every role when they target main, and
+# are NOT pre-granted on l2-orchestrator (decide() == "none") while
+# leaves and l0-router deny outright as before.
+
+
+class WorkstationLaneTests(unittest.TestCase):
+    def test_ws_lane_push_is_allowed_on_l1_coordinator_and_routing(self):
+        # WS-* lane pushes and dispatches are pre-granted on L1 roles.
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in WS_LANE_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertFalse(decide_deny(profile, "Bash", command))
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_ws_lane_main_target_is_denied_on_every_role(self):
+        # Any push/dispatch targeting main (including via a WS-x refspec)
+        # denies on every profile.
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in WS_LANE_MAIN_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_ws_lane_is_not_pre_granted_on_l2_orchestrator(self):
+        # L2 orchestrator only pre-grants its own L2-* prefix. WS-* stays
+        # unlisted (decide() == "none", fail closed), not allowed.
+        profile = load_profile("l2-orchestrator")
+        for command in WS_LANE_L2_UNLISTED_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    decide(profile, "Bash", command),
+                    "none",
+                    "%s is not unlisted on l2-orchestrator" % command,
+                )
+        # l0-router: none (ungranted).
+        for role in UNGRANTED_ROLES:
+            profile = load_profile(role)
+            for command in WS_LANE_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "none",
+                        "%s is not none on %s" % (command, role),
+                    )
+        # leaves: git push commands deny (leaf push fence), gh workflow run commands none.
+        ws_push_commands = (
+            "git push origin WS-OMNIREMOTE",
+            "git push -u origin WS-OMNIREMOTE",
+            "git push -q origin WS-OMNIREMOTE",
+            "git push -q origin FETCH_HEAD:refs/heads/WS-x",
+        )
+        ws_dispatch_commands = (
+            "gh workflow run ci.yml --ref WS-OMNIREMOTE",
+            "gh workflow run ci.yml --ref=WS-OMNIREMOTE",
+        )
+        for role in LEAF_ROLES:
+            profile = load_profile(role)
+            for command in ws_push_commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "deny",
+                        "%s is not deny on %s" % (command, role),
+                    )
+            for command in ws_dispatch_commands:
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "none",
+                        "%s is not none on %s" % (command, role),
+                    )
 
 
 # ---------------------------------------------------------------------------
