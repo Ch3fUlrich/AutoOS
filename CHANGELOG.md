@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — OpenCode no longer loads a managed skill twice (WS-HARNESS)
+
+- **`lib/agent_harness.py`**: `desired_opencode` drops a managed skill's
+  `SKILL.md` entry that still points into an `agent-skills` clone (the skills
+  home before `.agents/skills`, retired 2026-09-25) when it writes the
+  replacement entry. Before, the merge appended the new entry and kept the old
+  one, so OpenCode loaded two diverged copies of the same skill. Only the
+  harness's own skills are touched: a user's other `agent-skills` paths, and any
+  entry at all when there is no skills source to replace it, are kept.
+
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 
 A7b retired the component's *work* and left a live row holding a pointer: the
