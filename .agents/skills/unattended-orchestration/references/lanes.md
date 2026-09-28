@@ -28,8 +28,8 @@ DEFAULT in `tests/`, `configuration/`, `lib/`, `start-stack.*`, and in any file 
 the registry; plus, for a change to `install.sh`'s return codes, *every caller of the function* —
 `install_script`, the catalog's `postInstall` entries (which run bare under `set -e` through
 `run_post_install`, so a non-zero return aborts `setup.sh`), and direct calls (inbox 2026-09-27
-19:59:32Z, L1-backlog/rv 765f189). A route-set change then runs the tests `tools/affected-tests.py`
-selects — the tool name is the pointer; it lands with lane AFFTESTS — not a hand-picked filter: two
+19:59:32Z, L1-backlog/rv 765f189). A route-set change then runs the tests
+`python3 tools/affected-tests.py --from-diff <base> --format filter` selects — not a hand-picked filter: two
 provider flips in one day each broke literal shell pins the chosen filter missed (PROVPIN 18:4xZ,
 MUSEPIN 21:1xZ, CI 36340556590, 36350743072). Test expectations *derive* from the rendered files;
 the only thing pinned as a literal is an order a human approved (R-worker-01, R-worker-03,
