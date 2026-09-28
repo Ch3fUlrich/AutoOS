@@ -158,7 +158,7 @@ before, so the rows below record what each one absorbed and where the lesson cam
 
 | id | from | what it absorbed or changed |
 |---|---|---|
-| `R-coord-09` | new | the autoos-agent MCP/CLI is the only orchestration interface, and its failures are filed as lessons (A68 + A57 + A11) |
+| `R-coord-09` | new | L3-level orchestration (spawn/route/status) goes through autoos-agent only; L2 launches use the runner and CAO is separate (A68 + A57 + A11) |
 | `R-orch-15` | new | the `lesson: … evidence=…` line to the skill owner; a lesson becomes a rule only after a test (A30 + A35) |
 | `R-orch-16` | new | report-driven gates are re-audited cross-family and match names exactly (L33b, REVGATE2) |
 | `R-router-01` | merged | parent's inbox on a refused write, and the batched `Q:` line to a live L0; the literal format lives in `references/layers.md` (A38 + A59 + A65) |
