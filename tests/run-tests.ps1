@@ -1955,19 +1955,15 @@ Test-Case 'no bearer token is ever invented' {
 }
 
 Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
-    # The duty predates the clone and outlives it: AGENTS.md's skill table says
-    # ~/.claude/skills and ~/.gemini/config/skills are linked by the installers, so
-    # retiring the clone had to leave the wiring standing. It lives in
-    # Sync-AutoOSAgentSkillTargets now - one home for "which user-scope directory
-    # gets our skills" - and the function that used to spell the paths out itself
-    # names none of them, which is what keeps the two from drifting.
-    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
-    if ($fn -notmatch 'Sync-AutoOSAgentSkillTargets -Source \$skillsSource') {
-        throw 'Install-AutoOSAgentSkills no longer syncs the skill targets'
+    # Since WS-SKILLWIN both directories are destinations of
+    # Sync-AutoOSAgentSkillTargets; the functional test "links into
+    # ~/.claude\skills and ~/.gemini\config\skills" proves the links.
+    if ((Get-Command Install-AutoOSAgentSkills).Definition -notmatch 'Sync-AutoOSAgentSkillTargets -Source') {
+        throw 'Install-AutoOSAgentSkills does not call Sync-AutoOSAgentSkillTargets'
     }
-    if ($fn -match 'agySkills = Join-Path') {
-        throw 'the installer spells out a client skills directory again instead of asking the sync helper'
-    }
+    $body = (Get-Command Sync-AutoOSAgentSkillTargets).Definition
+    if ($body -notmatch [regex]::Escape("'.gemini\config\skills'")) { throw 'Antigravity skills dir is not a destination' }
+    if ($body -notmatch [regex]::Escape("'.claude\skills'")) { throw 'Claude Code skills dir is not a destination' }
     Pass
 }
 
@@ -5416,6 +5412,16 @@ Test-Case 'autoos_inbox: records, positions, late flags, the inbox verb, dispatc
     Assert-Equal $rc 0 "inbox unit tests failed: $out"
 }
 
+Test-Case 'autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_risk.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "risk unit tests failed: $out"
+}
+
 Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -6262,12 +6268,11 @@ Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
     Pass
 }
 
-Test-Case 'agent-skills targets: links repo skills into Claude Code and Antigravity dirs' {
-    # AGENTS.md's skill table promises ~/.claude/skills and ~/.gemini/config/skills
-    # are linked by the installers. Until SPEC-OMNI A3 the only thing feeding them
-    # on Windows was the retired clone's skills directory, so the clone could not
-    # simply be deleted: the duty moved with the source into the one helper that
-    # answers "which user-scope directories get our skills".
+Test-Case 'agent-skills targets: links into ~/.claude\skills and ~/.gemini\config\skills (WS-SKILLWIN)' {
+    # Before WS-SKILLWIN these two were linked from the retired agent-skills
+    # clone by Install-AutoOSAgentSkills, so edits to .agents/skills never
+    # reached Claude Code or Antigravity on Windows. Linux already lists both
+    # in agent_skill_link_dests.
     Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
     $repo = Join-Path $scratch 'repo'
@@ -6278,19 +6283,147 @@ Test-Case 'agent-skills targets: links repo skills into Claude Code and Antigrav
         $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
         if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
         foreach ($dest in $dests) {
-            $item = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
-            if (-not $item) { throw "$dest was not created" }
-            if ($item.LinkType) { throw "$dest is a $($item.LinkType), not a real directory" }
             foreach ($n in @('alpha', 'beta')) {
-                $link = Join-Path $dest $n
-                if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) { throw "skill '$n' not linked into $dest" }
-                if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md unreadable through $dest" }
+                $want = [IO.Path]::GetFullPath((Join-Path $repo ".agents\skills\$n")).TrimEnd('\', '/')
+                $got = Get-TestLinkTarget -Path (Join-Path $dest $n)
+                if ($got -ne $want) { throw "$dest\$n points at [$got], expected [$want]" }
             }
-            if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked into $dest" }
         }
     } finally {
         foreach ($dest in $dests) { Remove-TestDirLinks -Directory $dest }
+        Remove-TestDirLinks -Directory (Join-Path $homeDir '.agents\skills')
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Install-AutoOSAgentSkills no longer links global skills from the agent-skills clone' {
+    $body = (Get-Command Install-AutoOSAgentSkills).Definition
+    if ($body -match "Join-Path \`$dest 'skills'") { throw 'global skills still link from the agent-skills clone' }
+    Pass
+}
+
+Test-Case 'retired agent-skills links: only the known clone path, live or dangling, swapped safely, recorded after the move' {
+    # Muse review of 28a835b: a dangling link never converged, a suffix match
+    # took a user's own checkout, and the old link was gone when the new one
+    # could not be made. Retired roots are passed explicitly: never the real ones.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $src = Join-Path $repo '.agents\skills'
+    $clone = Join-Path $scratch 'Documents\Code\agent-skills\skills'
+    $mine = Join-Path $scratch 'my\agent-skills\skills'
+    $dests = @{}
+    foreach ($d in @('main', 'foreign', 'optout', 'dry', 'fail')) { $dests[$d] = Join-Path $scratch "dest-$d" }
+    $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
+    $records = { param($d) @(Get-ChildItem -LiteralPath $scratch -Filter "$(Split-Path $d -Leaf).autoos-backup-*") }
+    $savedEnv = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    $mod = Get-Module AutoOS.Install
+    $realLink = & $mod { ${function:script:New-AutoOSSkillLink} }
+    try {
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        New-TestSkillRepo -Repo $repo
+        foreach ($n in @('alpha', 'beta', 'other')) { $null = New-Item -ItemType Directory -Path (Join-Path $clone $n) -Force }
+        $null = New-Item -ItemType Directory -Path (Join-Path $mine 'alpha') -Force
+        foreach ($d in $dests.Values) { $null = New-Item -ItemType Directory -Path $d -Force }
+        # main: alpha live into the clone; beta dangling into the clone (the clone's
+        # beta is deleted after the link is made - junctions need a target to exist).
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'alpha') -Target (Join-Path $clone 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'beta') -Target (Join-Path $clone 'beta')
+        Remove-Item -LiteralPath (Join-Path $clone 'beta') -Recurse -Force
+        # foreign: a user's own checkout that merely ends in agent-skills\skills\alpha,
+        # and a clone link under ANOTHER skill's name.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'alpha') -Target (Join-Path $mine 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'beta') -Target (Join-Path $clone 'other')
+        foreach ($d in @('optout', 'dry', 'fail')) {
+            $null = New-Item -ItemType Junction -Path (Join-Path $dests[$d] 'alpha') -Target (Join-Path $clone 'alpha')
+        }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        foreach ($n in @('alpha', 'beta')) {
+            $got = Get-TestLinkTarget -Path (Join-Path $dests.main $n)
+            if ($got -ne (& $full (Join-Path $src $n))) { throw "main: $n points at [$got]" }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $clone 'alpha'))) { throw 'the old link target was deleted' }
+        $rec = @(& $records $dests.main)
+        if ($rec.Count -ne 1) { throw "main: expected one record, found $($rec.Count)" }
+        $text = Get-Content -LiteralPath $rec[0].FullName -Raw
+        foreach ($n in @('alpha', 'beta')) {
+            if ($text -notmatch [regex]::Escape((& $full (Join-Path $clone $n)))) { throw "main: the record does not name the old $n target" }
+        }
+        if (@(Get-ChildItem -LiteralPath $dests.main -Filter '*.autoos-new-*' -Force).Count) { throw 'main: a staged link was left behind' }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        if (@(& $records $dests.main).Count -ne 1) { throw 'main: a second run wrote another record' }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.foreign -RetargetRetiredClone -RetiredSkillRoots $clone
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'alpha')) -ne (& $full (Join-Path $mine 'alpha'))) { throw "foreign: a user's own checkout was retargeted" }
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'beta')) -ne (& $full (Join-Path $clone 'other'))) { throw 'foreign: a link under another name was retargeted' }
+
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = '0'
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.optout -RetargetRetiredClone -RetiredSkillRoots $clone
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.optout 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'optout: =0 did not stop the switch' }
+
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.dry -RetargetRetiredClone -RetiredSkillRoots $clone
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.dry 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'dry: a dry run retargeted' }
+
+        # A new link that cannot be made leaves the old one and writes no record.
+        & $mod { Set-Item function:script:New-AutoOSSkillLink { param($Path, $Target) $false } }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.fail -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.fail 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'fail: the old link is gone' }
+        if (@(& $records $dests.fail).Count) { throw 'fail: a record was written for a move that did not happen' }
+        foreach ($d in @('foreign', 'optout', 'dry', 'fail')) {
+            if (@(& $records $dests[$d]).Count) { throw "${d}: a record was written" }
+        }
+    } finally {
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $savedEnv
+        foreach ($d in $dests.Values) { Remove-TestDirLinks -Directory $d }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by default; =0 keeps it (Q-018)' {
+    # Operator Q-018 (2026-09-28): setup moves recognised links into the retired
+    # clone, with a backup record. AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $saved = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    foreach ($case in @(@{ Env = $null; Moved = $true }, @{ Env = '0'; Moved = $false })) {
+        $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+        $repo = Join-Path $scratch 'repo'
+        $homeDir = Join-Path $scratch 'home'
+        $claude = Join-Path $homeDir '.claude\skills'
+        # Where Get-AutoOSRetiredSkillRoots looks under the redirected home.
+        $old = Join-Path $homeDir 'Documents\Code\agent-skills\skills\alpha'
+        try {
+            New-TestSkillRepo -Repo $repo
+            $null = New-Item -ItemType Directory -Path $old, $claude -Force
+            $null = New-Item -ItemType Junction -Path (Join-Path $claude 'alpha') -Target $old
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $case.Env
+            $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+            if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+            $want = if ($case.Moved) { Join-Path $repo '.agents\skills\alpha' } else { $old }
+            $want = [IO.Path]::GetFullPath($want).TrimEnd('\', '/')
+            $got = Get-TestLinkTarget -Path (Join-Path $claude 'alpha')
+            if ($got -ne $want) { throw "env=[$($case.Env)]: alpha points at [$got], expected [$want]" }
+            if (-not (Test-Path -LiteralPath $old)) { throw 'the old target was deleted' }
+            $records = @(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*')
+            if ($case.Moved -and $records.Count -ne 1) { throw "expected one backup record, found $($records.Count)" }
+            if (-not $case.Moved -and $records.Count) { throw 'opt-out run wrote a backup record' }
+            if ($case.Moved) {
+                $null = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+                if (@(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*').Count -ne 1) { throw 'a second run wrote another backup record' }
+            }
+        } finally {
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $saved
+            foreach ($d in @($claude, (Join-Path $homeDir '.gemini\config\skills'), (Join-Path $homeDir '.agents\skills'))) { Remove-TestDirLinks -Directory $d }
+            Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     Pass
 }
@@ -6984,9 +7117,11 @@ Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
         }
         Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
     } finally {
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        # Restores first: a throw from Initialize-AutoOSInstaller must not leave
+        # the run with a scratch USERPROFILE or without the host's PAT.
         $env:QODER_PERSONAL_ACCESS_TOKEN = $realPat
         $env:USERPROFILE = $realHome
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
@@ -7780,7 +7915,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     }
 }
 
-Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
+Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $agents = ($stripped | ConvertFrom-Json).agents
@@ -7822,6 +7957,62 @@ Test-Case 'tier depth is mandatory: only t1 spawns, t3 spawns nothing' {
     foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'autoos-agent_*')) {
         $hit = @($t3 | Where-Object { $_.action -eq $tool })
         Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
+    }
+    foreach ($pat in @($fences.read_deny_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer read fence missing: $pat"
+    }
+    foreach ($pat in @($fences.bash_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer shell allow missing: $pat"
+    }
+    foreach ($pat in @($fences.read_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer read allow missing: $pat"
+    }
+    # KEYDENY: a fence is a decision over a path, not a list of names — last
+    # matching rule wins, so walk the rules and keep the final verdict. Fixture
+    # paths only; the suite never opens a real key file.
+    foreach ($path in @('configuration/api-keys.yml',
+                        '/home/x/.config/autoos/ai-stack/client.key',
+                        '/home/x/.config/autoos/ai-stack/manage.key')) {
+        $readVerdict = ''; $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+            if ($rule.action -eq 'shell' -and ("cat " + $path) -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
+    }
+    # KEYDENY2: a shell rule matches the whole command line, so the substring
+    # allow *api-keys.example* licensed the real key file as soon as the
+    # template's name shared a line with it (and let a copy out under an
+    # *.example* path). Fixture strings only — no key file is opened.
+    foreach ($command in @('cat configuration/api-keys.yml configuration/api-keys.example.yml',
+                           'cp configuration/api-keys.yml /tmp/api-keys.example/x',
+                           'cat /tmp/api-keys.example/stolen')) {
+        $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'shell' -and $command -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may run $command"
+    }
+    $example = 'configuration/api-keys.example.yml'
+    $readVerdict = ''; $shellVerdict = ''
+    foreach ($rule in $t3) {
+        if ($rule.action -eq 'read' -and $example -like $rule.resource) { $readVerdict = $rule.effect }
+        if ($rule.action -eq 'shell' -and ("cat " + $example) -like $rule.resource) { $shellVerdict = $rule.effect }
+    }
+    Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
+    Assert-Equal $shellVerdict 'deny' 't3-reviewer may cat the key example'
+    # A read allow is a path, not a substring: a backup named after the
+    # template stays denied.
+    foreach ($path in @('/tmp/api-keys.example.yml.bak', '/tmp/api-keys.example/stolen')) {
+        $readVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
     }
     foreach ($rule in @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' })) {
         Assert-True ($rule.action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $($rule.action)"
@@ -8985,6 +9176,8 @@ print('%s|%s|%s' % (
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
+        # DSBACK 2026-09-28: servable again (routes.deepseek-v4.1-flash declares 128k).
+        'deepseek-v4.1-flash' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -9432,7 +9625,8 @@ Test-Case 'apply scripts refresh the catalog between registering and reading /v1
            Read = '$resp = Invoke-RestMethod -Uri "$Gateway/v1/models'
            Write = '& omniroute combo create $combo.name' },
         @{ File = 'configuration/omniroute/apply.sh'
-           Add = 'omni providers add "$provider_id"'; Enum = 'omni models "$provider_id"'
+           # MUSEREG 2026-09-28: the connection binds to the provider NODE id ($add_id).
+           Add = 'omni providers add "$add_id"'; Enum = 'omni models "$provider_id"'
            Read = '"$GATEWAY/v1/models"'; Write = 'omni combo create "$name"' }
     )
     foreach ($s in $steps) {

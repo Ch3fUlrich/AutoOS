@@ -1640,6 +1640,10 @@ function Install-AutoOSAgentSkills {
 
     Set-AutoOSAntigravityMcp
 
+    # Antigravity (~/.gemini/config/skills) and Claude Code (~/.claude/skills) are
+    # linked by Sync-AutoOSAgentSkillTargets below, from Get-AutoOSSkillsSource -
+    # never from this clone, which is kept for its MCP infra only (WS-SKILLWIN).
+
     # Repo skills into project .claude/skills (Claude Code reads only that dir).
     # Junctions, created at install time (never committed - see .gitignore), so a
     # checkout without symlink rights still works. Guarded: existing entries win.
@@ -2872,6 +2876,19 @@ function New-AutoOSSkillLink {
     return $true
 }
 
+function Get-AutoOSRetiredSkillRoots {
+    <#
+      .SYNOPSIS
+        The retired agent-skills clone's skills directories: <Documents>\Code or
+        \code \agent-skills\skills, for the shell's Documents folder and $HOME's.
+        Where Install-AutoOSAgentSkills linked skills from before 2026-09-25.
+    #>
+    $docs = @([Environment]::GetFolderPath('MyDocuments'), (Join-Path $HOME 'Documents')) | Where-Object { $_ }
+    @(foreach ($d in $docs) {
+        foreach ($code in @('Code', 'code')) { Join-Path $d "$code\agent-skills\skills" }
+    }) | Select-Object -Unique
+}
+
 function Sync-AutoOSSkillDirs {
     <#
       .SYNOPSIS
@@ -2894,11 +2911,26 @@ function Sync-AutoOSSkillDirs {
         layout) is not written through - that would create links inside the repo or a
         clone - it is left with one warning that names the fix. A link that cannot be
         made is a warning, never an ok line. Returns $false when a link failed.
+
+        -RetargetRetiredClone (setup passes it; operator Q-018) adds one more
+        recognised shape: a link, live or dangling, whose target is the retired
+        agent-skills clone's copy of this skill - <root>\<name> for a root in
+        -RetiredSkillRoots (default Get-AutoOSRetiredSkillRoots, the path the
+        installer used before .agents/skills became the only skills home,
+        2026-09-25). A known location, not a suffix: a user's own
+        ...\agent-skills\skills\<name> checkout elsewhere is theirs. The new link is
+        made under a temporary name first and swapped in; a failed swap puts the
+        old link back. Only a move that happened is appended to
+        <Destination>.autoos-backup-<stamp>; the target itself is never touched.
+        AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 turns it off here too.
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        [switch]$RetargetRetiredClone,
+        [string[]]$RetiredSkillRoots = (Get-AutoOSRetiredSkillRoots)
     )
+    if ($env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -eq '0') { $RetargetRetiredClone = $false }
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
         Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
         return $true
@@ -2938,6 +2970,7 @@ function Sync-AutoOSSkillDirs {
 
     $ok = $true
     $skipped = 0
+    $record = $null
     foreach ($skill in $skills) {
         $link = Join-Path $Destination $skill.Name
         $want = [IO.Path]::GetFullPath($skill.FullName).TrimEnd('\', '/')
@@ -2947,8 +2980,9 @@ function Sync-AutoOSSkillDirs {
                 Write-AutoOSLine "linked $($skill.Name) into $Destination" -Level ok
             } else { $ok = $false }
         } elseif ($item.LinkType) {
-            # Target is a string[] in Windows PowerShell 5.1 and may be relative.
-            $raw = [string]@($item.Target)[0]
+            # Target is a string[] in Windows PowerShell 5.1 and may be relative;
+            # a junction can report its target with a \\?\ or \??\ prefix.
+            $raw = [string]@($item.Target)[0] -replace '^(\\\\\?\\|\\\?\?\\)', ''
             $have = ''
             if ($raw) {
                 if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
@@ -2971,6 +3005,46 @@ function Sync-AutoOSSkillDirs {
                 if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
                     Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
                 } else { $ok = $false }
+            } elseif ($RetargetRetiredClone -and $have -and @($RetiredSkillRoots | Where-Object { $_ } | Where-Object {
+                        [string]::Equals($have, [IO.Path]::GetFullPath((Join-Path $_ $skill.Name)).TrimEnd('\', '/'), $comparison)
+                    }).Count) {
+                # A link (live or dangling) into the retired agent-skills clone's
+                # copy of this skill. Make the new link under a temporary name
+                # first, so a link that cannot be made leaves the old one in place.
+                $staged = "$link.autoos-new-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+                if (-not (New-AutoOSSkillLink -Path $staged -Target $skill.FullName)) {
+                    Write-AutoOSLine "could not retarget ${link} - left as it was" -Level warn
+                    $ok = $false
+                    continue
+                }
+                try {
+                    $item.Delete()  # the link only - a reparse point is never recursed
+                    [IO.Directory]::Move($staged, $link)
+                } catch {
+                    $why = $_.Exception.Message
+                    $state = 'old link left in place'
+                    if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
+                        # A junction needs its target: a dangling old link cannot be
+                        # recreated, and the next run links the skill afresh.
+                        $state = if (New-AutoOSSkillLink -Path $link -Target $raw) { 'old link put back' }
+                                 else { 'old link could not be put back (its target is gone); the next run links it' }
+                    }
+                    $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                    if ($left -and $left.LinkType) { $left.Delete() }
+                    Write-AutoOSLine "could not retarget ${link}: $why - $state" -Level warn
+                    $ok = $false
+                    continue
+                }
+                # Recorded only now, when the move has happened.
+                if (-not $record) {
+                    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                    $record = "$Destination.autoos-backup-$stamp"
+                    $n = 0
+                    while (Test-Path -LiteralPath $record) { $n++; $record = "$Destination.autoos-backup-$stamp-$n" }
+                }
+                try { Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8 }
+                catch { Write-AutoOSLine "retargeted ${link} but could not write ${record}: was $raw" -Level warn }
+                Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
             } else {
                 Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
             }
@@ -2992,13 +3066,15 @@ function Sync-AutoOSAgentSkillTargets {
       .DESCRIPTION
         Clients that follow the Agent Skills convention read a user-scope
         directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
-        ~/.codex/skills. Claude Code and Antigravity each read a vendor directory
-        of their own (~/.claude/skills and ~/.gemini/config/skills), and those are
-        fed from the same source: until SPEC-OMNI A3 the only thing that filled
-        them was the retired clone, so dropping them with the clone would have
-        quietly unlinked every skill from two of the clients this wires. Each
-        skill is linked individually by Sync-AutoOSSkillDirs, so the user's own
-        entries sit beside ours and are never touched, and a second run is a no-op.
+        ~/.codex/skills. Claude Code reads ~/.claude/skills and Antigravity
+        ~/.gemini/config/skills (the same list as agent_skill_link_dests on
+        Linux). Each skill is linked individually by
+        Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
+        never touched, and a second run is a no-op.
+
+        Every destination gets -RetargetRetiredClone (see Sync-AutoOSSkillDirs):
+        setup moves recognised links into the retired agent-skills clone
+        (operator Q-018, 2026-09-28). AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
 
         ~/.codex/skills is only written when codex is actually there (its
         command is on PATH or its ~/.codex directory exists): creating the
@@ -3009,14 +3085,19 @@ function Sync-AutoOSAgentSkillTargets {
         wires are those two, and both are named by AGENTS.md's skill table.
     #>
     param([Parameter(Mandatory)][string]$Source)
-    $ok = Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $HOME '.agents\skills')
-    foreach ($vendor in @((Join-Path $HOME '.claude\skills'),
-                          (Join-Path $HOME '.gemini\config\skills'))) {
-        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination $vendor) -and $ok
-    }
+    $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -ne '0'
+    $dests = @(
+        (Join-Path $HOME '.agents\skills'),
+        (Join-Path $HOME '.claude\skills'),
+        (Join-Path $HOME '.gemini\config\skills')
+    )
     $codexHome = Join-Path $HOME '.codex'
     if ((Test-Path -LiteralPath $codexHome) -or (Get-Command codex -ErrorAction SilentlyContinue)) {
-        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination (Join-Path $codexHome 'skills')) -and $ok
+        $dests += Join-Path $codexHome 'skills'
+    }
+    $ok = $true
+    foreach ($dest in $dests) {
+        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination $dest -RetargetRetiredClone:$retarget) -and $ok
     }
     return $ok
 }
