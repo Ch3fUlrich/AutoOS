@@ -4916,25 +4916,47 @@ providers['ollama'] = {
 
 # Direct meta entry (muse-spark contributor) so the model the user asked to
 # keep is selectable in opencode; the key stays out of the file.
+#
+# REVROUTE (S2) item 4, measured on L1-backlog: that entry is written into the
+# USER config, so opencode parses it in EVERY cwd — and a {env:META_API_KEY}
+# placeholder with no such variable in the environment does not resolve to a
+# string, which fails the whole file (opencode reports Expected string at
+# [META_API_KEY]) and breaks every bare opencode start on the machine. So the
+# placeholder is rendered only when the variable it names actually exists. A key
+# that lives in api-keys.yml or in MUSE_API_KEY does not qualify: this provider
+# reads the process environment, nothing else. Without it the Muse contributor is
+# still selectable as omniroute/spark-1.3-contributor — the gateway route the
+# same config declares below, which is how the reviewer routing in
+# policy.reviewers reaches it — and a placeholder an earlier, keyed run left
+# behind is taken out (an already-broken machine has to be repaired, not just
+# avoided). A meta provider of the user's own shape is theirs and stays
+# (AGENTS.md §4/§5).
 _muse = REPO_BY_ID['muse-spark']['direct']
 _muse_model_id = _muse['model'].split('/', 1)[1]
-providers['meta'] = {
-    'npm': _muse['npm'],
-    'name': 'Meta',
-    'options': {
-        'baseURL': _muse['base_url'],
-        'apiKey': '{env:META_API_KEY}'
-    },
-    'models': {
-        _muse_model_id: {
-            'name': REPO_BY_ID['muse-spark']['name'],
-            'reasoning': True,
-            'limit': {'context': REPO_BY_ID['muse-spark']['context'],
-                      'output': REPO_BY_ID['muse-spark']['output']},
-            'options': {'reasoningEffort': _muse['reasoning_effort']}
+if os.environ.get('META_API_KEY'):
+    providers['meta'] = {
+        'npm': _muse['npm'],
+        'name': 'Meta',
+        'options': {
+            'baseURL': _muse['base_url'],
+            'apiKey': '{env:META_API_KEY}'
+        },
+        'models': {
+            _muse_model_id: {
+                'name': REPO_BY_ID['muse-spark']['name'],
+                'reasoning': True,
+                'limit': {'context': REPO_BY_ID['muse-spark']['context'],
+                          'output': REPO_BY_ID['muse-spark']['output']},
+                'options': {'reasoningEffort': _muse['reasoning_effort']}
+            }
         }
     }
-}
+else:
+    _stale = providers.get('meta')
+    if isinstance(_stale, dict) and (
+            (_stale.get('options') or {}).get('apiKey') == '{env:META_API_KEY}'
+            or _stale.get('npm') == _muse['npm']):
+        del providers['meta']
 
 muse_key = os.environ.get('META_API_KEY') or os.environ.get('MUSE_API_KEY') or secrets.get('muse')
 deepseek_key = os.environ.get('DEEPSEEK_API_KEY') or secrets.get('deepseek')

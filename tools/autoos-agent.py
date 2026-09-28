@@ -128,6 +128,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -160,6 +161,11 @@ TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # run's gate contradicts the recorded status of its route's legs.
 REGISTRY_PATH = os.path.join(ROOT, "catalog", "ai-registry.json")
 MEASURED_OVERLAY_PATH = os.path.join(ROOT, "logs", "routing", "measured.json")
+# REVROUTE (S2) item 3: the spawner's own transient note about which provider
+# just told it a reset time. Git-ignored beside measured.json - the registry is
+# the operator's file, this one is the machine's observation, and a record whose
+# window has passed stops mattering on its own (registry.unavailable_now).
+PROVIDER_STATE_PATH = os.path.join(ROOT, "logs", "routing", "provider-state.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
 # `route`'s default orchestrator model (spec 6.1): a registry model id billed
 # for verification cost when the caller does not pin one.
@@ -821,6 +827,276 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def resolve_review_plan(card: dict, now=None) -> dict | None:
+    """The ``policy.reviewers`` decision for an authored review card.
+
+    None unless the card both asks for a review and names who wrote the diff --
+    the different-family rule needs an author, and an unauthored review is the
+    orchestrator's own business (the spec 5.7 reviewer *routes* still apply).
+    Both card shapes count: v2 says ``kind=review``, v1 says ``role=review``,
+    and ``author`` is shared (autoos_routing.CARD_SHARED). Reads the same
+    registry, client probes and clock the route plan reads, so `route` and `run`
+    cannot disagree about who reviews.
+    """
+    if not _card_asks_review(card) or not card.get("author"):
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return resolver.reviewer_for(
+        card["author"], load_live_registry(),
+        measure_mod.client_state(clients), now,
+        risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
+
+
+def _card_asks_review(card: dict) -> bool:
+    """True when a normalized card asks for a review, v1 or v2 spelling."""
+    return card.get("kind") == "review" or card.get("role") == "review"
+
+
+def review_run_refusal(review: dict | None):
+    """Why an authored review run must not start yet, or None when it may.
+
+    ``queued`` reuses SPAWNFREE's exit 9: every reviewer that could take this
+    card is down with a known reset, so the right answer is to wait and re-spawn
+    (the same rc the caller's queue loop already understands), not to run the
+    review on a same-family model and call it independent. ``unresolved`` is the
+    opposite -- nobody is eligible and no wait changes that (a signed-out client
+    needs a human) -- so it is a plain exit-2 refusal, never a retry the caller
+    would have to bound.
+
+    Either way the skipped reviewers are printed first, one line each: "who is
+    blocked and why" is the question a refusal gets asked, and the answer is
+    already in the walk.
+    """
+    if not review:
+        return None
+    if review["state"] not in ("queued", "unresolved"):
+        return None
+    for line in resolver.reviewer_explain_lines(review):
+        print(line, file=sys.stderr)
+    if review["state"] == "queued":
+        return refuse("reviewer %s" % review["reason"], EXIT_FREE_QUEUE_TIMEOUT)
+    return refuse("reviewer unavailable: %s" % review["reason"])
+
+
+# REVROUTE (S2) item 5: what a lane record must SAY before the lane is ready.
+# A line, not a section: the record is free-form markdown a person writes, so
+# the gate looks for one machine-readable line per review and ignores the prose
+# around it. `review-status` prints the same hint it parses, and `run` prints a
+# paste-ready one, so the format is never something you have to go looking for.
+REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
+READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm"))
+# The final check is the operator's unchanged decision (Q-003 2026-09-27): a
+# cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
+# registry route -- it is the orchestrator's own interactive model -- so this one
+# matches the NAME, while the cross-family half is decided by registry families.
+FINAL_REVIEWER = "sonnet"
+REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
+                     "reviewer=<model> verdict=<ready|pass|lgtm|...>")
+
+
+def reviewer_family(spelling, registry):
+    """The model FAMILY of a reviewer named in a lane record, or None.
+
+    ``policy.reviewers`` first: its ``model`` column holds exactly the spelling a
+    spawn used (``omniroute/spark-1.3-contributor``), and registry check rule 11
+    keeps its ``family`` honest against ``models``. Then the registry's own model
+    ids, whole and after a client/provider prefix. The answer is in
+    ``resolver.family_key`` form, so a record's "Meta" and the registry's "meta"
+    are one family wherever it is compared (REVFIX S2).
+
+    Unknown returns None rather than a guess. An invented *reviewer* name would
+    differ from every author family and read as an independent review that never
+    happened -- which is also why ``author_family`` no longer guesses at an
+    unknown *author* (REVFIX S2: both halves must be known before they may
+    disagree).
+    """
+    if not isinstance(spelling, str) or not spelling.strip():
+        return None
+    name = spelling.strip()
+    key = resolver.family_key(name)
+    for entry in ((registry.get("policy") or {}).get("reviewers") or []):
+        if isinstance(entry, dict) and resolver.family_key(entry.get("model")) == key:
+            return resolver.family_key(entry.get("family"))
+    models = registry.get("models") or {}
+    for candidate in (key, key.rpartition("/")[2]):
+        entry = resolver.ci_value(models, candidate)
+        if isinstance(entry, dict):
+            return resolver.family_key(entry.get("family"))
+    return None
+
+
+def _review_entry_verdict(entry):
+    """``(ok, reason)`` for one entry's verdict field."""
+    verdict = (entry.get("verdict") or "").strip()
+    if verdict.lower() in READY_VERDICTS:
+        return True, None
+    return False, "verdict %s" % (verdict or "missing")
+
+
+def _cross_family_review(entries, registry):
+    """The record's independent review: a reviewer from a DIFFERENT family."""
+    wanted = [e for e in entries if e.get("kind") == "cross-family"]
+    if not wanted:
+        return {"ok": False, "family": None,
+                "detail": "no AutoOS-Review: kind=cross-family entry"}
+    reasons = []
+    for entry in wanted:
+        reviewer = entry["reviewer"]
+        family = reviewer_family(reviewer, registry)
+        if family is None:
+            reasons.append("%s is not a known reviewer (policy.reviewers or models)"
+                           % reviewer)
+            continue
+        author, why = resolver.author_family(entry.get("author") or "", registry)
+        if author is None:
+            # REVFIX S2: an author the registry cannot place is NOT treated as a
+            # family of its own. "Who wrote this" unanswered is not evidence that
+            # the reviewer is someone else, so the check fails and says so.
+            reasons.append("author: %s" % why)
+            continue
+        if author == resolver.family_key(family):
+            reasons.append("%s is the same family as the author (%s)" % (reviewer, family))
+            continue
+        ok, reason = _review_entry_verdict(entry)
+        if not ok:
+            reasons.append("%s %s" % (reviewer, reason))
+            continue
+        return {"ok": True, "family": family,
+                "detail": "%s reviewed by %s (%s)" % (entry.get("author"), reviewer, family)}
+    return {"ok": False, "family": None, "detail": "; ".join(reasons)}
+
+
+def _final_review(entries):
+    """The record's sign-off: a kind=final entry naming the final checker."""
+    wanted = [e for e in entries if e.get("kind") == "final"]
+    if not wanted:
+        return {"ok": False,
+                "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
+    named = [e for e in wanted if FINAL_REVIEWER in e["reviewer"].lower()]
+    if not named:
+        return {"ok": False,
+                "detail": "the final entries name %s, not %s"
+                          % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
+    reasons = []
+    for entry in named:
+        ok, reason = _review_entry_verdict(entry)
+        if ok:
+            return {"ok": True,
+                    "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
+        reasons.append("%s %s" % (entry["reviewer"], reason))
+    return {"ok": False, "detail": "; ".join(reasons)}
+
+
+def review_status(text, registry):
+    """Which of the two reviews a lane record carries, read off the record itself.
+
+    An item 2 spawn has already proved a reviewer EXISTS for this card; this is
+    the other half -- proof it RAN and said something, in the file that gets
+    merged. A same-family reviewer, an unknown reviewer spelling and a verdict
+    that says FIX-FIRST all fail, and each says which, because "missing" would
+    send someone to book a review that already happened and did not pass.
+    """
+    entries, malformed = [], []
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        fields = {}
+        for token in match.group("body").split():
+            key, _sep, value = token.partition("=")
+            if value and key.lower() in REVIEW_ENTRY_FIELDS:
+                fields[key.lower()] = value
+        if fields.get("kind") and fields.get("reviewer"):
+            entries.append(fields)
+        else:
+            malformed.append(match.group("body").strip())
+    cross = _cross_family_review(entries, registry)
+    final = _final_review(entries)
+    return {"entries": len(entries), "malformed": malformed,
+            "cross_family": cross, "final": final,
+            "ready": cross["ok"] and final["ok"],
+            "hint": REVIEW_ENTRY_HINT}
+
+
+def cmd_review_status(args) -> int:
+    """Report whether a lane record carries both reviews a ready lane needs.
+
+    Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
+    read -- a typo'd path is not a lane that needs reviewing, and a caller that
+    waits on 1 would wait forever on that mistake.
+    """
+    path = args.record
+    try:
+        if path == "-":
+            text, label = sys.stdin.read(), "<stdin>"
+        else:
+            with io.open(path, encoding="utf-8") as fh:
+                text, label = fh.read(), path
+    except OSError as exc:
+        print("review-status: %s" % exc, file=sys.stderr)
+        return 2
+    registry = load_registry(args.registry or REGISTRY_PATH)
+    report = review_status(text, registry)
+    print("review-status: %s -- %d review entr%s"
+          % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
+    for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
+        item = report[key]
+        print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+    for line in report["malformed"]:
+        print("  note: entry without a kind= or reviewer= ignored: %s" % line)
+    if not report["entries"]:
+        print("  note: write one line per review, e.g.: %s" % report["hint"])
+    print("ready: %s" % ("yes" if report["ready"] else "no"))
+    return 0 if report["ready"] else 1
+
+
+def reviewer_run_override(review, client, cfg, tier, model, override, free):
+    """``(model, combo, note)`` -- the run this reviewer resolution implies.
+
+    A review card that names its author is a *reviewer* request, so when the
+    reviewer the list picked runs on the client this run is already using, the
+    run carries that reviewer's model spelling rather than the resolver's
+    generic route (REVROUTE (S2) item 2; item 4 is what makes the paid Muse
+    reviewer's spelling resolvable at all).
+
+    Anything that is not that clean case leaves the run alone and says so in
+    ``note`` -- the operator's explicit ``--model``, a ``--free`` promo run, a
+    reviewer that lives on another client, and a non-gateway client (which takes
+    its own ``--model`` and has no gateway combo to name) all keep what they had.
+    Silence here would be the bug: the review would run on a model nobody chose.
+    """
+    if not review or review.get("state") != "resolved":
+        return model, None, None
+    entry = review["reviewer"]
+    asked = "%s %s" % (entry.get("client"), entry.get("model"))
+    if override:
+        return model, None, "note: an explicit --model wins over policy.reviewers (%s)" % asked
+    if free:
+        return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
+    if entry.get("client") != client.name:
+        return (model, None,
+                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
+                "so it is NOT the review that list picked"
+                % (entry.get("client"), entry.get("model"), client.name))
+    if not client.gateway:
+        return (model, None,
+                "note: %s is not a gateway client, so --model stays the caller's; "
+                "policy.reviewers picked %s" % (client.name, asked))
+    # The gateway only serves a route the client config declares, so a combo
+    # spelling is checked -- an undeclared heading is exactly the failure the
+    # operator must see, not a silent fallback (item 4).
+    # A model spelled on the client's OWN provider (opencode's zen free models,
+    # the same shape a --free run passes today) is the client's to resolve:
+    # there is no gateway route behind it to declare, and refusing it here would
+    # bench a reviewer that runs fine.
+    if not entry["model"].partition("#")[0].startswith("omniroute/"):
+        return entry["model"], None, "reviewer-model: %s" % asked
+    return (resolve_model(cfg, tier, False, entry["model"]),
+            entry["model"].partition("#")[0].replace("omniroute/", "", 1),
+            "reviewer-model: %s" % asked)
+
+
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                       exclude_routes: set | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
@@ -847,7 +1123,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     own; it only turns whatever route plan() already picked into a combo/tier.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
-    registry = load_registry(REGISTRY_PATH)
+    registry = load_live_registry()
     if exclude_routes:
         # A copy, so the shared load_registry() cache (and the caller's own
         # reference) never loses the routes a previous attempt needs recorded.
@@ -876,6 +1152,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
+    # An authored review card runs its reviewer, not just any survivable route
+    # (REVROUTE item 2); a reviewer on another client is announced, never faked.
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        result.get("review"), clients.CLIENTS[args.client], cfg, tier, model,
+        override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
@@ -886,7 +1169,11 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
             "bucket": result["bucket"], "class": route_class, "resolver": True,
-            "effort": result.get("effort")}
+            "effort": result.get("effort"),
+            # who reviews this card (REVROUTE item 2); plan() already walked
+            # policy.reviewers with the same registry/probes/clock it used to
+            # pick the route, so the spawner never re-derives it.
+            "review_plan": result.get("review"), "reviewer_note": reviewer_note}
 
 
 class PrivacyRefused(ValueError):
@@ -950,7 +1237,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
-                "review": args.tier == 3}
+                "review": args.tier == 3, "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
@@ -960,8 +1247,16 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+    review = resolve_review_plan(card)
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
-            "privacy": card["privacy"], "review": card["role"] == "review"}
+            "privacy": card["privacy"], "review": card["role"] == "review",
+            # a v1 card asks for a review with role=review; author is the shared
+            # field, so the same reviewer walk applies (REVROUTE item 2).
+            "review_plan": review, "reviewer_note": reviewer_note}
 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
@@ -1317,7 +1612,7 @@ def cmd_route(args) -> int:
         return refuse(str(exc))
     repo = args.repo or ROOT
     try:
-        registry = load_registry(REGISTRY_PATH)
+        registry = load_live_registry()
         overlay = load_overlay(MEASURED_OVERLAY_PATH)
     except (OSError, ValueError) as exc:
         return refuse("cannot load routing data: %s" % exc)
@@ -1484,6 +1779,297 @@ def provider_stop(tail: str) -> str | None:
                 marker in low for marker in PROVIDER_STOP_MARKERS):
             return clean
     return None
+
+
+# --- REVROUTE (S2) item 3: a stop that states its own reset time -------------
+#
+# A 429 that says "resets in ~83h" is worth more than a track record: the client
+# is the only witness to the window, and handing the same provider the next task
+# for three days wastes every one of them. So the spawner records the window in
+# its own state file and every ROUTING read (route, run, the reviewer walk)
+# merges it into the registry as the provider's `unavailable_until` -- which
+# `registry.unavailable_now` already knows how to skip and how to let expire.
+# Renders and `registry.py validate` never read it: they stay clock-free.
+
+# A client printing "resets in ~400d" must not bench a provider for a year on
+# the spawner's authority; a window this long is an operator edit to the
+# registry, with the evidence quoted next to it.
+MAX_AUTO_RESET_SECONDS = 7 * 86400
+
+_RESET_RE = re.compile(
+    r"(?:resets? in|reset after|try again in|retry after)\s*~?\s*(\d+)\s*([a-z]+)")
+_RESET_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+                "m": 60, "min": 60, "minute": 60, "minutes": 60,
+                "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "d": 86400, "day": 86400, "days": 86400}
+
+# "provider: sambanova. ..." - the gateway names the connection it tried. The
+# class stops at a comma or period so the sentence's own punctuation is not part
+# of the id.
+_STOP_PROVIDER_RE = re.compile(r"provider:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def parse_reset(text: str) -> int | None:
+    """The seconds a stop line counts itself out for, or None if it names none.
+
+    Reads the reset the client states ("resets in ~83h", "reset after 51s",
+    "try again in 15 minutes"), not a guess: a plain "Rate limit exceeded"
+    without a window returns None and records nothing. An unknown unit reads as
+    no window rather than as seconds.
+    """
+    m = _RESET_RE.search((text or "").lower())
+    if not m:
+        return None
+    unit = _RESET_UNITS.get(m.group(2))
+    return int(m.group(1)) * unit if unit else None
+
+
+def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
+    """Which provider took the stop, as the registry's own id, or None.
+
+    A line that names its provider wins -- including the gateway's spelling of
+    it (providers.<id>.omniroute_id), which is the same connection, not a new
+    one. Otherwise the gateway works down a route's legs in order, so the one
+    that took the traffic is the first leg whose provider is up right now; a
+    line that names nothing and has no live leg to choose from is attributed to
+    no provider (recording a guess would bench the wrong one).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    providers = registry.get("providers") or {}
+    m = _STOP_PROVIDER_RE.search(line or "")
+    if m:
+        named = m.group(1)
+        for pid, provider in providers.items():
+            if pid == named or (isinstance(provider, dict)
+                                and provider.get("omniroute_id") == named):
+                return pid
+        return None
+    for leg in legs or []:
+        pid = str(leg).partition("/")[0]
+        provider = providers.get(pid)
+        if isinstance(provider, dict) and not unavailable_now(provider, now):
+            return pid
+    return None
+
+
+def load_provider_state(path: str) -> dict:
+    """The spawner's provider-stop state; a missing or broken file reads as empty.
+
+    A record of a transient outage is never worth failing a run over, so this
+    cannot raise: an unreadable file is an empty state (silently -- there is
+    nothing to have said), and unparseable JSON is named on stderr and reads as
+    empty too, because the shape that follows cannot be trusted. What the file
+    SAYS once it parses is checked by `_validated_provider_entries`.
+    """
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    try:
+        state = json.loads(text)
+    except ValueError as exc:
+        _provider_state_warning("it is not JSON (%s)" % exc)
+        return {}
+    if not isinstance(state, dict):
+        _provider_state_warning("the file is a %s, not an object"
+                                % type(state).__name__)
+        return {}
+    return state
+
+
+def _provider_state_warning(why: str) -> None:
+    """One line on stderr about the provider-state file. Never an exception.
+
+    One per call, however many rows were bad: the caller is a routing read that
+    has already decided to ignore the file, and a page per row would bury the
+    rest of the run's output.
+    """
+    print("autoos-agent: ignoring the provider-state file: %s" % why,
+          file=sys.stderr)
+
+
+def _iso_utc(text):
+    """An ISO instant as an aware UTC datetime, or None.
+
+    `_parse_iso` accepts a naive value; a naive instant in a state file is
+    someone's local wall clock, and comparing it to an aware `now` would raise
+    TypeError. It is read as UTC -- the shape the writer emits (`_iso_zulu`) and
+    registry check rule 7 enforce.
+    """
+    parsed = _parse_iso(text)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _validated_provider_entries(state, now=None):
+    """``(rows, reasons_ignored)`` for a loaded provider-state file.
+
+    REVFIX S1/S3. The file is this tool's own, but it lives in logs/ where a
+    person fixes things by hand and where an older build may already have
+    written it, so no part of its shape is trusted: ``providers`` must be an
+    object, every row an object, and every row's ``unavailable_until`` a
+    parseable ISO instant no more than MAX_AUTO_RESET_SECONDS ahead -- the cap
+    the WRITER already applies, enforced on the way in as well or a single row
+    ("2099-01-01") benches a provider forever on the spawner's authority.
+
+    Every failure is a reason in the second half of the tuple, never an
+    exception: a routing read must go on with the registry as it is.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, reasons = {}, []
+    raw = state.get("providers") if isinstance(state, dict) else None
+    if raw is None:
+        return rows, reasons
+    if not isinstance(raw, dict):
+        return rows, ['its "providers" section is a %s, not an object of '
+                      "provider rows" % type(raw).__name__]
+    cap = now + datetime.timedelta(seconds=MAX_AUTO_RESET_SECONDS)
+    for pid, entry in raw.items():
+        if not isinstance(entry, dict):
+            reasons.append("%s is a %s, not an object" % (pid, type(entry).__name__))
+            continue
+        until = entry.get("unavailable_until")
+        parsed = _iso_utc(until)
+        if parsed is None:
+            reasons.append("%s carries no parseable ISO unavailable_until (%r)"
+                           % (pid, until))
+            continue
+        if parsed > cap:
+            reasons.append("%s claims a reset %s, past the %d-day window a machine "
+                           "observation may assert (an operator's own registry edit "
+                           "is how a longer outage is declared)"
+                           % (pid, until, MAX_AUTO_RESET_SECONDS // 86400))
+            continue
+        rows[pid] = entry
+    return rows, reasons
+
+
+def _iso_zulu(moment) -> str:
+    return moment.astimezone(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+
+
+def _until_is_expired(entry, now) -> bool:
+    """True when `entry`'s window already passed (so it says nothing anymore)."""
+    until = (entry or {}).get("unavailable_until")
+    parsed = _iso_utc(until)
+    return parsed is not None and now >= parsed
+
+
+def record_reset_stop(stop_line: str, combo, registry: dict, now=None,
+                      path: str | None = None):
+    """Record a stopped provider's own reset window; returns (provider, until) or None.
+
+    Nothing is recorded when the line states no window, when the window is
+    implausible (MAX_AUTO_RESET_SECONDS), or when no provider can be named for
+    it. A second stop for the same provider keeps the LATER window, and entries
+    whose window already passed are dropped on the way in, so the file cannot
+    grow into a list of historical outages. Writes atomically (mkstemp in the
+    target directory, then os.replace) - a reader mid-run must never see a
+    half-written state.
+    """
+    seconds = parse_reset(stop_line)
+    if seconds is None or seconds > MAX_AUTO_RESET_SECONDS:
+        return None
+    legs = ((registry.get("routes") or {}).get(combo) or {}).get("legs") or []
+    provider_id = stop_provider_id(stop_line or "", registry, legs, now)
+    if provider_id is None:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    path = path or PROVIDER_STATE_PATH
+    until = _iso_zulu(now + datetime.timedelta(seconds=seconds))
+    state = load_provider_state(path)
+    kept, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        # REVFIX S1: the writer is not poisoned by what it is reading. The bad
+        # rows are named and dropped, and the file that comes back is the shape
+        # the reader expects.
+        _provider_state_warning("; ".join(ignored))
+    providers = {pid: entry for pid, entry in kept.items()
+                 if not _until_is_expired(entry, now)}
+    previous = providers.get(provider_id) or {}
+    previous_until = _iso_utc(previous.get("unavailable_until"))
+    if previous_until is not None and _iso_utc(until) < previous_until:
+        until = previous["unavailable_until"]
+    providers[provider_id] = {"unavailable_until": until, "combo": combo,
+                              "reason": stop_line, "recorded_at": _iso_zulu(now)}
+    directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".provider-state-")
+        try:
+            with io.open(fd, "w", encoding="utf-8") as fh:
+                json.dump({"$comment": "providers a real run reported as stopped, "
+                                       "with the reset that run was told; transient "
+                                       "state, not the operator's registry",
+                           "providers": providers}, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except OSError as exc:
+        print("autoos-agent: could not record the provider stop: %s" % exc,
+              file=sys.stderr)
+        return None
+    return provider_id, until
+
+
+def apply_provider_state(registry: dict, state: dict, now=None) -> dict:
+    """`registry` with the recorded windows applied as providers' `unavailable_until`.
+
+    Returns a copy - the shared `load_registry()` object is never mutated. The
+    state is validated first (`_validated_provider_entries`): a row that is
+    missing, mis-shaped or beyond the cap is ignored with one warning and the
+    registry stands as it is, because this runs on the routing path of every
+    `route`/`run` and a broken outage record must not take the router down with
+    it (REVFIX S1/S3). An entry for a provider the registry does not know is
+    ignored (the state file follows the registry, not the other way round), and a
+    provider the operator already benched for LONGER keeps the operator's date: a
+    machine observation must never shorten an outage someone wrote on purpose, and
+    the cap is on the machine's word, not the operator's. A window that has passed
+    is applied as it is and self-heals in `unavailable_now`.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    rows, ignored = _validated_provider_entries(state, now)
+    if ignored:
+        _provider_state_warning("; ".join(ignored))
+    merged = dict(registry)
+    providers = dict(registry.get("providers") or {})
+    merged["providers"] = providers
+    for pid, entry in rows.items():
+        provider = providers.get(pid)
+        if not isinstance(provider, dict):
+            continue
+        parsed = _iso_utc(entry.get("unavailable_until"))
+        current = _iso_utc(provider.get("unavailable_until"))
+        if current is not None and current >= parsed:
+            continue
+        provider = dict(provider)
+        provider["available"] = False
+        provider["unavailable_until"] = entry["unavailable_until"]
+        providers[pid] = provider
+    return merged
+
+
+def load_live_registry(reg_path: str | None = None, state_path: str | None = None,
+                       now=None) -> dict:
+    """The registry as it stands for the routing decisions RIGHT NOW.
+
+    The catalog plus the spawner's recorded provider stops. Use this wherever
+    `route`/`run`/the reviewer walk ask "who is up"; keep plain
+    `load_registry()` for the privacy and capability reads (which a provider
+    outage does not change) and in the renders (which must not move with the
+    date). With no state recorded this is the cached registry, unchanged.
+    """
+    registry = load_registry(reg_path or REGISTRY_PATH)
+    state = load_provider_state(state_path or PROVIDER_STATE_PATH)
+    if not (state.get("providers") or {}):
+        return registry
+    return apply_provider_state(registry, state, now)
 
 
 def _porcelain_path_is_logs(p: str) -> bool:
@@ -2476,6 +3062,13 @@ def cmd_run(args, cfg: dict) -> int:
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
+    # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
+    # before anything is started -- a review by the author's own model family is
+    # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
+    # the same code SPAWNFREE's queue loop already handles), not a silent pass.
+    refusal = review_run_refusal(route.get("review_plan"))
+    if refusal is not None:
+        return refusal
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
     # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
@@ -2489,6 +3082,22 @@ def cmd_run(args, cfg: dict) -> int:
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
+    if route.get("review_plan"):
+        # who reviews, and who was passed over -- an operator reading a spawn
+        # should not have to re-run `route --explain` to see the family rule work.
+        reviewer = route["review_plan"]["reviewer"]
+        print("reviewer: %s %s (family %s, author %s)" % (
+            reviewer["client"], reviewer["model"], reviewer["family"],
+            route["review_plan"]["author_family"]))
+        # Item 5: the line that has to end up in the lane record for the lane to
+        # read as reviewed. Filling in the verdict is the reviewer's job at the
+        # end of the run, not the spawner's guess at the start of it.
+        print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
+              "verdict=<fill in>" % (route["card"].get("author"), reviewer["model"]))
+        for line in resolver.reviewer_explain_lines(route["review_plan"]):
+            print(line)
+    if route.get("reviewer_note"):
+        print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])
@@ -2653,6 +3262,14 @@ def cmd_run(args, cfg: dict) -> int:
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
         # a promo client whose tail is a provider stop does not get a false probe.
         stop = provider_stop(client_tail)
+        if stop is not None:
+            # REVROUTE (S2) item 3: when the stop line states its own reset,
+            # that window becomes the provider's unavailable_until for every
+            # later routing read - the next task goes elsewhere until then.
+            recorded = record_reset_stop(stop, plan["route"].get("combo"),
+                                         load_live_registry())
+            if recorded:
+                print("provider %s unavailable until %s" % recorded)
         if stop is not None and rc in (0, 3, 6):
             print("autoos-agent: PROVIDER-STOP: %s" % stop, file=sys.stderr)
             rc = 8
@@ -2851,6 +3468,14 @@ def main(argv=None) -> int:
                        help="registry model id billed for verification (default: %(default)s)")
     route.add_argument("--repo", help="repo root to measure against (default: this checkout)")
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
+    review_status_p = sub.add_parser(
+        "review-status", help="read a lane record and report whether it carries both "
+                              "reviews a ready lane needs: a cross-family review and the "
+                              "final check (REVROUTE)")
+    review_status_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
+    review_status_p.add_argument("--registry",
+                                 help="registry to resolve model families against "
+                                      "(default: catalog/ai-registry.json)")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return cmd_context(args)
@@ -2858,6 +3483,8 @@ def main(argv=None) -> int:
         return cmd_heartbeat(args)
     if args.cmd == "route":
         return cmd_route(args)
+    if args.cmd == "review-status":
+        return cmd_review_status(args)
     if args.cmd == "ps":
         return cmd_ps(args)
     cfg = load_jsonc(os.path.join(ROOT, "opencode.jsonc"))
