@@ -264,6 +264,11 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     for s in (sys.stdout, sys.stderr):
         s.reconfigure(encoding="utf-8")
+    if a.max_tokens < MAX_TOKENS:
+        print("--max-tokens %d is below the %d floor "
+              "(reasoning rungs answer an empty 502 below it)" % (a.max_tokens, MAX_TOKENS),
+              file=sys.stderr)
+        return 2
     try:
         check_model(a.model)
     except ValueError as e:
