@@ -46,7 +46,7 @@ fi
 
 if it "omnigraph images: the tag is the git SHA on ghcr.io, never a floating tag"; then
     problems=""
-    if ! grep -qF 'ghcr.io/${{ github.repository_owner }}/omnigraph-viewer:${{ github.sha }}' "$OMNI_WF"; then
+    if ! grep -qF 'ghcr.io/${{ steps.owner.outputs.lc }}/omnigraph-viewer:${{ github.sha }}' "$OMNI_WF"; then
         problems+=" no ghcr.io/<owner>/omnigraph-viewer:<sha> tag;"
     fi
     # `latest` (or any moving tag) must never be an image tag: a deployed image
@@ -59,6 +59,28 @@ if it "omnigraph images: the tag is the git SHA on ghcr.io, never a floating tag
     fi
     if grep -qE ':latest([^a-zA-Z0-9_-]|$)' "$OMNI_WF"; then
         problems+=" a :latest image tag is referenced;"
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "omnigraph images: the owner is lowercased before it reaches the tag (GHCR requirement)"; then
+    problems=""
+    grep -qE '\$\{GITHUB_REPOSITORY_OWNER,,\}' "$OMNI_WF" \
+        || problems+=" no lowercase transform of GITHUB_REPOSITORY_OWNER;"
+    grep -qF 'ghcr.io/${{ github.repository_owner }}' "$OMNI_WF" \
+        && problems+=" the raw (possibly mixed-case) owner is still used in a tag;"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "omnigraph images: publishing is main-only; a branch build never pushes"; then
+    problems=""
+    if ! grep -qF "github.ref == 'refs/heads/main'" "$OMNI_WF"; then
+        problems+=" no main-only gate found;"
+    fi
+    # The build-push-action's own push: must be gated, not a bare 'true' -- a
+    # bare true is exactly the bug (CI 36440796992) that published from a lane branch.
+    if grep -qE '^[[:space:]]*push:[[:space:]]*true[[:space:]]*$' "$OMNI_WF"; then
+        problems+=" push: true is unconditional;"
     fi
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
