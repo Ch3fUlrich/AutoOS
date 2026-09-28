@@ -28,6 +28,7 @@ their contemporary names.
 | RESTART state card + generated context pack, `inbox --since-card`, lower context cap | autoos-L1-routing | 2026-09-28 | cap ~350k measured, relaunch reads only card + pack | Running — R1 `inbox` verb (R1INBOX `d13c4d3`), §5 `token-rate` metric (R5ARATE `6e35511`), R5A5 token-rate follow-up (`19dba3f`); spawner/track fixes SPAWNFIX3 `5ef4510`; MISTRALFIX Mistral combos + registry/resolver fix (`c5ba389`, gateway apply by L1-routing); CAPL2 sonnet orchestrator cap 250k (`5c9a81f`, interim; operator 500k follow-up) |
 | B6 spawner gate (diff-in-paths, report-vs-diff) | autoos-L1-routing | 2026-09-25 | gate refuses an out-of-scope diff, tested | Open |
 | `apply -Probe` re-date verification table | autoos-L1-routing | — | 6 combos ack NEW legs, verification.md re-dated (or closed if the E1–E3 probes cover it) | Queued (low priority) |
+| Workstation-AutoOS lanes (WS-HARNESS, WS-SKILLWIN, WS-OS11 Windows run + fixes, WS-OMNIREMOTE, WS-DSCALL) | Workstation-AutoOS (fleet clones) | 2026-09-28 | each lane merged by L1-main with CI green | Running — WS-HARNESS `3f2df52` merged; WS-SKILLWIN in CI; others held on the operator |
 | Web Router-tiers backend (apply/switch) | — | — | — | Closed 2026-09-28: superseded by the FLEETSPEC console (OmniRoute-grade) |
 | Agent Canvas re-evaluation | — | — | — | Closed 2026-09-28: superseded — operator rejected OpenHands as the hub; FLEETSPEC replaces it |
 
