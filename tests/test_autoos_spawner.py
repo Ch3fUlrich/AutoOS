@@ -3544,6 +3544,87 @@ elif mode == "commit-sibling-worktree":
                     "-c", "user.email=autoos-worker@users.noreply.github.com",
                     "commit", "-q", "-m", "sibling lane worker change"], check=True)
     print("fake: a sibling lane's worker committed in its own worktree")
+elif mode == "parent-ff-onto-lane":
+    # LEAKFP A (review-fold2e.out): the orchestrator fast-forwards the parent
+    # worktree's OWN branch onto another lane's worker commits while this
+    # (read-only review) run is going. HEAD's first-parent chain now carries
+    # autoos-worker commits it never wrote.
+    git("switch", "-q", "-c", "lane-ff")
+    with open(os.path.join(root, "lane-ff.txt"), "w") as fh:
+        fh.write("lane\\n")
+    git("add", "lane-ff.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "another lane's worker change")
+    git("switch", "-q", "-")
+    git("-c", "user.name=orch", "-c", "user.email=orch@example.invalid",
+        "merge", "-q", "--ff-only", "lane-ff")
+    print("fake: parent branch fast-forwarded onto another lane's commits")
+elif mode == "ff-old-lane-commit":
+    # LEAKFP A, harder shape: the lane finished BEFORE this run (its commit is
+    # dated years back, made in another writer's clone so this worktree's HEAD
+    # reflog never saw it) and the orchestrator deletes the lane branch after
+    # the fast-forward, so no ref but the parent's own carries it -- only the
+    # commit's timestamp says it cannot be this worker's.
+    import shutil as _sh
+    import tempfile as _tf
+    old = dict(os.environ)
+    old["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00Z"
+    old["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00Z"
+    par = _tf.mkdtemp(prefix="autoos-fake-lane-")
+    other = os.path.join(par, "lane")
+    git("clone", "-q", "--local", root, other)
+
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True, env=old)
+    ogit("switch", "-q", "-c", "lane-old")
+    with open(os.path.join(other, "lane-old.txt"), "w") as fh:
+        fh.write("old lane\\n")
+    ogit("add", "lane-old.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "a finished lane's commit")
+    git("fetch", "-q", other, "lane-old:refs/heads/lane-old")
+    git("merge", "-q", "--ff-only", "lane-old")
+    git("branch", "-q", "-D", "lane-old")
+    _sh.rmtree(par, True)
+    print("fake: parent branch fast-forwarded onto a pre-run lane commit")
+elif mode == "commit-in-another-clone":
+    # LEAKFP B (MUSEAPI2.out tail): another writer's lane in the SAME
+    # repository advanced an existing branch. Every worktree and clone of one
+    # .git shares refs, and this worktree's HEAD never visited that branch, so
+    # "checked out in another worktree" cannot excuse the moved ref.
+    import shutil as _sh
+    import tempfile as _tf
+    par = _tf.mkdtemp(prefix="autoos-fake-sib-")
+    other = os.path.join(par, "lane")
+    def ogit(*a):
+        subprocess.run(["git", "-C", other, *a], check=True,
+                       capture_output=True, text=True)
+    git("clone", "-q", "--local", root, other)
+    ogit("switch", "-q", "side")
+    with open(os.path.join(other, "asm.txt"), "w") as fh:
+        fh.write("asm\\n")
+    ogit("add", "asm.txt")
+    ogit("-c", "user.name=autoos-worker",
+         "-c", "user.email=autoos-worker@users.noreply.github.com",
+         "commit", "-q", "-m", "another lane's worker change")
+    git("fetch", "-q", other, "side:side")
+    _sh.rmtree(par, True)
+    print("fake: a shared-repo branch moved under another writer")
+elif mode == "commit-worker-with-lane-present":
+    # The boundary the two fixes above must not cross: a real leak (the worker
+    # commits into the parent checkout under the worker identity) while an
+    # unrelated lane ref also exists in the repository.
+    git("branch", "lane-present")
+    with open(os.path.join(root, "worker-file.txt"), "w") as fh:
+        fh.write("worker\\n")
+    git("add", "worker-file.txt")
+    git("-c", "user.name=autoos-worker",
+        "-c", "user.email=autoos-worker@users.noreply.github.com",
+        "commit", "-q", "-m", "worker change")
+    print("fake: committed as worker with a lane ref present")
 elif mode == "untracked-in-parent":
     # A worker with full write rights drops a NEW untracked file into the parent
     # checkout (review of 6622d29: git status ran with --untracked-files=no).
@@ -3860,6 +3941,51 @@ class IsolateContainmentTests(unittest.TestCase):
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
         self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_parent_fast_forward_onto_another_lanes_commits_is_not_a_leak(self):
+        # LEAKFP A (work/L1-routing/review-fold2e.out, exit 7): the leak check
+        # read the parent HEAD range as "the worker committed here", but the
+        # orchestrator had only fast-forwarded this worktree's branch onto
+        # another lane's commits while a read-only review sandbox ran.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "parent-ff-onto-lane")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_prerun_lane_commit_fast_forwarded_in_is_not_a_leak(self):
+        # The timestamp leg of the rule: the lane finished before this run and
+        # its branch is gone, so nothing but the commit date tells the
+        # orchestrator's bring-up from a worker's write.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "ff-old-lane-commit")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_shared_repo_branch_moving_under_another_writer_is_not_a_leak(self):
+        # LEAKFP B (work/L1-routing/MUSEAPI2.out tail, exit 7): every worktree
+        # and clone of one .git shares refs, so another orchestrator's lane
+        # moves a ref that existed at this snapshot with in-window worker
+        # commits this run never wrote, and this worktree never visited it.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state, "commit-in-another-clone")
+        self.assertNotIn("LEAK", out + err)
+        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_worker_commit_in_the_parent_is_still_a_leak_with_a_lane_present(self):
+        # The boundary of both exemptions: a lane ref in the repository must not
+        # excuse a worker commit made on the parent's own branch.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        rc, out, err = self.run_isolated(root, stub, state,
+                                         "commit-worker-with-lane-present")
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(rc, 7, out + err)
+        self.assertIn("LEAK", out + err)
+        self.assertIn(sha, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_new_untracked_file_in_the_parent_is_a_leak(self):
