@@ -53,8 +53,11 @@ asks before loading that level's rules.
 This is depth, not the model tier `unattended-orchestration.md`'s `t1`/`t2`/`t3` picks for a task
 — the two axes are independent. *Relaunches* is a watch: each level reads the status timestamp the
 level below rewrites and relaunches — never resumes (R-orch-06) — a busy child quiet >25 min from
-its handoff (R-coord-08, the beat). `references/main-orchestrator.md` names a single top session
-"L1" in an older 3-level scheme (its L1 ≈ this table's L2) — read whichever your brief names.
+its handoff (R-coord-08, the beat). **L0 only routes and relays: the level that owns a topic
+researches it, answers it and summarizes it; L0 forwards what it cannot answer** (R-router-01;
+source: work/L1-routing/FOLD4.common.md "Levels"). `references/main-orchestrator.md` names a single
+top session "L1" in an older 3-level scheme (its L1 ≈ this table's L2) — read whichever your brief
+names.
 
 ## Rules
 
@@ -73,11 +76,15 @@ Every brief names this skill: the spawned session loads it, and a worker that ca
 gets the rules its task touches inlined (source: briefs/common.md "Skill rules bind every spawned
 agent", operator 2026-09-26T13:45Z).
 
-Mechanical rules already in code: run `python3 tools/autoos-agent.py heartbeat` (pause, unpushed,
-context cap), `python3 tools/autoos-agent.py ready` (review gate + pushed sha + inbox line),
-`python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until),
-`python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the
-full list of code-enforced rules.
+Mechanical rules already in code — the interface R-coord-09 mandates, and what each part gates:
+`python3 tools/autoos-agent.py` (the MCP server exposes the same) `run` (MCP `spawn`) launches one
+worker, `route` prints the resolver's pick for a task card, `ready` appends the ready line only
+after `review-status` and the pushed sha check out, `heartbeat` reports pause/unpushed/context
+fill, `ps` lists every live worker, `usage` the spend by provider and lane, `context` this
+session's fill, `token-rate` orchestrator tokens per merged change (RESTART spec §5), `list` the tiers and who may spawn whom. Also in code:
+`python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until) and
+`python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the full
+list of code-enforced rules.
 
 A level's rules bind every session doing that job: `coord` rules bind whoever runs lanes and
 merges (L1, and an L2 for its own lanes — so the heartbeat rules `R-coord-07`/`R-coord-08` bind
@@ -85,18 +92,19 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 
 ### router (L0)
 
-- R-router-01: Only L0 asks the operator, and only after research; every other session writes `question:` to the inbox. (why: a dialog blocks a background session; source: common.md Questions)
+- R-router-01: Only L0 asks, researched, as the batched `Q:` line; others write `question:` to L0 or its parent's inbox. (why: a dialog blocks a background session; source: common.md, inbox 05:47Z)
 - R-router-02: Diagnose against host and route state before declaring failure. (why: first verdict is usually wrong; source: review-b3c1.out 2026-09-26T07:33Z)
 
 ### coord (L1)
 
-- R-coord-01: Cut lanes from main; merge lane→orch→main, no-ff, mutex, one merger; freeze the parent while its child runs. (why: serial merges self-reconcile; source: HandoffCore tests, inbox 19:55Z)
+- R-coord-01: Cut lanes from main; merge main in before spawn; lane→orch→main, no-ff, mutex, one merger; freeze parent. (why: serial merges reconcile; source: HandoffCore tests, inbox 19:55Z, 19:39Z)
 - R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
-- R-coord-03: Claude orchestrates and final-checks, never implements; pick writers by complexity from `route --explain`. (why: Claude rate limit stops the whole run; source: common.md Claude budget)
-- R-coord-04: Hold host headroom: run `autoos-agent.py heartbeat`; <=3 lanes + 3 readers, MemAvailable >= 3 GB. (why: headroom keeps tests and builds alive; source: briefs/common.md "Host limits")
+- R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`. (why: a Claude limit stops the run; source: common.md)
+- R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
-- R-coord-08: Beat pushes, rewrites status timestamp-first, relaunches a child quiet >25 min; read inbox before launch. (why: stale orders launched three workers post-stop; source: common.md 15:3xZ)
+- R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
+- R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner; CAO separate. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
 
 ### orch (L2)
 
@@ -105,11 +113,13 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-04: Feed isolated workers inline or by absolute read-only path. (why: clone cannot read outside itself; source: work/L1-routing/Q1doc.out)
 - R-orch-06: Relaunch, never resume, a no-change child; verify worktree/WIP scope; run the old suite before new tests. (why: wrong tree; unrun WIP adds defects; source: common.md, REDACTFIX2.out)
 - R-orch-08: Commit lanes under lane identity; record classifier refusals verbatim and stop. (why: refusals are signals, never obstacles; source: refusals measured 2026-09-24/25)
-- R-orch-10: Any change that runs sudo/root gets the Sonnet final review regardless of cheap verdict. (why: privileged ops need highest-trust gate; source: L1-backlog agysb 8b36913)
+- R-orch-10: Privileged, installer or state-mutating changes get the Sonnet final regardless of cheap verdict. (why: a shallow first pass misses setup defects; source: agysb 8b36913, inbox 23:31:09Z)
 - R-orch-11: A lane that changes a route id or return code greps every consumer (lanes.md list), catalog postInstall too. (why: stale ids and bare postInstall abort CI; source: CI 36320592493, 765f189)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
-- R-orch-13: Plan, spec, decision or bigger change: a pinned cross-family review before execute or merge, then Sonnet. (why: same family repeats writer blind spots; source: common.md Second opinion)
+- R-orch-13: Plan, spec, decision, or bucket-table-big diff (lines incl. tests): pinned cross-family review before execute/merge, then Sonnet. (why: same family shares blind spots; source: inbox 00:31Z)
 - R-orch-14: Never skip a slow free reviewer; Haiku stays an extra pass; record writer, reviewer, verdict. (why: a small reviewer's no-issues is no proof; source: HAIKU-EVAL.md, review-spawnredact.md)
+- R-orch-15: Send the skill owner one `lesson: … evidence=…` line per bug or surprise; only a tested lesson becomes a rule. (why: unmeasured lessons corrupt the skill; source: briefs/common.md)
+- R-orch-16: Code that acts on a report (merge, ready, push) is re-audited cross-family before it gates; names match exactly. (why: a substring let notsonnet sign off; source: REVGATE2.brief, 4ff89c8)
 
 ### worker (L3)
 
@@ -120,7 +130,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-worker-05: Gate on `set -o pipefail` and the 'N passed' line, never `tail -1 && push`. (why: 'no tests ran' exited 0 and was pushed; source: work/L1-routing/B3a.out)
 - R-worker-06: A leaf role never spawns; only a spawning role lists the autoos-agent MCP. (why: supervisor wanting to code mis-decomposed; source: tests/test_agent_harness.py)
 - R-worker-07: Never shellcheck tests/run-tests.sh locally; run jobs over ~2 GB under systemd-run MemoryMax=2G. (why: its OOM killed every session twice; source: herdr-server.log 2026-09-26T15:25Z)
-- R-worker-08: Mutation-test a scratch copy (`tar --exclude=.git`), never the worktree. (why: a mutation must not touch the lane's tree; source: status/L1-backlog.lane-omni.report.md)
+- R-worker-08: Verify or mutate on a detached copy — `git clone --no-hardlinks`, never the worktree; `tar` only where nothing reads git. (why: an export broke 37 git fixtures; source: REVGATE.out)
 - R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 
 ## CAO quickstart

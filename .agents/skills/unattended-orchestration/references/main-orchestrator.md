@@ -20,11 +20,9 @@ cheaper than asking an L2.
 One recurring `CronCreate` job (cron `7-59/10 * * * *`) from launch until you stop, recreated after
 every relaunch or context clear. Its prompt names the round trip — read your inbox, the status and
 DONE files you wait for and your CI runs; act; continue your plan. It is your primary wake-up — a
-background loop dies under memory pressure. Each beat pushes your branches, rewrites your status
-file (timestamp on the first line), reads your inbox, and relaunches a child whose status has gone
-quiet past 25 min. The rules that bind
-it are R-coord-07 and R-coord-08; `autoos-agent.py heartbeat` is the read-only report of the same
-state, and an idle session is retired after 8 h.
+background loop dies under memory pressure (that is R-coord-07's why). What a beat then does is
+R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
+`autoos-agent.py heartbeat` is the read-only report of the same state.
 
 ## 2. Start of session
 
@@ -71,8 +69,8 @@ state, and an idle session is retired after 8 h.
 
 ## 4. L3 executors, and cross-family review
 
-Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md) (R-orch-14 keeps Haiku an
-extra cheap pass, never the final); put it in every L2 brief.
+Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md); Haiku's place is
+R-orch-14. Put both ids in every L2 brief.
 
 | Executor | Family | How to reach it (measured status, 2026-09-18) |
 |---|---|---|
@@ -89,9 +87,9 @@ extra cheap pass, never the final); put it in every L2 brief.
 **The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
 carries them:
 
-1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): the resolver owns the
-   leg order — read it with `python3 tools/autoos-agent.py route --explain`, never from prose
-   (R-coord-03) — and review by R-orch-13; Claude closes only high-risk changes (spec §5.7).
+1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): leg order is code, not
+   prose — read it with `python3 tools/autoos-agent.py route --explain`, per R-coord-03; review by
+   R-orch-13. Claude closes only high-risk changes (spec §5.7).
 4. **Opus stays at L1/L2 and does judgement:** decomposing, accepting or rejecting evidence
    (R-coord-02). Who wrote, reviewed and closed each change is the lane record's job — R-orch-14.
 5. **Free first, private never** (operator, 2026-09-18: "allowed training on user data now so the

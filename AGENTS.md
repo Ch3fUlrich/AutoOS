@@ -201,6 +201,14 @@ only skips when neither that nor the binary is available. Install them where you
 - `.ps1`/`.psm1` files keep the UTF-8 BOM **and CRLF** line endings in the working copy;
   `.gitattributes` normalises them to LF in git's own storage, so the diff you read and
   the bytes on disk legitimately differ.
+- `pkill -f <pattern>` and `pgrep -f <pattern>` run from a shell tool call match the **calling
+  shell's own command line** — the pattern is literally in it — so the call kills itself: exit 144
+  and no output. Filter `grep -v $$`, or resolve the pids first and kill by pid. (observed
+  2026-09-27 by L2-general; no repo test)
+- Derive an argv **head** verbatim from the token list; never drop the tokens that start with `-`.
+  A discarded `--` before a wrapper's positional reads as *no child process*, and *no child* is an
+  unaudited **allow**. Deny unknown heads instead of walking past them (fix 978dd09,
+  `tools/hostexec/policy.py`).
 
 ## 7. Definition of done
 
@@ -238,8 +246,10 @@ content in docs.
 | `homelab-access` / `herdr-orchestration` | homelab commands / supervised persistent agents |
 
 Loading per agent: opencode reads `.agents/skills` as project-compat source
-natively; Claude Code reads `.claude/skills` — the installers link each skill
-there (idempotent step, guarded by existence check). OpenHands (SDK 1.36) reads
+natively; Claude Code reads `.claude/skills` — the `agent-skill-links` component
+links each skill there (`link_skill_dirs` is the one link rule: absent → linked,
+an AutoOS link that dangles → repointed, anything of yours → kept). OpenHands
+(SDK 1.36) reads
 the workspace's `.agents/skills/*/SKILL.md` natively and user skills from
 `~/.agents/skills` and `~/.openhands/skills` (`agent_context.load_user_skills`,
 which the installers write as true); the profiles carry no skills path. The

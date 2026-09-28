@@ -2156,7 +2156,10 @@ class NoOpGuardTests(unittest.TestCase):
         spec.loader.exec_module(cls.cli)
 
     def test_implement_run_without_changes_is_a_failure(self):
-        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="")
+        # (SPAWNFIX3 item 1: the same run with NO report is an INCOMPLETE, the
+        # test below; a reported no-change stays the NO-OP.)
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="REPORT task · completed")
         self.assertEqual(rc, 5)
         self.assertIn("NO-OP", msg)
 
@@ -2166,6 +2169,620 @@ class NoOpGuardTests(unittest.TestCase):
 
     def test_a_review_run_may_change_nothing(self):
         self.assertEqual(self.cli.sandbox_verdict({"review": True}, changed="", ahead="")[0], None)
+
+    # SPAWNFIX3 (S3) item 1: a worker that quits mid-thought exits rc 0 with no
+    # commit and no report (work/L1-routing/MUSEREG.try1.out stopped after "Let
+    # me find the POST handler"). That is a different next action from a NO-OP —
+    # relaunch, not re-brief — so it gets its own exit code.
+
+    def test_a_run_that_changed_nothing_and_printed_no_report_is_incomplete(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="Let me find the POST handler")
+        self.assertEqual(rc, self.cli.EXIT_INCOMPLETE)
+        self.assertIn("INCOMPLETE", msg)
+        self.assertIn("relaunch it (never resume)", msg)
+
+    def test_a_run_that_printed_a_report_and_changed_nothing_is_still_a_no_op(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                           output="REPORT task · completed · - · -")
+        self.assertEqual(rc, 5)
+        self.assertIn("NO-OP", msg)
+
+    def test_a_change_or_a_commit_still_passes_with_no_report(self):
+        for changed, ahead in ((" M a.py", ""), ("", "abc fix")):
+            with self.subTest(changed=changed, ahead=ahead):
+                self.assertEqual(self.cli.sandbox_verdict(
+                    {"review": False}, changed=changed, ahead=ahead, output="")[0], None)
+
+    def test_a_report_heading_of_any_shape_counts(self):
+        for text in ("**REPORT** task · completed", "REPORT task · completed",
+                     "REPORT: completed", "  report · done", "# REPORT"):
+            with self.subTest(text=text):
+                self.assertTrue(self.cli.has_report(text), text)
+
+    def test_prose_that_mentions_a_report_is_not_a_report(self):
+        for text in ("I will report the results later", "the REPORTED numbers",
+                     "no REPORT was printed here", ""):
+            with self.subTest(text=text):
+                self.assertFalse(self.cli.has_report(text), text)
+
+    # SPAWNFIX3 (S3) item 4: a research run is judged by its report, not by a
+    # commit (work/L1-routing/R6RES.out and FOLD4MAP.out each ended "NO-OP
+    # exit 5" for a run whose whole job was to read and say something).
+
+    def test_a_read_only_run_that_reported_and_changed_nothing_is_a_research_ok(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False, "read_only": True},
+                                           changed="", ahead="",
+                                           output="REPORT task · completed")
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(msg, "RESEARCH: report only")
+
+    def test_a_read_only_run_with_no_report_is_still_incomplete(self):
+        rc, _msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output="reading the resolver now")
+        self.assertEqual(rc, self.cli.EXIT_INCOMPLETE,
+                         "no report and no change is unfinished, read-only or not")
+
+    def test_a_read_only_run_that_changed_its_sandbox_fails_with_the_diff_stat(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed=" M a.py", ahead="",
+            output="REPORT task · completed",
+            diffstat="1 file changed, 2 insertions(+), 1 deletion(-)")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+        self.assertIn("1 file changed, 2 insertions(+), 1 deletion(-)", msg)
+
+    def test_a_committed_change_counts_against_a_read_only_run(self):
+        # The WIP commit makes the dirt `ahead`, not `changed`; either way the
+        # run changed something it was told not to change.
+        rc, _msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="abc WIP",
+            output="REPORT task · completed", diffstat="1 file changed")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+
+    def test_a_writer_run_is_not_judged_as_a_research_run(self):
+        self.assertEqual(self.cli.sandbox_verdict(
+            {"review": False}, changed=" M a.py", ahead="",
+            output="REPORT task · completed", diffstat="1 file changed")[0], None)
+
+    def test_a_review_run_is_still_exempt_from_every_verdict(self):
+        self.assertEqual(self.cli.sandbox_verdict(
+            {"review": True, "read_only": True}, changed="", ahead="",
+            output="")[0], None)
+
+    def test_read_only_run_marks_the_card_and_the_flag(self):
+        run = self.cli.read_only_run
+        self.assertTrue(run(argparse.Namespace(read_only=True), {}))
+        self.assertTrue(run(argparse.Namespace(read_only=False), {"kind": "research"}))
+        self.assertTrue(run(argparse.Namespace(read_only=False), {"role": "research"}))
+        self.assertFalse(run(argparse.Namespace(read_only=False), {"kind": "implement"}))
+        self.assertFalse(run(argparse.Namespace(read_only=False), None))
+
+    def test_the_containment_prompt_tells_a_research_run_not_to_edit(self):
+        prefix = self.cli.isolate_task_prefix("/tmp/sb", "/tmp/parent", read_only=True)
+        self.assertIn("read-only", prefix)
+        self.assertIn("changing nothing", prefix)
+        self.assertNotIn("read-only", self.cli.isolate_task_prefix("/tmp/sb", "/tmp/parent"))
+
+    def test_the_exit_code_table_names_the_read_only_write_code(self):
+        # R-orch-11: the docstring table is what every caller reads.
+        doc = self.cli.__doc__
+        self.assertIn("11 = an --isolate run marked --read-only", doc)
+        self.assertIn("(READ-ONLY", doc)
+        self.assertEqual(self.cli.EXIT_READ_ONLY_WRITE, 11)
+
+    def test_a_read_only_write_is_recorded_as_a_capability_failure(self):
+        cli = self.cli
+        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+                "client": "opencode", "free": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            tracked = cli.track_entry(plan, cli.EXIT_READ_ONLY_WRITE, 1.0)
+            self.assertIsNotNone(tracked)
+            self.assertEqual(tracked["gate"], "fail")
+            self.assertEqual(tracked["failure_class"], "capability")
+            self.assertTrue(cli.record_run(os.path.join(tmp, "track.jsonl"), tracked),
+                            "rc 11 must be recorded, not dropped")
+
+    def test_the_exit_code_table_names_the_incomplete_code(self):
+        # R-orch-11: a new return code is only safe if the docstring table that
+        # every caller reads says so.
+        doc = self.cli.__doc__
+        self.assertIn("10 = an --isolate run that exited 0 having changed", doc)
+        self.assertIn("(INCOMPLETE", doc)
+        self.assertEqual(self.cli.EXIT_INCOMPLETE, 10)
+
+    def test_an_incomplete_run_is_recorded_as_a_capability_failure(self):
+        # rc 10 must reach the track record like rc 5 does: a record autoos_track
+        # rejects is dropped silently (REVFIX).
+        cli = self.cli
+        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+                "client": "opencode", "free": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            tracked = cli.track_entry(plan, cli.EXIT_INCOMPLETE, 1.0)
+            self.assertIsNotNone(tracked)
+            self.assertEqual(tracked["gate"], "fail")
+            self.assertEqual(tracked["failure_class"], "capability")
+            path = os.path.join(tmp, "track-record.jsonl")
+            self.assertTrue(cli.record_run(path, tracked),
+                            "rc 10 must be recorded, not dropped")
+
+
+# The task text an L2 hands an L3. Every real brief ends with the REPORT field
+# list the return contract asks for (docs/agent-protocol.md §REPORT) — which is
+# exactly the line a worker that cats or echoes its brief prints back.
+BRIEF_SHAPED_TASK = "\n".join((
+    "BRIEF SPAWNFIX3c (FIX-FIRST). Load skill .agents/skills/unattended-orchestration.",
+    "1. HIGH tools/autoos-agent.py ~2697 REPORT_HEADING_RE scans the whole tail.",
+    "2. MEDIUM sandbox_verdict reads only the final `git status --short`.",
+    'Commit: git -c user.name="autoos-worker" commit -m "fix(spawner): ..."',
+    "REPORT: sha, tests before/after, how each client's final message is "
+    "isolated (file:line), lesson:, open:.",
+))
+
+
+class ReportProvenanceTests(unittest.TestCase):
+    """SPAWNFIX3c (S2, after the Sonnet final): who is allowed to say "REPORT".
+
+    run_client (autoos-agent.py:3207-3276, the tail is built at :3249-3251)
+    merges the child's stdout+stderr, streams it to the spawner's stdout and
+    keeps the last TAIL_LIMIT bytes (autoos-agent.py:169) on ClientExit.tail;
+    cmd_run hands that tail to sandbox_verdict as `output`
+    (autoos-agent.py:4005-4015). So the string
+    has_report() searched was the RAW client transcript — the task text the
+    client echoed, every tool call and its output, and only at the end the
+    assistant's closing message. Every brief ends with an instruction line that
+    starts "REPORT:", so a worker that cat'd or echoed its own brief and then
+    died counted as reported and INCOMPLETE (10) never fired.
+
+    The contract that counts is the client's FINAL MESSAGE (docs/agent-protocol.md
+    §REPORT): the text after the last line its harness printed for a tool event,
+    with the brief's own lines and fenced quotations removed — neither is the
+    worker reporting.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    # A realistic brief: the spawner's own containment prefix (isolate_task_prefix,
+    # autoos-agent.py:220) plus the task text an L2 hands an L3.
+    BRIEF = "\n".join((
+        "Your working directory /tmp/sb is your only writable checkout; never cd, "
+        "git -C or write into /repo or any other path outside it.",
+        "The run is headless: nobody will answer questions or approve anything - "
+        "decide, commit, and report.",
+        BRIEF_SHAPED_TASK,
+    ))
+
+    # The transcript up to the last tool call, as a captured client prints it:
+    # agy's harness line per tool event (HEADLESS_REFUSAL_PREFIX,
+    # autoos-agent.py:1936) and a tool-call rendering.
+    TOOL_TAIL = "\n".join((
+        "I'll read the spawner first.",
+        "jetski: running command sed -n 2690,2710p tools/autoos-agent.py",
+        "def has_report(output: str) -> bool:",
+        '    return REPORT_HEADING_RE.search(output or "") is not None',
+        "Read(tools/autoos-agent.py)",
+        "# The return contract (docs/agent-protocol.md): a finished worker prints a",
+        "Now I'll write the failing test.",
+    ))
+
+    def test_a_brief_echoed_by_the_worker_is_not_its_report(self):
+        # The measured bug: the tail IS the brief, then a planning sentence, then
+        # the worker dies. The "REPORT: sha, tests..." line is the brief's own
+        # last line, quoted back — not a report.
+        tail = self.BRIEF + "\nI'll start by reading tools/autoos-agent.py.\n"
+        self.assertFalse(self.cli.has_report(tail, self.BRIEF))
+
+    def test_an_echoed_brief_inside_a_tool_transcript_is_not_a_report(self):
+        tail = "cat brief.md\n" + self.BRIEF + "\nLet me plan the fix.\n"
+        self.assertFalse(self.cli.has_report(tail, self.BRIEF))
+
+    def test_the_verdict_grades_an_echoed_brief_as_incomplete(self):
+        tail = self.BRIEF + "\nReading the resolver now.\n"
+        for route in ({"review": False}, {"review": False, "read_only": True}):
+            with self.subTest(read_only=bool(route.get("read_only"))):
+                rc, msg = self.cli.sandbox_verdict(route, changed="", ahead="",
+                                                   output=tail, brief=self.BRIEF)
+                self.assertEqual(rc, self.cli.EXIT_INCOMPLETE, msg)
+
+    def test_a_real_final_report_counts_in_every_shape(self):
+        for head in ("**REPORT** fix-x · completed · a.py · pytest -> pass · · -",
+                     "## REPORT\nfix-x · completed\n",
+                     "REPORT — fix-x · completed · - · - · - · -",
+                     "All done. Here it is:\n\nREPORT fix-x · completed"):
+            with self.subTest(head=head):
+                self.assertTrue(self.cli.has_report(self.TOOL_TAIL + "\n" + head,
+                                                     self.BRIEF), head)
+
+    def test_the_verdict_keeps_a_real_final_report_a_research_ok(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output=self.TOOL_TAIL + "\n\nREPORT fix-x · completed · - · - · - · -",
+            brief=self.BRIEF)
+        self.assertEqual(rc, 0, msg)
+        self.assertEqual(msg, "RESEARCH: report only")
+
+    def test_the_regexs_own_docstring_and_comment_lines_are_not_a_report(self):
+        # The heading check quoted into a tail — a worker that cats the spawner,
+        # or a brief that quotes it — says nothing about this run. Every quoting
+        # shape must miss: fenced, brief-quoted, and a comment line that quotes
+        # the token again inside itself.
+        quoted = "\n".join((
+            "# The return contract (docs/agent-protocol.md): a finished worker prints a",
+            "# REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).",
+            'REPORT_HEADING_RE = re.compile(r"(?im)^\\s*(?:[#>*-]+\\s*)?(?:\\*\\*)?REPORT(?:\\*\\*)?\\b")',
+        ))
+        self.assertFalse(self.cli.has_report("Reading tools/autoos-agent.py:\n```\n"
+                                             + quoted + "\n```\nThat is the check.", ""))
+        self.assertFalse(self.cli.has_report(quoted, ""))
+        self.assertFalse(self.cli.has_report(quoted, quoted))
+
+    def test_a_report_inside_a_fence_that_closes_before_the_message_continues_is_no_report(self):
+        # SPAWNFIX3d rewrote this test (it asserted the opposite). The rule at
+        # stake is WHICH fence hides a heading: a block that is followed by more
+        # tool activity is a quotation in the TRANSCRIPT, and the transcript is
+        # cut at the last tool line, so it never counts. What the old version
+        # also forbade — a heading inside a fence in the FINAL message — is a
+        # report: measured 2026-09-28, five corpus runs wrapped their whole
+        # closing message in one fence (R5ARATE.out, review-mcpb.out) or sat
+        # behind one that never closed (FULLGUARD.out, OR3.out, A5e2.out).
+        tail = ("Here is the contract this repo uses:\n"
+                "```\n"
+                "REPORT <id> · <status> · <files> · <tests> · <blockers> · <lessons>\n"
+                "```\n"
+                "jetski: running command git status\n")
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_report_that_is_not_the_last_thing_the_client_printed(self):
+        # The final message segment is the text AFTER the last tool line: a
+        # heading followed by more tool activity is the worker mid-run, and the
+        # run then died in that tool call rather than closing with its report.
+        tail = ("**REPORT** fix-x · completed · a.py · pytest -> pass · · -\n"
+                "jetski: running command git status\n"
+                "On branch agent/x\n")
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_report_still_counts_when_no_brief_was_passed(self):
+        # Callers that cannot supply the brief keep today's behaviour for a real
+        # report and for prose.
+        self.assertTrue(self.cli.has_report("REPORT fix-x · completed"))
+        self.assertFalse(self.cli.has_report("I will report the results later"))
+
+    def test_the_read_only_write_verdict_names_a_commit_the_reflog_hid(self):
+        rc, msg = self.cli.sandbox_verdict(
+            {"review": False, "read_only": True}, changed="", ahead="",
+            output="REPORT fix-x · completed", diffstat="",
+            reflog="1234abcd5678")
+        self.assertEqual(rc, self.cli.EXIT_READ_ONLY_WRITE)
+        self.assertIn("1234abcd5678", msg)
+        self.assertIn("commit then reset", msg)
+
+    def test_a_writer_run_is_not_judged_by_its_reflog(self):
+        # The reflog signal exists to catch a read-only run's destroyed commit; a
+        # writer that reset its own work away is still the unfinished run it looks
+        # like, never a pass.
+        rc, _msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="REPORT fix-x · completed",
+                                            reflog="1234abcd5678")
+        self.assertEqual(rc, 5)
+
+    def test_the_sandbox_reflog_sees_a_commit_reset_back_to_base(self):
+        # Direct on a real clone: snapshot the reflog counts, commit, reset --hard
+        # back; the porcelain and `base..branch` are clean again — only the reflog
+        # still names the commit.
+        cli = self.cli
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        clone = os.path.join(tempfile.mkdtemp(), "clone")
+        self.addCleanup(shutil.rmtree, os.path.dirname(clone), True)
+        subprocess.run(["git", "clone", "-q", "--local", root, clone], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "-c", "agent/x"], check=True)
+        base = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        snap = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        self.assertEqual(cli.sandbox_reflog_writes(clone, snap, base), [])
+        with open(os.path.join(clone, "sneaky.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        subprocess.run(["git", "-C", clone, "add", "sneaky.txt"], check=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=autoos-worker",
+                        "-c", "user.email=autoos-worker@users.noreply.github.com",
+                        "commit", "-q", "-m", "worker change"], check=True)
+        sha = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", clone, "reset", "-q", "--hard", base], check=True)
+        # The escapes this must still catch, and the moves it must not.
+        self.assertEqual(cli.sandbox_reflog_writes(clone, snap, base), [sha[:10]])
+        clean = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        subprocess.run(["git", "-C", clone, "switch", "-q", "side"], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "agent/x"], check=True)
+        self.assertEqual(cli.sandbox_reflog_writes(clone, clean, base), [],
+                         "moving HEAD onto base is not a write")
+        # A research run that walks the clone's history is not a write either:
+        # the commits it switches onto already existed when the snapshot was
+        # taken, so they are in its known set even when they sit past base.
+        subprocess.run(["git", "-C", clone, "switch", "-q", "-c", "lane-read"], check=True)
+        with open(os.path.join(clone, "lane.txt"), "w", encoding="utf-8") as fh:
+            fh.write("pre-existing lane work\n")
+        subprocess.run(["git", "-C", clone, "add", "lane.txt"], check=True)
+        subprocess.run(["git", "-C", clone, "-c", "user.name=orch",
+                        "-c", "user.email=orch@example.invalid",
+                        "commit", "-q", "-m", "a lane commit"], check=True)
+        subprocess.run(["git", "-C", clone, "switch", "-q", "agent/x"], check=True)
+        before_history = cli.sandbox_reflog_snapshot(clone, "agent/x")
+        subprocess.run(["git", "-C", clone, "switch", "-q", "lane-read"], check=True)
+        self.assertEqual(cli.sandbox_reflog_writes(clone, before_history, base), [],
+                         "switching onto a branch that existed at the snapshot is reading")
+        # `git stash` is the same escape as the reset, with a different verb: it
+        # commits the dirt and leaves a clean worktree, and only refs/stash and
+        # its own reflog remember it.
+        subprocess.run(["git", "-C", clone, "reset", "-q", "--hard", base], check=True)
+        snap2 = cli.sandbox_reflog_snapshot(clone, "lane-read")
+        with open(os.path.join(clone, "tracked.txt"), "a", encoding="utf-8") as fh:
+            fh.write("stashed away\n")
+        subprocess.run(["git", "-C", clone, "-c", "user.name=autoos-worker",
+                        "-c", "user.email=autoos-worker@users.noreply.github.com",
+                        "stash", "-q"], check=True)
+        self.assertEqual(
+            subprocess.run(["git", "-C", clone, "status", "--short"],
+                           capture_output=True, text=True, check=True).stdout.strip(), "")
+        self.assertTrue(cli.sandbox_reflog_writes(clone, snap2, base),
+                        "a stashed change must read as the write it is")
+
+
+class ReportFenceAndProseTests(unittest.TestCase):
+    """SPAWNFIX3d (S2, after the Sonnet re-check of the real corpus).
+
+    The 2026-09-25 corpus (work/L1-routing/*.out, read-only, 208 files) has real
+    REPORT headings the SPAWNFIX3c detector throws away, in two shapes:
+
+    - the fence toggle: a ``` that never closes discards everything to its EOF,
+      so a report printed after it is gone, and an odd fence count anywhere in a
+      long transcript leaves the toggle stuck open (FULLGUARD.out, OR3.out,
+      R5ARATE.out, review-mcpb.out, A5e2.out);
+    - the two-mentions rule: a heading that says the word "report" twice — once
+      as its own heading and once in prose — is a real report, not a quotation of
+      the contract (SPAWNFIX3c.out, OR34spike.out).
+
+    Both over-reached: a run that finished was graded INCOMPLETE and relaunched.
+    The protections that stay are the ones that identified the measured escape:
+    the cut at the last tool line, the brief's own lines, and a heading line that
+    renders the heading MARKUP itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    # work/L1-routing/R5ARATE.out: the client wrapped its whole closing message
+    # in one fence, and the spawner's summary follows it.
+    WRAPPED_REPORT = "\n".join((
+        "route: t2-worker reason=public-default routing=1",
+        "sandbox: /tmp/sb (branch agent/x)",
+        "```",
+        "REPORT R5ARATE (RESTART R5a, S2)",
+        "",
+        "sha: 533fb58 · lesson: a fence around the message is still the message",
+        "```",
+        "",
+        "sandbox changes (uncommitted):",
+        "  (none)",
+    ))
+
+    # work/L1-routing/A5e2.out: a ```bash opened in a tool transcript (line 223
+    # of 1123) never closes, and the report is 878 lines later.
+    DANGLING_FENCE = "\n".join((
+        "$ bash <<'EOF'",
+        "```bash",
+        "grep -n 'REPORT' tools/autoos-agent.py",
+        "EOF",
+        "2774: a finished worker prints a heading",
+        "> t2-worker · cheaperinference/kimi-k3",
+        "REPORT:",
+        "- sha: 2e985967",
+        "- tests: 26/26",
+    ))
+
+    # work/L1-routing/FULLGUARD.out: the report is the final message and its own
+    # body carries a nested, closed fence.
+    NESTED_FENCE = "\n".join((
+        " ```",
+        " quoted tool output from two turns ago",
+        " ```",
+        "> t2-worker · deepseek-v4.1-flash",
+        "REPORT",
+        "",
+        "- sha: 2661544",
+        "  ```",
+        "  run-tests.sh: refusing an unfiltered run",
+        "  ```",
+        "- lesson: a code refusal with an explicit opt-in does.",
+    ))
+
+    def test_a_report_wrapped_in_a_fence_is_a_report(self):
+        self.assertTrue(self.cli.has_report(self.WRAPPED_REPORT, ""),
+                        self.WRAPPED_REPORT)
+
+    def test_a_fence_that_never_closes_does_not_discard_the_report(self):
+        self.assertTrue(self.cli.has_report(self.DANGLING_FENCE, ""))
+        self.assertTrue(self.cli.has_report(self.NESTED_FENCE, ""))
+
+    def test_the_segment_is_the_final_message_not_the_transcript(self):
+        # The heading still has to be in the client's closing message: a report
+        # printed before the next tool call is the worker mid-run.
+        tail = self.DANGLING_FENCE + "\nBash(git status)\nOn branch agent/x\n"
+        self.assertNotIn("REPORT:", self.cli.final_message_segment(tail, ""))
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_heading_that_says_the_word_report_twice_is_a_report(self):
+        # SPAWNFIX3c.out: '**REPORT** … the brief-echo exited 0 printing
+        # `RESEARCH: report only`)' — the second mention quotes a spawner MESSAGE,
+        # and OR34spike.out's is plain prose. Neither renders the heading.
+        for head in (
+                "**REPORT** `ff5ebe9` · status: done · tests: before 595 passed "
+                "(18 failed: the read-only brief-echo exited 0 printing "
+                "`RESEARCH: report only`) · after 610 passed · blockers: none.",
+                "# REPORT — OR34spike one-router steps 3+4 "
+                "(lane attribution + usage report)"):
+            with self.subTest(head=head[:60]):
+                self.assertTrue(self.cli.has_report(head, ""), head)
+
+    def test_a_heading_that_renders_the_heading_markup_is_not_a_report(self):
+        # The spawner's own comment, quoted: the extra mentions display the
+        # convention (`**REPORT**`, `# REPORT:`, \breport\b), which no run files
+        # as its result line.
+        self.assertFalse(self.cli.has_report(
+            "# REPORT heading, optionally wrapped in markdown "
+            "(`**REPORT**`, `# REPORT:`).", ""))
+        self.assertFalse(self.cli.has_report(
+            '# REPORT: the check is `\\breport\\b` in a regex literal.', ""))
+
+    def test_a_brief_line_never_counts_even_when_it_is_a_heading(self):
+        brief = "**REPORT** sha, tests before/after, lesson:, open:."
+        self.assertFalse(self.cli.has_report("Working on it.\n" + brief, brief))
+
+    def test_a_file_named_after_the_contract_is_not_a_heading(self):
+        # work/L1-routing/A7spike.out: the research run wrote its report to
+        # ./REPORT.md and its closing line says so. The relaxation above must not
+        # make that a filed report — a heading may end a word, but it may not be
+        # one ("REPORTED"), and it may not be a filename ("REPORT.md").
+        for line in ("**REPORT.md** written to `./REPORT.md`. Here's what it covers:",
+                     "REPORT.md is the artifact this run produced.",
+                     "The REPORTED numbers were taken from the same transcript."):
+            with self.subTest(line=line[:40]):
+                self.assertFalse(self.cli.has_report(line, ""), line)
+        # and the same run, when it does print the heading, is not missed:
+        self.assertTrue(self.cli.has_report(
+            "**REPORT** `f0fa2bb` · router D-045 implemented test-first · "
+            "files: `tools/autoos_tokenrate.py` (+87/-19) · lesson: - · open: -", ""))
+
+
+class ReflogSnapshotCostTests(unittest.TestCase):
+    """SPAWNFIX3d (S2) item 3: only the verdict that reads the reflog pays for
+    the snapshot. sandbox_reflog_writes() runs for a read-only run only
+    (autoos-agent.py:4010), exactly like the diff stat at :4016, but the
+    snapshot taken right after the clone — a `rev-list --all` over the whole
+    history plus three reflog reads — ran for every --isolate worker."""
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_only_a_read_only_run_snapshots_the_reflog(self):
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        real = case.agent.sandbox_reflog_snapshot
+        calls = []
+
+        def spy(path, branch):
+            calls.append(os.path.basename(path))
+            return real(path, branch)
+
+        with mock.patch.object(case.agent, "sandbox_reflog_snapshot", spy):
+            writer_rc, _out, _err = case.run_isolated(root, stub, state, "report")
+        self.assertEqual(calls, [], "a writer run is not judged on its reflog")
+        with mock.patch.object(case.agent, "sandbox_reflog_snapshot", spy):
+            read_only_rc, out, _err = case.run_isolated(
+                root, stub, state, "report", read_only=True)
+        self.assertEqual(len(calls), 1, out)
+        self.assertEqual(read_only_rc, 0, out)
+        self.assertEqual(writer_rc, 5, "the writer still ends NO-OP: it reported, changed nothing")
+
+
+class IncompleteRunEndToEndTests(unittest.TestCase):
+    """SPAWNFIX3 (S3) item 1, through the real cmd_run: the verdict the operator
+    sees is the one the run ends with. Reuses the --isolate fake-client harness
+    (IsolateContainmentTests) rather than a new one, so the worker is the same
+    fake the containment and provider-stop contracts run."""
+
+    def _run(self, mode, **kw):
+        if os.name == "nt":
+            self.skipTest("sh stub; POSIX only")
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        rc, out, err = case.run_isolated(root, stub, state, mode, **kw)
+        return rc, out + err, case.agent
+
+    def test_a_silent_no_change_run_exits_incomplete_not_no_op(self):
+        rc, both, agent = self._run("noop")
+        self.assertEqual(rc, agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE: the worker stopped without a REPORT", both)
+        self.assertNotIn("NO-OP", both)
+
+    def test_a_reported_no_change_run_stays_a_no_op(self):
+        rc, both, _agent = self._run("report")
+        self.assertEqual(rc, 5, both)
+        self.assertIn("NO-OP", both)
+        self.assertNotIn("INCOMPLETE", both)
+
+    def test_a_worker_that_echoed_its_brief_and_stopped_is_incomplete(self):
+        # SPAWNFIX3c (S2): the measured escape. The run's whole stdout is its own
+        # brief (which ends with the "REPORT: ..." instruction line) plus a
+        # planning sentence, so nothing here is a report — and every one of those
+        # lines is text the spawner itself sent.
+        rc, both, agent = self._run("brief-echo", task=BRIEF_SHAPED_TASK)
+        self.assertEqual(rc, agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("NO-OP", both)
+
+
+class ReadOnlyRunEndToEndTests(unittest.TestCase):
+    """SPAWNFIX3 (S3) item 4, through the real cmd_run: --read-only marks a run
+    whose success is an empty sandbox and a REPORT. Measured in
+    work/L1-routing/R6RES.out and FOLD4MAP.out — research runs that reported
+    everything and were graded "NO-OP exit 5", i.e. the spawner asked for an
+    edit the task never wanted."""
+
+    def _run(self, mode, **kw):
+        if os.name == "nt":
+            self.skipTest("sh stub; POSIX only")
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        rc, out, err = case.run_isolated(root, stub, state, mode, read_only=True, **kw)
+        return rc, out + err, case
+
+    def test_a_read_only_run_that_only_reports_exits_zero_with_the_research_line(self):
+        rc, both, _case = self._run("report")
+        self.assertEqual(rc, 0, both)
+        self.assertIn("RESEARCH: report only", both)
+        self.assertNotIn("NO-OP", both)
+
+    def test_a_read_only_run_that_edits_its_sandbox_exits_read_only_write(self):
+        rc, both, case = self._run("sandbox-edit")
+        self.assertEqual(rc, case.agent.EXIT_READ_ONLY_WRITE, both)
+        self.assertIn("READ-ONLY", both)
+        self.assertIn("file changed", both)
+        self.assertNotIn("LEAK", both, "an edit inside the sandbox is not a leak")
+
+    def test_a_read_only_run_that_printed_nothing_is_incomplete(self):
+        rc, both, case = self._run("noop")
+        self.assertEqual(rc, case.agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("RESEARCH", both)
+
+    def test_a_read_only_run_that_echoed_its_brief_is_incomplete_not_research_ok(self):
+        # SPAWNFIX3c (S2): the escape that made every read-only run look like a
+        # success — the brief it was handed ends with a "REPORT:" instruction
+        # line, so echoing it printed a "report".
+        rc, both, case = self._run("brief-echo", task=BRIEF_SHAPED_TASK)
+        self.assertEqual(rc, case.agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE", both)
+        self.assertNotIn("RESEARCH", both)
+
+    def test_a_read_only_run_that_committed_then_reset_exits_read_only_write(self):
+        # SPAWNFIX3c (S2) item 2: the run wrote, committed, and reset the commit
+        # away, so the final `git status --short` is clean and `base..branch` is
+        # empty — the two reads this verdict used to make. The sandbox's own
+        # reflog still names the commit.
+        rc, both, case = self._run("sandbox-commit-reset")
+        self.assertEqual(rc, case.agent.EXIT_READ_ONLY_WRITE, both)
+        self.assertIn("READ-ONLY WRITE", both)
+        self.assertIn("commit then reset", both)
+        self.assertNotIn("RESEARCH", both)
+        self.assertNotIn("LEAK", both, "a commit inside the sandbox is not a leak")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
@@ -2520,6 +3137,452 @@ class HeadlessRefusalTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(rc.tail.encode("utf-8")), 64 * 1024)
         self.assertTrue(rc.tail.endswith("THE-END"))
+
+
+def load_redact():
+    """SPAWNREDACT item 1: the shared pattern module (loaded lazily so a
+    missing module fails the redaction tests, not the whole file)."""
+    import autoos_redact
+    return autoos_redact
+
+
+# Synthetic secrets (never real): one per pattern class, with the exact
+# substring that must never reach the caller's terminal, log, record or commit.
+REDACT_SAMPLES = (
+    ("curl -H 'Authorization: Bearer abcdef1234567890ABCD' https://h",
+     "abcdef1234567890ABCD"),
+    ("wrote sk-" "ABCDEFGHIJKLMNOP1234 into the file",
+     "sk-" "ABCDEFGHIJKLMNOP1234"),
+    ("leg sk-" "or-v1-0123456789abcdef0123456789abcdef is down",
+     "sk-" "or-v1-0123456789abcdef0123456789abcdef"),
+    ("key sk-" "ant-api03-0123456789abcdef0123456789abcdef",
+     "sk-" "ant-api03-0123456789abcdef0123456789abcdef"),
+    ("pushed with gh" "p_0123456789abcdef0123456789abcd now",
+     "gh" "p_0123456789abcdef0123456789abcd"),
+    ("gh" "o_0123456789abcdef0123456789abcd", "gh" "o_0123456789abcdef0123456789abcd"),
+    ("github" "_pat_11ABCDEFGH0123456789_abcdefghijklmnopqrstuvwx",
+     "github" "_pat_11ABCDEFGH0123456789_abcdefghijklmnopqrstuvwx"),
+    ("google AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678", "AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678"),
+    ("xo" "xb-123456789012-abcdefghijklmnop", "xo" "xb-123456789012-abcdefghijklmnop"),
+    ("xo" "xp-123456789012-abcdefghijklmnop", "xo" "xp-123456789012-abcdefghijklmnop"),
+    ("gl" "pat-ABCDEFGH12345678", "gl" "pat-ABCDEFGH12345678"),
+    ("api_key = fakevaluexyz123456", "fakevaluexyz123456"),
+    ("password: fakepass12345678", "fakepass12345678"),
+    ("TOKEN=faketokenvalue123", "faketokenvalue123"),
+    ("secret = fakesecretvalue99", "fakesecretvalue99"),
+    ("clone https://user:hunter2@git.internal/r.git", "hunter2"),
+)
+
+# A PEM private key spans lines, so it is tested on its own (a stream, not a line).
+REDACT_PEM_LINES = (
+    "report follows",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIBogIBAAJBALRm9DaFhwmB8QKB8CgYQK0AAAAAAAAAAAAAAAAAAAAB",
+    "hQL9Zm1Yq8ZkQYoZ1F0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "-----END RSA PRIVATE KEY-----",
+    "end of report",
+)
+
+
+class SharedRedactPatternTests(unittest.TestCase):
+    """SPAWNREDACT item 1: one home for the secret patterns, shared by the
+    spawner's text streams and hostexec's argv redaction."""
+
+    def setUp(self):
+        self.r = load_redact()
+
+    def test_every_pattern_class_is_masked_in_text(self):
+        for line, secret in REDACT_SAMPLES:
+            red = self.r.Redactor()
+            out = red.text(line)
+            self.assertNotIn(secret, out, line)
+            self.assertIn(self.r.TEXT_MASK, out, line)
+            self.assertEqual(red.count, 1, line)
+
+    def test_a_pem_block_is_masked_across_streamed_lines(self):
+        red = self.r.Redactor()
+        out = "".join(red.text(ln + "\n") for ln in REDACT_PEM_LINES)
+        self.assertNotIn("MIIBogIBAAJBALRm9DaFhwmB8QKB", out)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", out)
+        self.assertIn("report follows", out, "the surrounding output must survive")
+        self.assertIn("end of report", out)
+        self.assertIn(self.r.TEXT_MASK, out)
+
+    def test_ordinary_output_is_untouched(self):
+        red = self.r.Redactor()
+        for line in ("lane merged cleanly, the 429 backoff was retried\n",
+                     "FOO=bar PATH=/usr/bin make test\n",
+                     "the token count and key paths are in the report\n"):
+            self.assertEqual(red.text(line), line, line)
+        self.assertEqual(red.count, 0)
+
+    def test_secret_env_values_takes_long_secret_named_values_only(self):
+        vals = self.r.secret_env_values({
+            "AUTOOS_OMNIROUTE_KEY": "omniroute-test-value-0123456789",
+            "MY_TOKEN": "a-fine-32-char-token-value-abcdef",
+            "OPENAI_API_KEY": "too-short",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/tester"})
+        self.assertEqual(sorted(vals),
+                         sorted(["omniroute-test-value-0123456789",
+                                 "a-fine-32-char-token-value-abcdef"]))
+
+    def test_an_injected_env_value_is_masked_by_exact_value(self):
+        value = "omniroute-test-value-0123456789"
+        red = self.r.Redactor([value])
+        out = red.text("the key is %s and nothing else" % value)
+        self.assertNotIn(value, out)
+        self.assertIn(self.r.TEXT_MASK, out)
+        # a value the redactor was not given is not guessed at
+        self.assertEqual(red.text("plain line"), "plain line")
+
+    def test_redact_argv_masks_named_and_prefixed_tokens(self):
+        r = self.r
+        self.assertEqual(r.redact_argv(["tool", "API_KEY=abc123"]), ["tool", "API_KEY=***"])
+        self.assertEqual(r.redact_argv(["curl", "-H", "Bearer sk-live-x"]),
+                         ["curl", "-H", "Bearer ***"])
+        self.assertEqual(r.redact_argv(["tool", "sk-or-v1-0123456789abcdef"]), ["tool", "***"])
+        self.assertEqual(r.redact_argv(["env", "FOO=bar"]), ["env", "FOO=bar"])
+
+    def test_non_string_argv_elements_render_from_the_shared_module(self):
+        # REDACTMERGE: main's hx fix for a non-str argv element (MCP JSON can
+        # carry a number/bool/null, and a refused call must still be recorded)
+        # moved here with the rest of the pattern set, so the spawner's argv
+        # view gets it too and audit.py cannot drift from it.
+        self.assertEqual(self.r.redact_argv(["echo", 123, None, True]),
+                         ["echo", "123", "null", "true"])
+        # an element json.dumps cannot name falls back to repr, never raises
+        self.assertEqual(len(self.r.redact_argv(["echo", {1, 2}])), 2)
+
+    def test_audit_holds_no_pattern_set_of_its_own(self):
+        # REDACTMERGE resolution rule: ONE home for the patterns. hostexec keeps
+        # only what is audit-specific (its "***" mask and argv_sha256 over the
+        # redacted form); the carriers are the shared module's functions.
+        from hostexec import audit
+        self.assertIs(audit.redact_argv, self.r.redact_argv)
+        self.assertIs(audit.sanitize_text, self.r.sanitize_text)
+        src = (Path(__file__).resolve().parent.parent / "tools" / "hostexec"
+               / "audit.py").read_text(encoding="utf-8")
+        for own in ("_CONTROL_RE =", "_SECRET_PREFIX_RE =", "_BEARER_IN_TOKEN_RE =",
+                    "_URL_USERPASS_RE =", "_SECRET_VALUE_FLAGS ="):
+            self.assertNotIn(own, src, "the pattern set is duplicated in audit.py: " + own)
+
+    def test_the_text_prefix_rule_stays_case_exact_on_aiza(self):
+        # REDACTFIX item 3 pins the asymmetry review-spfix H1 accepted: hostexec's
+        # argv path matches every prefix case-insensitively, the text stream
+        # keeps `AIza` case-exact (Google's own keys always are `AIza`, and a
+        # case-insensitive run would eat ordinary prose). The other prefixes are
+        # masked in either case, so widening argv costs no real secret.
+        line = "note AIZA_SYABCDEFGHJKLMNOPQRSTUVW1234 in the report"
+        self.assertEqual(self.r.Redactor().text(line), line)
+        red = self.r.Redactor()
+        out = red.text("key AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678")
+        self.assertNotIn("AI" "zaSyABCDEFGHJKLMNOPQRSTUVW12345678", out)
+        self.assertIn(self.r.TEXT_MASK, out)
+
+
+class RedactAssignmentCostTests(unittest.TestCase):
+    """REDACTFIX item 1: the assignment scan runs in the output pump, once per
+    line of a stream whose line length the worker chooses, so it must be linear.
+    Evidence: review-spfix S1 on 227f470 measured the old ``_ASSIGNMENT_RE``
+    (two unbounded quantifiers overlapping the keyword literals) at 4.8 KB ->
+    2.56 s, and 200 KB -> 104 s; the pump thread hangs for that long and the run
+    is never reaped. The replacement tokenizes ``<word>[=:]<value>`` in one
+    linear pass and decides the keyword in Python."""
+
+    ADVERSARIAL = "keytokensecretpasswordcredential"   # keywords, no separator
+    SECRET = "faketokenvalue123"
+
+    def setUp(self):
+        self.r = load_redact()
+
+    def _timed(self, line):
+        red = self.r.Redactor()
+        start = time.monotonic()
+        out = red.text(line)
+        return out, time.monotonic() - start, red
+
+    def repeat(self, unit, size):
+        return (unit * (size // len(unit) + 1))[:size]
+
+    def test_a_200_kb_line_of_padded_keywords_redacts_in_under_a_second(self):
+        # The bug: this line has no `:`/`=`, so there is nothing to mask, and
+        # the old regex backtracked through every way to split the run first.
+        line = self.repeat(self.ADVERSARIAL, 200 * 1024)
+        out, elapsed, red = self._timed(line)
+        self.assertLess(elapsed, 1.0, "200 KB cost %.1f s" % elapsed)
+        self.assertEqual(out, line, "no carrier, so no masking")
+        self.assertEqual(red.count, 0)
+
+    def test_a_200_kb_value_after_a_carrier_is_masked_in_under_a_second(self):
+        # A long single-token value: masked whole, not left half-visible.
+        line = "token=" + self.repeat(self.ADVERSARIAL, 200 * 1024)
+        out, elapsed, _red = self._timed(line)
+        self.assertLess(elapsed, 1.0, "200 KB value cost %.1f s" % elapsed)
+        self.assertEqual(out, "token=" + self.r.TEXT_MASK)
+
+    def test_a_one_megabyte_normal_line_streams(self):
+        line = self.repeat("the lane merged cleanly ", 1024 * 1024)
+        out, elapsed, red = self._timed(line)
+        self.assertLess(elapsed, 2.0, "1 MB cost %.1f s" % elapsed)
+        self.assertEqual(out, line)
+        self.assertEqual(red.count, 0)
+
+    def test_a_carrier_at_the_end_of_a_one_megabyte_line_is_still_masked(self):
+        # A length cap that dropped the tail of a long line would leak here.
+        line = self.repeat("word ", 1024 * 1024) + "TOKEN=" + self.SECRET
+        out, elapsed, _red = self._timed(line)
+        self.assertLess(elapsed, 2.0, "1 MB cost %.1f s" % elapsed)
+        self.assertNotIn(self.SECRET, out)
+
+    def test_an_injected_value_far_into_a_one_megabyte_line_is_masked(self):
+        value = "omniroute-injected-test-value-0123456789"
+        line = self.repeat("filler ", 1024 * 1024) + value + " tail"
+        red = self.r.Redactor([value])
+        start = time.monotonic()
+        out = red.text(line)
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertNotIn(value, out)
+
+    def test_the_keyword_membership_rules_are_unchanged_by_the_rewrite(self):
+        # Pins the equivalence with the old regex's name/separator/value rules:
+        # the keyword is anywhere in the name run, the separator may be
+        # whitespace-padded, and the value must have a non-space character.
+        cases = [("MY_SECRET_TOKEN=s", True), ("api_key = v", True),
+                 ("password:  v", True), ("x-api-key: v", True),
+                 ("credential-id: v", True), ("key = 1", True),
+                 ("key=", False), ("key = ", False), ("passwd : ", False),
+                 ("the key paths are listed", False), ("FOO=bar", False)]
+        for line, masked in cases:
+            red = self.r.Redactor()
+            out = red.text(line)
+            self.assertEqual(self.r.TEXT_MASK in out, masked, line)
+            self.assertEqual(red.count, 1 if masked else 0, line)
+
+    def test_a_line_past_the_scan_cap_still_gets_the_other_patterns(self):
+        # Above the cap the assignment scan is skipped (documented), but the
+        # prefix/PEM/env patterns still run over the whole line.
+        line = self.repeat("word ", self.r.ASSIGNMENT_SCAN_CAP + 1024)
+        out, _elapsed, red = self._timed(line + " wrote sk-ABCDEFGHIJKLMNOP1234")
+        self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", out)
+        self.assertGreaterEqual(red.count, 1)
+
+
+class SpawnerOutputRedactionTests(unittest.TestCase):
+    """SPAWNREDACT items 2 and 3: every stream the spawner writes of a worker's
+    output is redacted - the live pass-through, the captured tail, the worker
+    record, the track entry and the WIP commit message - while refusal and
+    provider-stop classification still work on it. Evidence: lesson inbox
+    2026-09-27T18:58:28Z, a worker REPORT that printed a found secret."""
+
+    INJECTED = "omniroute-injected-test-value-0123456789"
+    # The child echoes these lines, replacing $KEY with the env value the
+    # spawner injected, so the test proves the exact-value rule too.
+    ECHO_CODE = (
+        "import os, sys\n"
+        "key = os.environ.get('AUTOOS_OMNIROUTE_KEY', '')\n"
+        "for line in sys.argv[1].split('\\n'):\n"
+        "    sys.stdout.write(line.replace('$KEY', key) + '\\n')\n"
+        "    sys.stdout.flush()\n")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.r = load_redact()
+
+    def _run_captured(self, lines, extra_env=None):
+        env = dict(os.environ)
+        env["AUTOOS_OMNIROUTE_KEY"] = self.INJECTED
+        env.update(extra_env or {})
+        payload = "\n".join(lines)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.agent.run_client([sys.executable, "-c", self.ECHO_CODE, payload],
+                                       ".", env, capture=True)
+        return rc, out.getvalue()
+
+    def test_the_live_stream_and_the_tail_carry_no_secret(self):
+        lines = [line for line, _ in REDACT_SAMPLES] + ["$KEY", "worker report done"]
+        rc, streamed = self._run_captured(lines)
+        for _, secret in REDACT_SAMPLES:
+            self.assertNotIn(secret, streamed, secret)
+            self.assertNotIn(secret, rc.tail, secret)
+        self.assertNotIn(self.INJECTED, streamed)
+        self.assertNotIn(self.INJECTED, rc.tail)
+        # streaming still works: ordinary output reaches the caller, masked or not
+        self.assertIn("worker report done", streamed)
+        self.assertIn(self.r.TEXT_MASK, streamed)
+
+    def test_a_pem_block_never_reaches_the_caller_line_by_line(self):
+        rc, streamed = self._run_captured(list(REDACT_PEM_LINES) + ["$KEY"])
+        self.assertNotIn("MIIBogIBAAJBALRm9DaFhwmB8QKB", streamed)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", streamed)
+        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", rc.tail)
+        self.assertIn("end of report", streamed)
+
+    def test_provider_stop_still_detects_a_rate_limit_next_to_a_redacted_line(self):
+        rc, _ = self._run_captured(["key sk-or-v1-0123456789abcdef0123456789abcdef",
+                                    "Error: Rate limit exceeded, quota 429 reached",
+                                    "$KEY"])
+        self.assertNotIn("sk-or-v1-0123456789abcdef0123456789abcdef", rc.tail)
+        stop = self.agent.provider_stop(rc.tail)
+        self.assertIsNotNone(stop, "redaction must not blind the provider-stop check")
+        self.assertIn("rate limit exceeded", stop.lower())
+        self.assertNotIn(self.INJECTED, stop)
+
+    def test_a_stop_marker_the_redactor_eats_is_still_classified(self):
+        # REDACTFIX item 2 (review-spfix S2): the marker here IS the value of a
+        # secret-named carrier, so no copy of the tail that reaches the caller
+        # can contain it. The check runs on the raw copy the pump kept in
+        # memory; the printed and recorded copy stays redacted.
+        rc, streamed = self._run_captured(["working", "error: retry_key = 429"])
+        self.assertIn("retry_key = 429", rc.raw_tail)
+        self.assertNotIn("retry_key = 429", rc.tail)
+        self.assertNotIn("retry_key = 429", streamed)
+        self.assertIsNone(self.agent.provider_stop(rc.tail),
+                          "the recorded copy is blind — the check must not use it")
+        self.assertIsNotNone(self.agent.provider_stop(rc.raw_tail))
+
+    def test_a_refusal_line_the_redactor_eats_is_still_classified(self):
+        rc, streamed = self._run_captured(
+            ["jetski: quota_token = no output produced"])
+        self.assertNotIn("= no output produced", rc.tail)
+        self.assertNotIn("= no output produced", streamed)
+        self.assertIsNone(self.agent.headless_refusal(rc.tail))
+        self.assertEqual(self.agent.refusal_exit(0, rc.raw_tail)[0], 6)
+
+    def test_a_refusal_is_classified_then_redacted(self):
+        refusal = ('jetski: no output produced - a tool required the "command" '
+                   'permission that headless mode cannot prompt for, so it was auto-denied')
+        rc, _ = self._run_captured(["api_key = fakevaluexyz123456", refusal, "$KEY"])
+        self.assertIsNotNone(rc.refusal)
+        self.assertNotIn("fakevaluexyz123456", rc.refusal)
+        self.assertNotIn(self.INJECTED, rc.refusal or "")
+        self.assertEqual(self.agent.refusal_exit(0, rc.refusal or "")[0], 6)
+
+    def test_the_raw_tail_is_capped_like_the_redacted_one(self):
+        # The raw copy is in memory only, but it is still bounded: a long run
+        # must not hold a megabyte of the worker's own text per client.
+        code = ("import sys\n"
+                "sys.stdout.write('a' * 70000 + 'THE-END')\n"
+                "sys.stdout.flush()\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = self.agent.run_client([sys.executable, "-c", code], tmp,
+                                            dict(os.environ), capture=True)
+        self.assertLessEqual(len(rc.tail.encode("utf-8")), 64 * 1024)
+        self.assertLessEqual(len(rc.raw_tail.encode("utf-8")), 64 * 1024)
+        self.assertTrue(rc.raw_tail.endswith("THE-END"))
+
+    def test_the_redaction_is_reported_once_to_the_caller(self):
+        rc, streamed = self._run_captured(["key sk-ABCDEFGHIJKLMNOP1234", "done"])
+        self.assertEqual(rc, 0)
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.report_redactions()
+        printed = out.getvalue() + err.getvalue()
+        self.assertIn("autoos-agent: redacted", printed)
+        self.assertRegex(printed, r"redacted \d+ secret\(s\) from worker output")
+
+    def test_a_worker_record_never_carries_a_secret(self):
+        self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
+        args = argparse.Namespace(task="fix https://user:hunter2@git.internal/r.git\n",
+                                  title=None)
+        with tempfile.TemporaryDirectory() as d:
+            wid, rec = self.agent._worker_record_start(
+                {"session_tag": "t", "client": "agy", "model": "m",
+                 "route": {"combo": ""}, "cwd": ".", "depth": [1, 3]}, args, d)
+            on_disk = json.load(open(os.path.join(d, wid + ".json")))
+        self.assertNotIn("hunter2", on_disk["task_head"])
+        self.assertIn(self.r.TEXT_MASK, on_disk["task_head"])
+
+    def test_a_track_entry_never_carries_a_secret(self):
+        entry = self.agent.redact_record(
+            {"route": "omniroute/sk-ABCDEFGHIJKLMNOP1234", "gate": "pass", "cost": 0.5})
+        self.assertNotIn("sk-ABCDEFGHIJKLMNOP1234", json.dumps(entry))
+        self.assertEqual(entry["cost"], 0.5, "non-text fields pass through")
+
+    def test_the_wip_commit_message_is_redacted(self):
+        self.agent.register_secret_env({"AUTOOS_OMNIROUTE_KEY": self.INJECTED})
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(git + ["init", "-q", repo], check=True)
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as fh:
+            fh.write("work\n")
+        subprocess.run(git + ["-C", repo, "add", "-A"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "-m", "i"], check=True)
+        with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as fh:
+            fh.write("more\n")
+        stop = ("Error: Rate limit exceeded for sk-or-v1-0123456789abcdef0123456789abcdef "
+                "key " + self.INJECTED)
+        sha = self.agent.wip_commit(repo, 0, stop)
+        self.assertTrue(sha)
+        msg = subprocess.run(git + ["-C", repo, "log", "-1", "--format=%s"],
+                             capture_output=True, text=True).stdout
+        self.assertIn("WIP(autoos-agent)", msg)
+        self.assertIn("Rate limit exceeded", msg, "the stop must stay readable")
+        self.assertNotIn("sk-or-v1-0123456789abcdef0123456789abcdef", msg)
+        self.assertNotIn(self.INJECTED, msg)
+
+
+class RawTailClassificationTests(unittest.TestCase):
+    """REDACTFIX item 2: cmd_run classifies on ClientExit.raw_tail (the child's
+    own text, kept in memory only) and prints/records the redacted copy. A
+    stop/refusal line that redaction alters must still decide the exit code."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+
+    def _run_verdict(self, exit_obj):
+        fake_plan = {
+            "agent": "t2-worker", "client": "qoder", "model": "qoder-model",
+            "cmd": ["qodercli", "do the thing"], "env": {},
+            "route": {"combo": "qoder-model", "reason": "test",
+                      "privacy": "public", "review": False, "tier": 2,
+                      "card": None},
+            "depth": (1, 3), "free": False, "sandbox": None,
+            "cwd": os.getcwd(),
+        }
+        ns = argparse.Namespace(
+            client="qoder", task="do the thing", free=False, dry_run=False,
+            card=None, clean=False, tier=2, joinable=False, lean=False,
+            isolate=False, auto=False, title=None, model=None,
+            free_model=None, max_depth=None, plan=None, allow_training=False)
+        with mock.patch.object(self.agent, "build_plan", return_value=fake_plan):
+            with mock.patch.object(self.agent, "run_client", return_value=exit_obj):
+                with mock.patch.object(self.agent.clients, "record_probe"):
+                    with mock.patch.object(self.agent.clients, "signin_state",
+                                           return_value=(None, "")):
+                        with mock.patch("shutil.which",
+                                        return_value="/usr/bin/qodercli"):
+                            out, err = io.StringIO(), io.StringIO()
+                            with contextlib.redirect_stdout(out), \
+                                    contextlib.redirect_stderr(err):
+                                rc = self.agent.cmd_run(ns, {})
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_a_stop_the_redacted_tail_hides_still_exits_8(self):
+        raw = "working\nerror: retry_key = 429\n"
+        red = "working\nerror: retry_key = [autoos:redacted]\n"
+        rc, printed = self._run_verdict(
+            self.agent.ClientExit(0, tail=red, raw_tail=raw))
+        self.assertEqual(rc, 8, printed)
+        self.assertIn("PROVIDER-STOP", printed)
+        self.assertNotIn("retry_key = 429", printed, "what the caller sees is redacted")
+
+    def test_a_refusal_the_redacted_tail_hides_still_exits_6(self):
+        raw = "jetski: quota_token = no output produced\n"
+        red = "jetski: quota_token = [autoos:redacted] output produced\n"
+        rc, printed = self._run_verdict(
+            self.agent.ClientExit(0, tail=red, refusal=red.strip(), raw_tail=raw))
+        self.assertEqual(rc, 6, printed)
+        self.assertIn("HEADLESS-REFUSAL", printed)
+        self.assertNotIn("= no output produced", printed)
 
 
 class KeyFileTests(unittest.TestCase):
@@ -3499,7 +4562,40 @@ mode = os.environ.get("AUTOOS_FAKE_MODE", "noop")
 def git(*a):
     subprocess.run(["git", "-C", root, *a], check=True,
                    capture_output=True, text=True)
-if mode == "commit-worker":
+if mode == "report":
+    # SPAWNFIX3 (S3) item 1: a worker that stopped having printed its REPORT
+    # (but changed nothing) is a NO-OP, not an INCOMPLETE.
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "brief-echo":
+    # SPAWNFIX3c (S2): the worker cats its own brief. argv's last element IS the
+    # text the spawner sent (the containment prefix plus the task), and every
+    # brief ends with a line starting "REPORT:" — so this whole stdout is
+    # quoted instruction text, and the run then stopped mid-plan.
+    print(sys.argv[-1])
+    print("I'll start by reading tools/autoos-agent.py.")
+elif mode == "sandbox-commit-reset":
+    # SPAWNFIX3c (S2) item 2: the read-only worker writes in its own sandbox,
+    # COMMITS it, then `reset --hard` back to base. The final `git status
+    # --short` is clean and `base..branch` is empty — the only two reads the
+    # read-only check made — and the worktree looks untouched.
+    cwd = os.getcwd()
+    base = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    with open(os.path.join(cwd, "worker-new.txt"), "w") as fh:
+        fh.write("work\\n")
+    subprocess.run(["git", "-C", cwd, "add", "worker-new.txt"], check=True)
+    subprocess.run(["git", "-C", cwd, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=autoos-worker@users.noreply.github.com",
+                    "commit", "-q", "-m", "worker change"], check=True)
+    subprocess.run(["git", "-C", cwd, "reset", "-q", "--hard", base], check=True)
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "sandbox-edit":
+    # SPAWNFIX3 (S3) item 4: the client's cwd IS its own sandbox, so this is
+    # not a leak (7) — it is the change a read-only run must not make.
+    with open(os.path.join(os.getcwd(), "tracked.txt"), "a") as fh:
+        fh.write("research edit\\n")
+    print("fake: edited its own sandbox")
+elif mode == "commit-worker":
     with open(os.path.join(root, "worker-file.txt"), "w") as fh:
         fh.write("worker\\n")
     git("add", "worker-file.txt")
@@ -3922,7 +5018,8 @@ class IsolateContainmentTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         return d
 
-    def run_isolated(self, root, stubdir, statedir, mode, card=None):
+    def run_isolated(self, root, stubdir, statedir, mode, card=None, read_only=False,
+                     task="do the thing"):
         agent = self.agent
         old_root, old_track = agent.ROOT, agent.TRACK_RECORD
         agent.ROOT, agent.TRACK_RECORD = root, os.path.join(statedir, "track-record.jsonl")
@@ -3930,10 +5027,11 @@ class IsolateContainmentTests(unittest.TestCase):
         os.chdir(self.make_scratch())
         try:
             args = argparse.Namespace(
-                client="agy", tier=None if card else 2, card=card, task="do the thing",
+                client="agy", tier=None if card else 2, card=card, task=task,
                 free=False, free_model=agent.DEFAULT_FREE_MODEL,
                 isolate=True, auto=True, joinable=False, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
+                read_only=read_only,
                 title=None, dry_run=False, no_defer=False)
             cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
                    "providers": {"omniroute": {"models": {"t2-worker": {},
@@ -3988,7 +5086,9 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "commit-other")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_merged_worker_lane_is_not_a_leak(self):
@@ -3997,7 +5097,7 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "merge-worker-lane")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_an_amend_with_a_worker_committer_is_a_leak(self):
@@ -4050,7 +5150,9 @@ class IsolateContainmentTests(unittest.TestCase):
                        check=True)
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_parent_fast_forward_onto_another_lanes_commits_is_a_leak_with_the_hint(self):
@@ -4168,7 +5270,7 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "fetch-lane-new-ref")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
         refs = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                                "--format=%(refname)"], capture_output=True, text=True,
                               check=True).stdout.split()
@@ -4183,7 +5285,9 @@ class IsolateContainmentTests(unittest.TestCase):
             fh.write("wip\n")
         rc, out, err = self.run_isolated(root, stub, state, "orchestrator-commits-wip")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_push_from_the_sandbox_to_the_parent_fails(self):
@@ -4212,8 +5316,13 @@ class IsolateContainmentTests(unittest.TestCase):
                 clean=False, allow_training=False, max_depth=None, lean=False, title=None)
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
             plan = agent.build_plan(args(True), cfg)
+        # SPAWNFIX3 (S3) item 2 (work/L1-routing/LEAKFP.out): the same worker
+        # stopped and asked for approval nobody was there to give, so the line
+        # says the run answers nothing.
         line = ("Your working directory %s is your only writable checkout; "
-                "never cd, git -C or write into %s or any other path outside it."
+                "never cd, git -C or write into %s or any other path outside it.\n"
+                "The run is headless: nobody will answer questions or approve "
+                "anything - decide, commit, and report."
                 % (plan["sandbox"]["path"], agent.ROOT))
         self.assertEqual(plan["cmd"][-1], line + "\n" + "do the thing")
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
@@ -4797,6 +5906,15 @@ class LeakStrictnessTests(unittest.TestCase):
             ["git", "-C", kw.get("cwd") or self.root, *args],
             capture_output=True, text=True, check=True,
             env=kw.get("env")).stdout.strip()
+
+    def test_the_known_holes_note_covers_a_worktree_the_worker_can_reach(self):
+        # SPAWNFIX3 (S3) item 5 review (Sonnet, LEAKFP2 MEDIUM): the docstring
+        # said a STALE worktree can carry the moved-ref exemption, which reads
+        # like a bug that only old leftovers have. Any worktree of the parent's
+        # .git is inside the fence - live, stale, or one the worker adds itself.
+        doc = self.agent.parent_leak.__doc__
+        self.assertIn("ANY\n    worktree the sandboxed worker can reach", doc)
+        self.assertIn("live one it did not make and a", doc)
 
     def sibling_worktree(self, branch, existing=False):
         """`git worktree add` at a fresh path: `existing` checks that branch
@@ -6208,6 +7326,15 @@ class ReviewerGateTests(unittest.TestCase):
 
     # --- the reviewer is picked from the registry, not from a constant ------
 
+    def test_a_research_card_and_the_flag_mark_the_route_read_only(self):
+        # SPAWNFIX3 (S3) item 4: the verdict reads the route dict, so the card
+        # kind and the explicit flag must both land in it.
+        self.assertTrue(self.route(
+            card="kind=research,paths=tools/registry.py")["read_only"])
+        self.assertTrue(self.route(read_only=True)["read_only"])
+        self.assertFalse(self.route()["read_only"],
+                         "a review card is graded on its diff, not on an empty sandbox")
+
     def test_an_authored_v2_review_card_carries_a_review_plan(self):
         review = self.route()["review_plan"]
         self.assertIsNotNone(review, "a kind=review card with an author must know who reviews")
@@ -6514,6 +7641,26 @@ class ProviderResetStateTests(unittest.TestCase):
         self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
         self.assertEqual(entry["combo"], "r-cheap")
         self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_line_carrying_a_secret_records_a_redacted_reason(self):
+        # REDACTFIX3 (S1): `record_reset_stop` is handed the child's OWN line
+        # because only that copy can still be classified (REDACTFIX item 2) --
+        # but it stored that copy in logs/routing/provider-state.json, which
+        # outlives the run. The classification keeps reading the raw line; the
+        # stored dict gets the redaction every other copy of it has.
+        key = "sk-" "ABCDEFGHIJKLMNOP1234"
+        stop = "%s (the worker echoed the key it was given: %s)" % (self.AGY_STOP, key)
+        recorded = self.agent.record_reset_stop(stop, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "the window is still parsed from the raw line and the "
+                         "provider still resolved off it")
+        stored = json.dumps(self.state())
+        self.assertNotIn(key, stored, "the key reached the state file")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertIn(load_redact().TEXT_MASK, entry["reason"])
+        self.assertIn("resets in ~83h", entry["reason"],
+                      "the reason must still say what the client stated")
 
     def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
         self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",
@@ -6876,6 +8023,74 @@ class GatewayCooldownStopTests(unittest.TestCase):
             now=self.NOW, path=self.state_path))
         self.assertFalse(os.path.exists(self.state_path))
 
+    # --- 4 (SPAWNFIX3 item 7): a model more than one provider serves ----------
+
+    GPT_OSS_COOLDOWN = ("Error: [429] All credentials for model gpt-oss-120b are "
+                        "cooling down (reset after 37s)")
+
+    def stop(self, line, route):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pid = self.agent.stop_provider_id(line, self.registry,
+                                              self.registry["routes"][route]["legs"])
+        return pid, out.getvalue()
+
+    def test_a_model_id_does_not_match_inside_a_longer_id(self):
+        # R6STOP review (Sonnet, MEDIUM): "\b" treats '-' as a boundary, so the
+        # bare "gemini-3.7-flash" matched the gateway's line about
+        # "gemini-3.7-flash-high" and benched the wrong provider. '-', '.' and
+        # '/' are word characters here: a model id is a whole token.
+        cases = (
+            ("All credentials for model gemini-3.7-flash-high are cooling down",
+             "gemini-3.7-flash", False),
+            ("All credentials for model gemini-3.7-flash are cooling down",
+             "gemini-3.7-flash", True),
+            ("All credentials for model openai/gpt-oss-120b are cooling down",
+             "gpt-oss-120b", False),
+            ("All credentials for model openai/gpt-oss-120b are cooling down",
+             "openai/gpt-oss-120b", True),
+            ("model gpt-oss-120b.", "gpt-oss-120b", True),
+            ("model deepseek-v4.1-flash:", "deepseek-v4.1-flash", True),
+            ("model deepseek-v4.1-flash-x", "deepseek-v4.1-flash", False),
+            ("gpt-oss-120b", "gpt-oss-120b", True),
+            ("", "gpt-oss-120b", False),
+            ("no model named here", "gpt-oss-120b", False))
+        for line, model_id, want in cases:
+            with self.subTest(line=line, model_id=model_id):
+                self.assertIs(self.agent._line_names_model(line.lower(), model_id),
+                              want, line)
+
+    def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
+        # The real t2-worker route serves gpt-oss-120b from cerebras AND
+        # sambanova: the stop line names the model, not the provider, so neither
+        # may be benched on a 50/50 guess (and picking one silently starves it).
+        pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
+        self.assertIsNone(pid)
+        # The names are the registry's own provider ids — the spelling every
+        # other read of this registry keys on, so a message is never the only
+        # place a made-up lowercase name appears.
+        self.assertEqual(printed.strip(),
+                         "ambiguous stop: gpt-oss-120b served by cerebras, "
+                         "SambaNova - not benched")
+
+    def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            recorded = self.agent.record_reset_stop(
+                self.GPT_OSS_COOLDOWN, "t2-worker", self.registry,
+                now=self.NOW, path=self.state_path)
+        self.assertIsNone(recorded)
+        self.assertFalse(os.path.exists(self.state_path),
+                         "an ambiguous stop must not write a provider-state file")
+
+    def test_a_model_one_provider_serves_still_benches_that_provider(self):
+        # The other half of the same line: gemini-3.7-flash-high is antigravity's
+        # alone in t2-worker, so the ambiguity rule must not swallow clean stops.
+        pid, printed = self.stop(
+            "Error: [429] All credentials for model gemini-3.7-flash-high are "
+            "cooling down (reset after 37s)", "t2-worker")
+        self.assertEqual(pid, "antigravity", printed)
+        self.assertEqual(printed, "")
+
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
         # this file in and skips the leg.
@@ -7137,6 +8352,45 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertIn("FIX-FIRST", report["cross_family"]["detail"])
         self.assertIn("FIX-FIRST", report["final"]["detail"])
 
+    def test_ship_is_a_ready_verdict_and_fix_first_still_is_not(self):
+        # SPAWNFIX3 (S3) item 5 (work/L1-routing/REVGATE.record.md): a Sonnet
+        # final signs its lanes "verdict=SHIP"; the gate only knew
+        # ready/pass/approve/lgtm, so a signed-off lane read as unreviewed.
+        # "fix-first" is the same vocabulary's OPEN finding, so it stays refused.
+        self.assertIn("ship", self.agent.READY_VERDICTS)
+        self.assertNotIn("fix-first", self.agent.READY_VERDICTS)
+        for verdict in ("SHIP", "ship"):
+            with self.subTest(verdict=verdict):
+                report = self.status(
+                    "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                    "reviewer=omniroute/muse verdict=%s\n"
+                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
+                    % (verdict, verdict))
+                self.assertTrue(report["ready"], report)
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=SHIP\n"
+                             "AutoOS-Review: kind=final reviewer=sonnet verdict=fix-first")
+        self.assertFalse(report["ready"], report)
+
+    def test_a_claude_model_id_is_the_policy_reviewers_reviewer_it_spells(self):
+        # SPAWNFIX3 (S3) item 5 (work/L1-routing/LEAKFP2.record.md): the cheap
+        # cross-family pass writes the id its client reports, `claude-haiku-4-5`,
+        # while policy.reviewers spells the same reviewer `haiku`. The client's
+        # own prefix and a version tail are not a different family.
+        self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
+                         "anthropic")
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=claude-haiku-4-5 verdict=ship\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+        # An id whose name the list does not carry stays unknown: a reviewer
+        # nobody can place is not an independent review (fail closed).
+        self.assertIsNone(self.agent.reviewer_family("claude-kimi-9-1", self.registry))
+        self.assertIsNone(self.agent.reviewer_family("claude-haikux", self.registry))
+        # The final checker is still the one spelled with the vendor's full id.
+        self.assertTrue(self.agent.is_final_reviewer("claude-sonnet-4-6"))
+        self.assertEqual(self.agent.reviewer_family("claude-sonnet-4-6", self.registry),
+                         None)
+
     def test_an_entry_missing_a_reviewer_is_listed_as_malformed(self):
         report = self.status("AutoOS-Review: kind=cross-family author=qwen\n" + FINAL_LINE)
         self.assertFalse(report["ready"])
@@ -7187,6 +8441,13 @@ class ReviewStatusTests(unittest.TestCase):
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
         self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
+        # ... and the real catalog carries the client's own id for it, which is
+        # what a finished cheap pass actually writes (SPAWNFIX3 item 5).
+        self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", real), "anthropic")
+        self.assertTrue(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+            "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
         # REVFIX S2 measured against the real catalog, not a fixture: the
@@ -7501,6 +8762,140 @@ class ReadyCommandTests(unittest.TestCase):
             sys.stdin = old_stdin
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+
+    # --- the CI gate (SPAWNFIX3 item 6) -------------------------------------
+
+    def ready_with_ci(self, status, extra=("--ci-run", "1234"), push=True):
+        """`ready` with the gh read replaced — a real call would ask a network
+        service about a commit that only exists under /tmp.
+
+        Returns (rc, out, err, inbox_content, repo, sha).
+        """
+        repo, sha = self.make_repo(push=push)
+        inbox = self.make_inbox("")
+        with mock.patch.object(self.agent, "ci_run_status",
+                               lambda run_id, runner=None: status(sha, run_id)):
+            rc, out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                      repo, sha, inbox, extra=extra)
+        return rc, out, err, self.read_inbox(inbox), repo, sha
+
+    def test_a_green_ci_run_at_the_right_sha_appends_the_line_with_ci(self):
+        rc, out, _err, inbox, _repo, sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None))
+        self.assertEqual(rc, 0, out + _err)
+        line = inbox.rstrip("\n")
+        self.assertTrue(line.endswith(" ci=1234"), line)
+        self.assertIn(sha, line)
+        self.assertNotIn("no --ci-run", out)
+
+    def test_a_failing_ci_run_is_refused_and_nothing_is_appended(self):
+        for conclusion in ("failure", "cancelled", "skipped", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                rc, out, err, inbox, _repo, sha = self.ready_with_ci(
+                    lambda sha, run_id, c=conclusion: (c, sha, None))
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn(conclusion, out + err)
+                self.assertEqual(inbox, "")
+
+    def test_a_ci_run_on_another_sha_is_refused(self):
+        # The green run must be green AT the sha the lane is ready at, or the
+        # line certifies a commit nobody tested.
+        rc, out, err, inbox, _repo, sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", "f" * 40, None))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("f" * 40, out + err)
+        self.assertIn(sha, out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_ci_read_that_cannot_run_exits_2_not_1(self):
+        # "gh failed" is not "CI is red": one is a gate that did not answer.
+        rc, out, err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: (None, None, "gh: command not found"))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("gh", err)
+        self.assertEqual(inbox, "")
+
+    def test_no_ci_run_is_allowed_but_says_so_once(self):
+        rc, out, _err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None), extra=())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count("note: no --ci-run given"), 1, out)
+        self.assertNotIn("ci=", inbox)
+
+    def test_the_ci_gate_does_not_jump_the_push_gate(self):
+        # Both must hold; a green CI on an unpushed lane is still not ready.
+        rc, out, err, inbox, _repo, _sha = self.ready_with_ci(
+            lambda sha, run_id: ("success", sha, None), push=False)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(inbox, "")
+
+
+class CIRunStatusTests(unittest.TestCase):
+    """`ci_run_status` reads one fact off GitHub Actions with `gh`, through an
+    injected runner (SPAWNFIX3 item 6): the conclusion and the head sha, or the
+    reason it cannot answer. Never raises — a gate that cannot run reports."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def read(self, proc=None, exc=None):
+        seen = {}
+
+        def runner(argv, **kw):
+            seen["argv"] = list(argv)
+            seen["kw"] = kw
+            if exc is not None:
+                raise exc
+            return proc
+
+        out = self.agent.ci_run_status("1234", runner=runner)
+        return out, seen
+
+    def proc(self, stdout, rc=0, stderr=""):
+        return subprocess.CompletedProcess(["gh"], rc, stdout=stdout, stderr=stderr)
+
+    def test_it_asks_gh_for_exactly_the_two_fields(self):
+        (_conclusion, _sha, err), seen = self.read(
+            self.proc('{"conclusion": "success", "headSha": "abc"}'))
+        self.assertIsNone(err)
+        self.assertEqual(seen["argv"],
+                         ["gh", "run", "view", "1234", "--json", "conclusion,headSha"])
+
+    def test_it_returns_the_conclusion_and_the_head_sha(self):
+        conclusion, sha, err = self.read(
+            self.proc('{"conclusion": "failure", "headSha": "deadbeef"}'))[0]
+        self.assertEqual((conclusion, sha), ("failure", "deadbeef"))
+        self.assertIsNone(err)
+
+    def test_a_nonzero_gh_is_an_error_naming_its_own_output(self):
+        (conclusion, sha, err), _seen = self.read(
+            self.proc("", rc=1, stderr="gh: could not find run 1234"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("could not find run", err)
+
+    def test_unparseable_output_is_an_error_not_a_crash(self):
+        (conclusion, sha, err), _seen = self.read(self.proc("not json at all"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("json", err.lower())
+
+    def test_a_missing_field_is_an_error(self):
+        (conclusion, sha, err), _seen = self.read(self.proc('{"conclusion": "success"}'))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("headSha", err)
+
+    def test_a_gh_that_cannot_start_is_an_error(self):
+        (conclusion, sha, err), _seen = self.read(exc=OSError("No such file or directory"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(sha)
+        self.assertIn("No such file", err)
+
+    def test_it_times_out_rather_than_hanging_the_gate(self):
+        (_c, _s, _e), seen = self.read(
+            self.proc('{"conclusion": "success", "headSha": "a"}'))
+        self.assertLessEqual(seen["kw"].get("timeout", 10 ** 9), 120)
 
 
 def _reviewer_client_state():
