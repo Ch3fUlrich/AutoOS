@@ -2656,6 +2656,14 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "google_ai_studio": "2026-09-28T12:00:37Z",
         "antigravity": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
+        # FREEKEYS-2 (D-141 item 3) put the two probe-passed free grants in the
+        # free band of every tier route, so the premise these two tests state —
+        # "every leg of the t2-worker routes is cooling" — now has to cool them
+        # too, or the route really is servable and the test would be asserting a
+        # falsehood. Both return later than google_ai_studio, so the "earliest
+        # return is the retry" limb still has teeth.
+        "scaleway": "2026-09-28T15:00:00Z",
+        "nebius": "2026-09-28T16:00:00Z",
     }
 
     def real_registry(self):
@@ -2752,7 +2760,21 @@ class MetaApiResolverTests(unittest.TestCase):
         legs, _skipped, _notes = r.usable_legs(
             self.registry["routes"]["t1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
-        self.assertEqual(legs[0], ("meta_api", "muse-spark-1.3-contributor"))
+        # FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid, so the
+        # paid contributor leg is no longer the first leg a public card sees — it is
+        # still the leg the route *serves* the writer on, and everything ahead of it
+        # must be free, which is the whole point of the reorder.
+        self.assertIn(("meta_api", "muse-spark-1.3-contributor"), legs)
+        head = [leg for leg in legs if leg[0] == "meta_api"][0]
+        self.assertGreater(legs.index(head), 0, legs)
+        for leg in legs[:legs.index(head)]:
+            self.assertEqual(self.registry["providers"][leg[0]]["tier"], "free", leg)
+        for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
+            paid, _s, _n = r.usable_legs(
+                self.registry["routes"][paid_route], card,
+                {"need_tokens": 1000}, self.state(), self.registry, {})
+            self.assertEqual(paid[0], ("meta_api", "muse-spark-1.3-contributor"),
+                             paid_route)
 
     def test_no_clean_route_serves_the_contributor_leg(self):
         card = {"kind": "review", "privacy": "sensitive"}

@@ -1256,7 +1256,7 @@
       "tool_calls": "proven",
       "price_in": 0,
       "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'bzl/deepseek/deepseek-v4-flash-0731free:free', which is why providers.bazaarlink.model_prefix is 'bzl'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedbazaarlink. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'bzl/deepseek/deepseek-v4-flash-0731free:free', which is why providers.bazaarlink.model_prefix is 'bzl'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedbazaarlink. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-2b DECISION (operator rule 'DeepSeek only V4.1 Flash'): these are V4 weights (v4-flash-0731), so this row stays registered and measured, but it routes NOWHERE - no combo carries it and policy.leg_rules carries no per-leg allow for it, so the blanket `deny-deepseek` refuses any attempt to pin it."
     },
     "google/gemini-2.5-flash": {
       "id": "google/gemini-2.5-flash",
@@ -2274,13 +2274,6 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
-        "id": "allow-bazaarlink-deepseek-flash-free",
-        "match": "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "allow": true,
-        "reason": "the same DeepSeek V4 Flash weights, served by the FREE bazaarlink gateway connection (providers.bazaarlink, tier free, credit_usd 0) - no DeepSeek API money is behind this leg, so `deny-deepseek` (a *spend* rule, `*deepseek*`) must not swallow it. Exact-match only, placed before the blanket deny: it names one model on one free connection, not the vendor. tool_calls is proven in the tracked registry (FREEKEYS-1 probe), 1M advertised context, and it trains on nothing verified (trains_on_prompts null), so it is in no *-clean route",
-        "source": "L1-routing FREEKEYS-2 (brief D-141 item 3) 2026-09-28, probe evidence FREEKEYS-1 logs/freekeys1-probe.jsonl"
-      },
-      {
         "id": "deny-deepseek",
         "match": "*deepseek*",
         "allow": false,
@@ -2398,21 +2391,13 @@
         "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
       },
       {
-        "client": "claude",
-        "model": "haiku",
-        "family": "anthropic",
-        "paid": true,
-        "first_pass_only": true,
-        "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
-      },
-      {
         "client": "opencode",
         "model": "omniroute/t2-worker",
         "family": "zhipu",
         "leg": "nebius/zai-org/GLM-5.3-Flash",
         "paid": false,
         "first_pass_only": true,
-        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28: the review chain's legs are every one of them `unproven` in the tracked registry (the proven verdict lives in the gitignored overlay), so a host without it had no reviewer it could prove answers a tool call. This is a free providers.nebius grant whose model row says `tool_calls: proven` (FREEKEYS-1 probe), listed LAST so it is reached only when the entries ahead of it are all refused, and first_pass_only because a cheap flash makes no final call."
+        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28, placement fixed by FREEKEYS-2b: the review chain's legs are every one of them `unproven` in the tracked registry (the proven verdict lives in the gitignored overlay), so a host without it had no reviewer it could prove answers a tool call. This is a free providers.nebius grant whose model row says `tool_calls: proven` (FREEKEYS-1 probe). It sits at the END of the free band, immediately before the closing anthropic row, so it is reached only when the entries ahead of it are all refused, and policy.reviewers stays ordered paid-first-then-free with Haiku last (ReviewerPolicyTests); first_pass_only because a cheap flash makes no final call."
       },
       {
         "client": "opencode",
@@ -2421,7 +2406,15 @@
         "leg": "scaleway/qwen3-235b-a22b-instruct-2507",
         "paid": false,
         "first_pass_only": true,
-        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28: the second new cross-provider reviewer, a 235B free providers.scaleway grant with `tool_calls: proven` in the tracked registry (FREEKEYS-1 probe) - a different family and a different vendor account from the nebius entry above, so one provider's rate limit does not bench both. Last in the list, same first_pass_only reasoning."
+        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28, placement fixed by FREEKEYS-2b: the second new cross-provider reviewer, a 235B free providers.scaleway grant with `tool_calls: proven` in the tracked registry (FREEKEYS-1 probe) - a different family and a different vendor account from the nebius entry above, so one provider's rate limit does not bench both. Last in the free band (the anthropic row still closes the list), same first_pass_only reasoning."
+      },
+      {
+        "client": "claude",
+        "model": "haiku",
+        "family": "anthropic",
+        "paid": true,
+        "first_pass_only": true,
+        "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
       }
     ],
     "claude_budget": {
@@ -3153,10 +3146,9 @@
     "deepseek-v4.1-flash": {
       "class": "cheap",
       "id": "deepseek-v4.1-flash",
-      "$comment": "Pinned per-model group (mapping doc Open choice 11), so every leg stays a DeepSeek V4 Flash weight - but it rendered ONE model, which is no fallback at all. FREEKEYS-2 adds the free bazaarlink copy (providers.bazaarlink, tier free, tool_calls proven, 1M advertised) behind the native head, so a 429 on DeepSeek API falls to a connection that costs nothing. The opencode-zen leg stays gated (client-bound, 402/429 probe).",
+      "$comment": "Pinned per-model group (mapping doc Open choice 11), so every leg stays a DeepSeek V4 Flash weight - and a pinned group is allowed to have one live leg, because its job is weights-fidelity, not fallback: cross-provider redundancy for a DeepSeek card lives in the tier routes, all of which carry the Gemini free leg plus the FREEKEYS-1 grants. FREEKEYS-2 drafted the free bazaarlink copy as a second leg and FREEKEYS-2b took it back out: deepseek-v4-flash-0731 is V4, not V4.1, and the operator rule is 'DeepSeek only V4.1 Flash' (policy.leg_rules deny-deepseek), so this group renders the native head alone. The opencode-zen leg stays gated (client-bound, 402/429 probe).",
       "legs": [
         "deepseek/deepseek-flash",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "opencode-zen/deepseek-v4.1-flash"
       ],
       "strategy": "priority",
@@ -3339,14 +3331,14 @@
       }
     },
     "t1-orchestrator": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the three probe-passed free grants bazaarlink 1M / scaleway Qwen3-235B / nebius GLM-5.3-Flash), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched.",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
         "gemini/gemini-3.8-flash",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "nebius/zai-org/GLM-5.3-Flash",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
         "meta_api/muse-spark-1.3-contributor",
         "opencode-zen/muse-spark-1.3-contributor-free",
         "openrouter/meta/muse-spark-1.3-contributor",
@@ -3434,15 +3426,15 @@
       "unavailable_legs": {}
     },
     "t1-orchestrator-free-only": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry. FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (bazaarlink 1M, scaleway Qwen3-235B, nebius GLM-5.3-Flash). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. A free-only route takes no credit leg at all: the grants are metered money, not free.",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry. FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, nebius GLM-5.3-Flash, scaleway Mistral Small 3.2) FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.. Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. A free-only route takes no credit leg at all: the grants are metered money, not free. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one.",
       "class": "free",
       "id": "t1-orchestrator-free-only",
       "legs": [
         "opencode-zen/muse-spark-1.3-contributor-free",
         "gemini/gemini-3.8-flash",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
-        "nebius/zai-org/GLM-5.3-Flash"
+        "nebius/zai-org/GLM-5.3-Flash",
+        "scaleway/mistral-small-3.2-24b-instruct-2506"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3547,13 +3539,12 @@
       "unavailable_legs": {}
     },
     "t2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (bazaarlink 1M, scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place, so it is still reached only when everything ahead of it failed. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again.",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again.",
       "class": "mid",
       "id": "t2-worker",
       "legs": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
@@ -3681,11 +3672,10 @@
     "t2-worker-free-only": {
       "class": "free",
       "id": "t2-worker-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (bazaarlink 1M, scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg.",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-medium",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
@@ -3760,14 +3750,13 @@
       }
     },
     "t3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the head; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) kept that measured head (200, 125 rpm, 625k tpm) in first place and put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, bazaarlink 1M, scaleway Qwen3-235B) straight behind it, ahead of every paid leg; the two credit legs trail the route gated, unpriced until a price lands.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the head; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) kept that measured head (200, 125 rpm, 625k tpm) in first place and put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) straight behind it, ahead of every paid leg; the two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "class": "cheap",
       "id": "t3-driver",
       "legs": [
         "mistral/mistral-code-latest",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",
@@ -3883,13 +3872,12 @@
     "t3-driver-free-only": {
       "class": "free",
       "id": "t3-driver-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, bazaarlink 1M, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap.",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
         "groq/qwen/qwen3.8-27b",
         "cerebras/qwen-3.8-27b",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.3-Flash",
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "free_ai/qwen7b"
       ],

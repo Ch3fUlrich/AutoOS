@@ -53,6 +53,18 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker
     litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: nebius/zai-org/GLM-5.2
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t2-worker
@@ -88,6 +100,18 @@ model_list:
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t2-worker-free-only
     litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: nebius/zai-org/GLM-5.2
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY
@@ -117,6 +141,18 @@ model_list:
       api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: nebius/zai-org/GLM-5.2
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver
+    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t3-driver
@@ -139,6 +175,18 @@ model_list:
   # The groq/cerebras qwen legs are dead through the gateway (OR1d, 2026-09-27);
   # free_ai/qwen7b is the only servable leg left.
   # AUTOOS-MANAGED-START t3-driver-free-only
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: nebius/zai-org/GLM-5.3-Flash
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
       model: openai/qwen7b
@@ -176,14 +224,26 @@ model_list:
   # AUTOOS-MANAGED-START t1-orchestrator
   - model_name: t1-orchestrator
     litellm_params:
-      model: openai/muse-spark-1.3-contributor
-      api_base: https://api.meta.ai/v1
-      api_key: os.environ/META_API_KEY
-  - model_name: t1-orchestrator
-    litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: nebius/zai-org/GLM-5.3-Flash
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: openai/muse-spark-1.3-contributor
+      api_base: https://api.meta.ai/v1
+      api_key: os.environ/META_API_KEY
   # AUTOOS-MANAGED-END t1-orchestrator
 
   # ── t1-orchestrator-free-only: zero spend, gemini free leg ──────────────────────
@@ -193,6 +253,18 @@ model_list:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
       rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: nebius/zai-org/GLM-5.3-Flash
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
   # AUTOOS-MANAGED-END t1-orchestrator-free-only
 
   # ── spark-1.3-contributor: 1M ctx, meta_api paid contributor leg ──────────────
