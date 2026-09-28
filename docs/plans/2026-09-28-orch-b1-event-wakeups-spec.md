@@ -34,11 +34,11 @@
 - 2.18 It exposes `card_last_event` as `last-event <position>` in status card header.
 - 2.19 `autoos-agent.py inbox <name>` prints records.
 - 2.20 It supports `[--since POS|--since-card CARD]`.
-- 2.21 `tools/autoos_heartbeat.py` has `_gives_order` order detection.
-- 2.22 It has `pause_state` for PAUSE/STOP/HOLD/RESUME.
-- 2.23 It recognizes ack markers `→ done:` and `lesson:`.
-- 2.24 It recognizes closing words.
-- 2.25 It has a negation veto.
+- 2.21 The order gate (`_gives_order`, `pause_state` hardening) is being built on lane L1-routing/R2a (R2a3..R2a7), NOT yet on main; B1 phase 1 starts after R2a merges and depends on it.
+- 2.22 On main today `pause_state` has only the basic PAUSE/STOP/HOLD/RESUME scan.
+- 2.23 R2a adds: ack markers `→ done:` and `lesson:`.
+- 2.24 R2a adds: closing words within a window.
+- 2.25 R2a adds: a negation veto; RESUME gated like PAUSE (R2a7).
 - 2.26 Policy is lost order = HIGH severity.
 - 2.27 Policy is spurious wake = acceptable.
 - 2.28 Lane workers run as `systemd --user` units.
@@ -89,7 +89,7 @@
 - D1.6 The command blocks instead of dumping and exiting.
 - D1.7 It prints one line per ACTIONABLE event.
 - D1.8 It never prints a raw record dump.
-- D1.9 It reuses the heartbeat order gate helper, no copy.
+- D1.9 It reuses the R2a order gate helper, no copy; if R2a is not merged, phase 1 waits (no second implementation).
 - D1.10 It reads through `autoos_inbox` API.
 - D1.11 B3 JSONL support is therefore a reader swap, not a rewrite.
 - D1.12 It uses `inotify` when available.
@@ -119,7 +119,7 @@
 - D2.1 Follower resumes from status card `last-event` via `card_last_event`.
 - D2.2 If no card is given, resume after this reader's newest own line in the inbox (its last ack), else from the last 30 records - never from the end (an event that landed before arming would be lost).
 - D2.3 Explicit `--since` overrides card when provided for repair.
-- D2.4 Session writes new position into its card after handling an event.
+- D2.4 Order per handled event: (1) write the new position into the card `last-event`, (2) re-arm the follower from that card, (3) side effects (push, pong, spawn). Re-arming before the card write would self-wake on the same event.
 - D2.5 A restart therefore neither replays nor misses handled events.
 - D2.6 Malformed/late lines are reported once as one event.
 - D2.7 They do not advance past unprocessed good records.
@@ -159,8 +159,8 @@
 - D4.12 Say so plainly in operator reports; do not claim literal zero.
 - D4.13 Interval is a policy knob, not hardcoded doctrine.
 - D4.14 Raise it if phase 0 shows the 8 h rule counts only user turns.
-- D4.15 Lower it only via Q2 decision while lanes run.
-- D4.16 Recreate the 3-h cron after relaunch, clear, and 7-day expiry.
+- D4.15 While any lane unit of this session runs, the dead-man interval is 30 min (stall detection for hung-but-alive workers); 3 h only when no lane runs (see Q2).
+- D4.16 Every dead-man firing unconditionally recreates its own cron (delete + CronCreate) so the 7-day expiry never removes it; also recreated after relaunch and clear.
 - D4.17 Rationale: polling is retained only as loss detector.
 - D4.18 Edge: dead-man itself must not do polling work when follower is healthy.
 
@@ -195,7 +195,8 @@
 - D6.8 Rationale: push/pong are responses, not ticks.
 - D6.9 Rationale: WIP-commit and stamps are loss-tolerant and fit 3-h cadence.
 - D6.10 Rationale: relaunch belongs with liveness checks in dead-man and C1.
-- D6.11 Edge: handler must re-arm follower before push/pong side effects.
+- D6.11 Edge: handler order is card write -> re-arm -> side effects (D2.4).
+- D6.13 The parent's 'status quiet > 25 min -> relaunch child' check (SKILL.md levels table, R-coord-08) reads the card header stamp; every card write (D2.4 per event, dead-man beat) refreshes it. The threshold becomes 'quiet > dead-man interval + 10 min' (40 min with lanes running, 3 h 10 min idle); rewritten together with R-coord-07/08.
 - D6.12 Edge: dead-man must skip WIP-commit when tree is clean.
 
 ## 5. Phases
@@ -238,6 +239,8 @@
 - 6.8 Offset resume neither replays nor skips.
 - 6.9 Dead-man beat re-arms a dead follower within one 3-h tick.
 - 6.10 Storm input collapses instead of emitting one wake per record.
+- 6.11 Stall latency: a hung-but-alive worker is noticed within 40 min while lanes run (30 min dead-man + 10 min slack), measured in the pilot with an injected hung worker.
+- 6.12 Dead-man cron still present after a simulated 7-day expiry (recreated on every firing).
 
 ## 7. Risks and edge cases
 - 7.1 Follower dies silently and events queue unseen until dead-man.
@@ -269,7 +272,7 @@
 - Q1 Does 8 h retirement count background-task wakes as activity?
 - Q1 Resolution is measured in phase 0.
 - Q2 Should dead-man shorten while lanes run, e.g. 1 h?
-- Q2 Default is no; 3 h unless stall data demands it.
+- Q2 Decided: yes, 30 min while lanes run (D4.15); revisit with pilot stall data.
 - Q3 One follower per session versus one per inbox shared by supervisor?
 - Q3 Decision is deferred to B3.
 - Q3 Per-session follower ships now; shared supervisor waits for JSONL offsets.
