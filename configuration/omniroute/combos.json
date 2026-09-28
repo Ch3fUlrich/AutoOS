@@ -15,7 +15,10 @@
     "a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek",
     "credit is out (L0: every tier keeps a free leg). cheaperinference legs",
     "omitted: wallet exhausted 2026-09-27T17:2xZ (402).",
-    "t1-orchestrator-clean, deepseek-v4.1-flash and samba/* still omitted",
+    "DSBACK 2026-09-28: providers.deepseek is available again after the",
+    "operator top-up (router balance 19.99 USD), so deepseek/deepseek-flash",
+    "heads t2-worker-clean/t3-driver-clean again and deepseek-v4.1-flash is",
+    "no longer omitted. t1-orchestrator-clean and samba/* still omitted",
     "(contributor-only, paid, or provider-off)."
   ],
   "retired": [
@@ -35,12 +38,19 @@
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
-    "deepseek-v4.1-flash",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "t1-orchestrator-clean"
   ],
   "combos": [
+    {
+      "name": "deepseek-v4.1-flash",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "deepseek/deepseek-flash"
+      ]
+    },
     {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
@@ -105,6 +115,7 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
+        "deepseek/deepseek-flash",
         "meta-api/muse-spark-1.3-contributor",
         "free-ai/qwen7b"
       ]
@@ -114,6 +125,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "deepseek/deepseek-flash",
         "mistral/mistral-small-latest"
       ]
     },
@@ -133,6 +145,7 @@
       "context": "128k",
       "models": [
         "mistral/mistral-code-latest",
+        "deepseek/deepseek-flash",
         "mistral/mistral-small-latest",
         "meta-api/muse-spark-1.3-contributor"
       ]
@@ -142,6 +155,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "deepseek/deepseek-flash",
         "mistral/mistral-small-latest"
       ]
     },

@@ -179,11 +179,11 @@
       "leaf": true,
       "opencode": {
         "mode": "subagent",
-        "model": "deepseek/deepseek-v4-flash"
+        "model": "deepseek/deepseek-flash"
       },
       "openhands": {
         "profile": "worker",
-        "llm_profile_ref": "deepseek-v4-flash"
+        "llm_profile_ref": "deepseek-flash"
       },
       "mcp": [
         "serena",

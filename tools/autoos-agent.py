@@ -280,6 +280,39 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     return base + ("#" + variant if variant else "")
 
 
+def declared_variants(cfg: dict, model: str) -> list:
+    """The variant ids opencode.jsonc declares for `model` ("provider/mid"),
+    [] for a model that declares none or names nothing opencode knows."""
+    base, _, _ = (model or "").partition("#")
+    provider, _, mid = base.partition("/")
+    entry = ((cfg.get("providers") or {}).get(provider) or {}).get("models") or {}
+    return [v["id"] for v in (entry.get(mid) or {}).get("variants") or [] if v.get("id")]
+
+
+def apply_effort_rung(cfg: dict, model: str, rung) -> str:
+    """Stamp the resolver's effort rung (spec 5.5) on an opencode model id.
+
+    opencode selects a per-request effort with a model VARIANT: `mid#high`
+    applies that variant entry's `settings.reasoningEffort`, which the
+    OpenAI-compatible protocol sends as `reasoning_effort=high`. Three cases
+    deliberately emit no suffix (DSBACK item 3, measured: the rung used to
+    reach only the track record, so every rung sent the same bare request):
+
+      * `none`/None — a non-reasoning leg, or a rung clamped to the ladder's
+        "none" rung. The base model entry carries no reasoning settings, so
+        the request goes out with NO reasoning param at all.
+      * a rung the model declares no variant for — dropped, never invented.
+        The render only generates variants for the leg that ANSWERS, so an
+        undeclared rung is a rung that leg would reject (PROVFIX3 finding 8).
+      * a model that already carries a variant — an explicit `--model x#low`
+        is the operator's choice and wins over the card's rung; appending a
+        second one would be an unresolvable id.
+    """
+    if not model or not rung or rung == "none" or "#" in model:
+        return model
+    return model + "#" + rung if rung in declared_variants(cfg, model) else model
+
+
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
 
@@ -1485,6 +1518,16 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         override, args.free)
     if reviewer_combo:
         combo = reviewer_combo
+    # DSBACK item 3: the rung the resolver scored has to reach the client that
+    # can honour it. opencode carries a per-request effort as a model variant
+    # (`omniroute/deepseek-v4.1-flash#high` -> that variant's
+    # settings.reasoningEffort -> reasoning_effort), so the stamp goes on the
+    # opencode model id only — an OmniRoute combo cannot carry a per-effort
+    # alias (pinned by tests/test_registry_render.py), and build_plan hands
+    # the gateway clients the bare combo. Until this, route["effort"] reached
+    # only the track record and every rung sent the same unadorned request.
+    if clients.CLIENTS[args.client].name == "opencode":
+        model = apply_effort_rung(cfg, model, result.get("effort"))
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
