@@ -1,10 +1,12 @@
-# RESTART — cheap relaunches: state card + context pack (spec v3.1)
+# RESTART — cheap relaunches: state card + context pack (spec v3.2)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
 Status: SPEC v3 (v2 Sonnet FIX-FIRST resolved, table under Delivery). v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
 `work/L1-routing/review-restart-spec.out`: 7 blockers, 11 high); v2 resolves every finding (§R at
 the end). Next: the Sonnet review, then the lanes.
+v3.2 (RSTAMEND, 2026-09-28): new §7 size limits, crash recovery through the pack (§4), the L2 cap
+decision (§5), and two delivery lanes (R2c, R8).
 
 ## Why (measured)
 
@@ -16,6 +18,11 @@ the end). Next: the Sonnet review, then the lanes.
   16,138 turns). So the per-turn cost grows with context size: a turn at 600k re-reads 600k.
   The byte-identical prefix pays off *within* a session (every later turn reads it from cache). A
   successor's first request pays the full input once, and that is what the ≤8k variable part keeps small.
+- What a relaunch actually reads, measured on a crash-recovery relaunch (routing-00 12:3xZ; L1-main
+  from L1-backlog session 8e409b42's transcript): the L2 policy cap is 150k, and the relaunch reached
+  153.9k after 28 tool results / 143k chars. About 70k tokens of that were whole-file reads — inbox 52k
+  chars, handoff 19k, status 17k, `briefs/common.md` 9.5k, three log dumps 9–11k each. L1-routing's own
+  crash relaunch (12:1xZ) read the same kind of files whole. §7 puts a hard budget on each of them.
 
 ## Goal
 
@@ -134,6 +141,11 @@ printed. The order is:
 - It prints one command whose prompt is a single line: `Read <pack path> first; it is your
   context.` The pack itself never goes into argv (quoting, size). It prints the command; running it
   is the parent's action.
+- **Crash recovery uses the same path.** `relaunch-line <name> --reason crash` builds the same pack
+  (§6 manifest `reason=crash`) and prints the same one-line prompt. The relaunching parent adds
+  nothing but the pack path — no prose summary of what it saw.
+- Worker and unit liveness goes into the pack's events part (§3 item 6), sourced from `ps` and
+  `systemctl --user` through `heartbeat`. It never goes into a prompt.
 
 ## 5. Context cap and the metric
 
@@ -142,6 +154,11 @@ printed. The order is:
   D-040, D-044). If Fable's before/after numbers show a quality loss, the row is split then. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
   pinned tests change in the same lane. `tools/registry.py validate` asserts
   `cap_tokens == window × cap_fraction`.
+- **L2 cap decision (router L1-routing, 2026-09-28): L2 stays at 150k.** With §3 and §7, a relaunch
+  costs system + tools (~30k) plus the pack (≤ ~14k with the prefix) ≈ 45k, which leaves ~105k of
+  work before the next handoff. Revisit once the first 5 post-pack L2 relaunches are measured: if the
+  median relaunch cost exceeds 60k, or an L2 hands off more than 4 times a day, raise the L2 cap to
+  200k — registry `cap_tokens`, one row, never in prose.
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
   stays gateway-only, so the metric needs no gateway.
   - Its numerator is the orchestrator sessions' weighted tokens: every usage record in the Claude
@@ -200,6 +217,37 @@ part by sha, which proves lineage but can no longer rebuild the bytes.
 - **Replay/diff:** `pack --replay <manifest-id>` reassembles the exact bytes from the blobs. It exits 1
   naming a pruned blob that is missing. `pack --diff <id1> <id2>` diffs two packs part by part.
 
+## 7. Size limits on every file a successor may open (hard, checked by code)
+
+§Why: a relaunch blew its cap reading whole files. Every file a successor may open has a byte budget,
+and the writer that produces it enforces the budget. A limit no code checks is prose.
+
+- **Card:** the §1 cap, checked by `card check`.
+- **Pack:** the §3 variable budget, checked by `pack`.
+- **Handoff file** `<RUN>/status/<name>.handoff.md`, written by `l1_handoff.py`: at most 5k tokens,
+  estimated as §3 estimates. Over budget it exits 2 and names the section that is over budget; it never
+  writes a file bigger than the budget. It never repeats a line — today it prints the same
+  `session … not running` line 5 times — and it never embeds the status file whole
+  (`render(snap, state_text)` does today); it points to the card. Lane R2c.
+- **Status file** `<RUN>/status/<name>.md` **is** the card. There is no second free-form status file:
+  R6 already makes `references/state-file.md` the card spec, so one home per fact.
+- **Inbox rotation:** new verb `autoos-agent.py inbox rotate <name>|--file PATH`.
+  - Trigger: the inbox file exceeds 50 KB, or its first record is from an earlier UTC month than today.
+  - Moves: every record at or before the card's `last-event` position (§0) that is acknowledged — a
+    later `→ done:` record covers it (§0 marker list) — into
+    `<RUN>/inbox/archive/<name>-<YYYYMM>.md`, filed under the record's own month.
+  - Stays: every unacknowledged record, and everything after the card's position. The `# inbox …`
+    header stays.
+  - Writes the new file, then renames it over the old one. The append-safety rules of §0 hold across
+    the swap: a torn last line stays a torn last line and is never glued onto a record.
+  - Idempotent: a second rotate moves nothing.
+  - `heartbeat` runs it at most once per hour per inbox.
+  - Reads: `inbox --all` reads the archive then the live file; `--since-card` never opens the archive.
+  Lane R8.
+- **Prompts and skill rules:** no relaunch prompt and no skill rule tells a session to read an inbox,
+  handoff, status, brief or log whole. A log is read with `tail -n 40` or a grep. The only prompt a
+  relaunch gets is §4's one line; R6 writes the rule.
+
 ## Delivery (each lane test-first; cheap writer → cross-family review → Sonnet final)
 
 | lane | scope | files (one writer each) |
@@ -207,6 +255,8 @@ part by sha, which proves lineage but can no longer rebuild the bytes.
 | R1 inbox | §0 module + `inbox`; replace `main()`'s dispatch fallthrough (`cmd_list … else cmd_run`) with an explicit verb table so later verbs cannot fall into `run` | tools/autoos_inbox.py (new), tools/autoos-agent.py (dispatch + inbox verb), tests |
 | R2a card | `card check` + extend `_NOT_AN_ORDER_RE` | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
 | R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
+| R2c handoff cap | §7 `l1_handoff.py` budget (refuse over 5k, name the section), line dedupe, no embedded status file | .agents/skills/unattended-orchestration/l1_handoff.py, tests |
+| R8 rotate | §7 `inbox rotate` verb, atomic swap, heartbeat hook (≤1/hour/inbox), archive read rules | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
 | R3 pack | `pack`, budget, `l1_handoff.py --pack` | tools/autoos-agent.py, .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
 | R4 relaunch | `relaunch-line`, run.json schema + example | tools/autoos-agent.py, configuration/run.example.json (new), tests |
@@ -215,9 +265,9 @@ part by sha, which proves lineage but can no longer rebuild the bytes.
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources | SKILL.md, references/ |
 
 Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
-dispatch-table line each), then R2b. Then R3, R7 (after REDACTMERGE is on main), R4, R5b (after the
-before-number), and R6. Every lane after R1 merges main before it starts. Each lane is at most three
-items per worker run.
+dispatch-table line each), then R2b. Then R2c and R8, right after R2b and before R3. Then R3, R7 (after
+REDACTMERGE is on main), R4, R5b (after the before-number), and R6. Every lane after R1 merges main
+before it starts. Each lane is at most three items per worker run.
 
 | v2 Sonnet finding | v3 resolution |
 |---|---|

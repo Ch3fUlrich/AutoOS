@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- **RESTART spec v3.2** (RSTAMEND, 2026-09-28): **`docs/plans/2026-09-28-restart-spec.md`** adds §7 — a hard, code-checked size budget on every file a successor may open (card §1, pack §3, the handoff file, the status file, inbox rotation, and no prompt or rule that reads them whole) — routes crash recovery through the same pack and one-line prompt (§4), records the L2 cap decision at 150k with its revisit trigger (§5), and adds lanes R2c and R8. Evidence: a crash-recovery relaunch reached 153.9k against a 150k cap, ~70k tokens of it whole-file reads (routing-00 12:3xZ, measured by L1-main from L1-backlog session 8e409b42's transcript).
+
 ### Changed — `agent-skills` is a tombstone on Linux and macOS (SPEC-OMNI A7)
 
 A7b retired the component's *work* and left a live row holding a pointer: the
