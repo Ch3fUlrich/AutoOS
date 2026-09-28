@@ -216,14 +216,20 @@ custom_is_installed() {
             ;;
         omnigraph-client)
             # "Installed" here means there is nothing left to write: this
-            # machine has a URL, the env file carries it and a token, the
-            # private prefix holds the pinned bridge, and the wrapper is a copy
-            # of the tracked one. AGENTS.md 4: the second run must report
-            # skipped, not installed.
-            local omni_base
+            # machine has a URL answer, the env file carries that URL and the
+            # token this run resolves, the private prefix holds the pinned
+            # bridge, the wrapper is a copy of the tracked one, and the rc files
+            # hold the line and none of the retired ones. The token is part of
+            # the question — install_component asks BEFORE the postInstall runs,
+            # so a gate that only checked "a token is in the file" would skip a
+            # rotation forever (A3 review, HIGH). AGENTS.md 4: the second run
+            # must report skipped, not installed.
+            local omni_base omni_token
             omni_base="$(omnigraph_url_answer)"
             [[ -n "$omni_base" ]] || return 1
-            omnigraph_client_is_current "$omni_base"
+            omni_token="$(omnigraph_client_token)"
+            [[ -n "$omni_token" ]] || return 1
+            omnigraph_client_is_current "$omni_base" "$omni_token"
             ;;
         mcp-graphify)
             mcp_has_server graphify || antigravity_has_server graphify
@@ -4097,6 +4103,84 @@ omnigraph_readiness() {
     (( ready ))
 }
 
+# omnigraph_env_state <file> <base-url> <token> [write|check]
+# Prints "written" or "unchanged": whether the env file holds exactly what a
+# write would put in it. mode=write applies it (backup, atomic replace, mode 600);
+# mode=check touches nothing. ONE implementation for both, because the skip gate
+# and the writer must never disagree about what "current" means — a gate that
+# asks a weaker question than the writer answers skips the write forever, which
+# is how a rotated token stayed stale (A3 review, HIGH). The values reach python
+# in the environment and are never printed: the bearer token must not end up in
+# a log line or a shell word.
+omnigraph_env_state() {
+    local path="$1" base="$2" token="$3" mode="${4:-write}"
+    OMNI_BASE="$base" OMNI_TOKEN="$token" OMNI_MODE="$mode" python3 - "$path" <<'PY'
+import os, shutil, sys, time
+path = sys.argv[1]
+mode = os.environ.get("OMNI_MODE", "write")
+want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
+if os.environ.get("OMNI_TOKEN"):
+    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
+
+def key_of(line):
+    # The forms this file is written in: `KEY=value`, and `export KEY=value`
+    # with any indent — what a person editing it by hand types. Recognising both
+    # here is what lets the writer normalise a hand line into one canonical row
+    # instead of leaving a second value that a reader could take first (the
+    # wrapper reads the file line by line, first value wins).
+    text = line.strip()
+    if text.startswith("export ") or text.startswith("export\t"):
+        text = text[len("export"):].lstrip()
+    return text.split("=", 1)[0].strip()
+
+old = ""
+if os.path.exists(path):
+    # surrogateescape, not a strict decode: a hand-edited file carrying one
+    # non-UTF-8 byte (a pasted curly quote is the ordinary case) must still be
+    # repairable — a strict read fails the write, and the token would never
+    # land. Odd bytes round-trip untouched, the way they came in.
+    with open(path, encoding="utf-8", newline="", errors="surrogateescape") as f:
+        old = f.read()
+lines, seen = [], set()
+for line in old.splitlines():
+    key = key_of(line)
+    if key in want:
+        if key in seen:
+            continue
+        line = "%s=%s" % (key, want[key])
+        seen.add(key)
+    lines.append(line)
+lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
+new = "\n".join(lines) + "\n"
+has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
+try:
+    mode_ok = (os.stat(path).st_mode & 0o777) == 0o600
+except OSError:
+    mode_ok = False
+if new == old and (mode != "check" or mode_ok):
+    if mode == "write" and not mode_ok:
+        os.chmod(path, 0o600)
+    print("unchanged", "token" if has_token else "no-token")
+    sys.exit(0)
+if mode == "check":
+    # What a write would do, reported without doing it — and without printing
+    # the value that differs.
+    print("written", "token" if has_token else "no-token")
+    sys.exit(0)
+if old:
+    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8", newline="\n", errors="surrogateescape") as f:
+    f.write(new)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print("written", "token" if has_token else "no-token")
+PY
+}
+
 # write_omnigraph_env <base-url> [token]
 # The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
 # place the bearer token lives on this machine. Tracked configs name the token
@@ -4130,45 +4214,7 @@ write_omnigraph_env() {
     fi
 
     local status rc=0
-    status="$(OMNI_BASE="$base" OMNI_TOKEN="$token" python3 - "$file" <<'PY'
-import os, shutil, sys, time
-path = sys.argv[1]
-want = {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"]}
-if os.environ.get("OMNI_TOKEN"):
-    want["OMNIGRAPH_TOKEN"] = os.environ["OMNI_TOKEN"]
-old = ""
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f:
-        old = f.read()
-lines, seen = [], set()
-for line in old.splitlines():
-    key = line.split("=", 1)[0].strip()
-    if key in want:
-        if key in seen:
-            continue
-        line = "%s=%s" % (key, want[key])
-        seen.add(key)
-    lines.append(line)
-lines += ["%s=%s" % (k, v) for k, v in want.items() if k not in seen]
-new = "\n".join(lines) + "\n"
-has_token = any(l.startswith("OMNIGRAPH_TOKEN=") and l.strip() != "OMNIGRAPH_TOKEN=" for l in lines)
-if new == old:
-    os.chmod(path, 0o600)
-    print("unchanged", "token" if has_token else "no-token")
-    sys.exit(0)
-if old:
-    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
-    shutil.copy2(path, backup)
-    os.chmod(backup, 0o600)
-tmp = path + ".tmp"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    f.write(new)
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-print("written", "token" if has_token else "no-token")
-PY
-)" || rc=$?
+    status="$(omnigraph_env_state "$file" "$base" "$token" write)" || rc=$?
     if (( rc != 0 )); then
         ui_warn "could not write ${file} (exit ${rc})"
         return 0
@@ -4306,18 +4352,47 @@ omnigraph_client_token() {
 }
 
 omnigraph_client_is_current() {
-    # omnigraph_client_is_current <base-url>: every artifact the component owns
-    # already holds exactly what this run would write. custom_is_installed asks,
-    # so the second run reports skipped and not installed (AGENTS.md §4).
-    local base="$1" env_file="$SYS_HOME/.autoos-omnigraph.env" wrapper src
-    wrapper="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    # omnigraph_client_is_current <base-url> <token>: every artifact the
+    # component owns already holds exactly what this run would write — the
+    # RESOLVED values, not merely "a line that contains them". custom_is_installed
+    # asks, so the second run reports skipped and not installed (AGENTS.md §4)
+    # while a rotated token, a deleted rc line or a lost environment.d link still
+    # reaches the writer. The comparison happens inside omnigraph_env_state with
+    # the values in the environment: printing them to grep them would put the
+    # bearer token in the log (AGENTS.md §1).
+    local base="$1" token="$2"
+    local env_file="$SYS_HOME/.autoos-omnigraph.env"
+    local link="$SYS_HOME/.config/environment.d/60-autoos-omnigraph.conf"
+    local wrapper="$SYS_HOME/.local/bin/omnigraph-mcp-autoos"
+    local src rc_line shell_rc status rc=0
     src="$(omnigraph_client_repo_root)/tools/omnigraph-mcp-autoos.sh"
-    grep -qF -- "OMNIGRAPH_BASE_URL=${base}" "$env_file" 2>/dev/null || return 1
-    grep -qE '^OMNIGRAPH_TOKEN=.' "$env_file" 2>/dev/null || return 1
+    [[ -n "$base" && -n "$token" ]] || return 1
+    status="$(omnigraph_env_state "$env_file" "$base" "$token" check)" || rc=$?
+    (( rc == 0 )) || return 1
+    [[ "$status" == unchanged* ]] || return 1
+    [[ -L "$link" && "$(readlink "$link")" == "$env_file" ]] || return 1
     [[ -x "$(omnigraph_bridge_bin)" ]] || return 1
+    [[ -n "$(omnigraph_bridge_pin)" ]] || return 1
     [[ "$(omnigraph_bridge_version)" == "$(omnigraph_bridge_pin)" ]] || return 1
-    [[ -f "$wrapper" ]] || return 1
+    # Copied, not linked: a link here would run whatever the checkout rewrites,
+    # and `cmp` cannot tell the two apart.
+    [[ -f "$wrapper" && ! -L "$wrapper" ]] || return 1
     cmp -s "$src" "$wrapper" || return 1
+    # Every rc file this machine has must carry the line this run would write,
+    # and carry neither an older AutoOS line nor the retired agent-skills token
+    # line this component removes.
+    rc_line="$(omnigraph_rc_line)"
+    for shell_rc in "$SYS_HOME/.bashrc" "$SYS_HOME/.zshrc"; do
+        [[ -f "$shell_rc" ]] || continue
+        grep -qF -- "$rc_line" "$shell_rc" || return 1
+        if grep -F -- "AutoOS:omnigraph-env" "$shell_rc" \
+            | grep -qvF -- "AutoOS:omnigraph-env-v2"; then
+            return 1
+        fi
+        if grep -F -- '/agent-skills/' "$shell_rc" | grep -qF -- 'OMNIGRAPH_TOKEN'; then
+            return 1
+        fi
+    done
     return 0
 }
 
@@ -4330,7 +4405,10 @@ omnigraph_install_bridge() {
     spec="$(mcp_package omnigraph)"
     name="$(omnigraph_bridge_pkg_name)"
     pin="$(omnigraph_bridge_pin)"
-    if [[ -z "$name" || "$name" == "$spec" ]]; then
+    if [[ -z "$name" || "$name" == "$spec" || -z "$pin" ]]; then
+        # `name@` is the shape that slips past `name != spec`: the pin is empty,
+        # and an empty pin equals the version string of a prefix that holds no
+        # bridge at all — which would make every machine look current.
         ui_err "the omnigraph pin in catalog/agent-harness.json ('${spec}') carries no @version"
         return 1
     fi
@@ -4376,6 +4454,14 @@ omnigraph_install_wrapper() {
     fi
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would copy ${src} to ${dest} (mode 755)"
+        return 0
+    fi
+    if [[ -L "$dest" ]]; then
+        # A link is not the copy this component promises, and `cp` to a linked
+        # path writes into whatever it points at — including the tracked file in
+        # this very checkout. Refuse, and touch neither the link nor its target.
+        ui_warn "${dest} is a link, not AutoOS's copy - left alone. Remove it to let AutoOS install its wrapper there."
+        autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
         return 0
     fi
     if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
@@ -4426,16 +4512,36 @@ omnigraph_retire_rc_token_lines() {
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
             continue
         fi
-        python3 - "$file" <<'PY'
-import sys
+        # Bytes, not decoded text: a dotfile is not necessarily UTF-8, and a
+        # text-mode read would re-encode the whole file (CRLF endings included)
+        # while editing one line of it. Contained like every other step — a file
+        # this cannot write is a warning and a recorded failure, never a repair
+        # this claims to have made.
+        local rc=0
+        AUTOOS_RETIRE_PATH='/agent-skills/' AUTOOS_RETIRE_KEY='OMNIGRAPH_TOKEN' python3 - "$file" <<'PY' || rc=$?
+import os, sys
 path = sys.argv[1]
-with open(path, encoding="utf-8") as f:
-    text = f.read()
-lines = text.split("\n")
-kept = [l for l in lines if not ("/agent-skills/" in l and "OMNIGRAPH_TOKEN" in l)]
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(kept))
+a = os.environ["AUTOOS_RETIRE_PATH"].encode()
+b = os.environ["AUTOOS_RETIRE_KEY"].encode()
+try:
+    with open(path, "rb") as f:
+        parts = f.read().split(b"\n")
+    kept = [p for p in parts if not (a in p and b in p)]
+    if len(kept) == len(parts):
+        sys.exit(0)
+    with open(path, "wb") as f:
+        f.write(b"\n".join(kept))
+except OSError:
+    # A file that cannot be read or written is the caller's to announce: the
+    # path is in its message, the file's contents are not, and a traceback in a
+    # provisioning log reads like a crash. Anything else is a bug and stays loud.
+    sys.exit(1)
 PY
+        if (( rc != 0 )); then
+            ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
+            autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
+            continue
+        fi
         OMNIGRAPH_CLIENT_CHANGED=1
         ui_ok "removed ${hits} retired agent-skills token line(s) from ${file}"
     done

@@ -25,14 +25,28 @@ if [[ -r "$env_file" ]]; then
     # Values are assigned, never evaluated: a token or URL holding $(...) must not
     # run here (the same rule as the rc-file line install.sh writes). Only the
     # three keys the bridge uses, and a value the caller already exported wins.
+    # A file that a person edited by hand is read the way they meant it: an
+    # optional indent, an optional `export `, and one layer of matching quotes
+    # round a value are stripped — nothing else, so a value that only starts with
+    # a quote keeps its own text.
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in
+            export[[:blank:]]*) line="${line#export}" ;;
+        esac
+        line="${line#"${line%%[![:space:]]*}"}"
         case "$line" in
             OMNIGRAPH_BASE_URL=*|OMNIGRAPH_TOKEN=*|OMNIGRAPH_GRAPH_ID=*) ;;
             *) continue ;;
         esac
         key="${line%%=*}"
         value="${line#*=}"
+        value="${value%"${value##*[![:space:]]}"}"
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
         [[ -n "$value" ]] || continue
         if [[ -z "${!key:-}" ]]; then
             printf -v "$key" '%s' "$value"

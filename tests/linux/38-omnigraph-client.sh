@@ -359,9 +359,8 @@ fi
 
 if it "omnigraph-client: a rotated token opens the skip gate and the next run lands it"; then
     tmp="$(oh_client_sandbox)"
-    oh_run_client "$tmp" >/dev/null
+    first="$(oh_run_client "$tmp" "" first-token-1111)"
     gate_same="$(oh_gate "$tmp" first-token-1111)"
-    oh_run_client "$tmp" "" first-token-1111 >/dev/null
     gate_rot="$(oh_gate "$tmp" rotated-token-2222)"
     out="$(oh_run_client "$tmp" "" rotated-token-2222)"
     tok_lines="$(grep -c '^OMNIGRAPH_TOKEN=' "$tmp/.autoos-omnigraph.env")"
@@ -372,6 +371,7 @@ if it "omnigraph-client: a rotated token opens the skip gate and the next run la
     backups="$(ls "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | wc -l)"
     rm -rf "$tmp"
     ok=1
+    [[ "$first" == *"CHANGED 1"* ]] || { ok=0; echo "a fresh machine wrote nothing: [${first:0:300}]" >&2; }
     [[ "$gate_same" == current ]] || { ok=0; echo "an unchanged machine does not read as current (gate [$gate_same])" >&2; }
     [[ "$gate_rot" == open ]] \
         || { ok=0; echo "the gate called the machine current after the token rotated - the rotation would never be written" >&2; }
