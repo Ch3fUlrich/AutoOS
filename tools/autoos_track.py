@@ -25,8 +25,9 @@ BUCKETS = ("unknown", "S0", "S1", "S2", "S3", "S4")
 # route can hand it to track_entry(); omitting it dropped the record (REVFIX2).
 EFFORTS = ("unknown", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 GATES = ("pass", "fail")
-# Every failure_class autoos-agent.py's track_entry() emits: rc 5 -> capability,
-# rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
+# Every failure_class autoos-agent.py's track_entry() emits: rc 5 -> capability
+# (and rc 10, the INCOMPLETE stop, the same class: no edit and nothing to
+# believe), rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
 # rc 8 -> provider. Omitting one made validate() reject the record and
 # record_run() silently drop it (REVFIX).
 FAILURES = (None, "logic", "capability", "containment", "provider", "refusal")

@@ -93,12 +93,15 @@ branch reflog (commit-then-reset) or moved side refs - or a tracked file outside
 before - the one exemption being a ref that is another lane's own worktree branch at both ends of the run, and an
 orchestrator that merged or fast-forwarded this parent mid-run is expected to see it: freeze the parent (skill
 R-coord-01). The shas and paths are printed, nothing is reverted, the track record carries
-failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6 and 8); 8 = a provider stop
+failure class "containment"; LEAK 7 overrides ANY child rc, including 5, 6, 8 and 10); 8 = a provider stop
 (rate limit, 429, capacity, quota or billing) appeared in the last lines of the captured client
 output while the client exited 0, 3 or 6 (PROVIDER-STOP; rc 3 is agy's own quota exit - AGYFIX
 item 3, measured 2026-09-27; the track record carries failure class
 "provider"; an --isolate run WIP-commits its uncommitted work first (a review run exempted - its
-deliverable is its diff), so nothing is lost); the child's
+deliverable is its diff), so nothing is lost); 10 = an --isolate run that exited 0 having changed
+nothing AND printed no REPORT heading (INCOMPLETE: the worker stopped mid-task, so there is no report
+to disbelieve - relaunch it, never resume, skill R-orch-06; the track record carries failure class
+"capability", like the NO-OP); the child's
 exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
 mode and the client's accepted list);
@@ -206,9 +209,16 @@ ISOLATE_PUSH_DISABLED = "DISABLED-autoos-isolate"
 
 
 def isolate_task_prefix(sandbox_path: str, root: str) -> str:
-    """The one line prepended to the task text of an --isolate run."""
+    """The two lines prepended to the task text of an --isolate run.
+
+    SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
+    reaches for approval stops there and exits 0, so the containment line is
+    paired with the one fact the worker cannot probe: nobody is answering.
+    """
     return ("Your working directory %s is your only writable checkout; "
-            "never cd, git -C or write into %s or any other path outside it."
+            "never cd, git -C or write into %s or any other path outside it.\n"
+            "The run is headless: nobody will answer questions or approve "
+            "anything - decide, commit, and report."
             % (sandbox_path, root))
 
 
@@ -306,6 +316,12 @@ DEFAULT_FREE_CONCURRENCY = 1
 FREE_QUEUE_POLL_SECONDS = 15
 FREE_QUEUE_TIMEOUT_SECONDS = 20 * 60
 EXIT_FREE_QUEUE_TIMEOUT = 9
+# SPAWNFIX (S3) item 1: a worker that stops mid-thought exits rc 0 having printed
+# neither a REPORT nor a commit (work/L1-routing/MUSEREG.try1.out quit after "Let
+# me find the POST handler"). A NO-OP says "it reported, and the report is worth
+# nothing"; this says "it never reported at all", and the next action is a
+# relaunch (skill R-orch-06: never resume a no-change child).
+EXIT_INCOMPLETE = 10
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -2509,17 +2525,40 @@ def _reflog_len(root: str, branch: str) -> int:
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
 
 
-def sandbox_verdict(route: dict, changed: str, ahead: str):
+# The return contract (docs/agent-protocol.md): a finished worker prints a
+# REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).
+# Prose that merely mentions a report is not one, and neither is a word that
+# only starts with the same letters ("REPORTED").
+REPORT_HEADING_RE = re.compile(r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?\b")
+
+INCOMPLETE_MESSAGE = ("INCOMPLETE: the worker stopped without a REPORT - "
+                      "relaunch it (never resume)")
+
+
+def has_report(output: str) -> bool:
+    """True when the captured client output carries a REPORT heading line."""
+    return REPORT_HEADING_RE.search(output or "") is not None
+
+
+def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = ""):
     """(rc override or None, message) for an --isolate run.
 
     Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
     commit hashes and changed nothing. A run whose job is to implement must
     leave a commit or a change; an agent's report is not evidence.
+
+    SPAWNFIX (S3) item 1: a run that changed nothing AND never printed its
+    REPORT did not finish the task at all (work/L1-routing/MUSEREG.try1.out),
+    which is a different next action from a reported no-change: relaunch it.
     """
-    if route.get("review") or changed or ahead:
+    if route.get("review"):
         return None, ""
-    return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
-               "unverified and the run as failed (exit 5)")
+    if not changed and not ahead:
+        if not has_report(output):
+            return EXIT_INCOMPLETE, INCOMPLETE_MESSAGE
+        return 5, ("NO-OP: the agent changed nothing in its sandbox - treat its report as "
+                   "unverified and the run as failed (exit 5)")
+    return None, ""
 
 
 def wip_commit(sandbox: str, rc: int, stop: str | None, branch: str | None = None) -> str | None:
@@ -2599,8 +2638,9 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     recorded as unknown/0 until the resolver measures them. The effort is the
     rung RUNV2's route carries (``route["effort"]``) when there is one, else
     "unknown". rc is the same value the run exits with, the NO-OP (5), the
-    headless refusal (6, failure class "refusal") and the LEAK (7, failure
-    class "containment") overrides included.
+    headless refusal (6, failure class "refusal"), the LEAK (7, failure class
+    "containment") and the INCOMPLETE (10, failure class "capability" like the
+    NO-OP) overrides included.
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -2636,7 +2676,7 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "cost": 0,
         "latency_s": secs,
         "gate": "pass" if rc == 0 else "fail",
-        "failure_class": (None if rc == 0 else ("capability" if rc == 5 else
+        "failure_class": (None if rc == 0 else ("capability" if rc in (5, EXIT_INCOMPLETE) else
                           ("refusal" if rc == 6 else
                            ("containment" if rc == 7 else
                             ("provider" if rc == 8 else "logic"))))),
@@ -3483,13 +3523,14 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: HEADLESS-REFUSAL: %s" % refusal, file=sys.stderr)
         # A provider stop is a failure even though the client often exited 0: it
         # was cut off mid-task (WIPfix, 2026-09-26). rc 0 and 6 upgrade to 8; a
-        # LEAK (7) still wins below, and the NO-OP (5) verdict never fires on an 8.
+        # LEAK (7) still wins below, and neither the NO-OP (5) nor the
+        # INCOMPLETE (10) verdict fires on an 8.
         # AGYFIX item 3 (measured 2026-09-27, K3 audit addendum 08:1xZ): agy with
         # no --model exits 3 after its default Gemini quota runs out, so rc 3 joins
         # them - the provider_stop() tail check still gates the upgrade, and other
         # rc-3 runs (missing binary is the spawner's own 3, set earlier) never
         # reach here with a provider-stop line.
-        # Exit precedence 7 > 8 > 5 > 6: a HEADLESS-REFUSAL (6) run that is then
+        # Exit precedence 7 > 8 > 5/10 > 6: a HEADLESS-REFUSAL (6) run that is then
         # provider-stopped exits 8 with failure_class "provider" (agy measured:
         # jetski refusal + AGY_ERROR 429, R-gateway-12).
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
@@ -3607,7 +3648,7 @@ def cmd_run(args, cfg: dict) -> int:
         print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
-        override, message = sandbox_verdict(plan["route"], changed, ahead)
+        override, message = sandbox_verdict(plan["route"], changed, ahead, client_tail)
         leak = parent_leak(parent_snap, sandbox=sb["path"])
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run

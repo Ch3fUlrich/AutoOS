@@ -2156,7 +2156,10 @@ class NoOpGuardTests(unittest.TestCase):
         spec.loader.exec_module(cls.cli)
 
     def test_implement_run_without_changes_is_a_failure(self):
-        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="")
+        # (SPAWNFIX3 item 1: the same run with NO report is an INCOMPLETE, the
+        # test below; a reported no-change stays the NO-OP.)
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="REPORT task · completed")
         self.assertEqual(rc, 5)
         self.assertIn("NO-OP", msg)
 
@@ -2166,6 +2169,94 @@ class NoOpGuardTests(unittest.TestCase):
 
     def test_a_review_run_may_change_nothing(self):
         self.assertEqual(self.cli.sandbox_verdict({"review": True}, changed="", ahead="")[0], None)
+
+    # SPAWNFIX3 (S3) item 1: a worker that quits mid-thought exits rc 0 with no
+    # commit and no report (work/L1-routing/MUSEREG.try1.out stopped after "Let
+    # me find the POST handler"). That is a different next action from a NO-OP —
+    # relaunch, not re-brief — so it gets its own exit code.
+
+    def test_a_run_that_changed_nothing_and_printed_no_report_is_incomplete(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                            output="Let me find the POST handler")
+        self.assertEqual(rc, self.cli.EXIT_INCOMPLETE)
+        self.assertIn("INCOMPLETE", msg)
+        self.assertIn("relaunch it (never resume)", msg)
+
+    def test_a_run_that_printed_a_report_and_changed_nothing_is_still_a_no_op(self):
+        rc, msg = self.cli.sandbox_verdict({"review": False}, changed="", ahead="",
+                                           output="REPORT task · completed · - · -")
+        self.assertEqual(rc, 5)
+        self.assertIn("NO-OP", msg)
+
+    def test_a_change_or_a_commit_still_passes_with_no_report(self):
+        for changed, ahead in ((" M a.py", ""), ("", "abc fix")):
+            with self.subTest(changed=changed, ahead=ahead):
+                self.assertEqual(self.cli.sandbox_verdict(
+                    {"review": False}, changed=changed, ahead=ahead, output="")[0], None)
+
+    def test_a_report_heading_of_any_shape_counts(self):
+        for text in ("**REPORT** task · completed", "REPORT task · completed",
+                     "REPORT: completed", "  report · done", "# REPORT"):
+            with self.subTest(text=text):
+                self.assertTrue(self.cli.has_report(text), text)
+
+    def test_prose_that_mentions_a_report_is_not_a_report(self):
+        for text in ("I will report the results later", "the REPORTED numbers",
+                     "no REPORT was printed here", ""):
+            with self.subTest(text=text):
+                self.assertFalse(self.cli.has_report(text), text)
+
+    def test_the_exit_code_table_names_the_incomplete_code(self):
+        # R-orch-11: a new return code is only safe if the docstring table that
+        # every caller reads says so.
+        doc = self.cli.__doc__
+        self.assertIn("10 = an --isolate run that exited 0 having changed", doc)
+        self.assertIn("(INCOMPLETE", doc)
+        self.assertEqual(self.cli.EXIT_INCOMPLETE, 10)
+
+    def test_an_incomplete_run_is_recorded_as_a_capability_failure(self):
+        # rc 10 must reach the track record like rc 5 does: a record autoos_track
+        # rejects is dropped silently (REVFIX).
+        cli = self.cli
+        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+                "client": "opencode", "free": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            tracked = cli.track_entry(plan, cli.EXIT_INCOMPLETE, 1.0)
+            self.assertIsNotNone(tracked)
+            self.assertEqual(tracked["gate"], "fail")
+            self.assertEqual(tracked["failure_class"], "capability")
+            path = os.path.join(tmp, "track-record.jsonl")
+            self.assertTrue(cli.record_run(path, tracked),
+                            "rc 10 must be recorded, not dropped")
+
+
+class IncompleteRunEndToEndTests(unittest.TestCase):
+    """SPAWNFIX3 (S3) item 1, through the real cmd_run: the verdict the operator
+    sees is the one the run ends with. Reuses the --isolate fake-client harness
+    (IsolateContainmentTests) rather than a new one, so the worker is the same
+    fake the containment and provider-stop contracts run."""
+
+    def _run(self, mode):
+        if os.name == "nt":
+            self.skipTest("sh stub; POSIX only")
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        rc, out, err = case.run_isolated(root, stub, state, mode)
+        return rc, out + err, case.agent
+
+    def test_a_silent_no_change_run_exits_incomplete_not_no_op(self):
+        rc, both, agent = self._run("noop")
+        self.assertEqual(rc, agent.EXIT_INCOMPLETE, both)
+        self.assertIn("INCOMPLETE: the worker stopped without a REPORT", both)
+        self.assertNotIn("NO-OP", both)
+
+    def test_a_reported_no_change_run_stays_a_no_op(self):
+        rc, both, _agent = self._run("report")
+        self.assertEqual(rc, 5, both)
+        self.assertIn("NO-OP", both)
+        self.assertNotIn("INCOMPLETE", both)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")
@@ -3499,7 +3590,11 @@ mode = os.environ.get("AUTOOS_FAKE_MODE", "noop")
 def git(*a):
     subprocess.run(["git", "-C", root, *a], check=True,
                    capture_output=True, text=True)
-if mode == "commit-worker":
+if mode == "report":
+    # SPAWNFIX3 (S3) item 1: a worker that stopped having printed its REPORT
+    # (but changed nothing) is a NO-OP, not an INCOMPLETE.
+    print("REPORT task \\u00b7 completed \\u00b7 - \\u00b7 - \\u00b7 - \\u00b7 -")
+elif mode == "commit-worker":
     with open(os.path.join(root, "worker-file.txt"), "w") as fh:
         fh.write("worker\\n")
     git("add", "worker-file.txt")
@@ -3988,7 +4083,9 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "commit-other")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_merged_worker_lane_is_not_a_leak(self):
@@ -3997,7 +4094,7 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "merge-worker-lane")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_an_amend_with_a_worker_committer_is_a_leak(self):
@@ -4050,7 +4147,9 @@ class IsolateContainmentTests(unittest.TestCase):
                        check=True)
         rc, out, err = self.run_isolated(root, stub, state, "commit-sibling-worktree")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_a_parent_fast_forward_onto_another_lanes_commits_is_a_leak_with_the_hint(self):
@@ -4168,7 +4267,7 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         rc, out, err = self.run_isolated(root, stub, state, "fetch-lane-new-ref")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
         refs = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                                "--format=%(refname)"], capture_output=True, text=True,
                               check=True).stdout.split()
@@ -4183,7 +4282,9 @@ class IsolateContainmentTests(unittest.TestCase):
             fh.write("wip\n")
         rc, out, err = self.run_isolated(root, stub, state, "orchestrator-commits-wip")
         self.assertNotIn("LEAK", out + err)
-        self.assertEqual(rc, 5, out + err)  # the NO-OP verdict still applies
+        # SPAWNFIX3 item 1: the fake reported nothing, so the no-change verdict
+        # is now the INCOMPLETE (10), not the NO-OP (5).
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_push_from_the_sandbox_to_the_parent_fails(self):
@@ -4212,8 +4313,13 @@ class IsolateContainmentTests(unittest.TestCase):
                 clean=False, allow_training=False, max_depth=None, lean=False, title=None)
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
             plan = agent.build_plan(args(True), cfg)
+        # SPAWNFIX3 (S3) item 2 (work/L1-routing/LEAKFP.out): the same worker
+        # stopped and asked for approval nobody was there to give, so the line
+        # says the run answers nothing.
         line = ("Your working directory %s is your only writable checkout; "
-                "never cd, git -C or write into %s or any other path outside it."
+                "never cd, git -C or write into %s or any other path outside it.\n"
+                "The run is headless: nobody will answer questions or approve "
+                "anything - decide, commit, and report."
                 % (plan["sandbox"]["path"], agent.ROOT))
         self.assertEqual(plan["cmd"][-1], line + "\n" + "do the thing")
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
