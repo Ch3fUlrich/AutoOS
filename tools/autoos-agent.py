@@ -1136,8 +1136,7 @@ def cmd_ready(args) -> int:
     report = review_status(text, registry)
     print_review_report(label, report)
     if not report["ready"]:
-        print("ready: not appended -- the record does not carry both reviews "
-              "(see %s)" % REVIEW_ENTRY_HINT)
+        print("ready: not appended -- the record does not carry both reviews")
         return 1
     tip, git_error = remote_branch_tip(args.repo or os.getcwd(), args.branch)
     if git_error:
