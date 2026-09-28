@@ -58,11 +58,24 @@ CARD_V2_VALUES = {
 }
 CARD_V2_DEFAULTS = {"kind": "implement", "risk": "normal", "spec": "partial",
                     "privacy": "public", "mode": "balanced", "deferrable": False,
-                    "deadline": None, "paths": [], "override": {}}
+                    "deadline": None, "paths": [], "override": {},
+                    "author": None}
 CARD_V1_ONLY = frozenset({"role", "complexity", "ctx", "spend"})
 CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
                           "deadline", "paths", "override"})
-CARD_SHARED = frozenset({"privacy"})
+# privacy and author belong to both dialects: REVROUTE (S2) item 2 put the
+# author on the card so a review can be resolved to a different-family
+# reviewer, and role=review is how most lanes already spell a review.
+CARD_SHARED = frozenset({"privacy", "author"})
+# The shared fields that are not one of v1's five combo inputs. privacy is
+# shared AND an input (it hard-filters routes); author is shared and never one
+# (it changes who reviews, not what runs) -- so normalize() validates it
+# separately instead of choice-checking it against CARD_VALUES.
+_CARD_NON_COMBO_SHARED = CARD_SHARED - frozenset(CARD_VALUES)
+# The shared fields that are not one of v1's five validated combo inputs.
+# privacy is in both sets, so it stays choice-checked by normalize(); author is
+# the only member and is checked by _check_author instead.
+_CARD_NON_COMBO_SHARED = CARD_SHARED - frozenset(CARD_VALUES)
 CARD_V2_KNOWN = CARD_V1_ONLY | CARD_V2_ONLY | CARD_SHARED
 OVERRIDE_FIELDS = ("route", "client", "effort")
 
@@ -104,13 +117,34 @@ def parse_card(text: str) -> dict:
     return card
 
 
+def _check_author(value) -> str:
+    """A card's author: a model id, a leg, or a bare family name.
+
+    Deliberately not validated against the registry here -- autoos_routing is
+    the card-shape module and has no registry loaded, and
+    ``autoos_resolver.author_family()`` is the one place that resolves the three
+    spellings (and fails closed on a registered model with no family).
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise CardError("card author=%r: expected a non-empty model id, leg or "
+                        "family name (e.g. author=qwen)" % (value,))
+    return value.strip()
+
+
 def normalize(card: dict) -> dict:
-    unknown = sorted(set(card) - set(CARD_VALUES))
+    unknown = sorted(set(card) - set(CARD_VALUES) - _CARD_NON_COMBO_SHARED)
     if unknown:
         raise CardError("unknown card field(s): %s (v%s knows: %s)"
-                        % (", ".join(unknown), ROUTING_VERSION, ", ".join(CARD_VALUES)))
+                        % (", ".join(unknown), ROUTING_VERSION,
+                           ", ".join(sorted(set(CARD_VALUES)
+                                            | _CARD_NON_COMBO_SHARED))))
     out = dict(CARD_DEFAULTS)
     for key, val in card.items():
+        if key in _CARD_NON_COMBO_SHARED:
+            # author changes who reviews, never which combo runs: select_combo
+            # reads the five CARD_VALUES fields and ignores this one.
+            out[key] = _check_author(val)
+            continue
         if val not in CARD_VALUES[key]:
             raise CardError("card %s=%r: expected one of %s" % (key, val, ", ".join(CARD_VALUES[key])))
         out[key] = val
@@ -241,11 +275,15 @@ def normalize_v2(card: dict) -> dict:
         out["bucket_hint"] = _V1_COMPLEXITY_TO_BUCKET[v1["complexity"]]
         out["min_context"] = _V1_CTX_TO_MIN[v1["ctx"]]
         out["spend"] = v1["spend"]
+        if "author" in v1:
+            out["author"] = _check_author(v1["author"])
         return out
 
     for key in ("kind", "risk", "spec", "privacy", "mode"):
         if key in flat:
             out[key] = _check_choice(key, flat[key], CARD_V2_VALUES[key])
+    if "author" in flat:
+        out["author"] = _check_author(flat["author"])
     if "deferrable" in flat:
         out["deferrable"] = _check_deferrable(flat["deferrable"])
     if "deadline" in flat and flat["deadline"] is not None:

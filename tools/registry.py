@@ -55,10 +55,13 @@ Three subcommands:
         models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
         2026-09-27);
     11. policy.reviewers is a non-empty ordered list, each entry carrying a
-        client that exists in ``clients`` and a non-empty model/family plus a
-        boolean paid -- the list the resolver walks to answer "who reviews this"
-        (REVROUTE (S2) item 1, 2026-09-27). The model half is the client's own
-        spelling, so it is deliberately not resolved against providers/models.
+        client that exists in ``clients``, a non-empty model/family, a boolean
+        paid and -- when it names one -- a ``leg`` that resolves and whose
+        model's ``family`` agrees with the entry's. This is the list the
+        resolver walks to answer "who reviews this" (REVROUTE (S2) item 1,
+        2026-09-27). ``model`` is the client's own spelling and is deliberately
+        not resolved against providers/models; ``leg`` is the gateway path and
+        is resolved with the same rule 1 predicate everything else uses.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -2313,6 +2316,26 @@ def _check_reviewers(registry) -> list:
             problems.append("reviewers: %s.client %r is not a registry client "
                             "(known: %s)"
                             % (label, client, ", ".join(sorted(known_clients))))
+
+        # A `leg` is the one link from the reviewer to a provider, and the
+        # resolver reads availability and the training test off it -- so a leg
+        # that does not resolve, or carries a family that disagrees with its own
+        # model's, would silently disable the different-family rule (the check
+        # compares the entry's spelling, the resolver compares this one).
+        leg = entry.get("leg")
+        if isinstance(leg, str) and leg:
+            try:
+                provider_id, model_id = resolve_leg(leg, registry)
+            except ValueError as exc:
+                problems.append("reviewers: %s.leg %s does not resolve: %s"
+                                % (label, leg, exc))
+                continue
+            model_family = (_section(registry, "models").get(model_id) or {}).get("family")
+            entry_family = entry.get("family")
+            if model_family and entry_family and model_family != entry_family:
+                problems.append(
+                    "reviewers: %s.family %r disagrees with models.%s.family %r "
+                    "(leg %s)" % (label, entry_family, model_id, model_family, leg))
     return problems
 
 

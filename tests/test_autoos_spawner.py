@@ -2577,7 +2577,12 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
+            "author": None,
         })
+        # REVROUTE (S2) item 2: author is shared by both dialects and is not a
+        # combo input -- it decides who reviews, never what runs.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})
@@ -2730,6 +2735,54 @@ class CardV2Tests(unittest.TestCase):
         out = self.norm({"privacy": "sensitive"})
         self.assertEqual(out["privacy"], "sensitive")
         self.assertEqual(out["version"], "2")
+
+    # --- author (brief REVROUTE (S2) item 2) -------------------------------
+    # Which model wrote the diff is what decides who may review it, so the
+    # field belongs to both card dialects: role=review,author=qwen is how a
+    # lane already spells the request.
+
+    def test_author_is_shared_and_never_a_mix(self):
+        out = self.norm({"author": "qwen"})
+        self.assertEqual(out["author"], "qwen")
+        self.assertEqual(out["version"], "2")
+        v1 = self.norm({"role": "review", "author": "qwen"})
+        self.assertEqual(v1["author"], "qwen")
+        self.assertEqual(v1["version"], "1")
+        self.assertEqual(v1["kind"], "review")
+
+    def test_a_v2_card_carries_its_author(self):
+        self.assertEqual(self.norm({"kind": "review",
+                                    "author": "meta_api/muse-spark-1.3-contributor"})
+                         ["author"], "meta_api/muse-spark-1.3-contributor")
+
+    def test_an_absent_author_is_none_not_a_default_reviewer(self):
+        # No author means the orchestrator did not say who wrote it: the
+        # different-family rule cannot run, and inventing an author would let
+        # the resolver claim a cross-family review nobody asked for.
+        self.assertIsNone(self.norm({"kind": "review"})["author"])
+
+    def test_key_value_form_reads_the_author(self):
+        self.assertEqual(self.norm(routing.parse_card("role=review,author=qwen"))
+                         ["author"], "qwen")
+
+    def test_an_empty_author_is_an_error(self):
+        for card in ({"author": ""}, {"author": "   "}, {"author": None},
+                     {"author": 7}):
+            with self.assertRaises(routing.CardError):
+                self.norm(card)
+
+    def test_the_author_never_changes_the_combo(self):
+        # autoos_routing.select_combo is the one launch-time decision; a review
+        # card must route to the same combo with or without an author, or the
+        # field would be a second, undeclared routing input.
+        plain = routing.select_combo({"role": "review"})
+        with_author = routing.select_combo({"role": "review", "author": "qwen"})
+        self.assertEqual(plain, with_author)
+
+    def test_normalize_v1_keeps_the_author_for_the_spawner(self):
+        card = routing.normalize({"role": "review", "author": "qwen"})
+        self.assertEqual(card["author"], "qwen")
+        self.assertEqual(card["role"], "review")
 
     def test_absolute_path_is_an_error(self):
         with self.assertRaises(routing.CardError):
@@ -5647,6 +5700,304 @@ class PsTests(_WorkerRecordBase):
         self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
         out = mcp_server.ps(include_ended=True)
         self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
+
+
+def _reviewer_registry():
+    """REVROUTE (S2) item 2 fixture: _small_route_registry() plus a
+    ``policy.reviewers`` list the spawner can walk.
+
+    Four reviewers, four families, one of them client-native (no ``leg``) and one
+    ``first_pass_only``. The two legs go through providers the fixture owns:
+    ``muse_api`` trains on prompts (so a privacy=sensitive card must walk past
+    it) and ``gem_api`` does not. Far-future/past dates are deliberate: no test
+    has to patch the clock to make a provider look down or back up.
+    """
+    reg = _small_route_registry()
+    reg["providers"]["muse_api"] = {"id": "muse_api", "tier": "paid",
+                                    "trains_on_prompts": True}
+    reg["providers"]["gem_api"] = {"id": "gem_api", "tier": "paid",
+                                   "trains_on_prompts": False}
+    # A sensitive card must still have a route to run on: the fixture's own two
+    # routes are private-safe, so only the *reviewer* list can fail privacy.
+    for provider in ("free-p", "cheap-p"):
+        reg["providers"][provider].update({"tier": "paid", "trains_on_prompts": False})
+    reg["models"]["muse-contrib"] = {"id": "muse-contrib", "family": "meta"}
+    reg["models"]["gem-flash"] = {"id": "gem-flash", "family": "google"}
+    # capabilities: --isolate asks for shell+write (SPAWNCAP), and a fixture with
+    # no declared client would be refused before the reviewer gate ever ran.
+    reg["clients"] = {
+        "opencode": {"id": "opencode", "capabilities": {"shell": True, "write": True}},
+        "claude": {"id": "claude", "capabilities": {"shell": True, "write": True}},
+    }
+    reg["policy"]["reviewers"] = [
+        {"client": "opencode", "model": "omniroute/muse", "family": "meta",
+         "leg": "muse_api/muse-contrib", "paid": True, "source": "test"},
+        {"client": "gemini", "model": "gem-flash", "family": "google",
+         "leg": "gem_api/gem-flash", "paid": False, "source": "test"},
+        {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen",
+         "paid": False, "source": "test"},
+        {"client": "claude", "model": "haiku", "family": "anthropic",
+         "paid": True, "first_pass_only": True, "source": "test"},
+    ]
+    return reg
+
+
+class ReviewerGateTests(unittest.TestCase):
+    """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
+    card from ``policy.reviewers``, and refuses to start a run that has no
+    eligible reviewer -- a same-family self-review is not an independent review,
+    and waiting is better than running one.
+
+    Same harness as RunCardV2Tests (no network, no real client probes, no key):
+    the registry and the client state are fixtures, the run is a dry run unless a
+    test is specifically checking that nothing was cloned or started.
+    """
+
+    DOWN = "2099-01-01T00:00:00Z"
+    DOWN_LATER = "2099-06-01T00:00:00Z"
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.tmp = tmp
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.client_state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                             for name in ("opencode", "gemini", "qoder", "claude")}
+        state = mock.patch.object(self.agent.measure_mod, "client_state",
+                                  lambda *a, **k: dict(self.client_state))
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        # "muse" is the head of this fixture's policy.reviewers list spelled as a
+        # gateway model heading -- what REVROUTE item 4 makes opencode.jsonc do
+        # for the real paid reviewer.
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,author=qwen,paths=tools/registry.py",
+            allow_training=False, client="opencode", joinable=False, max_depth=None,
+            clean=False, model=None, free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, lean=False, title=None, dry_run=True, task="x",
+            no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def route(self, **overrides):
+        """The route dict cmd_run would act on (build_plan, no clone, no start)."""
+        return self.agent.build_plan(self.args(**overrides), self.cfg())["route"]
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    # --- the reviewer is picked from the registry, not from a constant ------
+
+    def test_an_authored_v2_review_card_carries_a_review_plan(self):
+        review = self.route()["review_plan"]
+        self.assertIsNotNone(review, "a kind=review card with an author must know who reviews")
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["author"], "qwen")
+        self.assertEqual(review["author_family"], "qwen")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_the_reviewer_is_cross_family_and_the_walk_stops_at_the_first_usable(self):
+        review = self.route()["review_plan"]
+        self.assertNotEqual(review["reviewer"]["family"], review["author_family"])
+        self.assertEqual(review["skipped"], [],
+                         "the head of the list was usable, nothing was passed over")
+
+    def test_a_same_family_reviewer_is_skipped_with_the_reason_exposed(self):
+        review = self.route(card="kind=review,author=meta,paths=tools/registry.py")["review_plan"]
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual([s["model"] for s in review["skipped"]], ["omniroute/muse"])
+        self.assertIn("same family as author (meta)", review["skipped"][0]["reasons"])
+
+    def test_a_v1_role_review_card_with_an_author_is_resolved_too(self):
+        def boom(*a, **k):
+            raise AssertionError("a v1 card must not be routed by the resolver")
+        with mock.patch.object(self.agent, "route_plan_for", boom):
+            review = self.route(card="role=review,author=qwen")["review_plan"]
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_a_sensitive_card_walks_past_the_training_reviewer(self):
+        route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
+                                "paths=tools/registry.py")
+        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        skipped = route["review_plan"]["skipped"]
+        self.assertEqual([s["model"] for s in skipped], ["omniroute/muse"])
+        self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
+                        "the reason must name privacy, not availability")
+
+    def test_the_author_never_changes_the_route_the_resolver_picks(self):
+        with_author = self.route()
+        without = self.route(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(with_author["reason"], without["reason"],
+                         "who reviews is decided from the same plan, so it must not "
+                         "move the route scoring")
+        self.assertEqual(with_author["bucket"], without["bucket"])
+
+    # --- the picked reviewer is the model that runs (item 2 + item 4) -------
+
+    def test_the_resolved_reviewer_is_the_model_that_runs(self):
+        route = self.route()
+        self.assertEqual(route["model"], "omniroute/muse")
+        self.assertEqual(route["combo"], "muse")
+        self.assertEqual(route["reviewer_note"], "reviewer-model: opencode omniroute/muse")
+
+    def test_the_reviewer_model_shows_up_in_the_command_the_run_would_use(self):
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--model omniroute/muse", out.replace("'", ""))
+        self.assertIn("reviewer: opencode omniroute/muse (family meta, author qwen)", out)
+
+    def test_a_reviewer_model_that_opencode_json_does_not_declare_is_refused(self):
+        # REVROUTE (S2) item 4: the paid Muse reviewer must be DECLARED as a
+        # spawnable heading. Until it is, the run fails loudly instead of
+        # quietly reviewing on the resolver's generic route.
+        cfg = {"providers": {"omniroute": {"models": {"r-free": {}, "r-cheap": {}}}}}
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.agent.cmd_run(self.args(), cfg)
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("not declared in opencode.jsonc providers", err.getvalue())
+
+    def test_an_explicit_model_wins_over_the_reviewer_list(self):
+        route = self.route(model="omniroute/r-cheap")
+        self.assertEqual(route["model"], "omniroute/r-cheap")
+        self.assertNotEqual(route["combo"], "muse")
+        self.assertIn("an explicit --model wins", route["reviewer_note"])
+
+    def test_a_free_run_keeps_its_promo_model_and_says_the_reviewer_it_skipped(self):
+        route = self.route(free=True, free_model="opencode/muse-spark-1.3-contributor-free")
+        self.assertIsNone(route["model"], "--free carries no gateway model")
+        self.assertIn("--free keeps its promo model", route["reviewer_note"])
+        self.assertIn("opencode omniroute/muse", route["reviewer_note"])
+
+    def test_a_reviewer_on_another_client_is_announced_never_faked(self):
+        # Muse's provider is down, so the list picks Gemini -- which is not this
+        # run's client. The run must not pretend it is that review.
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        route = self.route()
+        self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
+        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
+        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
+        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+
+    def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
+        # route --explain must show the skipped reviewers, not only the run's own
+        # route scoring (brief item 2: "route --explain shows the skipped ones").
+        result = self.agent.route_plan_for(
+            "kind=review,author=meta,paths=tools/registry.py", "review this", str(ROOT),
+            "orch", datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc),
+            self.registry, {}, [], dict(self.client_state))
+        explain = "\n".join(result["explain"])
+        self.assertIn("reviewer skipped:", explain)
+        self.assertIn("same family as author (meta)", explain)
+        self.assertIsNotNone(result["review"])
+
+    # --- gated, not started --------------------------------------------------
+
+    def test_an_unauthored_review_card_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(self.route(card="kind=review,paths=tools/registry.py")["review_plan"])
+
+    def test_a_non_review_card_with_an_author_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=research,author=qwen,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(
+            self.route(card="kind=research,author=qwen,paths=tools/registry.py")["review_plan"])
+
+    def everyone_down(self):
+        """Every reviewer is unreachable *with a date* (brief item 2's "queue
+        instead of skip when all are rate-limited"): Muse and Gemini through
+        their providers, Haiku and Qwen through their own client outage."""
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        self.registry["providers"]["gem_api"].update({
+            "available": False, "unavailable_until": self.DOWN})
+        self.registry["clients"]["qoder"] = {
+            "id": "qoder", "available": False, "unavailable_until": self.DOWN_LATER}
+        self.registry["clients"]["claude"] = {
+            "id": "claude", "available": False, "unavailable_until": self.DOWN_LATER}
+
+    def test_a_queued_review_refuses_with_exit_9_and_names_the_earliest_return(self):
+        self.everyone_down()
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
+        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertEqual(out, "", "a queued run prints nothing it did not decide")
+
+    def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
+        self.everyone_down()
+        review = self.route()["review_plan"]
+        self.assertEqual(review["state"], "queued")
+        # Gemini's window is the shortest one, so the queue is over then -- even
+        # though the author's own family (qoder) is also "down": that entry can
+        # never review this card, waiting on it would be waiting forever.
+        self.assertEqual(review["retry_at"], self.DOWN)
+        self.assertIn("earliest", review["reason"])
+
+    def test_an_unresolved_review_refuses_with_exit_2_and_never_a_retry_code(self):
+        # Only a meta reviewer exists, and the author is meta: no wait fixes it.
+        self.registry["policy"]["reviewers"] = self.registry["policy"]["reviewers"][:1]
+        rc, out, err = self.run_cmd_run(card="kind=review,author=meta,paths=tools/registry.py")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no reviewer is eligible for an author from family meta", err)
+
+    def test_a_signed_out_reviewer_is_a_refusal_that_names_the_sign_in(self):
+        # A dated outage is a wait; a missing sign-in is a human action. rc 9 here
+        # would loop forever and never say what to do, so the refusal is exit 2
+        # with the skipped reviewer's own reason on stderr. (Gemini is the
+        # reviewer here, not the run's own client, so the route plan is
+        # unaffected and only the reviewer walk can fail.)
+        reviewers = self.registry["policy"]["reviewers"]
+        self.registry["policy"]["reviewers"] = reviewers[1:3]
+        self.client_state["gemini"] = {"installed": True, "signed_in": False, "reason": ""}
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("client: gemini not signed in", err)
+
+    def test_the_gate_fires_before_any_clone_or_client_start(self):
+        agent = self.agent
+        self.registry["providers"]["muse_api"].update({"available": False,
+                                                       "unavailable_until": self.DOWN})
+        self.registry["providers"]["gem_api"].update({"available": False,
+                                                      "unavailable_until": self.DOWN})
+        self.client_state["qoder"] = {"installed": False}
+        self.client_state["claude"] = {"installed": False}
+        calls = []
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_WORKERS_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
+                with mock.patch.object(agent.clients, "signin_state",
+                                       lambda client, env=None: (None, "")):
+                    with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(self.args(dry_run=False, isolate=True),
+                                                self.cfg())
+        self.assertEqual(rc, 9, out.getvalue() + err.getvalue())
+        self.assertEqual(calls, [], "the client never started")
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "sandboxes"))
+                         if os.path.isdir(os.path.join(self.tmp, "sandboxes")) else [], [],
+                         "no clone was made for a run that cannot review")
 
 
 if __name__ == "__main__":

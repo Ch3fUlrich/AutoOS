@@ -102,6 +102,7 @@ risk        normal | high                                           (orchestrato
 paths       files/dirs the task may touch                           (orchestrator; feeds §5.1)
 spec        exact | partial | vague                                 (orchestrator)
 privacy     public | sensitive                                      (default public)
+author      model, leg or family that wrote the diff                 (optional; §5.7 reviewer walk)
 deferrable  bool, deadline?                                         (default false)
 mode        cost-first | balanced | quality-first                   (default balanced)
 override    route/client/effort pinned by the operator              (optional; logged)
@@ -180,7 +181,8 @@ boundary.
    most quota headroom; if `deferrable` and the best provider's cheap window starts before the
    deadline, return `defer_until`.
 7. **Emit** `route_plan`: `route`, `class`, `client`, `effort`, `max_tokens`, `context_budget`,
-   `reviewers`, `escalation` (next two steps), `reason`.
+   `reviewers`, `review` (the §5.7 family walk, `null` for an unauthored card),
+   `escalation` (next two steps), `reason`.
 
 ### 5.4 Modes
 
@@ -237,6 +239,30 @@ Initial values in `policy`; `recalibrate` proposes new ones.
   history; the orchestrator decides (split, rewrite the brief, or take it itself).
 - **Review:** `normal` → 1 API review; `high` → 2 API reviews + Sonnet closes. Reviewers run at low
   effort, `max_tokens` 48k.
+- **Different family (REVROUTE, operator 2026-09-27).** A review must come from a model *family*
+  other than the author's — `models.<id>.family` is the one home of that fact. WHO may review is
+  `policy.reviewers` in the registry: an ordered preference list, each entry
+  `{client, model, family, leg?, paid, first_pass_only?}`. The paid Meta Muse 1.3 contributor leads;
+  Claude Haiku is a fallback first pass only (`first_pass_only`), and the Sonnet close above is
+  unchanged.
+- `plan()` walks the list for a `kind=review` card that carries an `author` (v1 `role=review` too),
+  and stops at the first entry that clears three checks: family differs from the author's; the entry
+  is reachable *now* (its provider/own-client `unavailable_until`, its client installed and signed
+  in, `client_bound`); and, for `privacy=sensitive`, `private_safe()` says the leg does not train on
+  prompts. An entry with no `leg` has nothing to check training against, so it fails closed on a
+  sensitive card. Every entry it passed over is reported with **all** its reasons, in
+  `review.skipped` and in `--explain` (`reviewer skipped: <client> <model> (…)`).
+- The run then *is* that reviewer when it can be: if the picked entry names this run's client and no
+  explicit `--model` was given, the run carries the reviewer's model spelling (and `run` prints
+  `reviewer: …`). Anything else — `--free`, an operator `--model`, a reviewer on another client, a
+  non-gateway client — prints a note and keeps its own model, because a silent substitution is how a
+  same-family self-review would sneak back in.
+- No reviewer usable → the run does not start. **`queued`** (exit 9, the SPAWNFREE wait code) when
+  at least one entry that *could* review is down with a known reset: `retry_at` is the **earliest**
+  one, since the queue is over when the first reviewer returns. **`unresolved`** (exit 2) otherwise —
+  a signed-out client or a same-family-only list needs a human, and exit 9 would loop forever.
+- An author that resolves to no family fails closed: guessing a family would let a model review its
+  own work.
 
 ## 6. Interfaces
 

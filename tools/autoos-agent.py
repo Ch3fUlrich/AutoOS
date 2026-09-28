@@ -821,6 +821,96 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def resolve_review_plan(card: dict, now=None) -> dict | None:
+    """The ``policy.reviewers`` decision for an authored review card.
+
+    None unless the card both asks for a review and names who wrote the diff --
+    the different-family rule needs an author, and an unauthored review is the
+    orchestrator's own business (the spec 5.7 reviewer *routes* still apply).
+    Both card shapes count: v2 says ``kind=review``, v1 says ``role=review``,
+    and ``author`` is shared (autoos_routing.CARD_SHARED). Reads the same
+    registry, client probes and clock the route plan reads, so `route` and `run`
+    cannot disagree about who reviews.
+    """
+    if not _card_asks_review(card) or not card.get("author"):
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return resolver.reviewer_for(
+        card["author"], load_registry(REGISTRY_PATH),
+        measure_mod.client_state(clients), now,
+        risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
+
+
+def _card_asks_review(card: dict) -> bool:
+    """True when a normalized card asks for a review, v1 or v2 spelling."""
+    return card.get("kind") == "review" or card.get("role") == "review"
+
+
+def review_run_refusal(review: dict | None):
+    """Why an authored review run must not start yet, or None when it may.
+
+    ``queued`` reuses SPAWNFREE's exit 9: every reviewer that could take this
+    card is down with a known reset, so the right answer is to wait and re-spawn
+    (the same rc the caller's queue loop already understands), not to run the
+    review on a same-family model and call it independent. ``unresolved`` is the
+    opposite -- nobody is eligible and no wait changes that (a signed-out client
+    needs a human) -- so it is a plain exit-2 refusal, never a retry the caller
+    would have to bound.
+
+    Either way the skipped reviewers are printed first, one line each: "who is
+    blocked and why" is the question a refusal gets asked, and the answer is
+    already in the walk.
+    """
+    if not review:
+        return None
+    if review["state"] not in ("queued", "unresolved"):
+        return None
+    for line in resolver.reviewer_explain_lines(review):
+        print(line, file=sys.stderr)
+    if review["state"] == "queued":
+        return refuse("reviewer %s" % review["reason"], EXIT_FREE_QUEUE_TIMEOUT)
+    return refuse("reviewer unavailable: %s" % review["reason"])
+
+
+def reviewer_run_override(review, client, cfg, tier, model, override, free):
+    """``(model, combo, note)`` -- the run this reviewer resolution implies.
+
+    A review card that names its author is a *reviewer* request, so when the
+    reviewer the list picked runs on the client this run is already using, the
+    run carries that reviewer's model spelling rather than the resolver's
+    generic route (REVROUTE (S2) item 2; item 4 is what makes the paid Muse
+    reviewer's spelling resolvable at all).
+
+    Anything that is not that clean case leaves the run alone and says so in
+    ``note`` -- the operator's explicit ``--model``, a ``--free`` promo run, a
+    reviewer that lives on another client, and a non-gateway client (which takes
+    its own ``--model`` and has no gateway combo to name) all keep what they had.
+    Silence here would be the bug: the review would run on a model nobody chose.
+    """
+    if not review or review.get("state") != "resolved":
+        return model, None, None
+    entry = review["reviewer"]
+    asked = "%s %s" % (entry.get("client"), entry.get("model"))
+    if override:
+        return model, None, "note: an explicit --model wins over policy.reviewers (%s)" % asked
+    if free:
+        return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
+    if entry.get("client") != client.name:
+        return (model, None,
+                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
+                "so it is NOT the review that list picked"
+                % (entry.get("client"), entry.get("model"), client.name))
+    if not client.gateway:
+        return (model, None,
+                "note: %s is not a gateway client, so --model stays the caller's; "
+                "policy.reviewers picked %s" % (client.name, asked))
+    # resolve_model raises ValueError when opencode.jsonc does not declare the
+    # heading -- exactly the failure the operator must see, not a silent fallback.
+    return (resolve_model(cfg, tier, False, entry["model"]),
+            entry["model"].partition("#")[0].replace("omniroute/", "", 1),
+            "reviewer-model: %s" % asked)
+
+
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                       exclude_routes: set | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
@@ -876,6 +966,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
 
     card = routing.normalize_v2(parsed_card)
+    # An authored review card runs its reviewer, not just any survivable route
+    # (REVROUTE item 2); a reviewer on another client is announced, never faked.
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        result.get("review"), clients.CLIENTS[args.client], cfg, tier, model,
+        override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     # the registry class of the combo that actually runs (an explicit --model may
     # have replaced the resolver's route); the track record keys on it
     route_class = registry.get("routes", {}).get(combo, {}).get("class")
@@ -886,7 +983,11 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
             "privacy": card["privacy"], "review": card["kind"] == "review",
             "bucket": result["bucket"], "class": route_class, "resolver": True,
-            "effort": result.get("effort")}
+            "effort": result.get("effort"),
+            # who reviews this card (REVROUTE item 2); plan() already walked
+            # policy.reviewers with the same registry/probes/clock it used to
+            # pick the route, so the spawner never re-derives it.
+            "review_plan": result.get("review"), "reviewer_note": reviewer_note}
 
 
 class PrivacyRefused(ValueError):
@@ -950,7 +1051,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo = (model or "").partition("#")[0].replace("omniroute/", "", 1) or None
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
-                "review": args.tier == 3}
+                "review": args.tier == 3, "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
@@ -960,8 +1061,16 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
         combo, reason = model.partition("#")[0].replace("omniroute/", "", 1), reason + "+model"
+    review = resolve_review_plan(card)
+    model, reviewer_combo, reviewer_note = reviewer_run_override(
+        review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
+    if reviewer_combo:
+        combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
-            "privacy": card["privacy"], "review": card["role"] == "review"}
+            "privacy": card["privacy"], "review": card["role"] == "review",
+            # a v1 card asks for a review with role=review; author is the shared
+            # field, so the same reviewer walk applies (REVROUTE item 2).
+            "review_plan": review, "reviewer_note": reviewer_note}
 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
@@ -2476,6 +2585,13 @@ def cmd_run(args, cfg: dict) -> int:
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
     route = plan["route"]
+    # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
+    # before anything is started -- a review by the author's own model family is
+    # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
+    # the same code SPAWNFREE's queue loop already handles), not a silent pass.
+    refusal = review_run_refusal(route.get("review_plan"))
+    if refusal is not None:
+        return refusal
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
     # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
@@ -2489,6 +2605,17 @@ def cmd_run(args, cfg: dict) -> int:
     env_names = sorted(plan["env"]) + (["AUTOOS_OMNIROUTE_KEY"] if uses_key else [])
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
+    if route.get("review_plan"):
+        # who reviews, and who was passed over -- an operator reading a spawn
+        # should not have to re-run `route --explain` to see the family rule work.
+        reviewer = route["review_plan"]["reviewer"]
+        print("reviewer: %s %s (family %s, author %s)" % (
+            reviewer["client"], reviewer["model"], reviewer["family"],
+            route["review_plan"]["author_family"]))
+        for line in resolver.reviewer_explain_lines(route["review_plan"]):
+            print(line)
+    if route.get("reviewer_note"):
+        print(route["reviewer_note"])
     print("depth: %d/%d" % plan["depth"])
     if plan.get("session_tag"):
         print("session-tag: %s" % plan["session_tag"])

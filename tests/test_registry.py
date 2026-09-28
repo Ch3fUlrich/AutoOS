@@ -1609,6 +1609,39 @@ class ReviewerPolicyTests(unittest.TestCase):
             problems = registry.check_registry(reg)
             self.assertTrue([p for p in problems if "reviewers" in p], problems)
 
+    def test_check_rule_flags_a_reviewer_leg_that_does_not_resolve(self):
+        # A leg is the only link from a reviewer to a provider, and the
+        # resolver reads availability and the training test off it.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["leg"] = "no-such-provider/no-such-model"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "does not resolve" in p],
+                        problems)
+
+    def test_check_rule_flags_a_family_disagreeing_with_its_leg(self):
+        # The different-family rule compares the entry's spelling; a leg whose
+        # own model says something else means the rule silently mis-fires.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["family"] = "qwen"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "disagrees" in p], problems)
+
+    def test_every_leg_on_the_reviewer_list_resolves(self):
+        legs = [e["leg"] for e in self.reviewers if "leg" in e]
+        self.assertTrue(legs, "no reviewer names a leg, so nothing is checked")
+        for leg in legs:
+            provider_id, model_id = registry.resolve_leg(leg, self.reg)
+            self.assertIn(model_id, self.reg["models"], leg)
+            self.assertIn(provider_id, self.reg["providers"], leg)
+
+    def test_the_list_is_ordered_paid_first_then_free(self):
+        # The operator's cost preference made visible: pay for the different
+        # family, fall back to free, and never let Haiku close.
+        self.assertIs(self.reviewers[0]["paid"], True)
+        self.assertEqual(self.reviewers[-1]["family"], "anthropic")
+
     def test_real_registry_passes_the_reviewers_check(self):
         self.assertEqual(registry.check_registry(self.reg), [])
 

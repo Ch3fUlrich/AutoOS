@@ -1768,7 +1768,7 @@ class PlanTests(unittest.TestCase):
             "route", "class", "client", "leg", "effort", "max_tokens",
             "context_budget", "bucket", "decompose", "p", "expected_cost",
             "reviewers", "escalation", "state", "defer_until", "reason",
-            "explain", "skipped_legs", "re_probe_notes",
+            "explain", "skipped_legs", "re_probe_notes", "review",
         })
         # Every model in this fixture is tool_calls "proven" with plenty of
         # context: nothing is skipped, so FT's skipped_legs is empty here.
@@ -2615,6 +2615,311 @@ class FreeAiResolverTests(unittest.TestCase):
         self.assertIn("t3-driver-free-only", removed)
         joined = " ".join(removed["t3-driver-free-only"])
         self.assertIn("privacy: free_ai/qwen7b", joined)
+
+
+class ReviewerSelectionTests(unittest.TestCase):
+    """Brief REVROUTE (S2) item 2: a review card carrying ``author`` resolves to
+    the first entry of ``policy.reviewers`` whose family differs from the
+    author's, whose provider/client is available at ``now``, and which privacy
+    allows. Everything the walk rejected is returned with its reason, because a
+    reviewer list that silently narrows is indistinguishable from a config
+    mistake -- and "silently no review" is exactly the failure this brief
+    exists to close.
+
+    A card where every remaining candidate is only *temporarily* down is
+    ``queued`` (the spawner waits, SPAWNFREE's rc 9), never ``unresolved``: a
+    rate limit is a delay, not an absence.
+    """
+
+    NOW = datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+    FUTURE = "2026-09-30T09:00:00Z"
+    FUTURE_LATER = "2026-09-30T12:00:00Z"
+
+    def registry(self):
+        return {
+            "providers": {
+                "meta_api": {"id": "meta_api", "tier": "paid",
+                             "trains_on_prompts": True},
+                "gemini": {"id": "gemini", "tier": "paid",
+                           "trains_on_prompts": False},
+            },
+            "models": {
+                "muse-spark-1.3-contributor": {
+                    "id": "muse-spark-1.3-contributor", "family": "meta"},
+                "gemini-3.8-flash": {"id": "gemini-3.8-flash", "family": "google"},
+            },
+            "clients": {
+                "opencode": {"id": "opencode"},
+                "gemini": {"id": "gemini"},
+                "qoder": {"id": "qoder"},
+                "claude": {"id": "claude"},
+            },
+            "policy": {"reviewers": [
+                {"client": "opencode", "model": "omniroute/spark-1.3-contributor",
+                 "family": "meta", "paid": True, "leg": "meta_api/muse-spark-1.3-contributor"},
+                {"client": "gemini", "model": "gemini-3.8-flash",
+                 "family": "google", "paid": False, "leg": "gemini/gemini-3.8-flash"},
+                {"client": "qoder", "model": "qwen3.8-flash",
+                 "family": "qwen", "paid": False},
+                {"client": "claude", "model": "haiku",
+                 "family": "anthropic", "paid": True, "first_pass_only": True},
+            ]},
+        }
+
+    def state(self, *names):
+        """client_state: every client installed and signed in but `names`."""
+        out = {c: {"installed": True, "signed_in": True, "reason": ""}
+               for c in ("opencode", "gemini", "qoder", "claude")}
+        for name in names:
+            out[name] = {"installed": True, "signed_in": False,
+                         "reason": "test: signed out"}
+        return out
+
+    def pick(self, author, **kwargs):
+        kwargs.setdefault("client_state", self.state())
+        kwargs.setdefault("risk", "normal")
+        kwargs.setdefault("privacy", "public")
+        return r.reviewer_for(author, self.registry(), kwargs.pop("client_state"),
+                              self.NOW, **kwargs)
+
+    # --- the author half ---------------------------------------------------
+
+    def test_author_spelled_as_a_family_works(self):
+        result = self.pick("qwen")
+        self.assertEqual(result["author_family"], "qwen")
+        self.assertEqual(result["reviewer"]["family"], "meta")
+
+    def test_author_spelled_as_a_registry_model_works(self):
+        result = self.pick("muse-spark-1.3-contributor")
+        self.assertEqual(result["author_family"], "meta")
+        # A meta author cannot be reviewed by the meta reviewer.
+        self.assertEqual(result["reviewer"]["family"], "google")
+
+    def test_author_spelled_as_a_leg_works(self):
+        self.assertEqual(self.pick("meta_api/muse-spark-1.3-contributor")
+                         ["author_family"], "meta")
+
+    def test_an_unknown_author_family_still_gets_the_first_reviewer(self):
+        # An author nobody has heard of is cross-family to everything, so the
+        # list's head wins rather than the card failing -- the family rule is a
+        # floor, not an allowlist.
+        self.assertEqual(self.pick("who-knows")["reviewer"]["family"], "meta")
+
+    def test_a_missing_family_on_the_author_model_is_not_guessed(self):
+        # A model with no family cannot be checked against the rule; claiming
+        # "meta" anyway would let an author review itself.
+        reg = self.registry()
+        del reg["models"]["muse-spark-1.3-contributor"]["family"]
+        result = r.reviewer_for("muse-spark-1.3-contributor", reg, self.state(),
+                               self.NOW, risk="normal", privacy="public")
+        self.assertIsNone(result["reviewer"])
+        self.assertIn("family", result["reason"])
+
+    # --- the same-family rule ----------------------------------------------
+
+    def test_the_walk_stops_at_the_first_usable_reviewer(self):
+        # The list is an ORDERED preference: once one entry passes, nothing
+        # after it is examined, so a cheap reviewer later never steals a
+        # cheaper-but-already-chosen one and the skipped list stays short.
+        result = self.pick("qwen")
+        self.assertEqual(result["reviewer"]["family"], "meta")
+        self.assertEqual(result["skipped"], [])
+
+    def test_the_author_family_is_skipped_with_a_reason(self):
+        result = self.pick("meta")
+        self.assertEqual(result["reviewer"]["family"], "google")
+        first = result["skipped"][0]
+        self.assertEqual(first["family"], "meta")
+        self.assertIn("same family as author (meta)", first["reasons"][0])
+        self.assertFalse(first["waiting"])
+
+    # --- availability ------------------------------------------------------
+
+    def test_a_down_provider_picks_the_next_reviewer(self):
+        reg = self.registry()
+        reg["providers"]["meta_api"].update(available=False,
+                                            unavailable_until=self.FUTURE)
+        result = r.reviewer_for("qwen", reg, self.state(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertEqual(result["reviewer"]["family"], "google")
+        down = result["skipped"][0]
+        self.assertEqual(down["family"], "meta")
+        self.assertTrue(down["waiting"])
+        self.assertIn(self.FUTURE, down["reasons"][0])
+
+    def test_a_past_unavailable_until_does_not_skip(self):
+        reg = self.registry()
+        reg["providers"]["meta_api"].update(
+            available=False, unavailable_until="2026-09-28T09:00:00Z")
+        result = r.reviewer_for("qwen", reg, self.state(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertEqual(result["reviewer"]["family"], "meta")
+
+    def test_a_signed_out_client_skips_its_reviewer(self):
+        result = self.pick("qwen", client_state=self.state("opencode"))
+        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertIn("signed in", result["skipped"][0]["reasons"][0])
+
+    def test_a_legless_reviewer_uses_its_client_outage_date(self):
+        reg = self.registry()
+        reg["clients"]["qoder"].update(available=False,
+                                       unavailable_until=self.FUTURE)
+        result = r.reviewer_for("meta", reg, self.state("opencode", "gemini"),
+                                self.NOW, risk="high", privacy="public")
+        # meta and google are out (signed out), anthropic is first-pass-only at
+        # high risk -- so qoder's dated outage is what the walk reports.
+        qoder = [s for s in result["skipped"] if s["client"] == "qoder"][0]
+        self.assertIn(self.FUTURE, qoder["reasons"][0])
+        self.assertTrue(qoder["waiting"])
+
+    # --- privacy -----------------------------------------------------------
+
+    def test_a_training_reviewer_never_takes_sensitive_work(self):
+        # Muse trains by contributor contract: privacy=sensitive must skip it
+        # even though it is the head of the list and cross-family.
+        result = self.pick("qwen", privacy="sensitive")
+        self.assertEqual(result["reviewer"]["family"], "google")
+        meta = result["skipped"][0]
+        self.assertIn("privacy", meta["reasons"][0])
+        self.assertFalse(meta["waiting"])
+
+    def test_a_legless_reviewer_fails_closed_on_sensitive_work(self):
+        # No leg means nothing to check training against, and "unproven" is not
+        # "safe" for a private prompt.
+        result = self.pick("meta", privacy="sensitive",
+                           client_state=self.state("opencode", "gemini"))
+        qoder = [s for s in result["skipped"] if s["client"] == "qoder"][0]
+        self.assertIn("no registry leg", qoder["reasons"][0])
+
+    # --- first-pass-only ---------------------------------------------------
+
+    def test_haiku_takes_a_normal_first_pass(self):
+        result = self.pick("qwen", client_state=self.state("opencode", "gemini"))
+        self.assertEqual(result["reviewer"]["client"], "claude")
+
+    def test_haiku_never_takes_the_high_risk_second_review(self):
+        result = self.pick("qwen", risk="high",
+                           client_state=self.state("opencode", "gemini"))
+        self.assertIsNone(result["reviewer"])
+        anthropic = [s for s in result["skipped"] if s["family"] == "anthropic"][0]
+        self.assertIn("first-pass", anthropic["reasons"][0])
+
+    # --- queue vs unresolved -----------------------------------------------
+
+    def test_everything_temporarily_down_queues_with_the_earliest_reset(self):
+        reg = self.registry()
+        reg["providers"]["meta_api"].update(available=False,
+                                            unavailable_until=self.FUTURE_LATER)
+        reg["providers"]["gemini"].update(available=False,
+                                          unavailable_until=self.FUTURE)
+        reg["clients"]["qoder"].update(available=False,
+                                       unavailable_until=self.FUTURE_LATER)
+        result = r.reviewer_for("meta", reg, self.state(), self.NOW,
+                                risk="high", privacy="public")
+        self.assertIsNone(result["reviewer"])
+        self.assertEqual(result["state"], "queued")
+        # The wait ends at the FIRST reviewer that comes back, not the last.
+        self.assertEqual(result["retry_at"], self.FUTURE)
+
+    def test_an_all_structural_walk_is_unresolved_not_queued(self):
+        # family/privacy/first-pass rejects never become a wait: nothing is
+        # coming back.
+        result = self.pick("qwen", risk="high",
+                           client_state=self.state("opencode", "gemini"))
+        self.assertEqual(result["state"], "unresolved")
+        self.assertIsNone(result["retry_at"])
+
+    def test_nothing_at_all_is_unresolved(self):
+        reg = self.registry()
+        reg["policy"]["reviewers"] = [e for e in reg["policy"]["reviewers"]
+                                      if e["family"] == "qwen"]
+        result = r.reviewer_for("qwen", reg, self.state(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertEqual(result["state"], "unresolved")
+
+    def test_a_missing_reviewers_list_is_reported_not_crashed(self):
+        reg = self.registry()
+        del reg["policy"]["reviewers"]
+        result = r.reviewer_for("qwen", reg, self.state(), self.NOW,
+                                risk="normal", privacy="public")
+        self.assertIsNone(result["reviewer"])
+        self.assertIn("policy.reviewers", result["reason"])
+
+    # --- explain lines -----------------------------------------------------
+
+    def test_explain_names_every_skipped_reviewer_in_order(self):
+        lines = r.reviewer_explain_lines(self.pick("meta"))
+        self.assertTrue(lines, "no explain line for a skipped reviewer")
+        self.assertIn("omniroute/spark-1.3-contributor", lines[0])
+
+    def test_explain_is_empty_when_the_head_of_the_list_was_usable(self):
+        self.assertEqual(r.reviewer_explain_lines(self.pick("qwen")), [])
+
+
+class PlanReviewCardTests(unittest.TestCase):
+    """plan() wires the walk into the route_plan: a review card with an author
+    gets a ``review`` decision beside its reviewer *routes*, and the explain
+    block carries why each candidate was not picked. Run against the real
+    catalog, because the point of item 1 is that this answer is data -- a
+    fixture that invented its own reviewer list would prove nothing about the
+    shipped one."""
+
+    NOW = datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        cls.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def state(self):
+        return {name: {"installed": True, "signed_in": True, "reason": ""}
+                for name in self.registry["clients"]}
+
+    def plan(self, **card_extra):
+        card = {"kind": "review", "mode": "balanced", "risk": "normal",
+                "spec": "exact", "privacy": "public"}
+        card.update(card_extra)
+        return r.plan(card, {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                             "tests": True, "need_tokens": 1000},
+                      self.state(), self.registry, {}, [], "claude-opus-4-6",
+                      self.NOW)
+
+    def test_a_review_card_with_an_author_carries_the_review_decision(self):
+        review = self.plan(author="qwen")["review"]
+        self.assertEqual(review["author_family"], "qwen")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["client"], "opencode")
+        self.assertIn("spark-1.3-contributor", review["reviewer"]["model"])
+        self.assertEqual(review["state"], "resolved")
+
+    def test_the_reason_says_who_authored_it(self):
+        self.assertIn("author qwen", self.plan(author="qwen")["review"]["reason"])
+
+    def test_a_meta_authored_card_skips_its_own_family_and_says_so(self):
+        plan = self.plan(author="meta")
+        review = plan["review"]
+        self.assertNotEqual(review["reviewer"]["family"], "meta")
+        self.assertIn("meta", [s["family"] for s in review["skipped"]])
+        # --explain's job: the skipped candidate is visible, not gone.
+        self.assertTrue([l for l in plan["explain"] if "omniroute/spark-1.3" in l])
+
+    def test_a_card_without_an_author_has_no_review_decision(self):
+        self.assertIsNone(self.plan()["review"])
+
+    def test_a_non_review_card_never_resolves_a_reviewer(self):
+        # An implement card has no review to route; author alone must not start
+        # one. research is another non-agentic kind, so the route itself
+        # survives and only the `review` guard is under test.
+        self.assertIsNone(self.plan(kind="research", author="qwen")["review"])
+
+    def test_sensitive_work_never_lands_on_the_training_reviewer(self):
+        # The operator's fixed rule: Muse trains, so a privacy=sensitive card
+        # must be reviewed by something that does not.
+        result = r.reviewer_for("qwen", self.registry, self.state(), self.NOW,
+                                risk="normal", privacy="sensitive")
+        if result["reviewer"] is not None:
+            self.assertNotEqual(result["reviewer"]["family"], "meta")
 
 
 if __name__ == "__main__":

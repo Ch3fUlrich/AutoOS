@@ -1226,6 +1226,254 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     return {"routes": list(picked), "closer": closer, "reason": reason}
 
 
+# ---------------------------------------------------------------------------
+# Reviewer routing (brief REVROUTE (S2) item 2, operator 2026-09-27T20:3xZ).
+#
+# Which client/model reviews is `policy.reviewers`'s business (item 1 put it in
+# data); this is the walk. It answers one question -- given the model that WROTE
+# the diff, who is allowed to read it -- and the operator's rule is that it must
+# not be the author's own family: a model reviewing its own output agrees with
+# itself. So the walk takes the first entry that clears four checks (family,
+# role in the review, availability, privacy) and reports every entry it passed
+# over, with its reasons.
+#
+# Pure, like the rest of the module: `now` is passed in, the registry is the
+# caller's, nothing is read or written.
+# ---------------------------------------------------------------------------
+
+# A rejection that says "not this one, ever" as opposed to "not right now".
+# Only a temporary rejection can make a run WAIT (state "queued", which the
+# spawner turns into SPAWNFREE's rc-9 queue); a structural one is answered by
+# picking someone else or by saying there is nobody.
+_TEMPORARY_REASONS = ("unavailable", "rate_limited")
+# A reason that names a dated outage, whoever produced it. The client filter's
+# reason ("client: agy unavailable until 2026-10-01T09:05:00Z") is written by
+# _client_reason for the route filter too, so it is matched on its wording
+# rather than by re-shaping a string another caller asserts on byte for byte.
+# "unavailable_until passed" (the re-probe note) deliberately does NOT match:
+# that one says the wait is already over.
+_TEMPORARY_MARKER = "unavailable until "
+
+
+def _is_temporary(reasons):
+    """True when every reason in `reasons` says "come back later"."""
+    return bool(reasons) and all(
+        any(reason.startswith(prefix) for prefix in _TEMPORARY_REASONS)
+        or _TEMPORARY_MARKER in reason
+        for reason in reasons)
+
+
+def author_family(author, registry):
+    """``(family, why_not)`` for the model that wrote the card.
+
+    An author is accepted in any of the three spellings a caller has to hand:
+    a registry model id (``muse-spark-1.3-contributor``), a leg
+    (``meta_api/muse-spark-1.3-contributor``), or a bare family name
+    (``qwen``). A name that matches no model is taken as a family -- an author
+    from a family nobody registered is cross-family to every reviewer, which is
+    the safe reading of the rule. A model that IS registered but carries no
+    ``family`` fails closed instead: guessing a family here would let an author
+    review its own work, which is the whole thing this rule exists to stop.
+    """
+    models = registry.get("models") or {}
+    if not isinstance(author, str) or not author.strip():
+        return None, "author is empty"
+    name = author.strip()
+
+    entry = models.get(name)
+    if isinstance(entry, dict):
+        family = entry.get("family")
+        if family:
+            return family, None
+        return None, "models.%s carries no family" % name
+
+    try:
+        _provider_id, model_id = resolve_leg(name, registry)
+    except ValueError:
+        model_id = None
+    if model_id is None and "/" in name:
+        # A client's own spelling ("<client>/<model>"), e.g. opencode's
+        # "opencode/nemotron-3-ultra-free": the model half is the registry id.
+        model_id = name.rpartition("/")[2] if name.rpartition("/")[2] in models else None
+    if model_id is not None:
+        family = (models.get(model_id) or {}).get("family")
+        if family:
+            return family, None
+        return None, "models.%s carries no family" % model_id
+    return name, None
+
+
+def _reviewer_rejections(entry, family, registry, client_state, now, risk,
+                         privacy):
+    """``(reasons, resolved_leg)`` for one reviewer entry; empty reasons = usable.
+
+    Every reason is collected, never just the first: a skipped reviewer that
+    reports one of its four problems hides the other three from whoever reads
+    ``--explain``, and "why is Muse not reviewing this" is usually answered by
+    the second reason, not the first.
+    """
+    reasons = []
+    reviewer_family = entry.get("family")
+    if not reviewer_family:
+        reasons.append("no family: cannot check the different-family rule")
+    elif reviewer_family == family:
+        reasons.append("same family as author (%s)" % family)
+
+    # Haiku's fixed role (operator 2026-09-27): a fallback FIRST pass only. At
+    # high risk the second reviewer closes toward the Sonnet check, and a
+    # first-pass-only model has no business in that seat.
+    if entry.get("first_pass_only") and risk == "high":
+        reasons.append("first-pass only: not eligible for a high-risk review")
+
+    client_reason = _client_reason(client_state, entry.get("client"), registry, now)
+    if client_reason:
+        reasons.append(client_reason)
+
+    leg = entry.get("leg")
+    resolved = None
+    if leg:
+        provider_id, model_id = resolve_leg(leg, registry)
+        resolved = (provider_id, model_id)
+        provider = registry["providers"].get(provider_id) or {}
+        if unavailable_now(provider, now):
+            reasons.append(_unavailable_reason(provider, provider_id))
+        bound = (registry["models"].get(model_id) or {}).get("client_bound")
+        if bound and bound != entry.get("client"):
+            reasons.append("client_bound: %s needs %s, not %s"
+                           % (leg, bound, entry.get("client")))
+        # Never privacy=sensitive to a training model (operator's fixed rule:
+        # Muse trains by contributor contract). private_safe is the one
+        # predicate that already encodes "paid AND does not train", so a free
+        # pool cannot be a fallback for a private prompt here either.
+        if privacy == "sensitive":
+            safe, why = private_safe(provider_id, model_id, registry)
+            if not safe:
+                reasons.append("privacy: %s %s" % (leg, why))
+    elif privacy == "sensitive":
+        # Fail closed: with no leg there is nothing to check training against,
+        # and "unknown" is not "safe" for a private prompt.
+        reasons.append("privacy: no registry leg to check training against")
+    return reasons, resolved
+
+
+def reviewer_for(author, registry, client_state, now=None, risk="normal",
+                 privacy="public"):
+    """The reviewer decision for an authored review card (spec 5.7 + D2).
+
+    Returns ``{author, author_family, reviewer, skipped, state, retry_at,
+    reason}``:
+
+    - ``reviewer`` -- the first ``policy.reviewers`` entry that clears the
+      family, availability and privacy checks, or None. The list is an ORDERED
+      preference, so the walk stops at the first usable entry and ``skipped``
+      holds exactly what it passed over, each with all of its reasons.
+    - ``state`` -- ``resolved``, ``queued`` (nothing usable, and at least one
+      entry the walk passed over is down *temporarily* with a known reset: a
+      reviewer will come back), or ``unresolved`` (nobody eligible, and no wait
+      will change that -- every rejection was structural, or nothing was down).
+    - ``retry_at`` -- the earliest ``unavailable_until`` among the temporary
+      rejections; the queue is over when the FIRST reviewer returns, not the
+      last.
+
+    ``client_state`` is the same measured dict ``filter_routes`` takes: a
+    reviewer that runs on a signed-out client cannot review anything.
+    """
+    now = _now_or_default(now)
+    family, why_not = author_family(author, registry)
+    if family is None:
+        return {"author": author, "author_family": None, "reviewer": None,
+                "skipped": [], "state": "unresolved", "retry_at": None,
+                "reason": "cannot resolve the author's family: %s" % why_not}
+
+    reviewers = (registry.get("policy") or {}).get("reviewers")
+    if not isinstance(reviewers, list) or not reviewers:
+        return {"author": author, "author_family": family, "reviewer": None,
+                "skipped": [], "state": "unresolved", "retry_at": None,
+                "reason": "policy.reviewers is missing or empty: nobody is "
+                          "registered to review (author %s)" % family}
+
+    skipped = []
+    waits = []
+    for entry in reviewers:
+        if not isinstance(entry, dict):
+            continue
+        reasons, _resolved = _reviewer_rejections(entry, family, registry,
+                                                 client_state, now, risk,
+                                                 privacy)
+        if not reasons:
+            model = entry.get("model")
+            return {
+                "author": author, "author_family": family,
+                "reviewer": dict(entry), "skipped": skipped,
+                "state": "resolved", "retry_at": None,
+                "reason": "reviewer: %s %s (family %s, author %s)"
+                          % (entry.get("client"), model, entry.get("family"),
+                             family),
+            }
+        temporary = _is_temporary(reasons)
+        skipped.append({"client": entry.get("client"),
+                        "model": entry.get("model"),
+                        "family": entry.get("family"),
+                        "reasons": reasons,
+                        "waiting": temporary})
+        if temporary:
+            waits.extend(_entry_unavailable_until(entry, registry, now))
+
+    if waits:
+        retry_at = _format_retry(min(waits))
+        return {"author": author, "author_family": family, "reviewer": None,
+                "skipped": skipped, "state": "queued", "retry_at": retry_at,
+                "reason": "queued until %s: no reviewer is available now, the "
+                          "earliest one returns then (author family %s)"
+                          % (retry_at, family)}
+    return {"author": author, "author_family": family, "reviewer": None,
+            "skipped": skipped, "state": "unresolved", "retry_at": None,
+            "reason": "no reviewer is eligible for an author from family %s "
+                      "(%d candidate(s) rejected)" % (family, len(skipped))}
+
+
+def _entry_unavailable_until(entry, registry, now):
+    """The ISO dates a reviewer entry is down until, parsed to datetimes.
+
+    Reads the same ``unavailable_until`` values the rejection reasons named
+    (provider-level for a leg; client-level for a client-native reviewer), so
+    ``retry_at`` can never promise a time nothing said. Returns [] when a
+    rejection carried no date -- a bare ``available: false`` comes back when an
+    operator flips it, not when the clock reaches something.
+    """
+    moments = []
+    leg = entry.get("leg")
+    if leg:
+        try:
+            provider_id, _model_id = resolve_leg(leg, registry)
+        except ValueError:
+            return moments
+        entry_data = registry["providers"].get(provider_id) or {}
+    else:
+        entry_data = (registry.get("clients") or {}).get(entry.get("client")) or {}
+    moment = _parse_until(entry_data.get("unavailable_until"))
+    if moment is not None and moment > now:
+        moments.append(moment)
+    return moments
+
+
+def _format_retry(moment):
+    """An outage instant as the short UTC stamp the plan prints elsewhere."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def reviewer_explain_lines(result):
+    """One ``--explain`` line per reviewer the walk passed over, in list order.
+
+    The plan's own ``explain`` block is the operator's answer to "who did NOT
+    review this and why"; a reviewer that vanished from the output instead of
+    being named is how a mis-registered list reads as a working one.
+    """
+    return ["reviewer skipped: %s %s (%s)"
+            % (entry["client"], entry["model"], "; ".join(entry["reasons"]))
+            for entry in (result or {}).get("skipped") or []]
+
+
 def _escalation(chosen, scores, registry):
     """The two escalation steps, spec 5.7.
 
@@ -1345,6 +1593,16 @@ def plan(card, features, client_state, registry, overlay, track_record,
                                   card["mode"], client, now)
     escalation = _escalation(chosen, scores, registry)
 
+    # REVROUTE (S2) item 2: an authored review card also gets the *client/model*
+    # that must read the diff, resolved from policy.reviewers. Only a review
+    # asks: an implement card with a stray author field must not start a review
+    # nobody ordered.
+    review = None
+    if card.get("kind") == "review" and card.get("author"):
+        review = reviewer_for(card["author"], registry, client_state, now,
+                              card.get("risk", "normal"),
+                              card.get("privacy", "public"))
+
     return {
         "route": chosen["route"],
         "class": route_class,
@@ -1359,11 +1617,13 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "p": chosen["p"],
         "expected_cost": chosen["expected_cost"],
         "reviewers": reviewers,
+        "review": review,
         "escalation": escalation,
         "state": "deferred" if defer_time is not None else "ready",
         "defer_until": _format_iso_z(defer_time) if defer_time is not None else None,
         "reason": "; ".join(reason_parts),
-        "explain": [s["reason"] for s in scores],
+        "explain": ([s["reason"] for s in scores]
+                    + reviewer_explain_lines(review)),
         "skipped_legs": skipped_legs,
         "re_probe_notes": re_probe_notes,
     }
