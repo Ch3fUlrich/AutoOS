@@ -170,6 +170,7 @@ import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
@@ -4336,6 +4337,13 @@ def _parser_usage(sub):
                                  "`usage --since 1h --by provider,lane`")
 
 
+def _parser_token_rate(sub):
+    sub.add_parser("token-rate",
+                   help="orchestrator tokens per merged change (RESTART spec §5); "
+                        "its own flags follow `token-rate`, e.g. "
+                        "`token-rate --since 48h --cwd-prefix <lane dir>`")
+
+
 def _parser_list(sub):
     sub.add_parser("list", help="show the tiers, their models and who may spawn whom")
 
@@ -4477,6 +4485,7 @@ def _parser_inbox(sub):
 
 VERB_PARSERS = {
     "usage": _parser_usage,
+    "token-rate": _parser_token_rate,
     "list": _parser_list,
     "ps": _parser_ps,
     "run": _parser_run,
@@ -4489,9 +4498,10 @@ VERB_PARSERS = {
 }
 
 # Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
-# verbs read, loaded for those two and None for the rest. `usage` is the one
-# registered verb with no entry here: main() hands it to autoos_usage before
-# argparse runs, because every flag after it belongs to that module.
+# verbs read, loaded for those two and None for the rest. `usage` and
+# `token-rate` are the registered verbs with no entry here: main() hands them to
+# autoos_usage / autoos_tokenrate before argparse runs, because every flag after
+# them belongs to that module.
 VERB_HANDLERS = {
     "context": lambda args, cfg: cmd_context(args),
     "heartbeat": lambda args, cfg: cmd_heartbeat(args),
@@ -4511,6 +4521,10 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["usage"]:  # everything after `usage` belongs to autoos_usage
         return usage_mod.main(list(argv[1:]))
+    # ... and everything after `token-rate` belongs to autoos_tokenrate
+    # (RESTART spec §5: the metric verb, no gateway needed).
+    if argv[:1] == ["token-rate"]:
+        return tokenrate_mod.main(list(argv[1:]))
     ap = argparse.ArgumentParser(description="Spawn one AutoOS tier agent (see module docstring).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for build_parser in VERB_PARSERS.values():

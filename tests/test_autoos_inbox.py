@@ -579,9 +579,9 @@ class DispatchTests(unittest.TestCase):
         registered = set(AGENT_MOD.VERB_PARSERS)
         self.assertTrue(registered)
         missing = sorted(registered - set(AGENT_MOD.VERB_HANDLERS))
-        self.assertEqual(missing, ["usage"],
-                         "every verb except the pre-argparse `usage` delegation "
-                         "needs a handler")
+        self.assertEqual(missing, ["token-rate", "usage"],
+                         "every verb except the pre-argparse `usage` and "
+                         "`token-rate` delegations needs a handler")
 
     def test_a_registered_verb_without_a_handler_is_refused_not_run(self):
         AGENT_MOD.VERB_PARSERS["orphan"] = lambda sub: sub.add_parser("orphan")
