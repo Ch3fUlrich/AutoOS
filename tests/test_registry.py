@@ -1781,6 +1781,140 @@ class ReviewerPolicyTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class HandoffCapsPolicyTests(unittest.TestCase):
+    """rule 13 (brief AUTHORS (S1) item 2, 2026-09-28): the hand-off cap is
+    *derived* data, and nothing checked the derivation.
+
+    ``policy.handoff_caps`` is the single source for the context cap a lane stops
+    at (spec 8.3; tools/autoos_context.py reads ``cap_tokens`` and never
+    recomputes it), so a row whose ``cap_tokens`` disagrees with
+    ``window * cap_fraction`` states two caps at once: the operator edits the
+    fraction, the lane still hands off at the old number. The schema checks each
+    field's type and can say nothing about the arithmetic between them, so the
+    invariant needs a rule of its own. The ``match: ["*"]`` row is checked too --
+    it is what gives a model no other row names a cap at all, and its absence is
+    what makes ``autoos_context.load_caps`` silently fall back to the hardcoded
+    ``DEFAULT_CAPS`` nobody maintains.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.caps = cls.reg["policy"]["handoff_caps"]
+
+    def caps_problems(self, reg):
+        return [p for p in registry.check_registry(reg) if p.startswith("handoff_caps:")]
+
+    # -- the real registry --------------------------------------------------
+
+    def test_every_real_row_hands_off_at_window_times_fraction(self):
+        for key, entry in sorted(self.caps.items()):
+            with self.subTest(row=key):
+                self.assertEqual(entry["cap_tokens"],
+                                 round(entry["window"] * entry["cap_fraction"]), key)
+
+    def test_exactly_one_star_fallback_row_exists(self):
+        rows = sorted(k for k, e in self.caps.items() if "*" in (e.get("match") or []))
+        self.assertEqual(len(rows), 1, rows)
+
+    def test_the_real_registry_passes_the_handoff_caps_check(self):
+        self.assertEqual(self.caps_problems(self.reg), [])
+
+    # -- red on a bad row ---------------------------------------------------
+
+    def test_a_cap_that_disagrees_with_its_formula_names_the_row(self):
+        reg = mutated()
+        key = sorted(reg["policy"]["handoff_caps"])[0]
+        row = reg["policy"]["handoff_caps"][key]
+        row["cap_tokens"] = row["cap_tokens"] + 1
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        # It names the row, and states both sides: "which number is wrong" must
+        # be answerable from the message, not from reopening the registry.
+        self.assertIn("policy.handoff_caps.%s" % key, problems[0])
+        self.assertIn(str(row["cap_tokens"]), problems[0])
+        self.assertIn(str(round(row["window"] * row["cap_fraction"])), problems[0])
+
+    def test_a_fraction_that_no_rounding_reproduces_is_reported_once(self):
+        # The other half of the same row: an operator lowers the fraction and
+        # forgets the tokens.
+        reg = mutated()
+        key = "claude-opus-1m"
+        reg["policy"]["handoff_caps"][key]["cap_fraction"] = 0.4
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("policy.handoff_caps.%s" % key, problems[0])
+
+    def test_deleting_the_star_row_is_reported_as_a_missing_fallback(self):
+        reg = mutated()
+        for key, entry in list(reg["policy"]["handoff_caps"].items()):
+            if "*" in entry["match"]:
+                del reg["policy"]["handoff_caps"][key]
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('"*"', problems[0])
+
+    def test_a_star_row_replaced_by_a_named_one_is_still_no_fallback(self):
+        # The defect is the same with a row that looks like a default: match
+        # ["*"] is the only spelling the cap reader treats as the fallback.
+        reg = mutated()
+        for entry in reg["policy"]["handoff_caps"].values():
+            if "*" in entry["match"]:
+                entry["match"] = ["sonnet"]
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('"*"', problems[0])
+
+    def test_a_row_that_is_not_an_object_is_named_and_nothing_crashes(self):
+        reg = mutated()
+        reg["policy"]["handoff_caps"]["opus-ish"] = "600000"
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("handoff_caps.opus-ish", problems[0])
+
+    def test_a_row_whose_numbers_are_not_numbers_is_named(self):
+        # A string window or a boolean fraction cannot be multiplied; it is
+        # reported, not skipped (rule 6 only walks `required`, never types).
+        for key, patch in (("window", "1000000"), ("cap_fraction", "0.6"),
+                           ("cap_tokens", True)):
+            reg = mutated()
+            reg["policy"]["handoff_caps"]["claude-opus-1m"][key] = patch
+            problems = self.caps_problems(reg)
+            with self.subTest(field=key, value=patch):
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("policy.handoff_caps.claude-opus-1m", problems[0])
+
+    def test_a_non_object_handoff_caps_section_is_reported_once(self):
+        # An absent section stays rule 6's (the schema marks it required); a
+        # present-but-wrong-typed one is this rule's, because nothing else can
+        # multiply it.
+        reg = mutated()
+        reg["policy"]["handoff_caps"] = []
+        self.assertEqual(len(self.caps_problems(reg)), 1, self.caps_problems(reg))
+        absent = mutated()
+        del absent["policy"]["handoff_caps"]
+        self.assertEqual(self.caps_problems(absent), [],
+                         "a missing required key belongs to rule 6, not here")
+        self.assertTrue([p for p in registry.check_registry(absent) if "handoff_caps" in p],
+                        "rule 6 must still name it")
+
+    def test_validate_exits_1_and_names_the_bad_row(self):
+        reg = mutated()
+        reg["policy"]["handoff_caps"]["gemini-1m"]["cap_tokens"] = 199999
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", prefix="registry-caps-", delete=False, encoding="utf-8")
+        json.dump(reg, tmp)
+        tmp.close()
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(REGISTRY_TOOL), "validate", "--registry", tmp.name],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+        finally:
+            Path(tmp.name).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("policy.handoff_caps.gemini-1m", proc.stdout)
+
+
 class DeepSeekBackTests(unittest.TestCase):
     """BRIEF DSBACK (S2 urgent, operator 2026-09-28 07:4xZ): DeepSeek's credit
     ran out on 2026-09-27T16:4xZ (402 Insufficient Balance) and the whole

@@ -76,6 +76,17 @@ Three subcommands:
         is a non-negative int with a boolean ``final``. classify() raises on an
         unknown type rather than ignoring it, so this is what keeps such a rule
         out of the committed registry.
+    13. every policy.handoff_caps row is self-consistent -- ``cap_tokens`` equals
+        ``round(window * cap_fraction)``, spec 8.3's own formula -- and one row
+        matches ``"*"``, the fallback the cap reader uses for a model no other
+        row names. ``tools/autoos_context.py`` reads ``cap_tokens`` and never
+        recomputes it, so a row whose pair disagrees states two caps at once and
+        the lane hands off at the stale one; a registry with no ``"*"`` row gets
+        no cap from the policy at all and silently falls back to that tool's own
+        hand-maintained DEFAULT_CAPS (brief AUTHORS (S1) item 2, 2026-09-28).
+        A *missing* policy.handoff_caps stays rule 6's (the schema marks it
+        required); this rule owns what the schema cannot see - the relation
+        between the fields and the existence of the default row.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -2589,6 +2600,86 @@ def _check_risk_policy(registry) -> list:
 
 
 # ===========================================================================
+# rule 13 - policy.handoff_caps: the cap a lane stops at
+# ===========================================================================
+
+_CAP_NUMBER_FIELDS = ("window", "cap_fraction", "cap_tokens")
+
+
+def _cap_row_problem(label, entry):
+    """One ``policy.handoff_caps`` row's problem line, or None when it holds.
+
+    The invariant is spec 8.3's own formula: the row states ``window`` and
+    ``cap_fraction`` *and* the derived ``cap_tokens``, and the two can disagree.
+    They disagree silently, because ``tools/autoos_context.py`` reads
+    ``cap_tokens`` and never recomputes it from the other pair -- so the hand
+    edit that moved Sonnet's row to 250k / 0.25 (routing-00 D-085, 2026-09-28)
+    had to change three fields to agree, and nothing read the pair to confirm it
+    did.
+
+    The line names the row and prints every number it compared, so the reader
+    does not have to open the registry to know which of the three to fix.
+    """
+    if not isinstance(entry, dict):
+        return ("handoff_caps: %s is not an object (got %r)" % (label, entry))
+    for field in _CAP_NUMBER_FIELDS:
+        value = entry.get(field)
+        # bool is an int in Python, and `true` as a cap or a fraction is a
+        # mistake, not a number to multiply.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ("handoff_caps: %s.%s must be a number (got %r) - the cap is "
+                    "round(window * cap_fraction), and %s has to be a number for "
+                    "that to mean anything" % (label, field, value, field))
+    window, fraction, cap = (entry["window"], entry["cap_fraction"],
+                             entry["cap_tokens"])
+    expected = round(window * fraction)
+    if cap != expected:
+        return ("handoff_caps: %s.cap_tokens %s != round(window %s * "
+                "cap_fraction %s) = %s - autoos_context reads cap_tokens and "
+                "never recomputes it, so this row states two caps at once"
+                % (label, cap, window, fraction, expected))
+    return None
+
+
+def _check_handoff_caps(registry) -> list:
+    """rule 13 - every hand-off cap row is self-consistent and a default exists
+    (brief AUTHORS (S1) item 2, 2026-09-28).
+
+    Two facts, both of which the schema is silent on because each is about the
+    *relation* between fields rather than their types:
+
+      - ``cap_tokens == round(window * cap_fraction)``, per row;
+      - at least one row carries ``"*"`` in its ``match`` list. That row is the
+        only fallback ``tools/autoos_context.py`` can use for a model no other
+        row names, so without it a cap is not read from this registry at all --
+        ``load_caps`` falls through to its own hand-maintained ``DEFAULT_CAPS``
+        and reports ``source='default'``, and the policy nobody checks is the
+        policy that drifts.
+
+    A *missing* section is not this rule's: the schema marks
+    ``policy.handoff_caps`` required, so rule 6 names it once. A present section
+    of the wrong shape is here, because nothing else multiplies it. Clock-free
+    and pure, like every other rule.
+    """
+    caps = _section(registry, "policy").get("handoff_caps")
+    if caps is None:
+        return []
+    if not isinstance(caps, dict):
+        return ["handoff_caps: policy.handoff_caps must be an object keyed by "
+                "orchestrator-model class (got %r)" % (caps,)]
+    problems = [_cap_row_problem("policy.handoff_caps.%s" % key, entry)
+                for key, entry in caps.items()]
+    problems = [problem for problem in problems if problem]
+    if not any(isinstance(entry, dict) and "*" in (entry.get("match") or [])
+               for entry in caps.values()):
+        problems.append('handoff_caps: policy.handoff_caps has no row matching '
+                        '"*" - a model no other row names gets no cap from this '
+                        'registry and falls through to autoos_context '
+                        'DEFAULT_CAPS (hand-maintained, not policy)')
+    return problems
+
+
+# ===========================================================================
 # check / validate
 # ===========================================================================
 
@@ -2632,6 +2723,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_risk_policy(registry))
+    problems.extend(_check_handoff_caps(registry))
     return problems
 
 
