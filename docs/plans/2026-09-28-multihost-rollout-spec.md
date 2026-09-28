@@ -21,7 +21,7 @@ designs only token (2): issuance, shape, revocation, and install-time pickup. To
 cited, never re-derived.
 
 Placeholder discipline follows the repo's own site-free precedent: every host, address, domain,
-and account here is a placeholder (`<tailnet>`, `<tailnet-cidr>`, `example.internal`), the way
+and account here is a placeholder (`<tailnet>`, `<tailnet-cidr>`, `example.com`), the way
 `docs/plans/2026-09-27-omnigraph-mcp-catalog-spec.md:6-9` keeps that spec site-free with
 `<omnigraph-url>`, `<server-vm>`, `<lan-cidr>`, `<tailnet-cidr>`, `<owner>`.
 
