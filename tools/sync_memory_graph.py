@@ -10,22 +10,56 @@ top-level dirs (PartOf -> autoos).
 
 Why this shape (copied from the router's bin/sync-memory-graph, same project
 graph): edges have no @key and duplicate on every re-load (structured-memory
-operations.md rule 7), so every emitted slug is recorded in the local state
-ledger ``.state/graph-loaded.txt`` (gitignored); ``--mark`` appends them only
-after a load is confirmed. Load mode is always ``merge`` (never ``overwrite`` -
-rule 8). Cross-project links to ``routing-d-NNN`` decisions are plain-text
-``rationale`` references, not edges: Implements is Task->Decision and there is
-no Decision->Decision implements edge, and fabricating a stand-in node would be
-worse than a text reference.
+operations.md rule 7), so every emitted record carries a ledger key recorded in
+the local state ledger ``.state/graph-loaded.txt`` (gitignored); ``--mark``
+appends them only after a load is confirmed. Load mode is always ``merge``
+(never ``overwrite`` - rule 8).
+
+Cross-project links to ``routing-d-NNN`` decisions are now real edges, not
+plain-text references (D-140): each live Task that cites a router decision emits
+``Implements: Task -> Decision`` by slug, and a Decision whose text explicitly
+supersedes another emits ``Supersedes: Decision -> Decision``. There is no
+Decision->Decision ``Implements`` edge and no schema change. A bare ``D-NNN``
+names the *same* decision number as ``routing-d-NNN`` by design (this repo's
+D-NNN ids ARE the router's routing decision numbers), so both forms normalise to
+one zero-padded slug (``D-88`` -> ``routing-d-088``). ``Implements`` and
+``Supersedes`` have no node of their own, so each is emitted as an edge-only
+record keyed ``"<edge>:<from>-><to>"`` - distinct from node-slug keys, so an
+edge still flows once on a machine whose ledger predates this change. Pass a set
+of known decision slugs (``known=`` / ``--known-slugs``) to drop citations that
+do not resolve, each with a stderr warning; the default ``None`` skips nothing
+in plain dump mode, but ``--load`` refuses an unvalidated edge batch (see Usage).
+
+Known limitation: a Task's board row is its slug source (``autoos-task-<row>``),
+so editing a row's wording mints a new Task slug and re-emits its Implements
+edges while the old slug's edges stay in the graph (stale-edge churn). Deduping
+by ledger key collapses identical keys within one run, not renamed rows across
+runs. A Decision that cites a routing-d-NNN in its own text emits no
+Decision->Decision ``Implements`` edge - no such schema edge exists.
 
 Usage: tools/sync_memory_graph.py > out.ndjson   (then load with omnigraph `load` mode=merge)
        tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs)
        tools/sync_memory_graph.py --load          (POST new records to $OMNIGRAPH_BASE_URL/graphs/autoos/load, then --mark)
+       tools/sync_memory_graph.py --known-slugs FILE --load
+
+``--load`` refuses (non-zero, nothing marked) when the batch carries an
+edge-only Implements/Supersedes record and no ``--known-slugs`` was given: an
+unresolved citation would create a dangling edge. Build the slug list from the
+graph's Decision slugs first, one per line:
+
+    # query decisions() { match { $d: Decision } return { $d.slug } }
+    # POST that to $OMNIGRAPH_BASE_URL/graphs/autoos/query, write each returned
+    # slug on its own line to known-slugs.txt, then:
+    tools/sync_memory_graph.py --known-slugs known-slugs.txt --load
+
+``--known-slugs`` accepts ``-`` (stdin), a file path, or a comma/space-separated
+list; an empty value, or a value starting with ``--``, is an error.
 """
 import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 GRAPH_ID = "autoos"
@@ -154,6 +188,52 @@ RULE_COMPONENT = {
 }
 
 
+# D-140: router decisions are looked up by slug ``routing-d-NNN``. A citation may
+# also appear bare (``D-085``); normalise both to the slug form. The lookbehind
+# stops ``routing-d-085``'s own inner ``d-085`` from matching a second time.
+_ROUTING_CITATION_RE = re.compile(r"routing-d-(\d+)|(?<![A-Za-z0-9-])d-(\d+)", re.I)
+
+# A citation only becomes Supersedes when a supersede/replace verb introduces it;
+# the window keeps a distant citation later in the same sentence out.
+_SUPERSEDE_VERB_RE = re.compile(r"\b(supersed\w*|replac\w*)\b", re.I)
+_SUPERSEDE_WINDOW = 60
+
+
+def routing_citations(text):
+    """Normalised, de-duplicated ``routing-d-NNN`` slugs cited in ``text``.
+
+    A bare ``D-NNN`` is zero-padded to the canonical three-digit slug, so
+    ``D-88`` and ``routing-d-88`` both become ``routing-d-088`` (one number
+    space: this repo's D-NNN ids ARE the router's decision numbers).
+    """
+    out = []
+    for m in _ROUTING_CITATION_RE.finditer(text or ""):
+        number = int(m.group(1) or m.group(2))
+        slug = "routing-d-" + str(number).zfill(3)
+        if slug not in out:
+            out.append(slug)
+    return out
+
+
+def supersedes_targets(text):
+    """Slugs a Decision explicitly supersedes/replaces, else empty.
+
+    The citation must sit in the same clause as the supersede/replace verb:
+    the ``_SUPERSEDE_WINDOW`` after the verb is cut at the first '.', ';' or
+    newline, so a later sentence's citation is never read as a replacement,
+    and the window keeps a distant citation in a run-on sentence out. Only the
+    first citation in that clause counts.
+    """
+    out = []
+    for m in _SUPERSEDE_VERB_RE.finditer(text or ""):
+        tail = (text or "")[m.end():m.end() + _SUPERSEDE_WINDOW]
+        clause = re.split(r"[.;\n]", tail, maxsplit=1)[0]
+        cited = routing_citations(clause)
+        if cited and cited[0] not in out:
+            out.append(cited[0])
+    return out
+
+
 def repo_root(explicit=None):
     if explicit is not None:
         return str(explicit)
@@ -211,7 +291,8 @@ def parse_task_board(root):
         if status == "Open":
             state = "planned"
         slug = "autoos-task-" + re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:60]
-        out.append((slug, task[:160], state, status[:300]))
+        row = " ".join(cells)
+        out.append((slug, task[:160], state, status[:300], row))
     return out
 
 
@@ -231,8 +312,15 @@ def decide_rule_severity(statement):
     return "must"
 
 
-def records(root=None):
-    """(ledger_key, node, [edges]) for everything mineable. Pure: reads repo files only."""
+def records(root=None, known=None):
+    """(ledger_key, node, [edges]) for everything mineable. Reads repo files only.
+
+    ``known`` is an optional set of decision slugs. A citation whose target is
+    not in it is skipped with a stderr warning (never an error); ``None`` accepts
+    every citation. ``Implements``/``Supersedes`` are edge-only records (``node``
+    is ``None``) keyed ``"<edge>:<from>-><to>"`` so a machine whose ledger already
+    holds the node slugs still emits each edge once.
+    """
     root = repo_root(root)
     out = []
     for slug, name, kind, location in COMPONENTS:
@@ -249,6 +337,13 @@ def records(root=None):
                      "data": {"slug": slug, "title": title[:300], "rationale": rationale[:1800],
                               "status": status, "date": date}},
                     edges))
+        for target in supersedes_targets(f"{title} {rationale}"):
+            if known is not None and target not in known:
+                print(f"warning: skipping Supersedes edge {slug} -> {target}: "
+                      "unknown decision slug", file=sys.stderr)
+                continue
+            out.append((f"Supersedes:{slug}->{target}", None,
+                        [{"edge": "Supersedes", "from": slug, "to": target}]))
     for rid, statement in parse_skill_rules(root):
         slug = "autoos-" + rid.lower()
         edges = [{"edge": "ConstrainsProject", "from": slug, "to": PROJECT_SLUG}]
@@ -261,19 +356,35 @@ def records(root=None):
                               "statement": f"{rid}: {statement}"[:800],
                               "severity": decide_rule_severity(statement)}},
                     edges))
-    for slug, title, state, status in parse_task_board(root):
+    for slug, title, state, status, row in parse_task_board(root):
         out.append((slug,
                     {"type": "Task",
                      "data": {"slug": slug, "title": title, "state": state}},
                     [{"edge": "Tracks", "from": slug, "to": PROJECT_SLUG}]))
-    return out
+        for target in routing_citations(row):
+            if known is not None and target not in known:
+                print(f"warning: skipping Implements edge {slug} -> {target}: "
+                      "unknown decision slug", file=sys.stderr)
+                continue
+            out.append((f"Implements:{slug}->{target}", None,
+                        [{"edge": "Implements", "from": slug, "to": target}]))
+    # Two board rows can mint the same Task slug once their titles collide
+    # truncated to 60 chars; emit each ledger key once (edges have no @key, so
+    # a duplicate edge record would duplicate on load).
+    seen, deduped = set(), []
+    for key, node, edges in out:
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((key, node, edges))
+    return deduped
 
 
-def emit(root=None, state=None):
+def emit(root=None, state=None, known=None):
     """Records whose ledger key is not yet in the state ledger."""
     done = loaded(root) if state is None else set(open(state).read().split()) \
         if os.path.exists(state) else set()
-    return [(k, n, e) for k, n, e in records(root) if k not in done]
+    return [(k, n, e) for k, n, e in records(root, known) if k not in done]
 
 
 def mark(root=None, state=None, batch=None):
@@ -284,14 +395,18 @@ def mark(root=None, state=None, batch=None):
         f.writelines(k + "\n" for k, _, _ in batch)
 
 
-def load_confirmed(res, sent):
-    """True when the load response confirms the batch landed. A response with
-    no per-table detail carries no evidence of failure (preserve prior
-    behavior); otherwise every reported table must be error-free and must
-    report rows when records were sent."""
+def load_confirmed(res, sent, edge_only=0):
+    """True when the load response confirms the batch landed.
+
+    A response with no per-table detail is no evidence either way. A node
+    record may be re-sent idempotently (merge upserts by @key), so preserve
+    the prior permissive behavior for a batch with no edge-only record; an
+    edge-only record has no @key and would silently duplicate, so an
+    unconfirmed edge batch must not be marked. Otherwise every reported table
+    must be error-free and must report rows when records were sent."""
     tables = (res or {}).get("tables", [])
     if not tables:
-        return True
+        return edge_only == 0
     for t in tables:
         if t.get("error"):
             return False
@@ -314,22 +429,84 @@ def post_load(base_url, token, lines):
     return json.load(urllib.request.urlopen(req, timeout=120))
 
 
+def read_known_slugs(spec):
+    """Slugs from ``-`` (stdin), a file path, or a comma/space-separated list."""
+    if spec == "-":
+        text = sys.stdin.read()
+    elif os.path.isfile(spec):
+        with open(spec, encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = spec
+    return {s for s in re.split(r"[,\s]+", text.strip()) if s}
+
+
+def _read_slugs_or_exit(spec):
+    slugs = read_known_slugs(spec)
+    if not slugs:
+        raise SystemExit("error: --known-slugs resolved to no slugs")
+    return slugs
+
+
+def _take_known_slugs(argv):
+    """Split ``--known-slugs VALUE`` / ``--known-slugs=VALUE`` out of argv.
+
+    A missing value, an empty value, or a value starting with ``--`` (which
+    would otherwise swallow a following flag such as ``--load``) is an error.
+    """
+    known, rest, i = None, [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--known-slugs":
+            i += 1
+            value = argv[i] if i < len(argv) else None
+            if value is None or value.startswith("--"):
+                raise SystemExit("error: --known-slugs needs a non-empty value")
+            known = _read_slugs_or_exit(value)
+        elif arg.startswith("--known-slugs="):
+            known = _read_slugs_or_exit(arg.split("=", 1)[1])
+        else:
+            rest.append(arg)
+        i += 1
+    return known, rest
+
+
 def main(argv=None, root=None, env=None):
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if env is None else env
     root = repo_root(root)
-    new = emit(root, ledger_path(root))
+    known, argv = _take_known_slugs(list(argv))
+    new = emit(root, ledger_path(root), known)
+    edge_only = sum(1 for _, node, _ in new if node is None)
     if "--load" in argv:
         if not new:
             print("nothing new", file=sys.stderr)
             return 0
-        lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new] + \
+        if known is None and edge_only:
+            print(f"ERROR: --load would emit {edge_only} edge-only record(s) "
+                  "(Implements/Supersedes) with no --known-slugs, so a citation "
+                  "that does not resolve would create a dangling edge. Pass "
+                  "--known-slugs with the graph's Decision slugs (see the "
+                  "module Usage) or run without --load.", file=sys.stderr)
+            return 1
+        lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new if n is not None] + \
                 [json.dumps(e) for _, _, es in new for e in es]
-        res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
-                        env["OMNIGRAPH_TOKEN"], lines)
+        try:
+            res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
+                            env["OMNIGRAPH_TOKEN"], lines)
+        except urllib.error.HTTPError as exc:
+            print(f"ERROR: the omnigraph server rejected the load "
+                  f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
+                  "retry.", file=sys.stderr)
+            return 1
+        except urllib.error.URLError as exc:
+            print(f"ERROR: could not reach the omnigraph server "
+                  f"({exc.reason}); ledger NOT marked - fix and retry.",
+                  file=sys.stderr)
+            return 1
         print("loaded:", {t["table_key"]: t["rows_loaded"]
                            for t in res.get("tables", [])}, file=sys.stderr)
-        if not load_confirmed(res, len(lines)):
+        if not load_confirmed(res, len(lines), edge_only):
             print("ERROR: load NOT confirmed by server response "
                   f"({res!r}); refusing to mark {len(new)} records as loaded. "
                   "Ledger untouched - fix the load and retry.",
@@ -341,7 +518,8 @@ def main(argv=None, root=None, env=None):
         print(f"marked {len(new)} records as loaded", file=sys.stderr)
         return 0
     for _, node, _ in new:
-        print(json.dumps(node, ensure_ascii=False))
+        if node is not None:
+            print(json.dumps(node, ensure_ascii=False))
     for _, _, edges in new:
         for e in edges:
             print(json.dumps(e))
