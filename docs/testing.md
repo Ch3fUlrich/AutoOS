@@ -130,7 +130,7 @@ to the official container when the binary is missing, and only skips when neithe
 is available:
 
 ```bash
-shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh   # if installed
+shellcheck -S warning setup.sh lib/linux/*.sh   # if installed; never tests/run-tests.sh
 for f in tests/linux/*.sh; do shellcheck -S warning "$f"; done      # the suite's parts, one each
 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable ...  # fallback
 ```
@@ -139,6 +139,8 @@ The Linux suite's cases live in `tests/linux/NN-<describe>.sh`, sourced in order
 `tests/run-tests.sh` (harness + summary only). Lint the parts one process each, never
 all at once: one shellcheck over the whole suite needed more than 2.5 GB and killed a
 16 GB host twice; one part peaks near 1.2 GB. A new `describe` block gets its own part.
+`tests/run-tests.sh` is never shellchecked locally at all — the skill rule that binds every
+session is R-worker-07.
 
 Install them anyway where you can:
 

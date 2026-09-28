@@ -26,7 +26,7 @@ and every new id target exists in `SKILL.md`.
 | `R-spawn-18` | code: MCP `spawn` backgrounds via Popen (never nohup/setsid) | already enforced |
 | `R-spawn-19` | `R-coord-01` | absorbed: push before dispatch |
 | `R-spawn-20` | `R-orch-06` | absorbed: verify WIP scope |
-| `R-spawn-21` | code: `--isolate` parent-checkout writes exit 7 (LEAK) | enforced, but false-positives on a moved parent — lanes.md "frozen parent" |
+| `R-spawn-21` | code: `--isolate` parent-checkout writes exit 7 (LEAK) | enforced; the moved-parent and shared-refs false positives are fixed (LEAKFP2 7da69d4) — lanes.md "frozen parent" |
 | `R-spawn-22` | `R-orch-04` | absorbed: feed isolated workers inline |
 | `R-spawn-23` | `R-orch-13` | absorbed: cross-family routing |
 | `R-spawn-24` | `R-coord-03` | absorbed: Claude orchestrates only |
@@ -54,7 +54,7 @@ and every new id target exists in `SKILL.md`.
 | `R-tests-11` | dropped: process gap (unwired suite), not a repeatable rule | one-off |
 | `R-tests-12` | `R-worker-03` | absorbed: real --no-cache builds |
 | `R-tests-13` | `R-worker-02` | absorbed: seed bug state, assert reason |
-| `R-tests-14` | R-worker-08 | |
+| `R-tests-14` | `R-worker-08` | absorbed: detached copy — a clone, not a tar export (L30) |
 | `R-tests-15` | `R-worker-02` | absorbed: guard platform (SUDO_USER) |
 | `R-tests-16` | `R-coord-02` | absorbed: verify yourself before merge |
 | `R-tests-17` | `R-worker-03` | absorbed: include helpers in touched area |
@@ -99,7 +99,7 @@ and every new id target exists in `SKILL.md`.
 | `R-level-01` | `R-router-01` | absorbed: background sessions never ask |
 | `R-level-02` | `R-router-01` | absorbed: L0 routes, L2 researches |
 | `R-heartbeat-01` | `R-coord-07` | absorbed: the session keeps one recurring 10-min heartbeat cron |
-| `R-heartbeat-02` | `R-coord-08` | absorbed: beat pushes and rewrites status; `autoos-agent.py heartbeat` is the read-only report |
+| `R-heartbeat-02` | `R-coord-08` | absorbed: beat pushes, pongs, WIP-commits, stamps status; `autoos-agent.py heartbeat` is the read-only report |
 | `R-heartbeat-03` | code: `autoos-agent.py heartbeat` exit 3 pause / 4 over-cap | already enforced |
 | `R-pause-01` | code: `heartbeat`+`run`+MCP `spawn` all refuse on PAUSE (exit 3) | already enforced |
 | `R-git-01` | `R-orch-08` | absorbed: harness trailer wins |
@@ -118,7 +118,7 @@ and every new id target exists in `SKILL.md`.
 | `R-handoff-06` | `R-router-01` | absorbed: never ask operator directly |
 | `R-handoff-07` | code: `heartbeat --transcript --cap` measures child, exit 4 relaunches | already enforced |
 | `R-handoff-08` | `R-orch-01` | absorbed: one writer per file |
-| `R-handoff-09` | `R-coord-08` | absorbed: answer ping with pong |
+| `R-handoff-09` | `R-coord-08` | absorbed: answer ping with pong — the beat now says so in the rule text |
 | `R-handoff-10` | `R-coord-06` | absorbed: state file template |
 | `R-handoff-11` | `R-coord-06` | absorbed: relaunch re-measures |
 | `R-host-01` | `R-coord-04` | absorbed: Serena ~200 MB budget |
@@ -149,3 +149,23 @@ side (one home per fact). A citation of any of them resolves to its surviving ru
 | `R-orch-07` | `R-orch-13` | cross-family review, reviewer model pinned, evidence by pointer |
 | `R-orch-09` | `R-coord-08` | read the inbox at the heartbeat and before every launch |
 | `R-coord-05` | `R-worker-03` | filtered tests while working, full suites once per phase |
+
+## Third-generation ids (fold 2026-09-28, FOLD4)
+
+Three new rule ids and eight merges, from `work/L1-routing/FOLD4.common.md` (A-rows) and
+`work/L1-routing/FOLD4.lessons.txt` (L-rows). A new id is a target, not a source: nothing cited it
+before, so the rows below record what each one absorbed and where the lesson came from.
+
+| id | from | what it absorbed or changed |
+|---|---|---|
+| `R-coord-09` | new | L3-level orchestration (spawn/route/status) goes through autoos-agent only; L2 launches use the runner and CAO is separate (A68 + A57 + A11) |
+| `R-orch-15` | new | the `lesson: … evidence=…` line to the skill owner; a lesson becomes a rule only after a test (A30 + A35) |
+| `R-orch-16` | new | report-driven gates are re-audited cross-family and match names exactly (L33b, REVGATE2) |
+| `R-router-01` | merged | parent's inbox on a refused write, and the batched `Q:` line to a live L0; the literal format lives in `references/layers.md` (A38 + A59 + A65) |
+| `R-coord-01` | merged | merge main into a lane before it spawns — a stale lane runs stale tooling (L07b) |
+| `R-coord-03` | merged | never researches either; Haiku is the allowed first-pass fallback per operator Q-003 (A42) |
+| `R-coord-04` | merged | heavy suites counted: one per orchestrator, two per host (A21) |
+| `R-coord-08` | merged | answers a ping with a pong, and WIP-commits work older than one beat (A09 + A28) |
+| `R-orch-10` | merged | widened from sudo/root to installer and state-mutating changes (L21) |
+| `R-orch-13` | merged | "bigger" sized as diff lines including tests, read off the bucket table (L24-25) |
+| `R-worker-08` | merged | the detached copy is a `git clone --no-hardlinks`; a tar export broke 37 git-fixture tests (L30) |
