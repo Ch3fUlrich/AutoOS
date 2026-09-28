@@ -111,6 +111,31 @@ def leaf_spawn_deny(client: "Client") -> tuple:
     return LEAF_SPAWN_DENY.get(client.name, ())
 
 
+def leaf_deny_argv(client: "Client") -> list:
+    """The rendered deny argv, per the flag's arity (KEYDENY3 Sonnet HIGH/MED).
+
+    The table stores one flag plus the tool names; each CLI reads them with a
+    different arity, and read wrong the gate denies one tool (or none) while
+    the rest lands in the prompt:
+      qoder  --disallowed-tools <tool> binds ONE value per occurrence, so the
+             flag repeats; `--` then separates the options from the query, as
+             qodercli's help instructs ("use -p or -- to separate from query").
+      claude --disallowed-tools <tools...> is variadic and takes everything up
+             to the next flag - the trailing prompt included - so the list is
+             terminated with `--` before the positional.
+      qwen   --exclude-tools is a parsed array; `-p task` already follows it.
+    """
+    entry = leaf_spawn_deny(client)
+    if not entry:
+        return []
+    flag, tools = entry[0], list(entry[1:])
+    if client.name == "qoder":
+        return [v for tool in tools for v in (flag, tool)] + ["--"]
+    if client.name == "claude":
+        return [flag] + tools + ["--"]
+    return list(entry)
+
+
 # --- carrying the run's gateway headers per client (FLEETP0 review item 4) ----
 # `omniroute run` itself has no header option (`omniroute run --help`: port,
 # remote/base-url, context, provider, model, profile, token/api-key[-env],
@@ -152,7 +177,7 @@ def gemini_custom_headers(headers: dict | None) -> str:
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
                   model: str | None = None, joinable: str | None = None,
-                  deny_spawn: bool = False, headers: dict | None = None) -> list:
+                  headers: dict | None = None, deny_spawn: bool = False) -> list:
     """The argv for one headless task. opencode is built by autoos-agent.py itself.
 
     `deny_spawn` is the leaf gate: it only ever applies to a run that wears a leaf
@@ -162,7 +187,7 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     them on a request uses them (gateway_header_args, gemini_custom_headers).
     """
     mode = client.modes.get(level, [])
-    deny = list(leaf_spawn_deny(client)) if deny_spawn else []
+    deny = leaf_deny_argv(client) if deny_spawn else []
     if client.name == "claude":
         if joinable:
             # No user-scope MCP servers: user-scope graphify started one docker

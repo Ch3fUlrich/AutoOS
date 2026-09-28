@@ -9578,6 +9578,42 @@ def _reviewer_client_state():
             for name in ("opencode", "gemini", "qoder", "claude")}
 
 
+# KEYDENY3b item 2: grep/glob is asserted against the *pattern*, so a leaf
+# grepping "sk-" inside a checkout that holds configuration/api-keys.yml is not
+# stopped by the fence at all. The guarantee that does hold is about the
+# directory a leaf runs in, so it is tested as one: the --isolate clone carries
+# no git-ignored file, and a leaf run without --isolate is refused.
+FAKE_KEY_TEXT = "omniroute: sk-000000000000000000000000000000000000-fake\n"
+FAKE_ENV_TEXT = "OPENAI_API_KEY=sk-000000000000-fake\n"
+
+
+def _init_checkout_with_an_ignored_key():
+    """A temp checkout that looks like a real working lane: tracked templates,
+    a git-ignored api-keys.yml and a git-ignored .env.local, both holding FAKE
+    content (no real key file is read or copied by this suite)."""
+    root = _init_git_root()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    os.makedirs(os.path.join(root, "configuration"), exist_ok=True)
+    with open(os.path.join(root, ".gitignore"), "w", encoding="utf-8") as fh:
+        fh.write("configuration/api-keys.yml\n.env.local\n")
+    for rel in ("configuration/api-keys.example.yml", ".env.example"):
+        with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+            fh.write("# template, no secret here\n")
+    subprocess.run(git + ["-C", root, "add", ".gitignore",
+                          "configuration/api-keys.example.yml", ".env.example"], check=True)
+    subprocess.run(git + ["-C", root, "commit", "-q", "-m", "templates"], check=True)
+    # The ignored secrets and one plain untracked file appear after the commit —
+    # exactly the state a leaf must not be dropped into.
+    with open(os.path.join(root, "configuration", "api-keys.yml"), "w",
+              encoding="utf-8") as fh:
+        fh.write(FAKE_KEY_TEXT)
+    with open(os.path.join(root, ".env.local"), "w", encoding="utf-8") as fh:
+        fh.write(FAKE_ENV_TEXT)
+    with open(os.path.join(root, "scratch-untracked.txt"), "w", encoding="utf-8") as fh:
+        fh.write("untracked\n")
+    return root
+
+
 class IsolateCloneCarriesNoSecretsTests(unittest.TestCase):
     def setUp(self):
         self.cli = load_agent()
@@ -9658,12 +9694,21 @@ class LeafIsolationMandatoryTests(unittest.TestCase):
             return self.cli.build_plan(self.args(**overrides), self.cfg)
 
     def dispatch(self, **overrides):
-        """cmd_run with the route stubbed; (rc, everything it printed)."""
+        """cmd_run with the route stubbed; (rc, everything it printed).
+
+        The run is declared AUTOOS_CLAUDE_CRITICAL because this class answers
+        the isolation question, not the budget's: the stub model
+        `omniroute/tN-worker` is not a registry route, and after the CLAUDEBUDGET
+        merge the last-mile gate refuses an unpriceable plan before cmd_run
+        reaches the isolation check (same reading as the agy probe tests).
+        """
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            with mock.patch.object(self.cli, "resolve_route",
-                                   lambda *a, **k: self.route(overrides.get("tier", 2))):
-                rc = self.cli.cmd_run(self.args(**overrides), self.cfg)
+            with mock.patch.dict(os.environ, {"AUTOOS_CLAUDE_CRITICAL":
+                                              "test: leaf isolation gate"}):
+                with mock.patch.object(self.cli, "resolve_route",
+                                       lambda *a, **k: self.route(overrides.get("tier", 2))):
+                    rc = self.cli.cmd_run(self.args(**overrides), self.cfg)
         return rc, out.getvalue() + err.getvalue()
 
     def test_a_leaf_tier_without_isolate_is_refused(self):
@@ -11443,10 +11488,13 @@ class ChildRuntimeDirTests(unittest.TestCase):
         # the re-run's. The first launch site provisioned the stopped attempt's
         # pair and nothing did the second, leaving the fallthrough worker with
         # an XDG dir it would have to create itself, outside the 0700 rule.
-        # Non-isolate and --free: no clone, so nothing else touched the disk.
+        # --free and non-isolate: KEYDENY3g refuses a SPAWNED tier (t2/t3) in
+        # place long before the launch site, so the fallthrough that re-mints
+        # its id runs on a t1- route — the stub's tier comes from the route id
+        # (_tier_for_route). Nothing but the launch sites touches the disk.
         import stat
         rc, out, err, calls, _ = _fallthrough_run(
-            self, ["r-free"], 1,
+            self, ["t1-free"], 1,
             args_over={"free": True, "free_model": FREE_MODELS[0],
                        "isolate": False},
             policy={"free_client_models": {"opencode": FREE_MODELS}})
@@ -11515,8 +11563,11 @@ class WorkerDirRefusalStopsLaunchTests(unittest.TestCase):
         return target
 
     def run_first_launch(self):
-        # Non-isolate so nothing but the launch site touches the disk.
-        return _fallthrough_run(self, ["r-a"], 0, args_over={"isolate": False})
+        # Non-isolate so nothing but the launch site touches the disk; a
+        # t1- route because KEYDENY3g refuses a spawned tier in place long
+        # before cmd_run reaches provisioning (the isolated-launch refusal is
+        # SandboxPushFenceTests' ground).
+        return _fallthrough_run(self, ["t1-a"], 0, args_over={"isolate": False})
 
     def test_a_refused_runtime_dir_refuses_the_launch(self):
         self.pin_run_ids(self.RUN_ID)
@@ -11550,7 +11601,7 @@ class WorkerDirRefusalStopsLaunchTests(unittest.TestCase):
         self.pin_run_ids(self.RUN_ID, self.RERUN_ID)
         target = self.plant_runtime_symlink(self.RERUN_ID)
         rc, out, err, calls, _ = _fallthrough_run(
-            self, ["r-free"], 1,
+            self, ["t1-free"], 1,
             args_over={"free": True, "free_model": FREE_MODELS[0],
                        "isolate": False},
             policy={"free_client_models": {"opencode": FREE_MODELS}})

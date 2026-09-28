@@ -3422,7 +3422,7 @@ def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
     logs = os.path.join(ROOT, "logs")
     os.makedirs(logs, exist_ok=True)
     route = plan["route"]
-    card = ",".join("%s=%s" % kv for kv in sorted((route["card"] or {}).items())) or "-"
+    card = ",".join("%s=%s" % kv for kv in sorted((route.get("card") or {}).items())) or "-"
     line = ("%s client=%s agent=%s model=%s combo=%s reason=%s routing=%s card=%s depth=%d/%d "
             "free=%d sandbox=%s rc=%d secs=%.0f\n") % (
         datetime.datetime.now().isoformat(timespec="seconds"), plan["client"], plan["agent"],
@@ -5422,7 +5422,7 @@ def cmd_run(args, cfg: dict) -> int:
         # read as reviewed. Filling in the verdict is the reviewer's job at the
         # end of the run, not the spawner's guess at the start of it.
         print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
-              "verdict=<fill in>" % (route["card"].get("author"), reviewer["model"]))
+              "verdict=<fill in>" % ((route.get("card") or {}).get("author"), reviewer["model"]))
         for line in resolver.reviewer_explain_lines(route["review_plan"]):
             print(line)
     if route.get("reviewer_note"):
