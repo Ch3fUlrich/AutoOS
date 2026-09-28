@@ -1138,12 +1138,41 @@ _REQUIRED_CARD_KEYS = ("kind", "mode", "risk")
 # free < cheap < mid < frontier (spec 3.1); used to find "the next class up".
 _CLASS_ORDER = ("free", "cheap", "mid", "frontier")
 
-# D2: normal risk gets 1 cross-family API review, high risk gets 2 plus a
-# Sonnet close.
+# D2's numbers, kept only as the fallback for a registry that declares no
+# policy.review_counts (RISKTIER-a): normal risk gets 1 cross-family API review,
+# high risk gets 2 plus a Sonnet close.
 _REVIEW_COUNTS = {"normal": 1, "high": 2}
 # The high-risk closer is a Claude client run (Agent-tool Sonnet), not a
 # registry route, so it has its own key beside the reviewer routes.
 _CLOSER = {"client": "claude", "model": "sonnet"}
+
+
+def _review_policy(risk, registry):
+    """`(cross_family_count, final?)` for a risk class (RISKTIER-a).
+
+    `policy.review_counts.<risk>` is what a class costs; the constants above are
+    the fallback for a registry that predates the field, so the field's absence
+    changes no routing. An unknown class still raises, and a declared count that
+    is not a non-negative int raises too -- a resolver that guessed at "1.5
+    reviewers" would review less than the policy asked for and say nothing.
+    """
+    if risk not in _REVIEW_COUNTS:
+        raise ValueError("unknown card risk %r" % (risk,))
+    entry = (((registry or {}).get("policy") or {}).get("review_counts")
+             or {}).get(risk)
+    if entry is None:
+        return _REVIEW_COUNTS[risk], risk == "high"
+    if not isinstance(entry, dict):
+        raise ValueError("policy.review_counts.%s is not an object: %r" % (risk, entry))
+    count = entry.get("cross_family", _REVIEW_COUNTS[risk])
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("policy.review_counts.%s.cross_family must be an int "
+                         ">= 0, got %r" % (risk, count))
+    final = entry.get("final", risk == "high")
+    if not isinstance(final, bool):
+        raise ValueError("policy.review_counts.%s.final must be a boolean, got %r"
+                         % (risk, final))
+    return count, final
 
 
 def _leg_model_id(leg):
@@ -1222,10 +1251,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     shortfall in ``reason`` rather than silently reviewing with fewer eyes.
     """
     risk = card["risk"]
-    try:
-        needed = _REVIEW_COUNTS[risk]
-    except KeyError:
-        raise ValueError("unknown card risk %r" % (risk,))
+    needed, final = _review_policy(risk, registry)
 
     pool = scores if len(scores) > 1 else _score_candidates(
         survivors, bucket_name, card, features, client_state, registry,
@@ -1241,13 +1267,16 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     picked = []
     excluded = {chosen_family}
     for score in ranked:
+        # The cap is checked BEFORE the append: a policy that asks for zero
+        # cross-family reviewers means zero, not one (the append-then-check shape
+        # this replaced returned one — tests/test_autoos_resolver.py).
+        if len(picked) >= needed:
+            break
         family = family_key(_model_family(score["leg"], registry))
         if family in excluded:
             continue
         picked.append(score["route"])
         excluded.add(family)
-        if len(picked) == needed:
-            break
 
     if len(picked) < needed:
         reason = "only %d of %d distinct-family reviewer(s) available: %s" % (
@@ -1255,7 +1284,7 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
     else:
         reason = "cross-family reviewer(s): %s" % ", ".join(picked)
 
-    closer = dict(_CLOSER) if risk == "high" else None
+    closer = dict(_CLOSER) if final else None
     return {"routes": list(picked), "closer": closer, "reason": reason}
 
 

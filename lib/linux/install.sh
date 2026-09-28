@@ -4830,6 +4830,9 @@ agent_skill_links_current() {
             [[ -f "${s_dir}SKILL.md" ]] || continue
             s_dir="${s_dir%/}"
             name="${s_dir##*/}"
+            # A link into the retired clone, live or dangling, is work setup
+            # still does (Q-018); link_skill_dirs "retarget" is what does it.
+            retired_skill_link "$dest/$name" "$name" && return 1
             [[ -e "$dest/$name" ]] || return 1
         done
     done < <(agent_skill_link_dests "$repo_root")
@@ -4863,7 +4866,7 @@ install_agent_skill_links() {
         return 0
     fi
     while IFS= read -r dest; do
-        link_skill_dirs "$skills_source" "$dest" ||
+        link_skill_dirs "$skills_source" "$dest" retarget ||
             autoos_record_failure "${AUTOOS_POST_COMPONENT:-agent-skill-links}"
     done < <(agent_skill_link_dests "$repo_root")
     if (( AUTOOS_DRY_RUN )); then
@@ -5594,7 +5597,27 @@ phys_path() {
     fi
 }
 
-# link_skill_dirs SRC_DIR DEST_DIR
+# retired_skill_link LINK NAME: true when LINK is a symlink - live or dangling,
+# the retired clone is exactly what gets deleted - whose target is the retired
+# agent-skills clone's copy of skill NAME: $SYS_HOME/Documents/{Code,code}/
+# agent-skills/skills/NAME, the path autoos_skills_source used. A known location,
+# not a suffix, so a user's own .../agent-skills/skills/NAME checkout is theirs.
+# False when setup was told to leave these alone
+# (AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0).
+retired_skill_link() {
+    local link="$1" name="$2" raw code
+    [[ "${AUTOOS_RETARGET_RETIRED_SKILL_LINKS:-1}" != 0 ]] || return 1
+    [[ -L "$link" ]] || return 1
+    raw="$(readlink -- "$link")"
+    [[ "$raw" == /* ]] || raw="$(dirname -- "$link")/$raw"
+    raw="${raw%/}"
+    for code in Code code; do
+        [[ "$raw" == "$SYS_HOME/Documents/$code/agent-skills/skills/$name" ]] && return 0
+    done
+    return 1
+}
+
+# link_skill_dirs SRC_DIR DEST_DIR [retarget]
 # Mirrors every skill in SRC_DIR (a direct child holding a SKILL.md) into
 # DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
 # so a user's skills sit beside ours and are never touched:
@@ -5610,8 +5633,13 @@ phys_path() {
 # A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
 # written through - that would create links inside the repo or a clone - it
 # is left with one warning that names the fix. Returns 0 unless a link failed.
+#
+# A third argument "retarget" adds one recognised shape (operator Q-018,
+# 2026-09-28): a link, live or dangling, into the retired agent-skills clone
+# (retired_skill_link). The link (never its target) is replaced, then its old
+# target is appended to DEST_DIR.autoos-backup-<stamp>.
 link_skill_dirs() {
-    local src="${1%/}" dest="${2%/}"
+    local src="${1%/}" dest="${2%/}" retarget="${3:-}" record=""
     [[ "$src" == /* ]] || src="$PWD/$src"
     [[ "$dest" == /* ]] || dest="$PWD/$dest"
 
@@ -5660,6 +5688,26 @@ link_skill_dirs() {
                     ui_ok "repointed $name (was $raw)"
                 else
                     ui_warn "could not repoint $t - left as it was"
+                    failed=1
+                fi
+            elif [[ "$retarget" == retarget ]] && retired_skill_link "$t" "$name"; then
+                # Replace first, record after: a record names only a move that
+                # happened, with the literal readlink value. A failed replace that
+                # left no link puts the old one back.
+                local literal
+                literal="$(readlink -- "$t")"
+                if ln -sfn "$src/$name" "$t" 2>/dev/null; then
+                    if [[ -z "$record" ]]; then
+                        record="$dest.autoos-backup-$(date +%Y%m%d-%H%M%S)"
+                        local n=0 base="$record"
+                        while [[ -e "$record" ]]; do n=$((n + 1)); record="$base-$n"; done
+                    fi
+                    printf '%s -> %s\n' "$t" "$literal" >>"$record" ||
+                        ui_warn "retargeted $t but could not write $record (was $literal)"
+                    ui_ok "retargeted $name from the retired agent-skills clone (was $literal; recorded in $record)"
+                else
+                    [[ -L "$t" ]] || ln -s -- "$literal" "$t" 2>/dev/null
+                    ui_warn "could not retarget $t - left as it was"
                     failed=1
                 fi
             else

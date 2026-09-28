@@ -30,6 +30,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Re-created from the operator's local work (2026-09-25) and reworked for the
   DSBACK policy (2026-09-28).
 
+### Fixed — Windows links Claude Code and Antigravity skills from `.agents/skills` (WS-SKILLWIN)
+
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` linked
+  `~/.claude/skills` and `~/.gemini/config/skills` from the retired agent-skills
+  clone, so edits to `.agents/skills` never reached either client on Windows
+  (Linux had moved to `link_skill_dirs`). Both directories are now destinations of
+  `Sync-AutoOSAgentSkillTargets`, the same list as `agent_skill_link_dests` on
+  Linux, with the same rules: a user's own entry is never touched.
+- **Setup retargets links into the retired clone, on both platforms** (operator
+  Q-018, 2026-09-28): a machine set up before 2026-09-25 still has links, live or
+  dangling, into the retired clone, which the link rule treats as the user's.
+  Setup now moves a link whose target is exactly the clone's copy of that skill —
+  `Documents/{Code,code}/agent-skills/skills/<name>`, the path the installers
+  used; a user's own checkout elsewhere is kept. The new link is made first and
+  swapped in, a failed swap puts the old link back, and only a move that happened
+  is recorded in `<dir>.autoos-backup-<stamp>` (literal old target). The target is
+  never touched. Windows: `Sync-AutoOSAgentSkillTargets` passes
+  `-RetargetRetiredClone` (roots from `Get-AutoOSRetiredSkillRoots`). Linux/macOS:
+  `install_agent_skill_links` passes `retarget` to `link_skill_dirs`
+  (`retired_skill_link`), and detection (`agent_skill_links_current`) counts such
+  a link as work still to do. `AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0` opts out on
+  both, inside the functions too. A second run is `skipped` with no second record.
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
@@ -193,6 +215,96 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
   the template with the read tool, and the read allow is narrowed to the exact suffix
   `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
+
+- **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding
+  was red before its fix** (72 red of 108 in `tests/test_autoos_risk.py`). The one
+  failure mode this module may not have is a diff that reads `normal` because the
+  reader never saw it; five of the six were exactly that.
+- **A rename kept only the name it moved to.** `git mv AGENTS.md docs/AGENTS.md`
+  reports one changed path, so a rule on `AGENTS.md` watched a policy file walk out
+  of the class that guards it. `changed_files` now carries `old_path`, every
+  `path_glob` is tested against both names, and the reason line says which moved:
+  `policy: AGENTS.md -> docs/AGENTS.md`.
+- **Secrets were path-only.** `**/*.key` and `**/*secret*` catch a file named for
+  what it holds and nothing else, so a key added to `notes.txt` was `normal`. Five
+  `added_regex` content rules now read the ADDED lines for the high-confidence
+  shapes (`-----BEGIN … PRIVATE KEY-----`, `AKIA…{16}`, `ghp_…{36}`, `sk-…{20,}`,
+  `xox[baprs]-`), and `**/*.pem`, `**/.env`, `**/.env.*` join the path rules. A new
+  `exclude` field on `path_glob` keeps the tracked `.env.example` templates out of
+  it — AGENTS.md rule 1 says commit those, and a rule that punished honest
+  templates is a rule that gets switched off. `tools/registry.py` rule 12 knows
+  both new fields. (Test fixtures assemble these shapes at runtime, so no tracked
+  file ever holds a literal key; the public scrub scan stays green.)
+- **`high` risk was cheaper to review than `normal`.** The RISKTIER-a registry
+  declared `review_counts.high` as 1 cross-family + the final, while operator Q-013
+  (common.md, D-060) says two diverse cheap cross-family reviews and, for high, the
+  same two *plus* the Sonnet final. `high` is now `cross_family: 2, final: true`,
+  which also agrees with the resolver's own D2 fallback constants it had been
+  overriding.
+- **`--sha HEAD` exited 2, and one commit had two audit answers.** `HEAD`, a branch
+  or a tag is not hex, so the draw raised while the diff classified perfectly; and
+  `audit()` buckets 12 hex digits, so `28ada0a` and the 40 digits of the same commit
+  could land in different buckets — a caller who learns the friendlier spelling.
+  `assess` now resolves the rev with `git rev-parse --verify <rev>^{commit}` (a tree
+  or blob is refused) and uses that hex everywhere, reporting it as `sha` /
+  `commit:` so a lane records which commit the answer is about.
+- **The diff was parsed line-and-tab, which git quotes.** `--name-status` C-quotes a
+  path containing a tab or a newline — and escapes the tab with the very character
+  the parser splits on, so the path arrived wrapped in quotes and matched no glob.
+  `changed_files` and the new `deleted_lines` read `-z` and split on NUL (a rename's
+  two paths by the arity its status declares, so a file named `A100` is never
+  mistaken for a status). The same quoting hits the `+++` header of `git diff -U0`:
+  an awkward filename left `current` unset for the file's whole body and dropped
+  every added line in it, `sudo` included. Added lines are now unquoted too.
+- **The rule table's gaps, and how much a change deletes.** `**/*.sql`,
+  `**/setup*`, `**/bootstrap*`, `**/Install*` (case-sensitive, so it is not the
+  existing `**/install*`) and `docs/**/*spec*.md` joined the globs; the generic
+  `diff_deletion` rule gained `min_deleted_lines: 200`, because a change that
+  deletes 240 lines from a file that *survives* is a large deletion and only a whole
+  file disappearing used to read as one. Corpus: `f5744611` (679 lines removed, no
+  file lost) flips `normal` → `high`; `967021cb8`, which edits
+  `stack.env.example`, stays `normal`.
+- Tests: 108 in `tests/test_autoos_risk.py` (was 82), wired into both harnesses
+  already. No CLI surface changed but the `risk` verb's output, which now leads with
+  the resolved commit.
+
+### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
+
+- **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the
+  registry's `policy.risk_rules` were data no code read. `tools/autoos_risk.py`
+  (stdlib, pure, one injectable git runner) now applies every rule to the diff at
+  `merge-base(base, sha)`: `path_glob` and `diff_deletion` (the two declared
+  shapes), plus the two the operator asked for — `added_regex`, an added line
+  matching a pattern (`\bsudo\b`, case-sensitive and deliberately textual: a test
+  that only *mentions* sudo raises the class), and `registry_policy`, which loads
+  `catalog/ai-registry.json` at both ends and compares only its `policy` object,
+  so a models-only edit is not a routing-policy edit. `audit(sha, percent)` is
+  `int(sha[:12], 16) % 100 < percent`: a property of the commit, so re-running
+  after an unlucky draw cannot shop for a friendlier bucket. Any git failure
+  raises `RiskError` (exit 2) — an unreadable diff never reads as `normal`.
+- **`tools/registry.py` rule 12** validates the new shapes, and refuses a rule
+  field its type does not read. A `paths` on a `path_glob` looks like a scope and
+  is not one; `classify()` ignores it silently, so validate says it out loud.
+  `policy.risk_rules` grows the 17 operator rules; `risk_audit_percent` (20) and
+  `review_counts` (normal 2 cross-family / high 1 + final) carry their source.
+- **`tools/autoos_resolver.py:_review_policy()`** reads the count from
+  `policy.review_counts[risk].cross_family` and the Sonnet close from `final`,
+  falling back to D2's constants when a registry predates the field — tested both
+  ways. The zero-reviewer case now genuinely means zero (the cap is checked
+  before the pick, not after).
+- **Two silent-`normal` bugs found while reviewing this** (both red before the
+  fix, `tests/test_autoos_risk.py`): a developer's `diff.noprefix=true` removes
+  the `b/` the `+++` header is read through, so *every* added line vanishes and a
+  sudo change classifies as normal; and git escapes an added line that starts
+  with a plus by doubling it, so a line of `+++++ x` in a test fixture was
+  dropped as a header. The default runner now pins `core.quotepath`,
+  `diff.noprefix`, `color.diff` and `--no-ext-diff`, and the parser tells a
+  header from content by hunk position.
+- **CLI**: `python3 tools/autoos-agent.py risk --sha <sha> [--base origin/main]
+  [--repo .] [--json]`. Wiring that class into `ready`/`review-status` is the
+  sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
+  harnesses.
 
 ### Changed — Sonnet orchestrators hand off at 250k, not 150k (CAPL2, routing-00 D-085, 2026-09-28)
 
