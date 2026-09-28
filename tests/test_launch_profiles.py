@@ -505,6 +505,60 @@ L2_WORKFLOW_UNLISTED_COMMANDS = (
     "gh workflow run ci.yml --ref l2-example-1",
 )
 
+# Round 6, whitespace class: bash word-splits on TAB, CR and LF, but every
+# fence matches a literal ASCII space as the argument separator - so each
+# command below allowed before this round (measured with decide(): l2
+# allowed `git push origin L2-x<TAB>main`, l1 allowed
+# `git push origin<TAB>main`). A push never legitimately needs a
+# non-space separator, so each must deny on EVERY profile now. The
+# escapes below are real separator characters in the command text, the
+# same characters the `Bash(*git push*<TAB/CR/LF>*)` denies match.
+WHITESPACE_DENY_COMMANDS = (
+    "git push origin L2-x\tmain",
+    "git push -u origin L2-x\tmain",
+    "git push origin L2-x\tL1-foo",
+    "git push origin L2-x\nL1-foo",
+    "git push origin L2-x\rL1-foo",
+    "git push origin\tmain",
+    "git push\torigin main",
+)
+
+# Round 6, quoting/expansion class: the fences match command text
+# literally and no fence entry carries a literal ` main`, so each push
+# below allowed under `Bash(git push:*)` on l1 before this round
+# (measured with decide()). The ref must be literal text so the fences
+# can see it - each must deny on EVERY profile now.
+QUOTED_PUSH_DENY_COMMANDS = (
+    'git push origin "main"',
+    "git push origin 'main'",
+    "git push origin $REF",
+    "git push origin $(echo main)",
+    "git push origin `main`",
+)
+
+# Round 6, quoting/expansion class for dispatch: same literal-text rule
+# for `--ref` - a quoted, variable or substituted ref denies on EVERY
+# profile now (`--ref "main"` already denied via the `*main*` fence; the
+# rest allowed on l1 before this round, measured with decide()).
+QUOTED_WORKFLOW_DENY_COMMANDS = (
+    "gh workflow run ci.yml --ref $R",
+    'gh workflow run ci.yml --ref "main"',
+    "gh workflow run ci.yml --ref='main'",
+    "gh workflow run ci.yml --ref `main`",
+)
+
+# Round-6 restatement: the plain same-name pushes still allow on l2, and
+# the L1 lane-push / lane-dispatch shapes still allow on l1.
+ROUND6_L2_ALLOW_COMMANDS = (
+    "git push origin L2-x",
+    "git push -u origin L2-x",
+)
+ROUND6_L1_ALLOW_COMMANDS = (
+    "git push origin L1-routing/x",
+    "git push -u origin L1-routing/x",
+    "gh workflow run ci.yml --ref L1-routing/x",
+)
+
 
 class BranchScopeTests(unittest.TestCase):
     def test_push_to_main_is_denied_by_every_profile(self):
@@ -877,6 +931,69 @@ class L2ScopeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# round 6: the fences see literal refs only - whitespace, quoting and
+# expansion classes deny on every role
+
+
+class Round6LiteralRefTests(unittest.TestCase):
+    def test_whitespace_separator_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in WHITESPACE_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_quoted_push_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in QUOTED_PUSH_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_quoted_workflow_dispatch_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in QUOTED_WORKFLOW_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_plain_l2_push_still_allows(self):
+        profile = load_profile("l2-orchestrator")
+        for command in ROUND6_L2_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_l1_lane_push_and_dispatch_still_allow(self):
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in ROUND6_L1_ALLOW_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertFalse(decide_deny(profile, "Bash", command))
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+
+    def test_no_allow_rule_contains_tab_cr_or_lf(self):
+        # The fences deny the whitespace class; no pre-grant may smuggle
+        # one back in through an allow entry carrying a separator.
+        for role in ROLES:
+            allow = perms_of(load_profile(role))["allow"]
+            for rule in allow:
+                with self.subTest(role=role, rule=rule):
+                    self.assertNotIn("\t", rule)
+                    self.assertNotIn("\r", rule)
+                    self.assertNotIn("\n", rule)
+
+
+# ---------------------------------------------------------------------------
 # wrapper/option forms and compound commands (H3), prefix divergences (M1)
 
 
@@ -1220,6 +1337,23 @@ CONTRADICTION_TARGETS = {
     "Bash(git push --* origin L2-*)": "git push --prune origin L2-x",
     "Bash(git push -f origin L2-*)": "git push -f origin L2-x",
     "Bash(git push -d origin L2-*)": "git push -d origin L2-x",
+    # Round-6 whitespace class (MAIN_FENCE, every role): each target
+    # carries the denied separator after a `git push` prefix, so the
+    # contradiction test proves the class fence fires.
+    "Bash(*git push*\t*)": "git push origin L2-x\tmain",
+    "Bash(*git push*\r*)": "git push origin L2-x\rL1-foo",
+    "Bash(*git push*\n*)": "git push origin L2-x\nL1-foo",
+    # Round-6 quoting/expansion class (MAIN_FENCE, every role): each
+    # target carries the denied character after a `git push` prefix.
+    'Bash(*git push*"*)': 'git push origin "main"',
+    "Bash(*git push*'*)": "git push origin 'main'",
+    "Bash(*git push*$*)": "git push origin $REF",
+    "Bash(*git push*`*)": "git push origin `main`",
+    # Round-6 quoting/expansion class (GH_REF_MAIN, every role).
+    'Bash(*gh workflow run*"*)': 'gh workflow run ci.yml --ref "main"',
+    "Bash(*gh workflow run*'*)": "gh workflow run ci.yml --ref='main'",
+    "Bash(*gh workflow run*$*)": "gh workflow run ci.yml --ref $R",
+    "Bash(*gh workflow run*`*)": "gh workflow run ci.yml --ref `main`",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that

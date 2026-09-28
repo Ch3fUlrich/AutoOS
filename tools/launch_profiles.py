@@ -50,10 +50,18 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    ``* ``-prefixed for the bare command under a prefix); plus the H3
    wrapper/option forms (``git -C ... push``, ``git --git-dir=... push``,
    ``git -c ... push`` - each denies every push through that argv shape,
-   lane refs included, because a wrapper push is never pre-granted).
+   lane refs included, because a wrapper push is never pre-granted);
+   plus the round-6 class fences (spec 3.3): any git push containing
+   a tab, CR or LF is denied on every role (bash splits on them; the
+   fences match spaces only), and any git push whose text contains a
+   double quote, a single quote, a dollar sign or a backtick is denied
+   on every role (the fences see literal refs only - quoted, variable
+   and substituted refs deny outright, fail closed).
 2. the ``gh workflow run --ref main`` fence (spec Q4): the L1
    ``gh workflow run`` grant stays, an explicit ``--ref main`` (or
-   ``--ref=main``) dispatch does not.
+   ``--ref=main``) dispatch does not - and the round-6 class fence: a
+   dispatch whose text contains a quote, a dollar sign or a backtick
+   denies on every role (the fences see literal refs only).
 3. the secret/credential entries of ``fences.bash_deny_all``, selected by
    ``bash_secret_patterns``: an entry is secret-relevant when its
    ``*``-stripped core contains a ``*``-stripped core of some
@@ -247,6 +255,8 @@ GRANT_SETS = {
 # Push-to-main fence set (spec 3.3, H2, H3): leading-`*` globs so a
 # sudo/env/xargs prefix does not escape the fence. The space before `main`
 # keeps a lane merely containing "main" (`main2`) outside the fence.
+# Round 6: any git push containing a tab, CR or LF is denied on every
+# role (bash splits on them; the fences match spaces only).
 MAIN_FENCE = (
     "Bash(*git push * main)",
     "Bash(*git push * main *)",
@@ -275,12 +285,46 @@ MAIN_FENCE = (
     "Bash(git -C * push*)",
     "Bash(git --git-dir* push*)",
     "Bash(git -c * push*)",
+    # Round 6, whitespace class: every fence above matches a literal ASCII
+    # space as the argument separator, but the allow globs' `*` spans any
+    # character and bash word-splits on TAB, CR and LF too - so
+    # `git push origin L2-x<TAB>main` allowed before this round. A push
+    # never legitimately needs a non-space separator, so any `git push`
+    # containing a tab, CR or LF is denied on every role (bash splits on
+    # them; the fences match spaces only) - deny the class, fail closed,
+    # without enumerating positions. Written with Python `\t`/`\r`/`\n`
+    # escapes so the rendered JSON carries `\t` `\r` `\n`.
+    "Bash(*git push*\t*)",
+    "Bash(*git push*\r*)",
+    "Bash(*git push*\n*)",
+    # Round 6, quoting/expansion class: the fences match command text
+    # literally, so `git push origin "main"` (or `'main'`, `$REF`,
+    # `$(...)`, backticks) allowed under `Bash(git push:*)` - no fence
+    # entry carries a literal ` main`. A push never needs quoting or
+    # expansion here; the ref must be literal text so the fences can see
+    # it, so any `git push` whose text contains a double quote, a single
+    # quote, a `$` or a backtick is denied on every role (fail closed).
+    # Do NOT normalise quoting in the decide() model - it must keep
+    # mirroring the CLI's literal-text matching.
+    'Bash(*git push*"*)',
+    "Bash(*git push*'*)",
+    "Bash(*git push*$*)",
+    "Bash(*git push*`*)",
 )
 
-# gh workflow run naming main stays denied under the L1 grant.
+# gh workflow run naming main stays denied under the L1 grant. Round 6,
+# quoting/expansion class (same rationale as the push class above): the
+# fences see literal `--ref <name>` text only, so a quoted, variable or
+# substituted ref (`--ref "main"`, `--ref $R`, `--ref $(...)`) must deny
+# outright on every role - the ref must be literal text so the fences can
+# see it (fail closed).
 GH_REF_MAIN = (
     "Bash(gh workflow run *--ref *main*)",
     "Bash(gh workflow run *--ref=*main*)",
+    'Bash(*gh workflow run*"*)',
+    "Bash(*gh workflow run*'*)",
+    "Bash(*gh workflow run*$*)",
+    "Bash(*gh workflow run*`*)",
 )
 
 # Shell-only secret-disclosure vectors with no read_deny_all counterpart,
@@ -302,6 +346,8 @@ SECRET_EXTRA_BASH = ("*.vault.yml", "*.pem")
 SECRET_EXTRA_READ = ("*.vault.yml", "*.pem")
 
 # ~/.claude.json writes: Edit, Write and the shell forms (spec 3.3).
+# Note: the CLI does not consult Write path rules - the Read/Edit fences
+# carry that case; the Write entry stays rendered anyway (harmless).
 CLAUDE_JSON_WRITES = (
     "Edit(*.claude.json*)",
     "Write(*.claude.json*)",

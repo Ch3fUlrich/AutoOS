@@ -45,7 +45,7 @@ Local to this spec; operator decisions keep the global `D-nn` form.
 | A1-D1 | A launch profile is a per-role **pre-reviewed grant bundle**: a tracked `.example` template plus a git-ignored runtime file, the same shape as `configuration/mcp/<role>.json` in the restart spec §8. |
 | A1-D2 | Path `configuration/launch-profiles/<role>.settings.json`. The `.settings.json` suffix makes the existing `**/*settings*.json` rule in `policy.risk_rules` (operator Q-013) cover a profile automatically, with no new risk rule. |
 | A1-D3 | The profile's **deny set is rendered from `catalog/agent-harness.json` `fences`** — one home. The profile restates no secret pattern and no `.claude.json` pattern of its own. |
-| A1-D4 | The **pre-granted allow set is narrow and role-scoped**: lane-branch push and `gh workflow run` for coordinator roles; gateway `apply.sh` only in the `l1-routing` profile; `l2-orchestrator` pushes exactly one `L2-*` ref, same-name, no options except `-u`, and runs workflows only with `--ref` on them — per role, not per session: any `l2-orchestrator` session may push/dispatch on any `L2-*` lane branch (per-session scoping is not expressible in a per-role profile) — under the same always-deny fences plus the L2-only single-ref shape fences (round 3, D-138; tightened round 4; shaped round 5). |
+| A1-D4 | The **pre-granted allow set is narrow and role-scoped**: lane-branch push and `gh workflow run` for coordinator roles; gateway `apply.sh` only in the `l1-routing` profile; `l2-orchestrator` pushes exactly one `L2-*` ref, same-name, no options except `-u`, and runs workflows only with `--ref` on them — per role, not per session: any `l2-orchestrator` session may push/dispatch on any `L2-*` lane branch (per-session scoping is not expressible in a per-role profile) — under the same always-deny fences plus the L2-only single-ref shape fences (round 3, D-138; tightened round 4; shaped round 5). Any `git push` containing a tab, CR or LF is denied on every role (bash splits on them; the fences match spaces only) (round 6). |
 | A1-D5 | `git push` to `main` and every secret read/write are **always-deny, no override**; a later allow entry can never win (tested, §3.2). |
 | A1-D6 | No profile sets `--dangerously-skip-permissions`, disables the classifier, or otherwise weakens Claude Code's own permission system (§6). |
 | A1-D7 | `autoos-agent run` and the MCP `spawn` load the profile through Claude Code's own `--settings` (claude/qoder only), keyed by the launch role; an unknown launching role is an error naming the role, never a silent no-profile run. |
@@ -143,7 +143,7 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
 
 | Grant | Roles | Why pre-granted | Guard |
 |---|---|---|---|
-| `Bash(git push:*)` **to a lane branch** | coordinators (`l1-*`) | the coordinator pushes lane branches and must not stop on a prompt | the always-deny below removes `main`; a test enumerates the ways to spell "main" |
+| `Bash(git push:*)` **to a lane branch** | coordinators (`l1-*`) | the coordinator pushes lane branches and must not stop on a prompt | the always-deny below removes `main`; a test enumerates the ways to spell "main"; any `git push` containing a tab, CR or LF is denied on every role (bash splits on them; the fences match spaces only) |
 | `Bash(gh workflow run:*)` | coordinators | CI is triggered by workflow dispatch from a branch (the repo's own pre-merge gate, AGENTS.md §7) | branch-scoped by the command; `main` dispatch stays deny |
 | `Bash(git push origin L2-*)` (+ the `-u` spelling) and `Bash(gh workflow run * --ref L2-*)` (+ the `--ref=` spelling) | **`l2-orchestrator` only** (round 3, D-138; tightened round 4; shaped round 5) | the orchestrator pushes any `L2-*` lane branch and dispatches CI on it without a prompt — per-role scope: any `l2-orchestrator` session may use any `L2-*` branch, not only one it created | narrower than the coordinator grant: other prefixes, non-origin remotes and bare runs stay unlisted; the same always-deny fence set applies and deny wins (an `L2-x:main` refspec denies); the L2-only fences deny every refspec colon, `refs/` path and delete flag (round 4) and, by shape, anything after the branch token plus any option before the ref but `-u` (round 5), so only exactly one `L2-*` ref, same-name, no options except `-u` is allowed |
 | `Bash(bash configuration/omniroute/apply.sh:*)` | **`l1-routing` only** | the gateway apply is a reviewed, idempotent, site-free script (APPLYIDEM `36be9c9`) | the model may *run* apply.sh but may not *read* its key (below); apply.sh reads `manage.key` itself |
@@ -183,7 +183,7 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
   phase-1 test adds a contradictory `allow` for each always-deny entry and asserts the decision is
   still `deny` (A1-D5). The exact CLI precedence is verified against `claude --help` in phase 0,
   the way restart spec §8 verified its argv.
-- **Text-only fencing is blind to git config and the checked-out branch.** A bare `git push` on `main`, or a push via an alias, carries no `main` token for a command-text fence to match, so server-side branch protection on `main` is load-bearing, not a backstop.
+- **Text-only fencing is blind to git config and the checked-out branch.** A bare `git push` on `main`, or a push via an alias, carries no `main` token for a command-text fence to match, so server-side branch protection on `main` is load-bearing, not a backstop. The text fences see literal refs only: a quoted, variable or substituted ref (`"main"`, `$REF`, `$(...)`, backticks) is denied outright on every role, and so is a quoted, variable or substituted `gh workflow run --ref` value — while server-side branch protection stays load-bearing for aliases and functions, which no text fence can see.
 
 ## 4. Consumption
 
@@ -294,8 +294,9 @@ guessed.
   launch, git-ignored, with the same ignore-rule treatment restart spec §8 gives
   `configuration/mcp/<role>.json`.
 - **Q4 — `gh workflow run` scope.** Default: allow `gh workflow run:*`; the workflow itself is
-  CI on a lane branch, and dispatching against `main` stays covered by the `main` deny. Needs one
-  measured check in phase 1 that the dispatch cannot target `main`.
+  CI on a lane branch, and dispatching against `main` stays covered by the `main` deny. The text
+  fences see literal refs only, so a quoted, variable or substituted `--ref` value is denied
+  outright. Needs one measured check in phase 1 that the dispatch cannot target `main`.
 - **Q5 — Gateway apply scope.** Default: `l1-routing` only (A1-D4), the MISTRALFIX precedent.
   Confirm routing-00 agrees; if not, the entry moves to the coordinator base grant.
 - **Q6 — How does `main` advance?** *Flagged for review.* Default: never through a launch
@@ -308,8 +309,8 @@ guessed.
 - **Q9 — Do workers/reviewers get pre-grants at all?** Default: **no** pre-grants beyond read-only
   work; leaves inherit the leaf fences unchanged. A leaf profile with an `allow` entry would need
   the strongest justification in the set.
-- **Q10 — CI drift check.** Default: yes — the generator's `--check` runs in both suites, so a
-  profile that no longer equals its render fails the build.
+- **Q10 — CI drift check.** Default: yes — the generator's `--check` runs in the Linux suite
+  (`tests/linux/33`), so a profile that no longer equals its render fails the build.
 
 ## 8. Phased build-out (a LATER lane)
 
