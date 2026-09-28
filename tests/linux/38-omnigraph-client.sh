@@ -1471,13 +1471,20 @@ fi
 if it "omnigraph-client: linux and macos carry the component and the catalogs still validate"; then
     out="$(python3 - <<'PY'
 import json, sys
+# The profiles differ per catalog by design: the Linux catalog has a `server`
+# profile and the operator put the component in it (2026-09-28, Q-001 lifted),
+# macOS has no `server` profile at all, so its entry keeps the three it has.
+profiles = {
+    "catalog/linux.json": ["workstation", "ai-coding", "light", "server"],
+    "catalog/macos.json": ["workstation", "ai-coding", "light"],
+}
 want = {
     "id": "omnigraph-client", "provider": "custom", "package": "omnigraph-client",
     "postInstall": "install_omnigraph_client", "prompt": "omnigraph_url",
-    "requires": ["nodejs"], "profiles": ["workstation", "ai-coding", "light"],
+    "requires": ["nodejs"],
 }
 problems = []
-for f in ("catalog/linux.json", "catalog/macos.json"):
+for f, want_profiles in profiles.items():
     data = json.load(open(f, encoding="utf-8"))
     found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "omnigraph-client"]
     if len(found) != 1:
@@ -1486,17 +1493,34 @@ for f in ("catalog/linux.json", "catalog/macos.json"):
     for k, v in want.items():
         if c.get(k) != v:
             problems.append("%s: %s is %r, expected %r" % (f, k, c.get(k), v))
+    if c.get("profiles") != want_profiles:
+        problems.append("%s: profiles is %r, expected %r" % (f, c.get("profiles"), want_profiles))
     if c.get("homepage") != "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp":
         problems.append(f + ": homepage is not the npm package page")
     if not c.get("notes"):
         problems.append(f + ": no notes for the plan entry")
-    if "server" in c.get("profiles", []):
-        problems.append(f + ": the server profile is on hold")
 print("\n".join(problems))
 sys.exit(1 if problems else 0)
 PY
 )" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
     && pass || fail "catalog entry: ${out:0:300}"
+fi
+
+if it "omnigraph-client: the server profile plans it and a headless dry run exits 0 with no URL configured"; then
+    # The Q-001 decision: a headless server gets the bridge too. Run the way an
+    # unattended server is run — profile, dry run, --yes, and no omnigraph_url
+    # answer anywhere (the prompt default is blank) — so this proves both halves
+    # at once: the component is in the plan, and a machine with no server
+    # configured reports a skip and still exits 0 rather than failing.
+    out="$(bash setup.sh --profile server --dry-run --yes --no-color 2>&1)"; rc=$?
+    planned="$(printf '%s\n' "$out" | grep -cE '^[[:space:]]+[0-9]+\.[[:space:]]+.*omnigraph-client' || true)"
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "exit $rc: [$(printf '%s\n' "$out" | tail -5)]" >&2; }
+    [[ "$planned" == 1 ]] \
+        || { ok=0; echo "the server plan does not carry omnigraph-client ($planned lines)" >&2; }
+    [[ "$out" == *"omnigraph-client: skipped: no omnigraph URL"* ]] \
+        || { ok=0; echo "no skip-with-hint line for the missing URL: [${out:0:300}]" >&2; }
+    (( ok )) && pass || fail "omnigraph-client is not in the server profile"
 fi
 
 if it "omnigraph-client: the api-keys template carries a commented omnigraph_token placeholder"; then

@@ -110,9 +110,12 @@ and never talks to the graph.
 ## The `omnigraph-client` component
 
 Everything above describes how this repository is wired. `omnigraph-client`
-(Linux and macOS, profiles `workstation`, `ai-coding`, `light`) is the machine
-half: it puts a server's URL and token where every client can reach it, and puts
-a working bridge on disk.
+is the machine half: it puts a server's URL and token where every client can
+reach it, and puts a working bridge on disk. Linux carries it in the
+`workstation`, `ai-coding`, `light` and `server` profiles — a headless server
+running agents needs the bridge as much as a desktop does (operator decision
+2026-09-28). macOS carries the first three; the macOS catalog has no `server`
+profile at all.
 
 **Inputs — both are required, and neither is guessed:**
 

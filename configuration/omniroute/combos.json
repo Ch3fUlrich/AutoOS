@@ -105,7 +105,8 @@
       "models": [
         "gemini/gemini-3.8-flash",
         "agy/gemini-3.7-flash-high",
-        "meta-api/muse-spark-1.3-contributor"
+        "meta-api/muse-spark-1.3-contributor",
+        "free-ai/qwen7b"
       ]
     },
     {

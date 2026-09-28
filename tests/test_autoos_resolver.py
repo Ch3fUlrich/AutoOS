@@ -6,6 +6,7 @@ ladder clamp and the max_tokens floors. The module is pure: it imports from any
 cwd once `tools/` is on sys.path, which is the first thing this file does.
 """
 import json
+import re
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -2505,6 +2506,70 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         after, _ = self.filter(now=self.dt(2026, 10, 1, 9, 5, 0))
         self.assertNotIn("r-quota", before)
         self.assertIn("r-quota", after)
+
+    # --- the real registry, cooled (R6STOP, 2026-09-28) ----------------------
+    #
+    # The writer side of this is in tests/test_autoos_spawner.py: a gateway
+    # "all credentials ... are cooling down" line now records
+    # google_ai_studio.unavailable_until. What has to follow is that the
+    # t2-worker combos the run was routed to -- whose only live legs are that
+    # provider and its two siblings (R6RES section 1) -- stop being answers, and
+    # that the caller is told WHEN, not just that nothing served.
+
+    REAL_UNTILS = {
+        # The cooldown the measured run was told, and two longer sibling
+        # outages: the earliest is the one the reason must name.
+        "google_ai_studio": "2026-09-28T12:00:37Z",
+        "antigravity": "2026-09-28T13:00:00Z",
+        "meta_api": "2026-09-28T14:00:00Z",
+    }
+
+    def real_registry(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        for provider_id, until in self.REAL_UNTILS.items():
+            registry["providers"][provider_id]["unavailable_until"] = until
+        return registry
+
+    def real_plan(self, card):
+        return r.plan(card,
+                      {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                       "tests": True, "need_tokens": 1000},
+                      {"opencode": {"installed": True, "signed_in": True,
+                                    "reason": ""}},
+                      self.real_registry(), {}, [], "muse-spark",
+                      self.dt(2026, 9, 28, 12, 0, 0))
+
+    def test_a_gemini_cooldown_sends_the_t2_worker_routes_away(self):
+        cooled = {"t2-worker", "t2-worker-free-only", "t2-worker-clean"}
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public"}
+        result = self.real_plan(card)
+        self.assertNotIn(result["route"], cooled,
+                         "a plan that answers a combo whose every leg is cooling "
+                         "is how the next task gets the same 429: %s"
+                         % result["reason"])
+        # The reason names the cooldown, and names the EARLIEST return as the
+        # retry -- a caller reading it must not wait for the last one.
+        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:00:37Z",
+                      result["reason"], result["reason"])
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+                           result["reason"])
+        self.assertEqual(min(dates), "2026-09-28T12:00:37Z", result["reason"])
+
+    def test_a_gemini_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
+        card = {"kind": "implement", "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public",
+                "override": {"route": "t2-worker"}}
+        result = self.real_plan(card)
+        self.assertIsNone(result["route"], result["reason"])
+        self.assertEqual(result["state"], "input_required")
+        self.assertIn("t2-worker", result["reason"])
+        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:00:37Z",
+                      result["reason"])
+        self.assertIn("unavailable: antigravity until 2026-09-28T13:00:00Z",
+                      result["reason"])
 
 
 class MetaApiResolverTests(unittest.TestCase):
