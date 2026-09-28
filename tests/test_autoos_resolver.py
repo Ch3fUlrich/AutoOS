@@ -2699,6 +2699,14 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertEqual(self.pick("meta_api/muse-spark-1.3-contributor")
                          ["author_family"], "meta")
 
+    def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
+        # A client's own model string (qoder's qwen3.8-flash, claude's haiku) is
+        # not a registry model id, but the operator's reviewer list states its
+        # family. Without that lookup the name is read as a bare family, and
+        # "haiku" then looks cross-family to every anthropic reviewer.
+        self.assertEqual(self.pick("qwen3.8-flash")["author_family"], "qwen")
+        self.assertEqual(self.pick("haiku")["author_family"], "anthropic")
+
     def test_an_unknown_author_family_still_gets_the_first_reviewer(self):
         # An author nobody has heard of is cross-family to everything, so the
         # list's head wins rather than the card failing -- the family rule is a

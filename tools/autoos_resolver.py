@@ -1300,6 +1300,14 @@ def author_family(author, registry):
         if family:
             return family, None
         return None, "models.%s carries no family" % model_id
+    for entry in ((registry.get("policy") or {}).get("reviewers") or []):
+        # A client's own model string (qoder's ``qwen3.8-flash``, claude's
+        # ``haiku``) is a reviewer spelling, not a registry id, and the operator
+        # already stated its family there -- check rule 11 keeps it honest. Read
+        # it before falling back to the name-as-family guess: ``haiku`` taken as
+        # a family name looks cross-family to every anthropic reviewer.
+        if entry.get("model") == name and entry.get("family"):
+            return entry["family"], None
     return name, None
 
 
