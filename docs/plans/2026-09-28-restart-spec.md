@@ -1,16 +1,23 @@
-# RESTART — cheap relaunches: state card + context pack (spec v3.3)
+# RESTART — cheap relaunches: state card + context pack (spec v3.4)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
 Status: SPEC v3 (v2 Sonnet FIX-FIRST resolved, table under Delivery). v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
 `work/L1-routing/review-restart-spec.out`: 7 blockers, 11 high); v2 resolves every finding (§R at
-the end). Next: the lanes (v3.3's Sonnet FIX-FIRST is resolved, table under Delivery).
+the end). Next: the lanes (v3.4's Muse FIX-FIRST is resolved, table under Delivery).
 v3.2 (RSTAMEND, 2026-09-28): new §7 size limits, crash recovery through the pack (§4), the L2 cap
 decision (§5), and two delivery lanes (R2c, R8).
 v3.3 (RSTAMEND2, 2026-09-28, Sonnet FIX-FIRST on 86da423): §7 rotate now archives only what a
 covering `→ done:` names, and only under the new §0 inbox lock; §7 stops calling `status/<name>.md`
 the card (§1 owns that path); §4 liveness points at the §3 snapshot; §5 takes the L2 cap to 250k
 (router D-085) and new §8 attacks the fresh-session baseline behind it (lane R9).
+v3.4 (RSTAMEND3, 2026-09-28, Muse FIX-FIRST on ae6696c): §7 matches a `→ done:` to a record by that
+record's **full leading stamp and its line**, and refuses to archive same-second records a done
+cannot name unambiguously; §0 says *every* inbox writer takes the lock — a bare `echo … >> inbox` is
+forbidden, sessions go through `inbox append` — and pins both lock timeouts (rotate 30 s / appender
+10 s); §7 cites §1's card budget and §0's marker list instead of restating either; §8 pins the argv
+(`--mcp-config` + `--strict-mcp-config`, verified against `claude --help`), names the three role
+files and what each lists, and defines the baseline measurement exactly (lane R9).
 
 ## Why (measured)
 
@@ -51,7 +58,8 @@ code from state the session keeps small at every wave. Then the context cap drop
 - **Position:** `<timestamp>#<ordinal>`, where the ordinal is the record's 1-based index among the
   records with that exact timestamp, in file order. It is unique even when records share a second:
   measured, 81 same-second collisions in one inbox. Reading "since P" is at-least-once: it returns
-  every record whose (timestamp, ordinal) is > P, in file order.
+  every record whose (timestamp, ordinal) is > P, in file order. The ordinal is the same `<n>` §7's
+  unambiguous `→ done: <full stamp>#<n>` form uses — one numbering, not two.
 - **Out-of-order timestamps:** reading uses file order; a record whose timestamp is lower than a
   record before it is still returned when it is after P in file order, and is flagged `(late)`.
 - **No parseable timestamp:** an inbox with records but no timestamp (another shape) makes every
@@ -69,12 +77,32 @@ code from state the session keeps small at every wave. Then the context cap drop
   A rotation holds it **exclusive** for its whole read-write-swap, so it waits for every appender and
   no append can start inside the window. Nobody renames or truncates an inbox without holding it.
   §7's rotate cites this; the lock is not defined twice.
+- **Who is a writer:** anything that appends, not only the code path. A bare
+  `echo … >> <RUN>/inbox/<name>.md` is **forbidden** — it appends straight into the rotation window,
+  and it is the shape a shell session reaches for first. A session appends with
+  `autoos-agent.py inbox append <name> <text>` (new verb in R8; it calls `append_inbox_line`, so the
+  lock has exactly one implementation), and anything that cannot call the tool wraps the redirect in
+  the lock itself, with the wait cap below:
+  `flock -s -w 10 <RUN>/inbox/<name>.lock -c 'printf … >> <file>'`. R8 lands the test that greps the
+  tracked skill and brief files for a bare `>> …/inbox/` and fails naming file and line; R6 —
+  SKILL.md's only writer — lands the rule line that cites this bullet.
+- **No deadlock, bounded waits:** one lock per inbox, and it is never upgraded — an appender that
+  holds shared never asks the same lock for exclusive, so no holder waits on something it already
+  holds, and with one lock resource per inbox there is no cycle to form. Both waits are capped. A
+  rotation acquires exclusive with a **30 s** timeout (`flock -w 30`) and on timeout exits 2 naming
+  the inbox and moving nothing — heartbeat retries it on the next beat. An appender waits at most
+  **10 s**, then appends anyway and reports `inbox: lock timeout`: an append is never refused, so the
+  escape valve trades the lock's guard for liveness rather than losing a line. The residual window
+  that guard closes — a line landing on the pre-swap inode between rotate's re-read and its rename —
+  therefore only exists when a rotation has already been wedged for 10 s, which the report names for
+  the next beat to see.
 - **Concurrent writers:** several sessions append to one inbox. A reader ignores a final line that
   has no trailing newline (a torn append): it is not a record and not a continuation, and the next
   read sees it whole. Writers append one complete line per write (`append_inbox_line` already does,
   in `a` mode). A record whose timestamp line fails the ISO parse *after* a newline is reported as
   `malformed at line N`, never glued onto the previous record. What keeps an append and a rotation
-  from racing each other is the lock above; the torn-line rule only describes what a reader sees.
+  from racing each other is the Inbox lock and its two writer bullets above; the torn-line rule only
+  describes what a reader sees.
 
 ## 1. State card — `<RUN>/status/<name>.card.md`
 
@@ -156,8 +184,9 @@ printed. The order is:
 
 ## 4. Relaunch command — `autoos-agent.py relaunch-line <name>`
 
-- The facts come from `<RUN>/run.json` (git-ignored, per run): for each session its name, worktree,
-  model, MCP config path and parent. The tracked example is `configuration/run.example.json`, with
+- The facts come from `<RUN>/run.json` (git-ignored, per run): for each session its name, its `role`
+  (one of §8's three role-file stems — it is what selects the session's MCP config file), its
+  worktree, model, MCP config path and parent. The tracked example is `configuration/run.example.json`, with
   placeholders only (AGENTS.md rule 1). `.claude/handoff.config.json` is a different tool's config
   and is not used.
 - It prints one command whose prompt is a single line: `Read <pack path> first; it is your
@@ -186,7 +215,8 @@ printed. The order is:
   trailing `[1m]` is stripped before matching, so the row must be inserted **before** the `*` 200k-class
   row — appended after it, sonnet would silently keep matching `*` and stay at 150k. The test pins a
   `…sonnet…[1m]` id resolving to 250000, not to the wildcard. Lane CAPL2. §8 goes after the 55.5k
-  itself; lower this row again once R3/R4 land and a measured relaunch costs < ~20k.
+  itself, and its protocol — not this sample — is what measures the number that gates this row: lower
+  it again once R3/R4 land and a measured relaunch costs < ~20k.
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
   stays gateway-only, so the metric needs no gateway.
   - Its numerator is the orchestrator sessions' weighted tokens: every usage record in the Claude
@@ -260,32 +290,50 @@ and the writer that produces it enforces the budget. A limit no code checks is p
 - **Status file** `<RUN>/status/<name>.md`: the old free-form status file. It is **not** the card —
   the card is `<RUN>/status/<name>.card.md` (§1), and that path is fixed there. `status/<name>.md` is
   retired once R6 lands, because heartbeat and `l1_handoff.py` read the card and a second state file
-  would be a second home for the same facts. Until R6 merges, it still exists and is capped by the
-  same §1 budget — at most 40 lines, at most 200 characters a line — and `card check` takes a path and
-  runs on whichever of the two files exists, so the cap is code-checked, not prose (lane R2a; R6
-  deletes the file and the second call site with it).
+  would be a second home for the same facts. Until R6 merges, it still exists and carries **the §1
+  card budget** — §1 owns both numbers (the line cap and the per-line character cap), so they are not
+  repeated here — and `card check` takes a path and runs on whichever of the two files exists, so the
+  cap is code-checked, not prose (lane R2a; R6 deletes the file and the second call site with it).
 - **Inbox rotation:** new verb `autoos-agent.py inbox rotate <name>|--file PATH`.
   - Trigger: the inbox file exceeds 50 KB, or its first record is from an earlier UTC month than today.
   - **Archivable** — this is what "acknowledged" means, and position alone is not enough of it. A
-    record moves only if either: (a) it is **not an order**, by the one §0 `_NOT_AN_ORDER_RE` list
-    R2a extends (`lesson:`, `→ done:`, a `ready`, a pong, an `info` line) — such a line records what
-    already happened, so nothing downstream waits on it; or (b) it **is** an order and a later
-    `→ done:` line **names it** by that record's own leading UTC timestamp — the
-    `→ done: 12:12:24 <what shipped>` form real inboxes use, and one done line may name several
-    timestamps. Anything else is an open order and stays live **whatever its position**. (why: with
-    position as the only test, an unrelated `→ done:` that happened to follow a PAUSE archived the
-    PAUSE and the successor never saw the order again.)
+    record moves only if either: (a) it is **not an order**, by the whole §0 `_NOT_AN_ORDER_RE` list
+    R2a extends — §0 names the shapes, and such a line records what already happened, so nothing
+    downstream waits on it; or (b) it **is** an order and a later `→ done:` line **names it**.
+    Anything else is an open order and stays live **whatever its position**. (why: with position as
+    the only test, an unrelated `→ done:` that happened to follow a PAUSE archived the PAUSE and the
+    successor never saw the order again.)
+  - **"Names it", exactly** — a record's address is its **full leading stamp**
+    `YYYY-MM-DDTHH:MM:SSZ` **plus its line number**. A `→ done:` closes it only if all of:
+    - the done line is at a **greater line number** than the record's stamp line — file order, which
+      is how §0 reads positions too, so a clock-skewed earlier stamp is never "later";
+    - it names that record's **full** stamp, or its short `HH:MM:SS` **only** when exactly one
+      not-yet-closed record on an earlier line carries that short time (the
+      `→ done: 12:12:24 <what shipped>` form real inboxes use);
+    - the match is against the record's **leading** stamp: a timestamp in a record's body — a
+      continuation line, a quoted inbox line, a sha that reads like a time — is not an address and
+      never closes anything.
+    One done line may name several records, each matched the same way. Because §0 measures 81
+    same-second collisions in one inbox, a full stamp can be carried by more than one record: when a
+    stamp matches more than one still-open record, **none of them is archivable** until a done names
+    one unambiguously, and the unambiguous form is `→ done: <full stamp>#<n>` — `<n>` is §0's
+    ordinal, the n-th record with that exact timestamp in file order, so the done form reuses the
+    position §0 defines rather than inventing a second numbering. Ambiguity is reported, not
+    resolved by guessing.
   - Moves: every archivable record at or before the card's `last-event` position (§0), into
     `<RUN>/inbox/archive/<name>-<YYYYMM>.md`, filed under the record's own month.
   - Stays: everything after the card's position, every record that is not archivable, and the
-    `# inbox …` header. Rotate prints `kept N records: no covering done` — N counts the orders it
-    refused to archive because no later `→ done:` named them.
+    `# inbox …` header. Rotate prints two counts, never one merged number:
+    `kept N records: no covering done` — the open orders no later `→ done:` named — and
+    `kept N records: ambiguous stamp` — the records a done could only match ambiguously.
   - Swap, under the §0 inbox lock held **exclusive** for the whole operation: re-read the live file
     under the lock (never decide from a read taken before it), append the moved records to the
     archive, write the new live file to a tmp in the same directory, `fsync` both, rename the tmp over
-    the inbox, release. The §0 append rules hold across the swap: a torn last line stays a torn last
-    line and is never glued onto a record, and an append cannot be swallowed by the rename because an
-    appender holds the shared lock the rotation waits for.
+    the inbox, release. Acquisition runs on §0's 30 s timeout: on timeout rotate exits 2 having moved
+    nothing, and heartbeat retries it on the next beat. The §0 append rules hold across the swap: a
+    torn last line stays a torn last line and is never glued onto a record, and an append cannot be
+    swallowed by the rename because an appender holds the shared lock the rotation waits for (the one
+    exception is §0's 10 s appender escape valve, which reports itself).
   - Idempotent: a second rotate moves nothing.
   - `heartbeat` runs it at most once per hour per inbox.
   - Reads: `inbox --all` reads the archive then the live file; `--since-card` never opens the archive.
@@ -297,26 +345,65 @@ and the writer that produces it enforces the budget. A limit no code checks is p
 ## 8. Fresh-session baseline (router D-085, 2026-09-28)
 
 §5 raised the L2 cap to 250k to *ride out* the baseline. The baseline is what a fresh session pays
-before it reads anything of its own: measured 55.5k for sonnet L2 = system prompt + MCP tool schemas +
-CLAUDE.md. The system prompt is not ours; the other two are, and both are cut per role, not per model.
+before it reads anything of its own — for a sonnet L2, the D-085 sample measures 55.5k of system
+prompt + MCP tool schemas + CLAUDE.md. That sample is the anchor, not the method: the number that
+decides before/after is defined by the protocol in the last bullet below. The system prompt is not
+ours; the other two are, and both are cut per role, not per model.
 
-- **A lean MCP set per role.** Each role gets a strict `--mcp-config` file that lists *only* the
-  servers that role uses. Tracked as `.example` templates with obviously fake values, like §4's
-  `run.example.json` — a real one would carry machine paths AGENTS.md rule 1 forbids here. Measured
-  intent: L2 orchestrator = `autoos-agent` + `omnigraph`; worker = nothing beyond its client's own
-  defaults; reviewer = none. A role that must not spawn lists no `autoos-agent` server at all, so the
-  tools are not merely unused but absent (R-worker-06). `relaunch-line` and `run` pass the path §4's
-  `<RUN>/run.json` already holds per session — that field is the only place a role's config path is
-  written down.
+- **A lean MCP set per role, and the exact argv that loads it.** The mechanism is pinned, not
+  sketched: `claude --mcp-config configuration/mcp/<role>.json --strict-mcp-config`. Both flags were
+  verified against `claude --help` in this sandbox on 2026-09-28 (CLI 2.1.283): `--mcp-config
+  <configs...>` loads servers "from JSON files or strings (space-separated)" and
+  `--strict-mcp-config` uses "only MCP servers from --mcp-config, ignoring all other MCP
+  configurations" — so no user-scope or project-scope server can be added back, and a file whose
+  `mcpServers` object is empty (`{"mcpServers": {}}`) means **no MCP servers at all** for that
+  session. The pair is already the repo's idiom, not a new one: `tools/autoos_clients.py` builds
+  `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` for joinable runs, and
+  `trust_worktree.py --lane-mcp` writes a `.claude/lane-mcp.local.json` loaded the same way.
+  `--lean` does the blunt half today — for a client in `MCP_STRICT_CLIENTS` it inserts a bare
+  `--strict-mcp-config` with no `--mcp-config`, i.e. zero MCP servers — and the role documents are the
+  selective half, so an orchestrator keeps the two servers it needs while a worker gets the empty
+  document. The pair is claude/qoder only — `tools/autoos-agent.py` `MCP_STRICT_CLIENTS` is
+  `("claude", "qoder")`; qwen, gemini and codex run behind `omniroute run <target>`, which would take
+  the flag as its own and reject it, and opencode cuts servers (`LEAN_DROP`) through its config
+  overlay instead of argv.
+- **The role files, and exactly what each lists.** R9 creates `configuration/mcp/` with these three
+  tracked `.example` templates and no others — fake values only, like §4's `run.example.json`, since
+  a real one carries machine paths AGENTS.md rule 1 forbids here. The argv above points at the
+  un-suffixed runtime document `configuration/mcp/<role>.json`, generated from its template and
+  git-ignored the way `run.json` is (R9 adds the ignore rule):
+  - `configuration/mcp/l2-orchestrator.json.example` — `autoos-agent` + `omnigraph`, nothing else
+    (an orchestrator's job is spawning, reviewing and memory);
+  - `configuration/mcp/l3-worker.json.example` — `{"mcpServers": {}}`: empty, so a leaf role's
+    `autoos-agent` tools are *absent*, not merely unused (R-worker-06). "Nothing beyond the client's
+    own defaults" is not expressible under `--strict-mcp-config` — the file **is** the whole set —
+    which is why the worker's file is the empty document rather than a short list;
+  - `configuration/mcp/l3-reviewer.json.example` — `{"mcpServers": {}}`: the same empty document,
+    a reviewer reads the diff and reports, and needs no server to do it.
+  `<role>` is §4's run.json `role` field, and the three names above are its whole domain.
+  `relaunch-line` and `run --client claude` pass the flag pair, taking the file for the session's
+  role from that field — §4's field is the only place a role's config path is written down. A role
+  with no file is an error naming the role: silently starting a worker with no MCP because the role
+  string did not match is the failure mode this pins shut, not a default.
 - **A trimmed always-loaded set.** CLAUDE.md / AGENTS.md keeps only what *every* session must read
   (the hard rules, the entry points, the definition of done); everything else moves behind a pointer
   to the skill or reference file that owns it. One home per fact decides what stays: a fact whose home
   is elsewhere is a pointer there, not a copy here.
-- **Measure it before and after, per role.** The baseline is one fresh session's first-turn input
-  tokens, read from the transcript's usage — the same all-records iterator §5's `token-rate` uses, so
-  it needs no gateway. `tools/autoos_tokenrate.py` gains a `baseline` measurement and
-  `autoos-agent.py token-rate --baseline [--role <name>]` prints it per role. Both numbers — before,
-  after — go to the L0 router with the role named. Lane R9.
+- **The baseline, defined so before and after are the same measurement.** A role's baseline is the
+  **first assistant turn** of a fresh session: that usage record's `input_tokens +
+  cache_creation_input_tokens + cache_read_input_tokens`, read from the transcript with the same
+  all-records iterator §5's `token-rate` uses (so it needs no gateway). It is **unweighted** — no
+  `CACHE_READ_WEIGHT`, and `output_tokens` is excluded: this measures how much context a session paid
+  to *start*, not what it cost to run — and **non-sidechain** (`isSidechain` false; a subagent's turn
+  is not the session's start). The protocol is fixed: the probe prompt `Reply OK` and nothing else as
+  the task, the role's pinned model and that role's config file, **3 runs**, and the **median** — one
+  run is cache-state noise, three is the cheapest set with a middle.
+  `tools/autoos_tokenrate.py` gains a `baseline` measurement and
+  `autoos-agent.py token-rate --baseline [--role <name>]` prints it per role; both numbers — before,
+  after the trim — go to the L0 router with the role and the pinned model named. The 55.5k in §5
+  (D-085, session 967be39d's first turn) is cited as **the pre-R9 anchor only**: a real session's
+  first turn, not a protocol run. Where R9's "before" differs from it, the protocol number stands
+  and the difference is reported, not smoothed into either. Lane R9.
 
 ## Delivery (each lane test-first; cheap writer → cross-family review → Sonnet final)
 
@@ -326,15 +413,15 @@ CLAUDE.md. The system prompt is not ours; the other two are, and both are cut pe
 | R2a card | `card check` + extend `_NOT_AN_ORDER_RE` (the ready/pong/info shapes too, §7); `card check` takes a path so it also caps `status/<name>.md` until R6 retires it | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
 | R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
 | R2c handoff cap | §7 `l1_handoff.py` budget (refuse over 5k, name the section), line dedupe, no embedded status file | .agents/skills/unattended-orchestration/l1_handoff.py, tests |
-| R8 rotate | §7 `inbox rotate` verb: archivable = non-order (§0 list) or named by a later `→ done:` timestamp, `kept N: no covering done`, exclusive §0 lock + re-read, tmp/`fsync`/rename swap, heartbeat hook (≤1/hour/inbox), archive read rules | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
+| R8 rotate | §7 `inbox rotate` verb: archivable = non-order (§0 list) or named by a later `→ done:` at a **greater line number** (full stamp, or a short stamp only while it is unique among open records; `#<n>` = §0's ordinal), the two `kept N:` counts, exclusive §0 lock + re-read, tmp/`fsync`/rename swap, §0's 30 s rotate / 10 s appender timeouts, heartbeat hook (≤1/hour/inbox), archive read rules; plus §0's `inbox append` verb (calls `append_inbox_line`, so the shared lock keeps one implementation) and the test grepping tracked skill/brief files for a bare `>> …/inbox/` | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
 | R3 pack | `pack`, budget, `l1_handoff.py --pack` | tools/autoos-agent.py, .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
-| R4 relaunch | `relaunch-line`, run.json schema + example | tools/autoos-agent.py, configuration/run.example.json (new), tests |
+| R4 relaunch | `relaunch-line`, run.json schema + example (its `role` field is §8's stems — R4 owns the field, R9 consumes it) | tools/autoos-agent.py, configuration/run.example.json (new), tests |
 | R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
 | R5b cap | shared opus/fable row 350k (D-044), DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
 | CAPL2 | §5 new `claude-sonnet-1m` handoff_caps row 250k/0.25 (D-085), inserted **before** the `*` row, + the same ordering in DEFAULT_CAPS; test pins a sonnet id resolving to 250000 | catalog/ai-registry.json, tools/autoos_context.py, tests |
-| R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources | SKILL.md, references/ |
-| R9 baseline | §8 per-role strict `--mcp-config` files + the flags that pass them, the always-loaded trim, the `baseline` measurement | configuration/mcp/ — one `<role>.json.example` per role (new), tools/autoos-agent.py (relaunch-line, run), tools/autoos_tokenrate.py, AGENTS.md, CLAUDE.md, tests |
+| R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources; the rule line telling a session to append with §0's `inbox append` (§0 owns the fact, R6 only words the rule) | SKILL.md, references/ |
+| R9 baseline | §8: the three named strict `--mcp-config` role documents, the pinned `--mcp-config … --strict-mcp-config` argv (claude/qoder only, `MCP_STRICT_CLIENTS`) passed by `relaunch-line` and `run --client claude` from R4's `role` field, the always-loaded trim, and the `baseline` protocol (probe `Reply OK`, pinned model + role document, 3 runs, median, non-sidechain first assistant turn) | configuration/mcp/ — `l2-orchestrator.json.example`, `l3-worker.json.example`, `l3-reviewer.json.example` (new, plus the ignore rule for the un-suffixed runtime documents), tools/autoos-agent.py (relaunch-line, run), tools/autoos_tokenrate.py, AGENTS.md, CLAUDE.md, tests |
 
 Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
 dispatch-table line each), then R2b. Then R2c and R8, right after R2b and before R3. Then R3, R7 (after
@@ -342,6 +429,11 @@ REDACTMERGE is on main), R4, R5b (after the before-number), CAPL2 (after R5b —
 fallback files, one writer at a time), R9 (after R4, since it adds a flag to `relaunch-line`, and after
 R5a, since it extends the token-rate module), and R6. Every lane after R1 merges main
 before it starts. Each lane is at most three items per worker run.
+
+Two cross-lane details are decided here so no lane discovers them mid-run: the `role` field §4's
+run.json carries is R4's (R9 consumes it and never edits the schema or its example), and R8's
+bare-append grep reads the whole tracked skill and brief corpus — if it names a recipe line in a file
+another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in the file.
 
 | v2 Sonnet finding | v3 resolution |
 |---|---|
@@ -357,12 +449,21 @@ before it starts. Each lane is at most three items per worker run.
 
 | v3.2 Sonnet finding (on 86da423) | v3.3 resolution |
 |---|---|
-| HIGH: rotate's "acknowledged" undefined; position alone archives an open PAUSE/order when an unrelated `→ done:` follows | §7 defines archivable — non-order by the §0 list, or an order a later `→ done:` names by its leading UTC timestamp; everything else stays live whatever its position, and rotate prints the kept count |
+| HIGH: rotate's "acknowledged" undefined; position alone archives an open PAUSE/order when an unrelated `→ done:` follows | §7 defines archivable — non-order by the §0 list, or an order a later `→ done:` names by its leading UTC timestamp (v3.4 turns that into a matching rule: full stamp + line number, see the table below); everything else stays live whatever its position, and rotate prints the kept count |
 | HIGH: rotate's read-to-rename window drops a concurrent §0 append | §0 inbox lock (`<inbox>.lock`): shared and short on every append, exclusive across rotate's re-read → tmp → `fsync` → rename; §7 points at it |
-| HIGH: §7 called `status/<name>.md` "the card" while §1 fixes the card at `status/<name>.card.md` | §7 keeps one path (§1's) and says the free-form file is retired when R6 lands; until then it carries the same 40-line cap |
+| HIGH: §7 called `status/<name>.md` "the card" while §1 fixes the card at `status/<name>.card.md` | §7 keeps one path (§1's) and says the free-form file is retired when R6 lands; until then it carries the §1 cap |
 | MEDIUM: §4 sent liveness to §3 item 6 and carried its sources there | Liveness is the §3 item 2 snapshot line, sources named once there; §4 only says it never goes into a prompt |
 | L2 cap 150k vs the measured trigger | §5 D-085: trigger met (handoff every ~15 min, 55.5k fresh sonnet baseline), new `claude-sonnet-1m` row at 250k, lane CAPL2 |
 | what the cap was riding out | new §8: lean per-role `--mcp-config` + trimmed always-loaded set, measured before/after per role, lane R9 |
+
+| v3.3 Muse finding (on ae6696c) | v3.4 resolution |
+|---|---|
+| HIGH: "a later `→ done:` names that record's leading UTC timestamp" is a rule that cannot be implemented — §0 measures 81 same-second collisions, and a stamp quoted inside a body line would close the wrong record | §7 states the address and the three tests: a record is its **full leading stamp plus its line number**, the done must be at a greater line number, it must name the full stamp (or a short `HH:MM:SS` only while exactly one open earlier record carries it), and only a leading stamp is an address. A stamp matching several open records archives none until `→ done: <full stamp>#<n>` (§0's ordinal) names one; rotate prints `kept N: ambiguous stamp` beside the `no covering done` count |
+| HIGH: §0's lock named "every write" but only `append_inbox_line` held it — a skill or brief recipe saying `echo … >> inbox` loses that line to a rename | §0 says who a writer is and forbids the bare redirect: `inbox append` (new R8 verb, same code path as `append_inbox_line`, so the lock has one implementation) or `flock -s`. R8 greps the tracked skill and brief files for the bare form, R6 words the rule line, and §0 states why one lock per inbox with no shared→exclusive upgrade cannot deadlock |
+| MEDIUM: no wait was bounded anywhere — one wedged rotation could hold every appender and every heartbeat behind it | §0 caps both directions: rotate acquires exclusive with a 30 s timeout and on timeout exits 2 having moved nothing (heartbeat retries next beat); an appender waits 10 s, then appends anyway and reports `inbox: lock timeout`, so the guard gives way before a line can be lost to it |
+| MEDIUM: §7 restated §1's 40-line / 200-char budget and §0's marker shapes, so the same facts had three homes and could drift apart | §7 cites §1 for the budget and §0 for the marker list, naming neither numbers nor shapes of its own |
+| MEDIUM: §8 said "a strict `--mcp-config` file" without the argv, without the empty-document form, without saying which role files exist or what each lists | §8 pins `claude --mcp-config configuration/mcp/<role>.json --strict-mcp-config` (both flags checked against `claude --help`, CLI 2.1.283), names the three role documents and exactly what each holds, points at the code already using the pair, limits it to `MCP_STRICT_CLIENTS`, and says which verbs pass it from §4's `role` field — an unknown role is an error, not a silent no-tools session |
+| MEDIUM: "the baseline is one fresh session's first-turn input tokens" is not a measurement, so before/after would not be comparable and 55.5k not reproducible | §8 defines it: the non-sidechain **first assistant turn's** `input + cache_creation + cache_read`, unweighted and output-free, on the fixed probe prompt `Reply OK` with a pinned model and the role's document, 3 runs, the median, reported per role to L0. §5's 55.5k is the pre-R9 anchor only |
 
 ## §R. v1 review findings → v2 resolution
 
