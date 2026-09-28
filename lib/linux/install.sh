@@ -292,6 +292,11 @@ apt_repo_key_install() {
 
 # ─── Idempotency checks ─────────────────────────────────────────────────────
 is_installed() {
+    # A dry run installs nothing, so one npm snapshot answers every call
+    # (WS-NPMCACHE); a real run asks npm fresh, because an earlier step may
+    # just have installed the package.
+    local _AUTOOS_NPM_CACHE=0
+    (( ${AUTOOS_DRY_RUN:-0} )) && _AUTOOS_NPM_CACHE=1
     detect_installed_status "$1" "$2" "${3:-0}"
     [[ "$INSTALLED_STATUS" == installed ]]
 }
