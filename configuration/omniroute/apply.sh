@@ -454,18 +454,34 @@ provider_needs_node() {
 
 # omni_rest <METHOD> <path> [json-body] - one gateway REST call with the manage
 # key. The key goes in a private curl config file and the request body on
-# stdin, never in argv. Prints the response body; REST_ERROR holds the reason
-# for a failure, redacted by the caller before it reaches the log.
+# stdin, never in argv. The response lands in REST_BODY (empty on a failure),
+# the reason in REST_ERROR, redacted by the caller before it reaches the log.
+# Both are globals, not stdout, on purpose: a caller that read the body with
+# $( ) would run this function in a subshell, and the two temp files would then
+# belong to a shell that an interrupted run cannot reach - which is exactly how
+# the key outlived the call (MUSEFIX). A caller that needs the failure's reason
+# has to be in this shell too, for the same reason.
 REST_ERROR=""
+REST_BODY=""
 omni_rest() {
     local method="$1" path="$2" body="${3:-}"
-    local cfg out code text escaped
+    local cfg out code escaped
+    REST_BODY=""
     cfg="$(mktemp)" || { REST_ERROR="no curl config file could be created"; return 1; }
-    out="$(mktemp)" || { rm -f "$cfg"; REST_ERROR="no response file could be created"; return 1; }
+    out="$(mktemp)" || { rm -f -- "$cfg"; REST_ERROR="no response file could be created"; return 1; }
     chmod 600 "$cfg" "$out"
     escaped="${REST_KEY//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
     printf 'header = "Authorization: Bearer %s"\n' "$escaped" >"$cfg"
+    # The config file holds the manage key and the response file holds whatever
+    # the gateway answered - GET /api/providers returns every provider's live
+    # apiKey. Removing them after the call only covers the path that gets there:
+    # a run interrupted (Ctrl-C, or killed) while the call was in flight left a
+    # 0600 file carrying the key in /tmp on the user's machine. So the removal
+    # is trapped for the duration of the call and the trap cleared (back to no
+    # trap - this script sets none of its own) right after, the same shape
+    # ai-stack.sh uses for its edge-webhook header file.
+    trap 'rm -f -- "$cfg" "$out"' INT TERM EXIT
     if [[ -n "$body" ]]; then
         code="$(printf '%s' "$body" | curl -s -S -m 20 --config "$cfg" -X "$method" \
             -H 'Content-Type: application/json' --data @- \
@@ -474,28 +490,35 @@ omni_rest() {
         code="$(curl -s -S -m 20 --config "$cfg" -X "$method" -o "$out" \
             -w '%{http_code}' "$GATEWAY$path" 2>/dev/null)" || code=""
     fi
-    text=""
-    [[ -s "$out" ]] && text="$(cat "$out")"
-    rm -f "$cfg" "$out"
+    [[ -s "$out" ]] && REST_BODY="$(cat "$out")"
+    rm -f -- "$cfg" "$out"
+    trap - INT TERM EXIT
     if [[ -z "$code" ]]; then
         REST_ERROR="the gateway could not be reached for $path"
+        REST_BODY=""
         return 1
     fi
     if [[ "$code" != 2* ]]; then
-        REST_ERROR="HTTP $code for $path: $(head -c 300 <<<"$text")"
+        REST_ERROR="HTTP $code for $path: $(head -c 300 <<<"$REST_BODY")"
+        REST_BODY=""
         return 1
     fi
-    printf '%s\n' "$text"
 }
 
-# provider_node_id <prefix> - the id of the provider node carrying this prefix,
-# or nothing. GET /api/provider-nodes answers {"nodes":[…],"total":N} (measured
-# live 2026-09-28); {"items":[…]} and a bare list are tolerated.
+# provider_node_id <prefix> - sets NODE_ID to the id of the provider node
+# carrying this prefix, or to nothing. GET /api/provider-nodes answers
+# {"nodes":[…],"total":N} (measured live 2026-09-28); {"items":[…]} and a bare
+# list are tolerated. A global rather than stdout, and called without $( ), for
+# the reason in omni_rest's comment.
+NODE_ID=""
 provider_node_id() {
-    local doc
-    doc="$(omni_rest GET /api/provider-nodes 2>/dev/null || true)"
+    NODE_ID=""
+    local doc=""
+    if omni_rest GET /api/provider-nodes; then
+        doc="$REST_BODY"
+    fi
     [[ -n "$doc" ]] || return 0
-    python3 -c 'import json,sys
+    NODE_ID="$(python3 -c 'import json,sys
 try:
     doc = json.load(sys.stdin)
 except Exception:
@@ -508,7 +531,7 @@ for n in rows or []:
     if isinstance(n, dict) and n.get("prefix") == sys.argv[1]:
         print(n.get("id") or "")
         break
-' "$1" <<<"$doc" || true
+' "$1" <<<"$doc" || true)"
 }
 
 # provider_connection_exists <node-id> <name> - is a key already bound to this
@@ -520,9 +543,10 @@ for n in rows or []:
 # (measured live 2026-09-28) and also carries every stored apiKey, so only these
 # two fields are read and the body is never printed.
 provider_connection_exists() {
-    local doc
-    doc="$(omni_rest GET '/api/providers?limit=5000' 2>/dev/null || true)"
-    [[ -n "$doc" ]] || return 1
+    if ! omni_rest GET '/api/providers?limit=5000'; then
+        return 1
+    fi
+    [[ -n "$REST_BODY" ]] || return 1
     python3 -c 'import json,sys
 try:
     doc = json.load(sys.stdin)
@@ -534,25 +558,33 @@ for c in rows or []:
                                 or c.get("name") == sys.argv[2]):
         sys.exit(0)
 sys.exit(1)
-' "$1" "$2" <<<"$doc"
+' "$1" "$2" <<<"$REST_BODY"
 }
 
-# ensure_provider_node <provider-id> - "<note> <node id>" on stdout, where note
-# is "created" or "existing", so the caller can say which one it was. (A global
-# would not survive here: the caller reads the id with $( ), and a subshell's
-# assignments cannot leave it.) Creates the node only when the gateway has no
-# node with that prefix - GET first, or a re-run adds a second one.
+# ensure_provider_node <provider-id> - sets the globals NODE_NOTE ("created" or
+# "existing") and NODE_ID, so the caller can say which one it was. Globals, not
+# stdout, and called without $( ): the REST calls below own the two temp files
+# and write the failure's reason into REST_ERROR, and both belong to the shell
+# that runs them - a subshell would hide the reason from the log and put the
+# files out of reach of the interrupt trap. Creates the node only when the
+# gateway has no node with that prefix - GET first, or a re-run adds a second
+# one.
+NODE_NOTE=""
 ensure_provider_node() {
-    local provider_id="$1" node_id body
-    node_id="$(provider_node_id "$provider_id")"
-    if [[ -n "$node_id" ]]; then
-        printf 'existing %s\n' "$node_id"
+    local provider_id="$1" body
+    NODE_NOTE=""
+    provider_node_id "$provider_id"
+    if [[ -n "$NODE_ID" ]]; then
+        NODE_NOTE="existing"
         return 0
     fi
     # createProviderNodeSchema, omniroute
-    # src/shared/validation/schemas/provider.ts:307-385: name, prefix, baseUrl,
-    # and - for type "openai-compatible" - an apiType, or the write is refused.
-    # The CLI's own POST sends no body at all (bin/cli/api-commands/
+    # src/shared/validation/schemas/provider.ts:307-385: it demands name and
+    # prefix, an apiType for type "openai-compatible", and a baseUrl only for
+    # the "vibeproxy-openai" preset - every other field is optional, so the
+    # gateway would accept this body without it. apply sends baseUrl anyway: a
+    # node without the endpoint the registry names is a node nobody can route
+    # to. The CLI's own POST sends no body at all (bin/cli/api-commands/
     # provider-nodes.mjs:18-25), so this is the REST call, not `omniroute api`.
     body="$(python3 -c 'import json,sys
 print(json.dumps({"name": sys.argv[1], "prefix": sys.argv[1],
@@ -561,17 +593,17 @@ print(json.dumps({"name": sys.argv[1], "prefix": sys.argv[1],
         REST_ERROR="the provider node request could not be built"
         return 1
     }
-    if ! omni_rest POST /api/provider-nodes "$body" >/dev/null; then
+    if ! omni_rest POST /api/provider-nodes "$body"; then
         return 1
     fi
     # The created node is read back rather than trusted from the POST response:
     # the response shape is not the documented contract, the prefix is.
-    node_id="$(provider_node_id "$provider_id")"
-    if [[ -z "$node_id" ]]; then
+    provider_node_id "$provider_id"
+    if [[ -z "$NODE_ID" ]]; then
         REST_ERROR="the gateway accepted the node but does not list it"
         return 1
     fi
-    printf 'created %s\n' "$node_id"
+    NODE_NOTE="created"
 }
 
 register_provider() {
@@ -608,14 +640,14 @@ register_provider() {
             echo "      manage.key): register it in the dashboard"
             return 0
         fi
-        local node_note="" node_line=""
-        if ! node_line="$(ensure_provider_node "$provider_id")"; then
+        # No $( ) here: the reason has to survive in REST_ERROR.
+        if ! ensure_provider_node "$provider_id"; then
             echo "  ! $provider_id provider node could not be created — register it in the dashboard"
             print_cli_error "${REST_ERROR:-the gateway refused the request}" "$value" "$REST_KEY"
             return 0
         fi
-        node_note="${node_line%% *}"; node_id="${node_line#* }"
-        if [[ "$node_note" == "created" ]]; then
+        node_id="$NODE_ID"
+        if [[ "$NODE_NOTE" == "created" ]]; then
             echo "  + $provider_id: provider node created (prefix $provider_id -> ${PROVIDER_BASE[$provider_id]})"
         fi
         if provider_connection_exists "$node_id" "$provider_id"; then

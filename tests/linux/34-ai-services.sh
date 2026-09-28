@@ -474,8 +474,10 @@ fi
 # omniroute src/lib/db/providers/nodes.ts:64-74 names the concrete node id
 # ("<type>-<uuid>") as "what the dashboard sends" for a new connection. The
 # create body is createProviderNodeSchema, omniroute
-# src/shared/validation/schemas/provider.ts:307-385 — name, prefix, baseUrl and,
-# for type "openai-compatible", an apiType:
+# src/shared/validation/schemas/provider.ts:307-385 — name and prefix, an
+# apiType for type "openai-compatible", and a baseUrl only for the
+# "vibeproxy-openai" preset; apply sends the baseUrl anyway, because a node
+# without the endpoint the registry names routes nowhere:
 #   {"name":"meta-api","prefix":"meta-api","type":"openai-compatible",
 #    "apiType":"chat","baseUrl":"https://api.meta.ai/v1"}
 # The stand-ins reproduce that contract rather than a convenient fiction
@@ -573,13 +575,13 @@ NODECLI
 #!/usr/bin/env bash
 d="$(cd "$(dirname "$0")/.." && pwd)"
 printf '%s\n' "$*" >>"$d/argv.log"
-method=GET url="" out="" fmt="" fail=0 has_body=0
+method=GET url="" out="" fmt="" fail=0 has_body=0 cfg=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -X|--request) method="${2:-GET}"; shift 2 ;;
         -o|--output) out="${2:-}"; shift 2 ;;
         -w|--write-out) fmt="${2:-}"; shift 2 ;;
-        --config|-K) shift 2 ;;
+        --config|-K) cfg="${2:-}"; shift 2 ;;
         --data|--data-raw|--data-binary|--data-urlencode) has_body=1; shift 2 ;;
         -m|--max-time|-H|--header) shift 2 ;;
         --fail) fail=1; shift ;;
@@ -597,6 +599,16 @@ case "$url" in
         else reply='{"data":[]}'; fi ;;
     */api/provider-nodes*)
         if [[ "$method" == "GET" ]]; then
+            if [[ -f "$d/stall" ]]; then
+                # A call in flight: apply.sh is interrupted (SIGTERM) while its
+                # two mktemp files - the curl config holding the manage key and
+                # the response file - still exist. Marks the moment it started
+                # answering, then answers two seconds later, so the test can
+                # kill the run in between and still have a live process.
+                rm -f "$d/stall"
+                : >"$d/curl-stalled"
+                sleep 2
+            fi
             # The live shape (measured 2026-09-28): {"nodes":[…],"total":N,
             # "ccCompatibleProviderEnabled":false}.
             reply="$(python3 - "$d/nodes.json" <<'PY'
@@ -610,7 +622,30 @@ PY
             req=""
             [[ $has_body -eq 1 ]] && req="$(cat)"
             printf '%s' "$req" >"$d/last_body.json"
-            reply="$(python3 - "$d/nodes.json" "$d/builtins.txt" "$req" <<'PY'
+            if [[ -f "$d/reserved" ]]; then
+                # The gateway refuses a prefix that collides with one of its
+                # reserved ids (omniroute src/shared/constants/
+                # reservedProviderPrefixes.ts). This stand-in additionally
+                # echoes the bearer token it refused with - read out of the very
+                # curl config file apply.sh wrote - because that is the worst
+                # case apply's redaction has to survive: a 4xx body that repeats
+                # the request's own credential.
+                bearer=""
+                [[ -f "$cfg" ]] && bearer="$(sed -n 's/.*Bearer //p' "$cfg" |
+                    head -n 1 | tr -d '"')"
+                reply="$(python3 - "$req" "$bearer" <<'RESPY'
+import json, sys
+try:
+    prefix = json.loads(sys.argv[1] or "{}").get("prefix", "?")
+except ValueError:
+    prefix = "?"
+print(json.dumps({"error": {"message": '"%s" is a reserved provider prefix '
+                                      '(refused with token %s)' % (prefix, sys.argv[2])}}))
+RESPY
+)"
+                code=400
+            else
+                reply="$(python3 - "$d/nodes.json" "$d/builtins.txt" "$req" <<'PY'
 import json, sys
 try:
     body = json.loads(sys.argv[3] or "{}")
@@ -638,6 +673,7 @@ json.dump(nodes, open(sys.argv[1], "w"), indent=1)
 print(json.dumps(node))
 PY
 )" && code=201 || code=400
+            fi
         fi ;;
     */api/providers*)
         # The live shape: {"connections":[…],"total":N}. The stored apiKey is a
@@ -801,6 +837,125 @@ if it "svc: apply treats every id as built-in when the CLI's catalog is unreadab
         || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "an unreadable catalog became a licence to create provider nodes"; fi
+fi
+
+# ─── MUSEFIX S1: an interrupted REST call leaves no temp file behind ─────────
+# omni_rest writes the manage key into a mktemp curl --config file and the
+# response into a second mktemp, and GET /api/providers answers with every
+# provider's live apiKey. Both were removed only on the normal path, so a run
+# interrupted with Ctrl-C - or killed - while a call was in flight left a 0600
+# file holding the manage key in /tmp on the user's machine, which is exactly
+# what an onboarding run that a user gets impatient with looks like.
+# TMPDIR points at a directory this case alone owns (mktemp honours it), the
+# stand-in holds its first provider-nodes answer for two seconds (a call in
+# flight), and SIGTERM goes to the run's whole process group inside that window
+# - the shape of a real Ctrl-C. Red before the fix: the run dies and both files
+# stay in the directory.
+if it "svc: apply removes the REST temp files when a call is interrupted"; then
+    d="$(_node_sandbox)"
+    mkdir -p "$d/tmp"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    touch "$d/stall"
+    # Monitor mode around the launch only, so the run starts in its own process
+    # group: Ctrl-C signals the whole foreground group, and that is the
+    # interrupt that leaks - the call in flight is killed too and never reaches
+    # the rm that follows it. Signalling just the script's pid lets the call
+    # finish and clean up behind it, and the case proves nothing.
+    set -m
+    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
+        bash "$ROOT/configuration/omniroute/apply.sh" >"$d/run.out" 2>&1 &
+    apply_pid=$!
+    set +m
+    ok=1
+    stalled=""
+    for _ in $(seq 1 200); do
+        [[ -e "$d/curl-stalled" ]] && { stalled=1; break; }
+        kill -0 "$apply_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    [[ -n "$stalled" ]] || { ok=0; echo "the stand-in never took the call: $(cat "$d/run.out")" >&2; }
+    # The window has to be real: at this moment the temp files exist. Without
+    # this the case could pass on a run that never reached omni_rest at all.
+    [[ -n "$(ls -A "$d/tmp" 2>/dev/null)" ]] ||
+        { ok=0; echo "no temp file existed during the call - the case proves nothing" >&2; }
+    kill -TERM -- "-$apply_pid" 2>/dev/null || { ok=0; echo "the run was already gone" >&2; }
+    wait "$apply_pid" 2>/dev/null || true
+    # The interrupted call was in flight when the signal landed, so the run has
+    # up to its timeout left to do. Give it a bounded window and judge what is
+    # still on disk when the window closes.
+    clean=""
+    for _ in $(seq 1 300); do
+        [[ -z "$(ls -A "$d/tmp" 2>/dev/null)" ]] && { clean=1; break; }
+        sleep 0.05
+    done
+    [[ -n "$clean" ]] ||
+        { ok=0; echo "survived the interrupt in $d/tmp: $(ls -A "$d/tmp")" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted REST call left the manage key in a temp file"; fi
+fi
+
+# A gateway refuses a provider-node prefix that collides with one of its
+# reserved ids (omniroute src/shared/constants/reservedProviderPrefixes.ts), and
+# ensure_provider_node's failure path prints REST_ERROR through print_cli_error
+# with both keys as redaction arguments. The stand-in answers the POST with that
+# refusal AND the bearer token it read out of apply.sh's own curl config file -
+# the worst case the redaction has to survive, a 4xx body that repeats the
+# request's credential. The reason must reach the log; the key must not, and it
+# must never have reached a command line, where `ps` reads argv for the
+# lifetime of the call.
+if it "svc: apply prints the gateway's reserved-prefix refusal with the token redacted"; then
+    d="$(_node_sandbox)"
+    printf 'meta: sk-not-a-real-key-456\n' >"$d/keys.yml"
+    touch "$d/reserved"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider node could not be created"* ]] || { ok=0; echo "no failure line: $out" >&2; }
+    [[ "$out" == *"register it in the dashboard"* ]] || { ok=0; echo "no operator route: $out" >&2; }
+    [[ "$out" == *"reserved provider prefix"* ]] || { ok=0; echo "the gateway's reason was swallowed: $out" >&2; }
+    [[ "$out" == *"[REDACTED]"* ]] || { ok=0; echo "the refusal printed the token raw: $out" >&2; }
+    [[ "$out" != *"fake-manage-key-MUSEREG"* ]] || { ok=0; echo "the manage key was printed" >&2; }
+    [[ "$out" != *"sk-not-a-real-key-456"* ]] || { ok=0; echo "the provider key was printed" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line: $(cat "$d/argv.log")" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "a node was stored: $(cat "$d/nodes.json")" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a connection was added for a refused node" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a refused provider node leaked, or hid, what the gateway said"; fi
+fi
+
+# The state the dashboard leaves behind: the provider node exists, no key is
+# bound to it. apply has to add the connection to THAT node and POST no second
+# one - the GET-first order in ensure_provider_node is what keeps a re-run from
+# storing one node per connection.
+if it "svc: apply binds the key to an existing provider node instead of making a second one"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" != *"provider node created"* ]] || { ok=0; echo "a node was announced: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a node was POSTed: $(cat "$d/curl.log")" >&2; }
+    grep -qx 'providers add openai-compatible-chat-00000001 --name meta-api --credential-env AUTOOS_KEY_META --yes' \
+        "$d/calls.log" || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/nodes.json'))))")" == "1" ]] \
+        || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an existing node with no connection was not simply bound"; fi
 fi
 
 # ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
