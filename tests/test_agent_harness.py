@@ -4,6 +4,7 @@ Run from the repo root:
 
     python3 tests/test_agent_harness.py
 """
+import fnmatch
 import importlib.util
 import json
 import os
@@ -47,6 +48,52 @@ def read_ordered(path):
 def harness_data():
     with open(HARNESS, encoding="utf-8") as handle:
         return json.load(handle)
+
+
+# The files a spawned leaf must never see. Fixture paths only — no real key
+# file is opened by this suite, the fence is decided on the name alone.
+KEY_PATHS = [
+    "configuration/api-keys.yml",
+    "/home/x/.config/autoos/ai-stack/client.key",
+    "/home/x/.config/autoos/ai-stack/manage.key",
+]
+KEY_EXAMPLE = "configuration/api-keys.example.yml"
+# KEYDENY2: a shell rule is matched against the whole command line, so an allow
+# whose pattern is a *substring* of the line licenses every other path that
+# shares it. These are the three command lines that walked the
+# `*api-keys.example*` shell allow past the `*api-keys*` deny. Fixture strings
+# only — no real key file is opened or copied by this suite.
+SHELL_ABUSE = [
+    "cat configuration/api-keys.yml configuration/api-keys.example.yml",
+    "cp configuration/api-keys.yml /tmp/api-keys.example/x",
+    "cat /tmp/api-keys.example/stolen",
+]
+# A read rule sees one path, so the example's allow has to be its exact
+# suffix, not a substring: this is a backup of a key file that merely contains
+# the example's name.
+READ_NEAR_MISS = ["/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"]
+
+
+def fence_verdict(pattern_map, value):
+    """The verdict a rendered fence map gives `value`: last glob match wins.
+
+    This is opencode's own rule shape (opencode.jsonc: "last matching rule
+    wins"), which is why an allow_all pattern is emitted after deny_all by
+    _rebuild_patterns/_role_bash. `*` spans path separators — the harness's
+    pattern idiom, since `*api_keys*` has to fence
+    `cat /home/x/secrets/api_keys.conf` as well as a bare relative path.
+    """
+    verdict = pattern_map.get("*", "allow")
+    for pattern, effect in pattern_map.items():
+        if pattern != "*" and fnmatch.fnmatch(value, pattern):
+            verdict = effect
+    return verdict
+
+
+def leaf_bash_maps(doc, harness):
+    for name, role in harness["roles"].items():
+        if role["leaf"]:
+            yield name, doc["agent"][name]["permission"]["bash"]
 
 
 class CheckTests(unittest.TestCase):
@@ -325,6 +372,89 @@ class OpencodeMergeTests(unittest.TestCase):
             for pattern in harness["fences"]["bash_allow_all"]:
                 self.assertEqual(bash[pattern], "allow", pattern)
 
+    def test_a_leaf_is_denied_read_and_cat_of_every_real_key_file(self):
+        # KEYDENY: the fence spelled the key file `*api_keys*` (underscore)
+        # while the real one is configuration/api-keys.yml, and the gateway's
+        # client.key/manage.key were not fenced at all — so a leaf could Read
+        # and `cat` the keys. Decided on the rendered map, not on file
+        # contents: no key file is opened here.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            self.assertTrue(list(leaf_bash_maps(doc, harness)), "no leaf role renders")
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                top_bash = doc["permission"]["bash"]
+                for path in KEY_PATHS:
+                    self.assertEqual(fence_verdict(read_map, path), "deny",
+                                     "%s may Read %s" % (name, path))
+                    self.assertEqual(fence_verdict(bash_map, "cat " + path), "deny",
+                                     "%s may cat %s" % (name, path))
+                    self.assertEqual(fence_verdict(top_bash, "cat " + path), "deny",
+                                     "top level may cat %s" % path)
+
+    def test_a_leaf_reads_the_key_example_but_never_cats_it(self):
+        # The template has to stay readable — read rules see one path, so the
+        # allow is the example's exact suffix. `cat` of it is denied: a shell
+        # rule sees the whole command line, and an allow that is only a
+        # substring of that line cannot be bounded to one file (KEYDENY2).
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                self.assertEqual(fence_verdict(read_map, KEY_EXAMPLE), "allow",
+                                 "%s is denied the example" % name)
+                self.assertEqual(fence_verdict(bash_map, "cat " + KEY_EXAMPLE), "deny",
+                                 "%s may cat the example" % name)
+                self.assertEqual(fence_verdict(doc["permission"]["bash"],
+                                               "cat " + KEY_EXAMPLE), "deny",
+                                 "top level may cat the example")
+
+    def test_a_leaf_reads_the_example_only_at_its_exact_path(self):
+        # KEYDENY2: `*api-keys.example*` as a read allow also licensed
+        # /tmp/api-keys.example.yml.bak — a copy of the real key file named
+        # after the template. Only the exact example suffix is allowed.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(read_map, path), "deny", path)
+
+    def test_a_substring_allow_cannot_license_a_command_line(self):
+        # KEYDENY2: the shell allow `*api-keys.example*` won over the
+        # `*api-keys*` deny whenever the example's name appeared anywhere in
+        # the line, so a leaf could read the real key file by pairing it with
+        # the template, or by exfiltrating a copy under an *.example* path.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            top_bash = doc["permission"]["bash"]
+            for command in SHELL_ABUSE:
+                self.assertEqual(fence_verdict(top_bash, command), "deny", command)
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                for command in SHELL_ABUSE:
+                    self.assertEqual(fence_verdict(bash_map, command), "deny",
+                                     "%s may run %s" % (name, command))
+
+    def test_the_shell_fence_grants_no_substring_pattern(self):
+        # The structural reason the abuse worked: bash_allow_all is matched
+        # against a command line, so no entry of it may match a command that
+        # names a real key file. Guard the list itself, not just the verdict.
+        fences = harness_data()["fences"]
+        for pattern in fences["bash_allow_all"]:
+            for command in SHELL_ABUSE:
+                self.assertFalse(fnmatch.fnmatch(command, pattern),
+                                 "bash_allow_all %s matches %s" % (pattern, command))
+            for path in KEY_PATHS:
+                self.assertFalse(fnmatch.fnmatch("cat " + path, pattern),
+                                 "bash_allow_all %s matches cat of %s" % (pattern, path))
+
     def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
@@ -490,6 +620,92 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertIn("left alone", result.stdout)
             self.assertEqual(real.read_bytes(), before)
             self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
+
+    def test_a_managed_skill_left_in_agent_skills_is_replaced_not_duplicated(self):
+        # 2026-09-25: after .agents/skills became the home, the merge appended the
+        # new coding-principles entry and kept the agent-skills one, so OpenCode
+        # loaded two diverged copies of the same skill.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        old = "C:\\Users\\x\\Documents\\Code\\agent-skills\\skills/%s/SKILL.md" % skill
+        user = {"instructions": [
+            old,
+            "my-rules.md",
+            "/home/x/agent-skills/notes/%s.md" % skill,   # not a SKILL.md: the user's
+            "/home/x/agent-skills/skills/unlisted-skill/SKILL.md",  # not managed: the user's
+        ]}
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertNotIn(old, doc["instructions"])
+        self.assertIn("%s/%s/SKILL.md" % (SKILLS_SOURCE, skill), doc["instructions"])
+        for kept in user["instructions"][1:]:
+            self.assertIn(kept, doc["instructions"])
+
+    def test_stale_entry_matching_ignores_case_and_accepts_relative_paths(self):
+        # Windows paths are case-insensitive, and hand-written configs vary the
+        # drive letter, the clone's spelling and SKILL.md's case (review, WS-HARNESS).
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "C:/Users/x/Code/agent-skills-work/.agents/skills"
+        self.assertTrue(stale("C:\\Users\\x\\Code\\Agent-Skills\\skills\\coding-principles\\skill.md", skills, source))
+        self.assertTrue(stale("agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # The current entry, spelled with another drive-letter case, is never stale,
+        # even when the source itself sits under a directory named agent-skills.
+        nested = "C:/Users/x/Code/agent-skills/.agents/skills"
+        self.assertFalse(stale("c:/Users/x/Code/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, nested))
+        self.assertFalse(stale("my-agent-skills/skills/coding-principles/SKILL.md", skills, source))
+
+    def test_only_the_retired_clone_layout_is_stale(self):
+        # Muse review of 2b71861 (HIGH x2): the retired layout is exactly
+        # <clone>/agent-skills/skills/<skill>/SKILL.md (install.sh skills_source =
+        # $code_root/agent-skills/skills). Anything else under a directory named
+        # agent-skills is the user's.
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "/repo/.agents/skills"
+        self.assertFalse(stale("/home/x/agent-skills/my-notes/coding-principles/SKILL.md", skills, source))
+        self.assertFalse(stale("/backup/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # A trailing space or separator is the same entry (Muse MEDIUM 4).
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md ", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md/", skills, source))
+
+    def test_the_current_entry_in_another_spelling_is_not_appended_twice(self):
+        # Muse MEDIUM 3: the stale check folds case and separators, so the
+        # canonical-exists check must too, or a second spelling is appended.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        spelled = "c:\\r\\.agents\\skills\\%s\\skill.md " % skill
+        doc = module.desired_opencode({"instructions": [spelled]}, harness, REPO_ROOT, "C:/R/.agents/skills")
+        matching = [e for e in doc["instructions"] if e.strip().replace("\\", "/").casefold()
+                    == ("c:/r/.agents/skills/%s/skill.md" % skill)]
+        self.assertEqual(matching, [spelled])
+
+    def test_a_second_merge_changes_nothing(self):
+        # Muse MEDIUM 5: desired(desired(x)) == desired(x).
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        user = {"instructions": [
+            "/home/x/agent-skills/skills/%s/SKILL.md" % skill,
+            "/home/x/agent-skills/my-notes/%s/SKILL.md" % skill,
+            "my-rules.md",
+        ]}
+        once = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        twice = module.desired_opencode(once, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertEqual(twice, once)
+
+    def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
+        # No source means no replacement: dropping the old entry would leave
+        # OpenCode with no copy of the skill at all.
+        module = load_module()
+        harness = harness_data()
+        old = "/home/x/agent-skills/skills/%s/SKILL.md" % harness["rules"]["skills"][0]
+        doc = module.desired_opencode({"instructions": [old]}, harness, REPO_ROOT, "")
+        self.assertIn(old, doc["instructions"])
 
     def test_an_unexpected_instructions_type_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:

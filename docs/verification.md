@@ -48,7 +48,7 @@ Notes from the runs:
 | `deepseek/deepseek-flash` | OK |
 | `openrouter/deepseek/deepseek-v4.1-flash` | OK |
 | `mistral/mistral-code-latest` | OK (429 when the free pool is throttled) |
-| `mistral/mistral-small-latest` | OK (2 RPM free tier) |
+| `mistral/mistral-small-latest` | OK (2 RPM free tier) — **superseded 2026-09-28**: 429 at **0 rpm** on this plan (direct `x-ratelimit` probe) and 0/3 through the gateway (MISTRALREPL probe); leg of no route now. The numbers live in `catalog/ai-registry.json:providers.mistral.limits` and docs/models.md's measured table |
 | `groq/openai/gpt-oss-120b` | OK — after the Cloudflare UA fix, see below |
 | `cerebras/gpt-oss-120b` | OK — same fix |
 | `opencode-zen/muse-spark-1.3-contributor-free` | 500 at peak (Zen side) |

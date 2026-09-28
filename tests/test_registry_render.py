@@ -1232,10 +1232,13 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # DSBACK 2026-09-28: t2-worker-clean serves deepseek FIRST again —
         # providers.deepseek is back on after the operator top-up. The openrouter
         # leg stays out (provider off, DSMAX) and the zen leg stays out (its own
-        # route gate), so the combo is exactly the two live legs in registry order.
+        # route gate). MISTRALFIX 2026-09-28 took the route's fourth leg,
+        # mistral/mistral-small-latest, out of the registry itself (0 rpm on the
+        # measured plan), so the combo is now exactly the one live leg — and the
+        # combo survives, which is what the invariant in tests/test_registry.py
+        # requires of a route that still serves traffic.
         self.assertEqual(
-            combos["t2-worker-clean"]["models"],
-            ["deepseek/deepseek-flash", "mistral/mistral-small-latest"])
+            combos["t2-worker-clean"]["models"], ["deepseek/deepseek-flash"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes.
         # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
