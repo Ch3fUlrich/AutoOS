@@ -87,10 +87,53 @@ AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
 # and runs a shell command unattended in 25 s with bypass_permissions.
 QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
 
+# --- carrying the run's gateway headers per client (FLEETP0 review item 4) ----
+# `omniroute run` itself has no header option (`omniroute run --help`: port,
+# remote/base-url, context, provider, model, profile, token/api-key[-env],
+# dry-run, json), so each launched CLI has to put the headers on its own
+# requests. Measured 2026-09-28 against a local listener the launcher was
+# pointed at with --remote (no gateway spend):
+#   codex  -c 'model_providers.omniroute.http_headers.<name>="<value>"', which
+#          MUST sit before the `exec` subcommand: after it the override replaces
+#          the whole model_providers table and codex aborts with "provider name
+#          must not be empty". A dotted segment with dashes parses; a quoted
+#          segment (."x-...") is dropped without a word.
+#   gemini GEMINI_CLI_CUSTOM_HEADERS="<name>:<value>,<name2>:<value2>"
+#          (bundle parseCustomHeaders: split on /,(?=\s*[^,:]+:)/, first ':'
+#          divides). Both headers arrived on the model request.
+#   qwen   nothing: customHeaders exists only in settings.json, and the launcher
+#          owns the temporary QWEN_HOME it deletes on exit; the one env hook
+#          (QWEN_CODE_SYSTEM_SETTINGS_PATH) is the machine-wide system settings
+#          file, not something one spawn may write.
+# So qwen rows stay untagged; docs/routing.md says so too.
+CODEX_PROVIDER_TABLE = "model_providers.omniroute"
+GEMINI_CUSTOM_HEADERS_ENV = "GEMINI_CLI_CUSTOM_HEADERS"
+HEADER_CLIENTS = ("gemini", "codex")  # gateway clients that can carry a header
+
+
+def gateway_header_args(client: Client, headers: dict | None) -> list:
+    """The launcher-argv prefix that gives `client` its per-request headers."""
+    if client.name != "codex" or not headers:
+        return []
+    args = []
+    for name, value in headers.items():
+        args += ["-c", '%s.http_headers.%s="%s"' % (CODEX_PROVIDER_TABLE, name, value)]
+    return args
+
+
+def gemini_custom_headers(headers: dict | None) -> str:
+    """The GEMINI_CLI_CUSTOM_HEADERS value for these headers ('k:v' pairs)."""
+    return ",".join("%s:%s" % (name, value) for name, value in (headers or {}).items())
+
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
-                  model: str | None = None, joinable: str | None = None) -> list:
-    """The argv for one headless task. opencode is built by autoos-agent.py itself."""
+                  model: str | None = None, joinable: str | None = None,
+                  headers: dict | None = None) -> list:
+    """The argv for one headless task. opencode is built by autoos-agent.py itself.
+
+    `headers` are the run's gateway request headers; only a client that can put
+    them on a request uses them (gateway_header_args, gemini_custom_headers).
+    """
     mode = client.modes.get(level, [])
     if client.name == "claude":
         if joinable:
@@ -116,8 +159,9 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
         inner = ["--skip-trust"] + mode + ["-p", task]
     else:  # qwen
         inner = mode + ["-p", task]
-    return ["omniroute", "run", client.name, "--model", model or combo,
-            "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] + inner
+    return (["omniroute", "run", client.name, "--model", model or combo,
+             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] +
+            gateway_header_args(client, headers) + inner)
 
 
 # CLAUDEBUDGET-h item 2 (Muse#high on 4fc082b..d1eb9c8, findings 2+4): ONE table

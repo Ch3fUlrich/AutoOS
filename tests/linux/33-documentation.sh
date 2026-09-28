@@ -563,7 +563,7 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, AUTOOS_AGENT_RUN_ID, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi
@@ -582,9 +582,24 @@ if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch ta
     out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
+# the glob matcher, every policy.risk_rules shape, the sha audit draw, assess()
+# against a temp git repo, and the `risk` verb. Fixtures are temp repos and
+# injected runners; no gateway, no network, nothing spawned.
+if it "autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)"; then
+    out="$(python3 tests/test_autoos_risk.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/vibe_kanban_bridge.py: the board's missing dependency, capacity-pickup
+# and pause logic (FLEETSPEC §6.1, D-089/D-095). Pure/fake-driven; no live Vibe
+# Kanban is contacted.
+if it "vibe_kanban_bridge: dependencies, readiness, pause, poll loop (unit tests)"; then
+    out="$(python3 tests/test_vibe_kanban_bridge.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "resolver v2: measure() features and client_state (unit tests)"; then
@@ -623,6 +638,12 @@ fi
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy
+# fallback, locked merge-save) - temp dirs only, never the real state dir.
+if it "autoos_overlay: machine-wide overlay path, legacy fallback, locked merge-save (unit tests)"; then
+    out="$(python3 tests/test_autoos_overlay.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # catalog/ai-registry.json (routing v2 spec section 3): check rules.
@@ -763,7 +784,9 @@ fi
 # matches nothing), MCP write tools bypass the edit/write deny, and a leaf
 # never commits or pushes. Live 2026-09-24 the old stanza let t3-reviewer commit
 # through the shell and overwrite a file through serena's create_text_file.
-if it "t3-reviewer fences the shell, serena and omnigraph writes"; then
+# KEYDENY 2026-09-28: the same stanza allowed every `read`, so the read_deny_all
+# fences are asserted here too — as patterns and as a decision on real paths.
+if it "t3-reviewer fences the shell, read, serena and omnigraph writes"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
@@ -778,6 +801,49 @@ def last(action, resource):
 for pat in fences["bash_deny_all"] + fences["bash_deny_leaf"]:
     if last("shell", pat) != "deny":
         problems.append("shell:" + pat)
+for pat in fences["read_deny_all"]:
+    if last("read", pat) != "deny":
+        problems.append("read:" + pat)
+for pat in fences["bash_allow_all"]:
+    if last("shell", pat) != "allow":
+        problems.append("shell-allow:" + pat)
+for pat in fences["read_allow_all"]:
+    if last("read", pat) != "allow":
+        problems.append("read-allow:" + pat)
+# KEYDENY: a fence is a decision over a path, not a list of names. Fixture
+# paths only — no real key file is opened, the deny is on the name.
+import fnmatch
+def decide(action, value):
+    verdict = None
+    for a, r, e in t3:
+        if a == action and fnmatch.fnmatch(value, r):
+            verdict = e
+    return verdict
+for path in ("configuration/api-keys.yml",
+             "/home/x/.config/autoos/ai-stack/client.key",
+             "/home/x/.config/autoos/ai-stack/manage.key"):
+    if decide("read", path) != "deny":
+        problems.append("read-open:" + path)
+    if decide("shell", "cat " + path) != "deny":
+        problems.append("shell-open:" + path)
+# KEYDENY2: a shell rule matches the whole command line, so the substring allow
+# *api-keys.example* licensed the real key file the moment its name shared a
+# line with the template — and let a copy out under an *.example* path.
+for command in ("cat configuration/api-keys.yml configuration/api-keys.example.yml",
+                "cp configuration/api-keys.yml /tmp/api-keys.example/x",
+                "cat /tmp/api-keys.example/stolen"):
+    if decide("shell", command) != "deny":
+        problems.append("shell-substring-abuse:" + command)
+example = "configuration/api-keys.example.yml"
+if decide("read", example) != "allow":
+    problems.append("read-denied-example")
+if decide("shell", "cat " + example) != "deny":
+    problems.append("shell-cats-example")
+# A read allow is a path, not a substring: a backup named after the template
+# stays denied.
+for path in ("/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"):
+    if decide("read", path) != "deny":
+        problems.append("read-open-near-miss:" + path)
 if last("serena_*", "*") != "deny":
     problems.append("serena-writes-open")
 for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "autoos-agent_*"):

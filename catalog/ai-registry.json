@@ -97,6 +97,46 @@
       "reasoning": false,
       "tool_calls": "proven"
     },
+    "claude-fable-5-1": {
+      "$comment": "AUTHORS (S1) 2026-09-28: an orchestrator model, registered so the review gate can resolve WHO wrote a lane record (tools/autoos_resolver.py author_family reads this table). An author, not a route: no provider names it, no leg serves it, and the resolver cannot send work here. Window is the 1M class policy.handoff_caps.claude-opus-1m states for 'fable'; the ladder, output_max and $0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)'), never read for a plan.",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-fable-5-1",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-haiku-4-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the orchestrator's cheap first-pass model, spelled as its own client reports it (policy.reviewers spells the same reviewer 'haiku'). Author-only: no provider names it and no leg serves it, so it can never be routed to - and an anthropic author keeps an anthropic reviewer out of the cross-family seat. Window/ladder/output are the 200k-class defaults of claude-opus-4-6; $0 marginal per docs/models.md 'Claude family'.",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-haiku-4-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "claude-opus-4-6": {
       "$comment": "cc (Claude Code subscription) overflow leg; same sourced $0 marginal cost and conservative ladder as claude-opus-4-6-thinking.",
       "context_advertised": 200000,
@@ -131,6 +171,46 @@
       ],
       "family": "anthropic",
       "id": "claude-opus-4-6-thinking",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-opus-5-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the L1/L2 orchestrator model this host actually runs, spelled as its own client reports it. Before it was registered, `ready` refused every record it wrote ('author claude-opus-5-5 is not a model, leg, route or reviewer the registry knows') and lanes borrowed claude-opus-4-6 - a false statement about who wrote the diff. Author-only: no provider names it, no leg serves it, nothing routes to it. Window is the 1M class policy.handoff_caps.claude-opus-1m states for 'opus'; ladder/output/$0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)').",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-opus-5-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-sonnet-5": {
+      "$comment": "AUTHORS (S1) 2026-09-28: the final-checker model (R-orch-10, Q-003), and the author of the records it signs. Author-only - no provider names it, no leg serves it; `is_final_reviewer` matches its NAME and does not read this row. Window is the 1M class policy.handoff_caps.claude-sonnet-1m states for 'sonnet'; ladder/output/$0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)').",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-sonnet-5",
       "output_max": 32768,
       "price_in": 0.0,
       "price_out": 0.0,
@@ -1358,38 +1438,38 @@
     },
     "handoff_caps": {
       "claude-opus-1m": {
-        "cap_fraction": 0.6,
-        "cap_tokens": 600000,
+        "cap_fraction": 0.5,
+        "cap_tokens": 500000,
         "match": ["opus", "fable"],
-        "source": "operator 2026-09-27T10:4xZ (common.md 'Operator direction 10:4xZ': Opus orchestrators hand off at 600k, 60% of 1M; was 400k 2026-09-25)",
+        "source": "operator D-088 2026-09-28 (typed in the L1-routing session): orchestration sessions hand off at 500k (was 600k, operator 2026-09-27T10:4xZ)",
         "window": 1000000
       },
       "muse-spark-1m": {
-        "cap_fraction": 0.3,
-        "cap_tokens": 300000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 400000,
         "match": ["spark"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 400k (was 300k)",
         "window": 1000000
       },
       "gemini-1m": {
-        "cap_fraction": 0.2,
-        "cap_tokens": 200000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 400000,
         "match": ["gemini"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 400k (was 200k)",
         "window": 1000000
       },
       "claude-sonnet-1m": {
-        "cap_fraction": 0.25,
-        "cap_tokens": 250000,
+        "cap_fraction": 0.5,
+        "cap_tokens": 500000,
         "match": ["sonnet"],
-        "source": "routing-00 D-085 2026-09-28 (L2 sonnet orchestrators handed off every ~15 min at 150k; fresh L2 baseline 55.5k measured); lower again after RESTART packs if a relaunch costs < ~20k",
+        "source": "operator D-088 2026-09-28 (typed in the L1-routing session): orchestration sessions (sonnet L2s, 1M window) hand off at 500k (was 250k D-085, 150k before)",
         "window": 1000000
       },
       "200k-class": {
-        "cap_fraction": 0.75,
-        "cap_tokens": 150000,
+        "cap_fraction": 0.4,
+        "cap_tokens": 80000,
         "match": ["*"],
-        "source": "2026-09-25",
+        "source": "operator D-088 2026-09-28: worker agents hand off at min(40% of window, 400k) = 80k of a 200k window (was 150k)",
         "window": 200000
       }
     },
@@ -1443,6 +1523,14 @@
         }
       }
     },
+    "risk_audit_percent": {
+      "$comment": [
+        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): how much of the NORMAL-risk work gets the Sonnet final on top of its two cheap cross-family reviews. tools/autoos_risk.py audit() decides it as int(sha[:12], 16) % 100 < percent — deterministic in the commit itself, so re-running the classifier after an unlucky draw cannot shop for a friendlier bucket.",
+        "Why a sample instead of a rule: the final is the expensive eye. Paying it on 100% of normal work is the cost this routing scheme exists to avoid; paying it on 0% would make the audit meaningless. The value stays clock-free and machine-free (rule 5), so the draw is a property of the commit."
+      ],
+      "source": "operator Q-013 2026-09-28",
+      "value": 20
+    },
     "risk_rules": [
       {
         "pattern": "configuration/api-keys.yml",
@@ -1487,8 +1575,9 @@
         "type": "path_glob"
       },
       {
+        "min_deleted_lines": 200,
         "reason": "deletion paths",
-        "source": "default",
+        "source": "default; threshold RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
         "type": "diff_deletion"
       },
       {
@@ -1502,8 +1591,204 @@
         "reason": "security settings",
         "source": "default",
         "type": "path_glob"
+      },
+      {
+        "pattern": ".agents/skills/**",
+        "reason": "skill rules",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "AGENTS.md",
+        "reason": "policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "CLAUDE.md",
+        "reason": "policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "docs/plans/**",
+        "reason": "plans/specs (R-orch-13)",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "docs/**/*spec*.md",
+        "reason": "plans/specs (R-orch-13)",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "docs/agent-protocol.md",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "tools/autoos_agent_mcp.py",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "catalog/*.schema.json",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "tools/autoos_redact.py",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.key",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*secret*",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.pem",
+        "reason": "secrets",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/.env",
+        "reason": "secrets",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "exclude": "**/*.example",
+        "pattern": "**/.env.*",
+        "reason": "secrets",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/migrations/**",
+        "reason": "data migrations",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.pg",
+        "reason": "data migrations",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.sql",
+        "reason": "data migrations",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "Windows/ansible/**",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/install*.sh",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/install*.ps1",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/setup*",
+        "reason": "installer",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/bootstrap*",
+        "reason": "installer",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/Install*",
+        "reason": "installer",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "\\bsudo\\b",
+        "reason": "root/sudo (R-orch-10)",
+        "source": "operator Q-013 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "reason": "secret content",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "pattern": "AKIA[0-9A-Z]{16}",
+        "reason": "secret content",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "pattern": "ghp_[A-Za-z0-9]{36}",
+        "reason": "secret content",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "pattern": "sk-[A-Za-z0-9_-]{20,}",
+        "reason": "secret content",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "pattern": "xox[baprs]-",
+        "reason": "secret content",
+        "source": "RISKTIER-a2 review (Muse xhigh, D-060) 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "reason": "routing policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "registry_policy"
       }
     ],
+    "review_counts": {
+      "$comment": [
+        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): what each risk class costs in review eyes. cross_family is how many reviewers tools/autoos_resolver.py _select_reviewers must pick from a family other than the author's; final is whether the Claude-client Sonnet close (spec 5.7 D2, the resolver's own _CLOSER) runs on top of them.",
+        "The class itself is no longer the writer's call: tools/autoos_risk.py reads it off the diff against policy.risk_rules, so these numbers are what a high-risk diff pays, not what it volunteers. Normal work gets two cheap cross-family reviews plus the sampled final (policy.risk_audit_percent); high work pays the SAME two cross-family reviews and adds the final on top. RISKTIER-a declared high as 1 + final, which reviewed a dangerous change with fewer eyes than a routine one — the operator's Q-013 line in common.md is 'two diverse cheap cross-family reviews, and for high the same two plus the Sonnet final' (RISKTIER-a2, D-060)."
+      ],
+      "high": {
+        "cross_family": 2,
+        "final": true,
+        "source": "operator Q-013/D-060 2026-09-28 (common.md)"
+      },
+      "normal": {
+        "cross_family": 2,
+        "final": false,
+        "source": "operator Q-013 2026-09-28"
+      }
+    },
     "seed_priors": {
       "cheap": {
         "S0": {
@@ -1985,6 +2270,8 @@
       "$comment": "peak_utc/peak_days from provider-windows.json, half price everywhere else per its offpeak_note; the three off-peak weekday ranges and the full weekend range are this converter's hand-computed complement of the two peak ranges (00:00-23:59 used for 'through end of day' - the registry's utc_to pattern has no 24:00). ADR 0006 finding C5: this source is only a *partial* match for DeepSeek's real pricing - the 'excluding Chinese public holidays' rule is not captured here either. BACK ON (DSBACK): operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK); GET /user/balance measured is_available=true. This reverses the 402 Insufficient Balance of 2026-09-27T16:4xZ, when the provider was switched off entirely (available: false) until topped up and the routes whose only served leg was deepseek/* (deepseek-v4.1-flash) failed closed like t1/spark. The per-leg operator flags are NOT reversed by this: opencode-zen/deepseek-v4.1-flash keeps its own route gate (measured 402/429 by tools/probe-toolcalls.py) and openrouter stays available: false.",
       "api_base": null,
       "available": true,
+      "monthly_cap_usd": 25,
+      "monthly_cap_source": "operator 2026-09-28T07:4xZ DeepSeek paid cap",
       "source": "operator top-up 2026-09-28T07:4xZ, router balance check 19.99 USD (DSBACK)",
       "id": "deepseek",
       "litellm_env": "DEEPSEEK_API_KEY",

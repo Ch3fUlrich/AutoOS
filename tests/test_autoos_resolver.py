@@ -1947,6 +1947,65 @@ class PlanTests(unittest.TestCase):
             "reason": "cross-family reviewer(s): r-free, r-cheap",
         })
 
+    def test_review_counts_come_from_the_policy_when_the_registry_declares_them(self):
+        # RISKTIER-a: what a class costs is registry data, not a constant here.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 2, "final": False, "source": "test"},
+            "high": {"cross_family": 1, "final": True, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        # r-free (alpha) chosen: the two cheapest other families are r-cheap
+        # (beta) and r-mid (gamma); r-frontier is alpha again, so it stays out.
+        self.assertEqual(plan["reviewers"]["routes"], ["r-cheap", "r-mid"])
+        self.assertIsNone(plan["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["routes"], ["r-cheap"])
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
+    def test_review_counts_declaring_no_final_leaves_the_closer_out(self):
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "high": {"cross_family": 2, "final": False, "source": "test"},
+        }
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["closer"], None)
+
+    def test_a_policy_asking_for_no_cross_family_reviewer_gets_none(self):
+        # zero means zero. The pick loop breaks on the cap BEFORE appending, so
+        # a 0-count policy routes no reviewer at all; an append-then-check loop
+        # (what the hard-coded table made harmless) would always return one.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 0, "final": False, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        self.assertEqual(plan["reviewers"]["routes"], [])
+        self.assertIsNone(plan["reviewers"]["closer"])
+        self.assertIn("cross-family reviewer(s):", plan["reviewers"]["reason"])
+
+    def test_an_absent_review_counts_key_falls_back_to_d2s_numbers(self):
+        # The constants stay as the fallback, so a registry that predates
+        # policy.review_counts routes exactly as it did before the field.
+        registry = self.registry()
+        registry["policy"].pop("review_counts", None)
+        normal = r.plan(self.card(), self.features(), self.state(), registry,
+                        {}, [], "orch", self.now())
+        self.assertEqual(normal["reviewers"]["routes"], ["r-cheap"])
+        self.assertIsNone(normal["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(len(high["reviewers"]["routes"]), 2)
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
     def test_escalation_logic_raises_one_rung_capability_moves_up_a_class(self):
         result = self.s3_plan()
         self.assertEqual(result["escalation"], [
@@ -2005,9 +2064,9 @@ class PlanTests(unittest.TestCase):
         """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
         sensitive-routing regression below needs an agentic kind's
         tool_calls proven for at least one private-safe leg, but
-        logs/routing/measured.json (the real probe's overlay) is
-        git-ignored and absent on a fresh clone or in CI. Marks the
-        -clean routes' head leg (clean_head_leg: private-safe — paid tier,
+        the real probe's overlay (tools/autoos_overlay.py) is never in
+        git and absent on a fresh clone or in CI. Marks the -clean routes'
+        head leg (clean_head_leg: private-safe — paid tier,
         trains_on_prompts false, no model-level override) proven and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
@@ -2025,7 +2084,7 @@ class PlanTests(unittest.TestCase):
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
         # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
         # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
-        # instead of reading the git-ignored logs/routing/measured.json --
+        # instead of reading the machine-wide overlay --
         # see
         # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
         # below for the real-probe-overlay variant, which may still skip.
@@ -2051,13 +2110,17 @@ class PlanTests(unittest.TestCase):
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
         # Extra (PRIV2): the same regression against the real probe's
-        # overlay, when one happens to be on disk. logs/routing/measured.json
-        # is git-ignored, so this skips on a fresh clone or in CI rather than
-        # failing -- the inline-overlay test above is the one that must run.
-        overlay_path = (Path(__file__).resolve().parent.parent
-                        / "logs" / "routing" / "measured.json")
-        if not overlay_path.is_file():
-            self.skipTest("no logs/routing/measured.json overlay to probe with")
+        # overlay, when one happens to be on disk. The machine-wide overlay
+        # (autoos_overlay, OVERLAYHOME) is never in git, so this skips on a
+        # fresh clone or in CI rather than failing -- the inline-overlay test
+        # above is the one that must run. Read-only: it never writes the file.
+        import autoos_overlay
+        found = autoos_overlay.found(
+            autoos_overlay.default_path(),
+            autoos_overlay.legacy_path(str(Path(__file__).resolve().parent.parent)))
+        if found is None:
+            self.skipTest("no tool_calls overlay on this machine to probe with")
+        overlay_path = Path(found)
         registry_path = (Path(__file__).resolve().parent.parent
                          / "catalog" / "ai-registry.json")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -2185,9 +2248,23 @@ class GatewayOrderTests(unittest.TestCase):
         # models through paid APIs (no cheaperinference/claude-*, no
         # cheaperinference/gpt-*): too expensive" - "DROP the review combo on
         # cheaperinference/claude-sonnet-5".
+        #
+        # AUTHORS (S1) 2026-09-28 rewrote the two models-table limbs as the leg
+        # test they were standing in for. "claude-sonnet-5 is not in models" was
+        # never the rule; "nothing routes to it" is, and registering the
+        # orchestrator's own model as an AUTHOR id -- so `review-status` can read
+        # a record the Sonnet final wrote instead of refusing it -- says nothing
+        # about legs. An author row carries no provider and no route names it;
+        # what keeps Claude and GPT off a paid API is policy.leg_rules
+        # deny-claude-paid-api / deny-gpt-paid-api, checked by registry rule 9.
         registry = self.registry()
-        self.assertNotIn("claude-sonnet-5", registry["models"])
-        self.assertNotIn("gpt-5.6-terra", registry["models"])
+        legs = {leg for route in registry["routes"].values()
+                for leg in (route.get("legs") or [])
+                + list(route.get("unavailable_legs") or {})}
+        for mid in ("claude-sonnet-5", "gpt-5.6-terra"):
+            self.assertEqual([leg for leg in sorted(legs)
+                              if leg.split("/", 1)[1:2] == [mid]], [],
+                             "%s is an author id, never a routable leg" % mid)
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 self.assertFalse(leg.startswith("cheaperinference/claude"), leg)

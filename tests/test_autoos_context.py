@@ -98,40 +98,41 @@ class CapTests(unittest.TestCase):
 
     def test_table_holds_the_section_8_3_rows(self):
         self.assertEqual(ctx.DEFAULT_CAPS, [
-            ("opus", 1000000, 600000),
-            ("fable", 1000000, 600000),
-            ("spark", 1000000, 300000),
-            ("gemini", 1000000, 200000),
-            ("sonnet", 1000000, 250000),
-            ("*", 200000, 150000),
+            ("opus", 1000000, 500000),
+            ("fable", 1000000, 500000),
+            ("spark", 1000000, 400000),
+            ("gemini", 1000000, 400000),
+            ("sonnet", 1000000, 500000),
+            ("*", 200000, 80000),
         ])
 
     def test_named_rows(self):
-        self.assertEqual(ctx.cap_for("claude-opus-4-6", ctx.DEFAULT_CAPS), 600000)
-        self.assertEqual(ctx.cap_for("fable-1", ctx.DEFAULT_CAPS), 600000)
-        self.assertEqual(ctx.cap_for("muse-spark-1.3", ctx.DEFAULT_CAPS), 300000)
-        self.assertEqual(ctx.cap_for("gemini-3.1-pro", ctx.DEFAULT_CAPS), 200000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6", ctx.DEFAULT_CAPS), 500000)
+        self.assertEqual(ctx.cap_for("fable-1", ctx.DEFAULT_CAPS), 500000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro", ctx.DEFAULT_CAPS), 400000)
 
-    def test_sonnet_l2_hands_off_at_250k(self):
-        # routing-00 D-085: sonnet L2 orchestrators (1M window) hand off at 250k.
-        self.assertEqual(ctx.cap_for("claude-sonnet-5", ctx.DEFAULT_CAPS), 250000)
-        self.assertEqual(ctx.cap_for("claude-sonnet-5[1m]", ctx.DEFAULT_CAPS), 250000)
+    def test_orchestrators_hand_off_at_500k(self):
+        # Operator D-088 (2026-09-28): orchestration sessions (1M models) hand off at 500k;
+        # worker agents at min(40% of their window, 400k).
+        self.assertEqual(ctx.cap_for("claude-sonnet-5", ctx.DEFAULT_CAPS), 500000)
+        self.assertEqual(ctx.cap_for("claude-sonnet-5[1m]", ctx.DEFAULT_CAPS), 500000)
 
     def test_200k_class_falls_through_to_the_default(self):
-        self.assertEqual(ctx.cap_for("claude-haiku-4-5", ctx.DEFAULT_CAPS), 150000)
-        self.assertEqual(ctx.cap_for("some-unknown-model", ctx.DEFAULT_CAPS), 150000)
+        self.assertEqual(ctx.cap_for("claude-haiku-4-5", ctx.DEFAULT_CAPS), 80000)
+        self.assertEqual(ctx.cap_for("some-unknown-model", ctx.DEFAULT_CAPS), 80000)
 
     def test_match_is_case_insensitive_substring(self):
-        self.assertEqual(ctx.cap_for("Claude-OPUS-4-6", ctx.DEFAULT_CAPS), 600000)
+        self.assertEqual(ctx.cap_for("Claude-OPUS-4-6", ctx.DEFAULT_CAPS), 500000)
 
     def test_first_matching_row_wins(self):
-        self.assertEqual(ctx.cap_for("gemini-opus-hybrid", ctx.DEFAULT_CAPS), 600000)
+        self.assertEqual(ctx.cap_for("gemini-opus-hybrid", ctx.DEFAULT_CAPS), 500000)
 
     def test_bracket_1m_takes_the_family_row(self):
-        self.assertEqual(ctx.cap_for("fable[1m]", ctx.DEFAULT_CAPS), 600000)
-        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]", ctx.DEFAULT_CAPS), 300000)
-        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]", ctx.DEFAULT_CAPS), 200000)
-        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]", ctx.DEFAULT_CAPS), 600000)
+        self.assertEqual(ctx.cap_for("fable[1m]", ctx.DEFAULT_CAPS), 500000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]", ctx.DEFAULT_CAPS), 400000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]", ctx.DEFAULT_CAPS), 500000)
 
     def test_the_caller_supplies_the_table(self):
         caps = [("small", 1000, 500), ("*", 2000, 1500)]
@@ -179,11 +180,11 @@ class RegistryCapsTests(unittest.TestCase):
             self.assertEqual(ctx.cap_for("fable-1", caps), 123)
             self.assertEqual(ctx.cap_for("claude-sonnet-4-5", caps), 150000)
 
-    def test_live_registry_gives_sonnet_250k(self):
+    def test_live_registry_gives_sonnet_500k(self):
         caps, source = ctx.load_caps()
         self.assertEqual(source, "policy")
-        self.assertEqual(ctx.cap_for("claude-sonnet-5", caps), 250000)
-        self.assertEqual(ctx.cap_for("claude-haiku-4-5", caps), 150000)
+        self.assertEqual(ctx.cap_for("claude-sonnet-5", caps), 500000)
+        self.assertEqual(ctx.cap_for("claude-haiku-4-5", caps), 80000)
 
     def test_missing_registry_falls_back_to_default(self):
         """Missing registry file -> DEFAULT_CAPS with source 'default'."""
@@ -236,10 +237,10 @@ class RegistryCapsTests(unittest.TestCase):
 
     def test_bracket_1m_rule_unchanged_with_registry(self):
         """The [1m] rule works the same whether caps come from registry or default."""
-        self.assertEqual(ctx.cap_for("fable[1m]"), 600000)
-        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]"), 300000)
-        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]"), 200000)
-        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]"), 600000)
+        self.assertEqual(ctx.cap_for("fable[1m]"), 500000)
+        self.assertEqual(ctx.cap_for("muse-spark-1.3[1m]"), 400000)
+        self.assertEqual(ctx.cap_for("gemini-3.1-pro[1m]"), 400000)
+        self.assertEqual(ctx.cap_for("claude-opus-4-6[1m]"), 500000)
 
 
 class CliTests(unittest.TestCase):
@@ -270,7 +271,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(
             proc.stdout.strip(),
-            "context: 200000 / 600000 (33%%) model=claude-opus-4-6 transcript=%s"
+            "context: 200000 / 500000 (40%%) model=claude-opus-4-6 transcript=%s"
             % self.transcript)
 
     def test_json_output_has_every_field(self):
@@ -279,8 +280,8 @@ class CliTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         self.assertEqual(data, {
             "tokens": 200000,
-            "cap": 600000,
-            "pct": 33,
+            "cap": 500000,
+            "pct": 40,
             "model": "claude-opus-4-6",
             "transcript": str(self.transcript),
             # C4: the cap comes from the registry's policy.handoff_caps now
@@ -294,8 +295,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         data = json.loads(proc.stdout)
         self.assertEqual(data["model"], "gemini-3.1-pro")
-        self.assertEqual(data["cap"], 200000)
-        self.assertEqual(data["pct"], 100)
+        self.assertEqual(data["cap"], 400000)
+        self.assertEqual(data["pct"], 50)
 
 
 class DiscoveryTests(unittest.TestCase):
