@@ -2577,7 +2577,12 @@ class CardV2Tests(unittest.TestCase):
             "kind": "implement", "risk": "normal", "spec": "partial",
             "privacy": "public", "mode": "balanced", "deferrable": False,
             "deadline": None, "paths": [], "override": {},
+            "author": None,
         })
+        # REVROUTE (S2) item 2: author is shared by both dialects and is not a
+        # combo input -- it decides who reviews, never what runs.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
 
     def test_an_empty_card_is_v2_with_defaults(self):
         out = self.norm({})
@@ -2730,6 +2735,54 @@ class CardV2Tests(unittest.TestCase):
         out = self.norm({"privacy": "sensitive"})
         self.assertEqual(out["privacy"], "sensitive")
         self.assertEqual(out["version"], "2")
+
+    # --- author (brief REVROUTE (S2) item 2) -------------------------------
+    # Which model wrote the diff is what decides who may review it, so the
+    # field belongs to both card dialects: role=review,author=qwen is how a
+    # lane already spells the request.
+
+    def test_author_is_shared_and_never_a_mix(self):
+        out = self.norm({"author": "qwen"})
+        self.assertEqual(out["author"], "qwen")
+        self.assertEqual(out["version"], "2")
+        v1 = self.norm({"role": "review", "author": "qwen"})
+        self.assertEqual(v1["author"], "qwen")
+        self.assertEqual(v1["version"], "1")
+        self.assertEqual(v1["kind"], "review")
+
+    def test_a_v2_card_carries_its_author(self):
+        self.assertEqual(self.norm({"kind": "review",
+                                    "author": "meta_api/muse-spark-1.3-contributor"})
+                         ["author"], "meta_api/muse-spark-1.3-contributor")
+
+    def test_an_absent_author_is_none_not_a_default_reviewer(self):
+        # No author means the orchestrator did not say who wrote it: the
+        # different-family rule cannot run, and inventing an author would let
+        # the resolver claim a cross-family review nobody asked for.
+        self.assertIsNone(self.norm({"kind": "review"})["author"])
+
+    def test_key_value_form_reads_the_author(self):
+        self.assertEqual(self.norm(routing.parse_card("role=review,author=qwen"))
+                         ["author"], "qwen")
+
+    def test_an_empty_author_is_an_error(self):
+        for card in ({"author": ""}, {"author": "   "}, {"author": None},
+                     {"author": 7}):
+            with self.assertRaises(routing.CardError):
+                self.norm(card)
+
+    def test_the_author_never_changes_the_combo(self):
+        # autoos_routing.select_combo is the one launch-time decision; a review
+        # card must route to the same combo with or without an author, or the
+        # field would be a second, undeclared routing input.
+        plain = routing.select_combo({"role": "review"})
+        with_author = routing.select_combo({"role": "review", "author": "qwen"})
+        self.assertEqual(plain, with_author)
+
+    def test_normalize_v1_keeps_the_author_for_the_spawner(self):
+        card = routing.normalize({"role": "review", "author": "qwen"})
+        self.assertEqual(card["author"], "qwen")
+        self.assertEqual(card["role"], "review")
 
     def test_absolute_path_is_an_error(self):
         with self.assertRaises(routing.CardError):
@@ -4608,7 +4661,8 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
             "defer_until": None}
 
 
-def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None):
+def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
+                     stop_tail=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -4624,6 +4678,10 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
 
     `args_over` (SPAWNFREE) overrides run-args fields (free, free_model, card,
     isolate); `policy` is the registry's policy section.
+
+    `stop_tail` (REVROUTE item 3) is what a stopped attempt prints; the
+    provider-state file is redirected into the same temp state dir and exposed
+    as `case.provider_state`.
     """
     agent = case.agent
     root = _init_git_root()
@@ -4640,6 +4698,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     os.chdir(root)
     agent.TRACK_RECORD = os.path.join(statedir, "track-record.jsonl")
     agent.MEASURED_OVERLAY_PATH = os.path.join(statedir, "measured.json")
+    case.provider_state = os.path.join(statedir, "provider-state.json")
+    old_provider_state = agent.PROVIDER_STATE_PATH
+    agent.PROVIDER_STATE_PATH = case.provider_state
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
     calls = {"n": 0, "cwds": [], "cmds": [], "route_marks": [], "free_models": [],
@@ -4664,7 +4725,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                   encoding="utf-8") as fh:
             fh.write("work\n")
         if calls["n"] <= stops:
-            return agent.ClientExit(0, tail="Error: Rate limit exceeded\n")
+            return agent.ClientExit(0, tail=stop_tail or "Error: Rate limit exceeded\n")
         return agent.ClientExit(0, tail="done\n")
 
     args = argparse.Namespace(
@@ -4707,8 +4768,9 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
         agent.time.time = old_time
         calls["track"] = agent.track.load(agent.TRACK_RECORD)
-        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH) = (
-            old_root, old_track, old_overlay)
+        (agent.ROOT, agent.TRACK_RECORD, agent.MEASURED_OVERLAY_PATH,
+         agent.PROVIDER_STATE_PATH) = (
+            old_root, old_track, old_overlay, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
     names = os.listdir(base) if os.path.isdir(base) else []
     return rc, out.getvalue(), err.getvalue(), calls, names
@@ -4860,9 +4922,11 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         line = "Error: credits exhausted"
         self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"), line)
 
-    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None):
+    def _run(self, route_ids, stops, clock=None, args_over=None, policy=None,
+             stop_tail=None):
         return _fallthrough_run(self, route_ids, stops, clock=clock,
-                                args_over=args_over, policy=policy)
+                                args_over=args_over, policy=policy,
+                                stop_tail=stop_tail)
 
     def test_a_provider_stop_falls_through_to_the_next_route_and_succeeds(self):
         rc, out, err, calls, sandboxes = self._run(["r-free", "r-cheap"], stops=1)
@@ -4934,6 +4998,32 @@ class ProviderStopFallthroughTests(unittest.TestCase):
             [("r-free", "fail", "provider"),
              ("r-cheap", "fail", "provider"),
              ("r-cheap2", "fail", "provider")], out + err)
+
+    # REVROUTE (S2) item 3: the stop line often states its own reset time, and
+    # that is worth more than a track record -- it takes the provider out of the
+    # rotation until the window passes.
+    AGY_RESET_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                      "Quota resets in ~83h\n")
+
+    def test_a_provider_stop_is_offered_to_the_reset_recorder(self):
+        recorded = []
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: recorded.append(a) or None):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual([call[1] for call in recorded], ["r-free"],
+                         "one record for the stopped attempt, none for the survivor")
+        self.assertIn("resets in ~83h", recorded[0][0])
+
+    def test_a_recorded_reset_window_is_printed_as_the_providers_new_until(self):
+        with mock.patch.object(self.agent, "record_reset_stop",
+                               lambda *a, **k: ("cheap-p", "2026-10-01T17:00:00Z")):
+            rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                               stop_tail=self.AGY_RESET_STOP)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("provider cheap-p unavailable until 2026-10-01T17:00:00Z",
+                      out + err)
 
 
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
@@ -6009,6 +6099,920 @@ class PsTests(_WorkerRecordBase):
         self.assertEqual([w["id"] for w in json.loads(r.stdout)["workers"]], ["recent"])
         out = mcp_server.ps(include_ended=True)
         self.assertEqual([w["id"] for w in out["workers"]], ["recent"])
+
+
+def _reviewer_registry():
+    """REVROUTE (S2) item 2 fixture: _small_route_registry() plus a
+    ``policy.reviewers`` list the spawner can walk.
+
+    Four reviewers, four families, one of them client-native (no ``leg``) and one
+    ``first_pass_only``. The two legs go through providers the fixture owns:
+    ``muse_api`` trains on prompts (so a privacy=sensitive card must walk past
+    it) and ``gem_api`` does not. Far-future/past dates are deliberate: no test
+    has to patch the clock to make a provider look down or back up.
+    """
+    reg = _small_route_registry()
+    reg["providers"]["muse_api"] = {"id": "muse_api", "tier": "paid",
+                                    "trains_on_prompts": True}
+    reg["providers"]["gem_api"] = {"id": "gem_api", "tier": "paid",
+                                   "trains_on_prompts": False}
+    # A sensitive card must still have a route to run on: the fixture's own two
+    # routes are private-safe, so only the *reviewer* list can fail privacy.
+    for provider in ("free-p", "cheap-p"):
+        reg["providers"][provider].update({"tier": "paid", "trains_on_prompts": False})
+    reg["models"]["muse-contrib"] = {"id": "muse-contrib", "family": "meta"}
+    reg["models"]["gem-flash"] = {"id": "gem-flash", "family": "google"}
+    # capabilities: --isolate asks for shell+write (SPAWNCAP), and a fixture with
+    # no declared client would be refused before the reviewer gate ever ran.
+    reg["clients"] = {
+        "opencode": {"id": "opencode", "capabilities": {"shell": True, "write": True}},
+        "claude": {"id": "claude", "capabilities": {"shell": True, "write": True}},
+    }
+    reg["policy"]["reviewers"] = [
+        {"client": "opencode", "model": "omniroute/muse", "family": "meta",
+         "leg": "muse_api/muse-contrib", "paid": True, "source": "test"},
+        {"client": "gemini", "model": "gem-flash", "family": "google",
+         "leg": "gem_api/gem-flash", "paid": False, "source": "test"},
+        {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen",
+         "paid": False, "source": "test"},
+        {"client": "claude", "model": "haiku", "family": "anthropic",
+         "paid": True, "first_pass_only": True, "source": "test"},
+    ]
+    return reg
+
+
+class ReviewerGateTests(unittest.TestCase):
+    """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
+    card from ``policy.reviewers``, and refuses to start a run that has no
+    eligible reviewer -- a same-family self-review is not an independent review,
+    and waiting is better than running one.
+
+    Same harness as RunCardV2Tests (no network, no real client probes, no key):
+    the registry and the client state are fixtures, the run is a dry run unless a
+    test is specifically checking that nothing was cloned or started.
+    """
+
+    DOWN = "2099-01-01T00:00:00Z"
+    DOWN_LATER = "2099-06-01T00:00:00Z"
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.tmp = tmp
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        # No recorded provider stop: this fixture decides who reviews from the
+        # registry and the probes, not from an outage some earlier run saw.
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "provider-state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.client_state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                             for name in ("opencode", "gemini", "qoder", "claude")}
+        state = mock.patch.object(self.agent.measure_mod, "client_state",
+                                  lambda *a, **k: dict(self.client_state))
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        # "muse" is the head of this fixture's policy.reviewers list spelled as a
+        # gateway model heading -- what REVROUTE item 4 makes opencode.jsonc do
+        # for the real paid reviewer.
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,author=qwen,paths=tools/registry.py",
+            allow_training=False, client="opencode", joinable=False, max_depth=None,
+            clean=False, model=None, free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, lean=False, title=None, dry_run=True, task="x",
+            no_defer=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def route(self, **overrides):
+        """The route dict cmd_run would act on (build_plan, no clone, no start)."""
+        return self.agent.build_plan(self.args(**overrides), self.cfg())["route"]
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    # --- the reviewer is picked from the registry, not from a constant ------
+
+    def test_an_authored_v2_review_card_carries_a_review_plan(self):
+        review = self.route()["review_plan"]
+        self.assertIsNotNone(review, "a kind=review card with an author must know who reviews")
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["author"], "qwen")
+        self.assertEqual(review["author_family"], "qwen")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_the_reviewer_is_cross_family_and_the_walk_stops_at_the_first_usable(self):
+        review = self.route()["review_plan"]
+        self.assertNotEqual(review["reviewer"]["family"], review["author_family"])
+        self.assertEqual(review["skipped"], [],
+                         "the head of the list was usable, nothing was passed over")
+
+    def test_a_same_family_reviewer_is_skipped_with_the_reason_exposed(self):
+        review = self.route(card="kind=review,author=meta,paths=tools/registry.py")["review_plan"]
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual([s["model"] for s in review["skipped"]], ["omniroute/muse"])
+        self.assertIn("same family as author (meta)", review["skipped"][0]["reasons"])
+
+    def test_a_v1_role_review_card_with_an_author_is_resolved_too(self):
+        def boom(*a, **k):
+            raise AssertionError("a v1 card must not be routed by the resolver")
+        with mock.patch.object(self.agent, "route_plan_for", boom):
+            review = self.route(card="role=review,author=qwen")["review_plan"]
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_a_sensitive_card_walks_past_the_training_reviewer(self):
+        route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
+                                "paths=tools/registry.py")
+        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        skipped = route["review_plan"]["skipped"]
+        self.assertEqual([s["model"] for s in skipped], ["omniroute/muse"])
+        self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
+                        "the reason must name privacy, not availability")
+
+    def test_the_author_never_changes_the_route_the_resolver_picks(self):
+        with_author = self.route()
+        without = self.route(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(with_author["reason"], without["reason"],
+                         "who reviews is decided from the same plan, so it must not "
+                         "move the route scoring")
+        self.assertEqual(with_author["bucket"], without["bucket"])
+
+    # --- the picked reviewer is the model that runs (item 2 + item 4) -------
+
+    def test_the_resolved_reviewer_is_the_model_that_runs(self):
+        route = self.route()
+        self.assertEqual(route["model"], "omniroute/muse")
+        self.assertEqual(route["combo"], "muse")
+        self.assertEqual(route["reviewer_note"], "reviewer-model: opencode omniroute/muse")
+
+    def test_the_reviewer_model_shows_up_in_the_command_the_run_would_use(self):
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--model omniroute/muse", out.replace("'", ""))
+        self.assertIn("reviewer: opencode omniroute/muse (family meta, author qwen)", out)
+
+    def test_the_run_prints_the_record_entry_the_lane_record_needs(self):
+        # REVROUTE (S2) item 5: readiness is read off the record, so the spawn
+        # that did the review has to hand over the line that goes in it --
+        # otherwise the gate asks for something nobody writes.
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("record-line: AutoOS-Review: kind=cross-family "
+                      "author=qwen reviewer=omniroute/muse", out)
+
+    def test_a_reviewer_model_that_opencode_json_does_not_declare_is_refused(self):
+        # REVROUTE (S2) item 4: the paid Muse reviewer must be DECLARED as a
+        # spawnable heading. Until it is, the run fails loudly instead of
+        # quietly reviewing on the resolver's generic route.
+        cfg = {"providers": {"omniroute": {"models": {"r-free": {}, "r-cheap": {}}}}}
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.agent.cmd_run(self.args(), cfg)
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("not declared in opencode.jsonc providers", err.getvalue())
+
+    def test_an_explicit_model_wins_over_the_reviewer_list(self):
+        route = self.route(model="omniroute/r-cheap")
+        self.assertEqual(route["model"], "omniroute/r-cheap")
+        self.assertNotEqual(route["combo"], "muse")
+        self.assertIn("an explicit --model wins", route["reviewer_note"])
+
+    def test_a_free_run_keeps_its_promo_model_and_says_the_reviewer_it_skipped(self):
+        route = self.route(free=True, free_model="opencode/muse-spark-1.3-contributor-free")
+        self.assertIsNone(route["model"], "--free carries no gateway model")
+        self.assertIn("--free keeps its promo model", route["reviewer_note"])
+        self.assertIn("opencode omniroute/muse", route["reviewer_note"])
+
+    def test_a_reviewer_on_another_client_is_announced_never_faked(self):
+        # Muse's provider is down, so the list picks Gemini -- which is not this
+        # run's client. The run must not pretend it is that review.
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        route = self.route()
+        self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
+        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
+        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
+        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+
+    def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
+        # route --explain must show the skipped reviewers, not only the run's own
+        # route scoring (brief item 2: "route --explain shows the skipped ones").
+        result = self.agent.route_plan_for(
+            "kind=review,author=meta,paths=tools/registry.py", "review this", str(ROOT),
+            "orch", datetime.datetime(2026, 9, 29, 9, 0, tzinfo=datetime.timezone.utc),
+            self.registry, {}, [], dict(self.client_state))
+        explain = "\n".join(result["explain"])
+        self.assertIn("reviewer skipped:", explain)
+        self.assertIn("same family as author (meta)", explain)
+        self.assertIsNotNone(result["review"])
+
+    # --- gated, not started --------------------------------------------------
+
+    def test_an_unauthored_review_card_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=review,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(self.route(card="kind=review,paths=tools/registry.py")["review_plan"])
+
+    def test_a_non_review_card_with_an_author_is_not_gated(self):
+        rc, out, err = self.run_cmd_run(card="kind=research,author=qwen,paths=tools/registry.py")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(
+            self.route(card="kind=research,author=qwen,paths=tools/registry.py")["review_plan"])
+
+    def everyone_down(self):
+        """Every reviewer is unreachable *with a date* (brief item 2's "queue
+        instead of skip when all are rate-limited"): Muse and Gemini through
+        their providers, Haiku and Qwen through their own client outage."""
+        self.registry["providers"]["muse_api"].update({
+            "available": False, "unavailable_until": self.DOWN_LATER})
+        self.registry["providers"]["gem_api"].update({
+            "available": False, "unavailable_until": self.DOWN})
+        self.registry["clients"]["qoder"] = {
+            "id": "qoder", "available": False, "unavailable_until": self.DOWN_LATER}
+        self.registry["clients"]["claude"] = {
+            "id": "claude", "available": False, "unavailable_until": self.DOWN_LATER}
+
+    def test_a_queued_review_refuses_with_exit_9_and_names_the_earliest_return(self):
+        self.everyone_down()
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
+        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertEqual(out, "", "a queued run prints nothing it did not decide")
+
+    def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
+        self.everyone_down()
+        review = self.route()["review_plan"]
+        self.assertEqual(review["state"], "queued")
+        # Gemini's window is the shortest one, so the queue is over then -- even
+        # though the author's own family (qoder) is also "down": that entry can
+        # never review this card, waiting on it would be waiting forever.
+        self.assertEqual(review["retry_at"], self.DOWN)
+        self.assertIn("earliest", review["reason"])
+
+    def test_an_unresolved_review_refuses_with_exit_2_and_never_a_retry_code(self):
+        # Only a meta reviewer exists, and the author is meta: no wait fixes it.
+        self.registry["policy"]["reviewers"] = self.registry["policy"]["reviewers"][:1]
+        rc, out, err = self.run_cmd_run(card="kind=review,author=meta,paths=tools/registry.py")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no reviewer is eligible for an author from family meta", err)
+
+    def test_a_signed_out_reviewer_is_a_refusal_that_names_the_sign_in(self):
+        # A dated outage is a wait; a missing sign-in is a human action. rc 9 here
+        # would loop forever and never say what to do, so the refusal is exit 2
+        # with the skipped reviewer's own reason on stderr. (Gemini is the
+        # reviewer here, not the run's own client, so the route plan is
+        # unaffected and only the reviewer walk can fail.)
+        reviewers = self.registry["policy"]["reviewers"]
+        self.registry["policy"]["reviewers"] = reviewers[1:3]
+        self.client_state["gemini"] = {"installed": True, "signed_in": False, "reason": ""}
+        rc, out, err = self.run_cmd_run()
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("client: gemini not signed in", err)
+
+    def test_the_gate_fires_before_any_clone_or_client_start(self):
+        agent = self.agent
+        self.registry["providers"]["muse_api"].update({"available": False,
+                                                       "unavailable_until": self.DOWN})
+        self.registry["providers"]["gem_api"].update({"available": False,
+                                                      "unavailable_until": self.DOWN})
+        self.client_state["qoder"] = {"installed": False}
+        self.client_state["claude"] = {"installed": False}
+        calls = []
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_WORKERS_DIR": self.tmp}, clear=True):
+            with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
+                with mock.patch.object(agent.clients, "signin_state",
+                                       lambda client, env=None: (None, "")):
+                    with mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = agent.cmd_run(self.args(dry_run=False, isolate=True),
+                                                self.cfg())
+        self.assertEqual(rc, 9, out.getvalue() + err.getvalue())
+        self.assertEqual(calls, [], "the client never started")
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "sandboxes"))
+                         if os.path.isdir(os.path.join(self.tmp, "sandboxes")) else [], [],
+                         "no clone was made for a run that cannot review")
+
+
+class ProviderResetStateTests(unittest.TestCase):
+    """REVROUTE (S2) item 3: a provider stop that states its own reset time
+    ("Individual quota reached ... resets in ~83h", "cooling down (reset after
+    51s)") is recorded as an ``unavailable_until`` in the spawner's own state,
+    and the resolver reads it -- the provider is skipped until then instead of
+    being handed the next task (measured: agy RESOURCE_EXHAUSTED 429 83h,
+    L1-backlog 2026-09-27T23:22:13Z; gemini cooling 19:3xZ).
+
+    Nothing here edits ``catalog/ai-registry.json``: the registry is the
+    operator's, this file is the machine's transient observation, git-ignored
+    beside ``measured.json`` and ``track-record.jsonl``.
+    """
+
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    AGY_STOP = ("AGY_ERROR: 429 RESOURCE_EXHAUSTED: Individual quota reached. "
+                "Quota resets in ~83h")
+    COOLING_STOP = "Error: 429 cooling down (reset after 51s)"
+    NO_RESET_STOP = "Error: 429 Rate limit exceeded"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state_path = os.path.join(self.tmp, "provider-state.json")
+        self.registry = _reviewer_registry()
+
+    def state(self):
+        with io.open(self.state_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # --- reading the reset out of the client's own line ----------------------
+
+    def test_resets_in_hours_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.AGY_STOP), 83 * 3600)
+
+    def test_reset_after_seconds_is_that_many_seconds(self):
+        self.assertEqual(self.agent.parse_reset(self.COOLING_STOP), 51)
+
+    def test_a_reset_spelled_out_in_minutes_is_minutes(self):
+        self.assertEqual(
+            self.agent.parse_reset("Error: 429 quota reached, try again in 15 minutes"),
+            15 * 60)
+
+    def test_a_day_sized_reset_is_days(self):
+        self.assertEqual(self.agent.parse_reset("Error: 429 quota resets in ~2d"),
+                         2 * 86400)
+
+    def test_a_stop_that_names_no_reset_parses_to_none(self):
+        self.assertIsNone(self.agent.parse_reset(self.NO_RESET_STOP))
+        self.assertIsNone(self.agent.parse_reset(""))
+
+    # --- which provider stopped ---------------------------------------------
+
+    def test_a_provider_named_in_the_line_is_the_one_recorded(self):
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: No active credentials for provider: sambanova. Quota resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_a_provider_named_by_its_gateway_alias_is_the_same_provider(self):
+        # The gateway spells a provider its own way (providers.<id>.omniroute_id);
+        # an error line quoting that spelling is the same provider, not a new one.
+        self.registry["providers"]["sambanova"] = {"id": "sambanova"}
+        self.registry["providers"]["sambanova"]["omniroute_id"] = "samba"
+        self.assertEqual(
+            self.agent.stop_provider_id(
+                "Error: no active credentials for provider: samba, resets in ~5m",
+                self.registry, ["muse_api/muse-contrib"]),
+            "sambanova")
+
+    def test_an_unnamed_stop_is_attributed_to_the_first_servable_leg(self):
+        # The gateway works down a route's legs in order, so the one that took
+        # the traffic is the first that is up right now.
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "muse_api")
+        self.registry["providers"]["muse_api"] = {"id": "muse_api", "available": False}
+        self.assertEqual(
+            self.agent.stop_provider_id(self.AGY_STOP, self.registry,
+                                        ["muse_api/muse-contrib", "free-p/free-model"]),
+            "free-p")
+
+    def test_a_stop_with_no_legs_to_choose_from_is_attributed_to_nothing(self):
+        self.assertIsNone(self.agent.stop_provider_id(self.AGY_STOP, self.registry, []))
+
+    # --- the state file ------------------------------------------------------
+
+    def test_a_stop_with_a_reset_records_the_provider_unavailable_until_then(self):
+        # r-cheap's only leg is cheap-p/cheap-model, and the stop line names no
+        # provider, so the leg that took the traffic is what gets the window.
+        recorded = self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                                 now=self.NOW, path=self.state_path)
+        self.assertEqual(recorded, ("cheap-p", "2026-10-01T23:00:00Z"),
+                         "83h after 2026-09-28T12:00Z -- the window the client "
+                         "itself stated, kept to the second it was told")
+        entry = self.state()["providers"]["cheap-p"]
+        self.assertEqual(entry["unavailable_until"], "2026-10-01T23:00:00Z")
+        self.assertEqual(entry["combo"], "r-cheap")
+        self.assertIn("resets in ~83h", entry["reason"])
+
+    def test_a_stop_without_a_reset_records_nothing_and_creates_no_file(self):
+        self.assertIsNone(self.agent.record_reset_stop(self.NO_RESET_STOP, "r-cheap",
+                                                       self.registry, now=self.NOW,
+                                                       path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_an_implausible_reset_is_not_recorded(self):
+        # A client printing "resets in ~400d" must not take a provider out of
+        # rotation for a year; that is an operator edit to the registry, not a
+        # spawner observation.
+        self.assertIsNone(self.agent.record_reset_stop(
+            "Error: 429 quota resets in ~400d", "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+    def test_a_later_stop_for_the_same_provider_extends_its_window(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+
+    def test_an_expired_record_is_pruned_when_the_next_stop_is_written(self):
+        self.agent.record_reset_stop(self.COOLING_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"])
+        later = self.NOW + datetime.timedelta(hours=1)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=later, path=self.state_path)
+        self.assertEqual(list(self.state()["providers"]), ["cheap-p"],
+                         "the 51s window expired and went; the 83h one is there")
+        self.assertEqual(self.state()["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-02T00:00:00Z")
+
+    def test_a_missing_or_corrupt_state_file_is_not_a_failure(self):
+        agent = self.agent
+        self.assertEqual(agent.load_provider_state(os.path.join(self.tmp, "none.json")), {})
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.load_provider_state(self.state_path), {})
+
+    # --- REVFIX S1: the file's SHAPE is not trusted -------------------------
+    #
+    # The state is written by this tool, but it lives in logs/ where a person
+    # fixes things by hand and where an older or buggier build may already have
+    # written something. A record of a transient outage is never worth failing a
+    # run over: a shape the reader did not expect is ignored with one warning,
+    # it must never raise into `route`/`run`/the reviewer walk.
+
+    def capture(self, fn, *a, **kw):
+        """fn(...)'s return value plus everything it wrote to stderr."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = fn(*a, **kw)
+        return result, err.getvalue()
+
+    def test_providers_spelled_as_a_list_is_ignored_with_a_warning(self):
+        # The exact shape REVFIX S1 reproduced: [{"providers": [...]}] used to
+        # raise AttributeError out of apply_provider_state and kill the run.
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": [{"muse_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}]})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "nothing was applied: %r" % (merged["providers"]["muse_api"],))
+        self.assertEqual(merged["providers"], self.registry["providers"],
+                         "an unreadable file changes no provider")
+        self.assertIn("provider-state", err)
+
+    def test_a_state_that_is_not_an_object_at_all_is_ignored_with_a_warning(self):
+        for bad in ({"providers": "down"}, {"providers": 7}, {"providers": [1, 2]}):
+            merged, err = self.capture(self.agent.apply_provider_state, self.registry, bad)
+            self.assertNotIn("available", merged["providers"]["muse_api"], str(bad))
+            self.assertIn("provider-state", err, str(bad))
+
+    def test_an_entry_that_is_not_an_object_is_ignored_with_a_warning(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": "down",
+                           "gem_api": {"unavailable_until": "2026-09-29T00:00:00Z"}}})
+        self.assertNotIn("available", merged["providers"]["muse_api"],
+                         "a string entry is not a record")
+        self.assertIs(merged["providers"]["gem_api"]["available"], False,
+                      "the well-shaped sibling is still applied")
+        self.assertEqual(err.count("provider-state"), 1,
+                         "one warning for the whole file, not one per row: %r" % err)
+
+    def test_a_record_stop_over_a_malformed_state_file_rewrites_it_cleanly(self):
+        # The writer cannot be poisoned by what it is reading either: the bad
+        # rows go and the file that comes back is the shape the reader expects.
+        with io.open(self.state_path, "w", encoding="utf-8") as fh:
+            json.dump({"providers": [{"muse_api": "the old wrong shape"}]}, fh)
+        recorded, err = self.capture(
+            self.agent.record_reset_stop, self.AGY_STOP, "r-cheap", self.registry,
+            now=self.NOW, path=self.state_path)
+        self.assertIn("provider-state", err)
+        self.assertEqual(recorded[0], "cheap-p")
+        providers = self.state()["providers"]
+        self.assertIsInstance(providers, dict)
+        self.assertEqual(list(providers), ["cheap-p"],
+                          "the malformed row was dropped, not carried forward")
+
+    # --- REVFIX S3: the read side honours the same cap the writer does ------
+
+    def test_a_window_beyond_the_cap_is_ignored_on_read(self):
+        # The write side refuses to RECORD a 400-day reset; a file that already
+        # says one (an old build, a hand edit) must not bench a provider for a
+        # year either -- 7 days is the most the spawner's word can cost.
+        far = (self.NOW + datetime.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": far}}}, now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+        self.assertIn("7", err, "the warning names the cap it applied")
+
+    def test_an_unparsable_window_is_ignored_on_read(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": "next tuesday"}}},
+            now=self.NOW)
+        self.assertNotIn("available", merged["providers"]["muse_api"])
+        self.assertIn("provider-state", err)
+
+    def test_a_window_inside_the_cap_is_still_applied(self):
+        inside = (self.NOW + datetime.timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"muse_api": {"unavailable_until": inside}}}, now=self.NOW)
+        self.assertIs(merged["providers"]["muse_api"]["available"], False)
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"], inside)
+        self.assertEqual(err, "", "a well-shaped record is not worth a warning")
+
+    # --- the resolver reads it ----------------------------------------------
+
+    def test_apply_marks_the_provider_down_for_the_resolver(self):
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
+        provider = merged["providers"]["muse_api"]
+        self.assertIs(provider["available"], False)
+        self.assertEqual(provider["unavailable_until"], "2026-10-01T23:00:00Z")
+        self.assertIsNot(merged["providers"]["muse_api"], self.registry["providers"]["muse_api"],
+                         "the loaded registry is copied, never mutated in place")
+
+    def test_apply_never_shortens_an_operators_outage(self):
+        self.registry["providers"]["muse_api"] = {
+            "id": "muse_api", "tier": "paid", "trains_on_prompts": True,
+            "available": False, "unavailable_until": "2099-06-01T00:00:00Z"}
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                           "2026-10-01T17:00:00Z"}}},
+            now=self.NOW)
+        # The cap is on what the STATE file may say, not on what the operator
+        # wrote: a 2099 date in the registry stays exactly as long as it reads.
+        self.assertEqual(merged["providers"]["muse_api"]["unavailable_until"],
+                          "2099-06-01T00:00:00Z")
+
+    def test_apply_ignores_a_provider_that_is_not_in_the_registry(self):
+        merged, err = self.capture(
+            self.agent.apply_provider_state, self.registry,
+            {"providers": {"no-such-p": {"unavailable_until": "2026-10-01T23:00:00Z"}}},
+            now=self.NOW)
+        self.assertNotIn("no-such-p", merged["providers"])
+        self.assertEqual(err, "", "a well-shaped row for an unknown provider is not "
+                                  "a malformed file")
+
+    def test_a_window_that_passed_leaves_the_provider_servable_again(self):
+        # R-gateway-12: the record comes back on its own, no hand-edit needed.
+        merged = self.agent.apply_provider_state(
+            self.registry, {"providers": {"muse_api": {"unavailable_until":
+                                                            "2000-01-01T00:00:00Z"}}})
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(), self.NOW)
+        self.assertEqual(review["state"], "resolved")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+
+    def test_two_recorded_stops_queue_the_review_instead_of_skipping_it(self):
+        # Item 3 feeding item 2: both reviewer providers stopped with a stated
+        # reset, so the review waits for the earliest one -- it is NOT run by a
+        # same-family model and called independent. High risk, so the
+        # first-pass-only fallback is out on its own rule and the queue is what
+        # the two windows leave behind.
+        state = {"providers": {
+            "muse_api": {"unavailable_until": "2026-10-01T23:00:00Z"},
+            "gem_api": {"unavailable_until": "2026-09-28T14:00:00Z"}}}
+        merged = self.agent.apply_provider_state(self.registry, state)
+        review = resolver.reviewer_for("qwen", merged, _reviewer_client_state(),
+                                       self.NOW, risk="high")
+        self.assertEqual(review["state"], "queued")
+        self.assertEqual(review["retry_at"], "2026-09-28T14:00:00Z")
+        self.assertTrue([s for s in review["skipped"] if s["waiting"]], review)
+
+    def test_load_live_registry_reads_the_registry_and_the_state_together(self):
+        reg_path = os.path.join(self.tmp, "registry.json")
+        with io.open(reg_path, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.agent.record_reset_stop(self.AGY_STOP, "r-cheap", self.registry,
+                                      now=self.NOW, path=self.state_path)
+        live = self.agent.load_live_registry(reg_path, state_path=self.state_path,
+                                              now=self.NOW)
+        self.assertEqual(live["providers"]["cheap-p"]["unavailable_until"],
+                          "2026-10-01T23:00:00Z")
+        self.assertIs(live["providers"]["cheap-p"]["available"], False)
+
+
+class ReviewerSpawnabilityTests(unittest.TestCase):
+    """REVROUTE (S2) item 4: the reviewer a card resolves to must be a model this
+    host can actually START. A reviewer list that names an undeclared heading is
+    a review that never happens, so this reads the real files -- the registry the
+    operator edits and the opencode.jsonc `tools/sync-ide-models.py` renders --
+    instead of a fixture that could disagree with both.
+
+    Two spellings, two rules:
+    - `omniroute/<route>` is the gateway's, and the gateway only serves a route
+      the client config declares (the same check that refuses a typo'd combo).
+    - `opencode/<model>` is opencode's own provider -- the identical shape a
+      `--free` run already uses every day -- so the client resolves it and the
+      gateway-declaration check has nothing to say about it.
+    """
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def real_cfg(self):
+        return self.agent.load_jsonc(os.path.join(self.REPO, "opencode.jsonc"))
+
+    def real_reviewers(self):
+        with io.open(os.path.join(self.REPO, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            return json.load(fh)["policy"]["reviewers"]
+
+    def test_the_paid_muse_reviewer_heading_is_declared_in_the_repo_config(self):
+        # The brief's requirement, on the files a real run reads: the default
+        # reviewer is the paid Meta leg, reached as the gateway's own heading.
+        entry = self.real_reviewers()[0]
+        self.assertEqual((entry["client"], entry["model"], entry["family"],
+                          entry["paid"]),
+                         ("opencode", "omniroute/spark-1.3-contributor", "meta", True))
+        cfg = self.real_cfg()
+        self.assertIn(entry["model"], self.agent.declared_models(cfg),
+                      "run tools/sync-ide-models.py: the paid Muse reviewer must be "
+                      "declared for opencode to start it")
+        self.assertEqual(self.agent.resolve_model(cfg, 3, False, entry["model"]),
+                         "omniroute/spark-1.3-contributor")
+
+    def test_every_gateway_spelled_reviewer_is_declared(self):
+        declared = self.agent.declared_models(self.real_cfg())
+        missing = [e["model"] for e in self.real_reviewers()
+                   if e["client"] == "opencode"
+                   and e["model"].partition("#")[0].startswith("omniroute/")
+                   and e["model"] not in declared]
+        self.assertEqual(missing, [],
+                         "policy.reviewers names a gateway route opencode.jsonc does "
+                         "not declare: the run would be refused before it started")
+
+    def test_a_reviewer_on_the_clients_own_provider_is_not_gateway_validated(self):
+        # opencode-zen's free models (the same strings --free runs) reach the
+        # child as the model, not as a combo the gateway has to serve.
+        client = argparse.Namespace(name="opencode", gateway=True)
+        review = {"state": "resolved",
+                  "reviewer": {"client": "opencode", "model": "opencode/deepseek-v4.1-flash"}}
+        model, combo, note = self.agent.reviewer_run_override(
+            review, client, self.real_cfg(), 3, "omniroute/t3-driver", None, False)
+        self.assertEqual(model, "opencode/deepseek-v4.1-flash")
+        self.assertIsNone(combo, "no gateway combo to rename: the route stands")
+        self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
+
+
+CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                     "reviewer=omniroute/muse verdict=PASS")
+FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+
+
+class ReviewStatusTests(unittest.TestCase):
+    """REVROUTE (S2) item 5: a lane is not ready because the orchestrator says so.
+
+    A lane record must carry two review entries before it can be called ready --
+    one cross-family review (a reviewer whose model FAMILY differs from the
+    author's, the rule items 1-2 made data) and the Sonnet final check (the
+    operator's unchanged decision). This reads the record, not a person's
+    summary of it, and says which of the two is missing and why.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # The command reads a registry file, so the fixture has to be one: the
+        # alternative is pointing the command at the real catalog and having it
+        # fail on a fixture spelling for a reason the test is not about.
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+
+    def status(self, text):
+        return self.agent.review_status(text, self.registry)
+
+    def cmd(self, path):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_review_status(
+                argparse.Namespace(record=path, registry=self.registry_path))
+        return rc, out.getvalue(), err.getvalue()
+
+    def write_record(self, *lines):
+        fd, path = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    # --- what counts -------------------------------------------------------
+
+    def test_a_record_with_both_entries_is_ready(self):
+        # Prose around the entries is the norm: a record is a markdown report,
+        # and an entry may sit in a bullet or under a heading.
+        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n"
+                             % (CROSS_FAMILY_LINE, FINAL_LINE))
+        self.assertTrue(report["ready"], report)
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertTrue(report["final"]["ok"])
+
+    def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
+        report = self.status(CROSS_FAMILY_LINE)
+        self.assertFalse(report["ready"])
+        self.assertTrue(report["cross_family"]["ok"])
+        self.assertFalse(report["final"]["ok"])
+        self.assertIn("sonnet", report["final"]["detail"].lower())
+
+    def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
+        report = self.status(FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("kind=cross-family", report["cross_family"]["detail"])
+
+    def test_a_same_family_reviewer_is_not_a_cross_family_review(self):
+        # The author reviewing its own family is the exact case this gate exists
+        # for, even with a PASS on the line.
+        report = self.status("AutoOS-Review: kind=cross-family author=gem-flash "
+                             "reviewer=gem-flash verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_reviewer_is_not_guessed_into_a_family(self):
+        # A REVIEWER must be known: an invented spelling would otherwise differ
+        # from every author family and read as an independent review that never
+        # happened. (REVFIX S2: an unknown AUTHOR is refused for the same reason
+        # — see test_an_unknown_author_fails_the_cross_family_check.)
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=not-a-model-anywhere verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("not-a-model-anywhere", report["cross_family"]["detail"])
+
+    # --- REVFIX S2: the family comparison is a comparison, not a string match -
+
+    def test_an_author_spelled_with_the_vendors_capitalization_is_the_same_family(self):
+        # Meta markets its model as "Meta Muse"; a record quoting that spelling
+        # used to compare unequal to the registry's "meta" and pass as an
+        # independent review of itself.
+        report = self.status("AutoOS-Review: kind=cross-family author=Meta "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_a_family_capitalized_on_the_registry_side_is_the_same_family(self):
+        # Normalizing both sides, not just the author's: an operator who writes
+        # "Meta" in policy.reviewers means the family the models call "meta".
+        for entry in self.registry["policy"]["reviewers"]:
+            if entry["model"] == "omniroute/muse":
+                entry["family"] = "Meta"
+        report = self.status("AutoOS-Review: kind=cross-family author=muse-contrib "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertIn("same family", report["cross_family"]["detail"])
+
+    def test_an_unknown_author_fails_the_cross_family_check(self):
+        # REVFIX S2: author_family used to hand back an unresolved name as if it
+        # were a family, so ANY typo ("qwen3.8-flsh", a model nobody registered)
+        # differed from every reviewer and the lane went ready. Not knowing who
+        # wrote the diff is not proof of independence.
+        report = self.status("AutoOS-Review: kind=cross-family author=who-knows "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("who-knows", report["cross_family"]["detail"])
+
+    def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
+        # The record quotes what the client was run with, not a registry id:
+        # "omniroute/spark-1.3-contributor" is the operator's reviewer spelling
+        # whose family the registry states.
+        report = self.status("AutoOS-Review: kind=cross-family "
+                             "author=omniroute/muse reviewer=gem-flash verdict=PASS\n"
+                             + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "google")
+
+    def test_a_bare_family_name_the_registry_knows_is_still_a_family(self):
+        # Fail-closed on the unknown must not break the ordinary shorthand:
+        # "qwen" is a family the fixture's reviewers declare, so it resolves.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+
+    def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
+        # "Reviewed, said FIX-FIRST" and "never reviewed" need different next
+        # actions; collapsing them to "missing" would hide an open finding.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=FIX-FIRST\n"
+                             "AutoOS-Review: kind=final reviewer=sonnet verdict=FIX-FIRST")
+        self.assertFalse(report["ready"])
+        self.assertIn("FIX-FIRST", report["cross_family"]["detail"])
+        self.assertIn("FIX-FIRST", report["final"]["detail"])
+
+    def test_an_entry_missing_a_reviewer_is_listed_as_malformed(self):
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen\n" + FINAL_LINE)
+        self.assertFalse(report["ready"])
+        self.assertEqual(len(report["malformed"]), 1)
+
+    def test_a_record_with_no_entries_says_so_with_the_line_format(self):
+        report = self.status("# Lane x\n\nSTATUS: DONE. Gate green, shipped it.\n")
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["entries"], 0)
+        # The hint is the whole usability of the gate: nobody reads the source.
+        self.assertIn("AutoOS-Review: kind=", report["hint"])
+
+    # --- the command's contract -------------------------------------------
+
+    def test_the_command_exits_0_on_a_ready_record(self):
+        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 0)
+        self.assertIn("ready", out)
+
+    def test_the_command_exits_1_and_names_the_missing_review(self):
+        path = self.write_record("# Lane x", FINAL_LINE)
+        rc, out, _ = self.cmd(path)
+        self.assertEqual(rc, 1)
+        self.assertIn("cross-family", out)
+
+    def test_an_unreadable_record_exits_2_not_1(self):
+        # rc 1 is "not ready yet"; rc 2 is "the gate could not run" — a caller
+        # that treats 1 as "wait" must not wait forever on a typo'd path.
+        rc, _out, err = self.cmd(os.path.join(tempfile.gettempdir(), "no-such-lane-record.md"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no-such-lane-record.md", err)
+
+    # --- reality, not the fixture -----------------------------------------
+
+    def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["family"], "meta")
+        # Haiku is the fallback first pass: it counts as a cross-family reviewer
+        # for a non-anthropic author, and the same anthropic family as Sonnet's
+        # final check — which is why the two entries are different requirements.
+        self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
+
+    def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
+        # REVFIX S2 measured against the real catalog, not a fixture: the
+        # operator's reviewer spelling resolves through the registry to the
+        # family it declares, and the vendor's capitalization of that family is
+        # the same family.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            real = json.load(fh)
+        self.assertEqual(self.agent.resolver.author_family(
+            "omniroute/spark-1.3-contributor", real)[0], "meta")
+        self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+        self.assertTrue(report["ready"], report)
+        # The self-review that used to pass: Meta's own model, Meta's reviewer.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+        # An author the registry cannot place is not an independent review.
+        self.assertFalse(self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=gpt-next-week "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+
+
+def _reviewer_client_state():
+    return {name: {"installed": True, "signed_in": True, "reason": ""}
+            for name in ("opencode", "gemini", "qoder", "claude")}
 
 
 if __name__ == "__main__":

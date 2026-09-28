@@ -51,6 +51,17 @@ Three subcommands:
     9. every serving route leg is allowed by policy.leg_rules (ordered fnmatch
        rules, first match wins, no match = allowed; leg_rule_for()); a denied
        leg must be gated (available false) - L0 ONE-ROUTER 2026-09-27.
+    10. every providers.<id>.limits key resolves to one of that provider's
+        models and every rpm/rpd/tpm/tpd value is a non-negative int (brief R4,
+        2026-09-27);
+    11. policy.reviewers is a non-empty ordered list, each entry carrying a
+        client that exists in ``clients``, a non-empty model/family, a boolean
+        paid and -- when it names one -- a ``leg`` that resolves and whose
+        model's ``family`` agrees with the entry's. This is the list the
+        resolver walks to answer "who reviews this" (REVROUTE (S2) item 1,
+        2026-09-27). ``model`` is the client's own spelling and is deliberately
+        not resolved against providers/models; ``leg`` is the gateway path and
+        is resolved with the same rule 1 predicate everything else uses.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -2246,6 +2257,88 @@ def _check_provider_limits(registry) -> list:
     return problems
 
 
+# The fields of one policy.reviewers entry whose TYPE this check owns; presence
+# is rule 6's job (the schema marks all five required), so a missing field is
+# reported once, by the rule that can name it as "missing: ... (required key)".
+_REVIEWER_STR_FIELDS = ("client", "model", "family")
+
+
+def _check_reviewers(registry) -> list:
+    """rule 11 - policy.reviewers is a non-empty ordered list of reviewers the
+    resolver can actually walk (brief REVROUTE (S2) item 1, 2026-09-27).
+
+    The list is the one home for "who may review": the resolver reads it instead
+    of a family table of its own, so an entry that names a client nobody has is
+    a reviewer that can never be spawned -- and the review silently degrades to
+    whoever else is left. That is why the client half is checked against
+    ``clients`` here.
+
+    The ``model`` half is deliberately NOT resolved against providers/models.
+    Like ``policy.free_client_models``, it is the client's own spelling (a
+    gateway combo name, or Haiku's client-side alias), not a route leg -- and a
+    reviewer is picked per client, so a leg-shaped check would reject valid
+    entries. The check stays clock-free: ``source`` is exempt from rule 5, and
+    nothing here reads ``available``/``unavailable_until`` (that is the
+    resolver's job at plan time).
+    """
+    problems = []
+    reviewers = _section(registry, "policy").get("reviewers")
+    if reviewers is None:
+        # rule 6 does not mark policy.reviewers required (the schema's policy
+        # `required` list is the spec's, and this file predates the field), so
+        # an absent list is reported here rather than reading as "clean".
+        return ["reviewers: policy.reviewers is missing - the resolver has no "
+                "reviewer preference list to walk"]
+    if not isinstance(reviewers, list) or not reviewers:
+        return ["reviewers: policy.reviewers must be a non-empty ordered list"]
+
+    known_clients = _section(registry, "clients")
+    for index, entry in enumerate(reviewers):
+        label = "policy.reviewers[%d]" % index
+        if not isinstance(entry, dict):
+            problems.append("reviewers: %s is not an object" % label)
+            continue
+        for field in _REVIEWER_STR_FIELDS:
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, str) or not value:
+                problems.append("reviewers: %s.%s must be a non-empty string "
+                                "(got %r)" % (label, field, value))
+        if "paid" in entry and not isinstance(entry["paid"], bool):
+            problems.append("reviewers: %s.paid must be a boolean (got %r)"
+                            % (label, entry["paid"]))
+        if "first_pass_only" in entry and not isinstance(entry["first_pass_only"], bool):
+            problems.append("reviewers: %s.first_pass_only must be a boolean "
+                            "(got %r)" % (label, entry["first_pass_only"]))
+        client = entry.get("client")
+        if isinstance(client, str) and client and client not in known_clients:
+            problems.append("reviewers: %s.client %r is not a registry client "
+                            "(known: %s)"
+                            % (label, client, ", ".join(sorted(known_clients))))
+
+        # A `leg` is the one link from the reviewer to a provider, and the
+        # resolver reads availability and the training test off it -- so a leg
+        # that does not resolve, or carries a family that disagrees with its own
+        # model's, would silently disable the different-family rule (the check
+        # compares the entry's spelling, the resolver compares this one).
+        leg = entry.get("leg")
+        if isinstance(leg, str) and leg:
+            try:
+                provider_id, model_id = resolve_leg(leg, registry)
+            except ValueError as exc:
+                problems.append("reviewers: %s.leg %s does not resolve: %s"
+                                % (label, leg, exc))
+                continue
+            model_family = (_section(registry, "models").get(model_id) or {}).get("family")
+            entry_family = entry.get("family")
+            if model_family and entry_family and model_family != entry_family:
+                problems.append(
+                    "reviewers: %s.family %r disagrees with models.%s.family %r "
+                    "(leg %s)" % (label, entry_family, model_id, model_family, leg))
+    return problems
+
+
 # ===========================================================================
 # check / validate
 # ===========================================================================
@@ -2264,6 +2357,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_unavailable_until_pairs_available(registry))
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
+    problems.extend(_check_reviewers(registry))
     return problems
 
 

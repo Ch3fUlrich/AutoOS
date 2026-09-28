@@ -131,12 +131,18 @@ if "t2-worker" not in (lit.get("models") or {}):
     problems.append("missing:lit-t2-worker")
 if "deepseek" in p:
     problems.append("resurrected:deepseek")
-meta = p.get("meta", {})
-if not (meta.get("options", {}).get("apiKey", "") == "{env:META_API_KEY}"):
-    problems.append("meta-key-not-placeholder")
-if not (meta.get("models") or {}).keys() == {"muse-spark-1.3-contributor"}:
-    problems.append("meta-models:%s" % sorted((meta.get("models") or {}).keys()))
+# REVROUTE (S2) item 4, measured in L1-backlog: with META_API_KEY unset, a
+# `{env:META_API_KEY}` placeholder in the config does not resolve to a string,
+# and opencode fails the WHOLE file — "Expected string at [META_API_KEY]" on
+# every bare `opencode` start, in every cwd, because this is the user config.
+# The direct provider is therefore written only when the key is in the
+# environment; the paid Muse reviewer reaches the model through the gateway
+# heading above either way (asserted by the ide-models surface check).
+if "meta" in p:
+    problems.append("meta-provider-without-a-key")
 raw = io.open(sys.argv[1], encoding="utf-8-sig").read()
+if "{env:META_API_KEY}" in raw:
+    problems.append("meta-key-placeholder-without-a-key")
 if re.search(r"sk-[A-Za-z0-9]{10,}", raw):
     problems.append("secret-leak")
 print(" ".join(problems))
@@ -148,6 +154,90 @@ PY
     rm -rf "$scratch"
     assert_eq "$report" ""
     assert_eq "$backups" "0"
+    fi
+fi
+
+# REVROUTE (S2) item 4: the direct meta provider is what a key buys, and only
+# that — the same writer must not leave a placeholder behind that no environment
+# can fill.
+if it "opencode user config: META_API_KEY in the environment writes the direct provider"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      # export, not a prefix on `unset`: a prefix assignment to that builtin
+      # never reaches the writer, and the writer reads the process environment.
+      export META_API_KEY="sk-fake-meta-key-1234"
+      curl() { return 6; }
+      # The V1 provider block is what opencode reads here, and the host's
+      # `opencode --version` must never be part of a config assertion.
+      opencode_is_v2() { return 1; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    got="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import io, json, sys
+d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
+meta = (d.get("provider") or {}).get("meta") or {}
+raw = io.open(sys.argv[1], encoding="utf-8-sig").read()
+print(json.dumps(sorted((meta.get("models") or {}).keys())),
+      (meta.get("options") or {}).get("apiKey", "-"), "sk-fake-meta-key" in raw)
+PY
+)"
+    rm -rf "$scratch"
+    # The key buys the provider and its placeholder — never the key itself
+    # (AGENTS.md §1: this file is written into the user's home on a public repo).
+    assert_eq "$got" '["muse-spark-1.3-contributor"] {env:META_API_KEY} False'
+    fi
+fi
+
+if it "opencode user config: a keyless run removes the placeholder a keyed run left"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    # A machine that had the key and lost it (or restored a config from a
+    # backup) must not stay broken: the second, keyless run has to take the
+    # unfillable placeholder OUT, or the fix never reaches the box that already
+    # has the error.
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      export META_API_KEY="sk-fake-meta-key-1234"
+      curl() { return 6; }
+      opencode_is_v2() { return 1; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    # The keyed run really did write it, or this test proves nothing.
+    placed="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import io, json, sys
+d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
+print(json.dumps(sorted((((d.get("provider") or {}).get("meta") or {}).get("models") or {}).keys())))
+PY
+)"
+    assert_eq "$placed" '["muse-spark-1.3-contributor"]'
+    # A provider of the user's own — a real key, a different model — is theirs
+    # (AGENTS.md §4/§5): the writer removes what it wrote, nothing else.
+    python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import io, json, sys
+path = sys.argv[1]
+d = json.load(io.open(path, encoding="utf-8-sig"))
+d["provider"]["mine"] = {"options": {"baseURL": "https://api.example.invalid/v1",
+                                     "apiKey": "sk-users-own-key-9999"},
+                        "models": {"theirs": {"name": "Theirs"}}}
+io.open(path, "w", encoding="utf-8").write(json.dumps(d))
+PY
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      opencode_is_v2() { return 1; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    got="$(python3 - "$scratch/.config/opencode/config.json" <<'PY'
+import io, json, sys
+d = json.load(io.open(sys.argv[1], encoding="utf-8-sig"))
+p = d.get("provider") or {}
+raw = io.open(sys.argv[1], encoding="utf-8-sig").read()
+print("meta" in p, "{env:META_API_KEY}" in raw,
+      (p.get("mine") or {}).get("options", {}).get("apiKey", "-"),
+      "sk-fake-meta-key" in raw)
+PY
+)"
+    rm -rf "$scratch"
+    assert_eq "$got" "False False sk-users-own-key-9999 False"
     fi
 fi
 
