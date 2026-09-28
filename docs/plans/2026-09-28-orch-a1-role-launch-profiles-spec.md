@@ -179,6 +179,7 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
   phase-1 test adds a contradictory `allow` for each always-deny entry and asserts the decision is
   still `deny` (A1-D5). The exact CLI precedence is verified against `claude --help` in phase 0,
   the way restart spec §8 verified its argv.
+- **Text-only fencing is blind to git config and the checked-out branch.** A bare `git push` on `main`, or a push via an alias, carries no `main` token for a command-text fence to match, so server-side branch protection on `main` is load-bearing, not a backstop.
 
 ## 4. Consumption
 

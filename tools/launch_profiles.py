@@ -21,18 +21,37 @@ cadence. The render/``--check`` style follows ``tools/registry.py`` and
 file). The harness file is read, never written (phase 1 reads
 ``catalog/agent-harness.json`` fences; out of scope).
 
+Settings shape (review round 1 - the shape the CLI actually reads): Claude
+Code CLI 2.1.283 reads permission rules ONLY under a top-level
+``permissions`` object - ``{"permissions": {"allow": [...], "deny": [...]}}``.
+Top-level ``allow``/``deny`` keys are ignored silently, and
+``permissionMode`` / ``permissionPrompts`` are NOT settings keys, so the
+render emits neither. No ``defaultMode`` either: no accepted value
+(``default``, ``acceptEdits``, ``plan`` - never ``bypassPermissions``)
+expresses the fail-closed prompting behaviour the spec wanted, so that
+behaviour is dropped from this file and stated here instead: fail-closed
+for non-interactive sessions comes from the launch flags (a Phase 2
+concern), not from this file. The remaining top-level fields (``role``,
+``harnessRole``, ``mcpConfig``) are AutoOS metadata the CLI ignores - the
+spec's launch identity and MCP-document reference, kept because the spec
+requires them.
+
 Deny composition, in committed order (deny entries are order-independent -
 Claude Code evaluates deny before allow - so this order is for reviewers):
 
-1. the push-to-``main`` fence set (spec 3.3): anchored ``git push *...``
-   globs with a leading space before ``main`` so a lane merely containing
-   "main" (``main2``) is not fenced, while every spelling of the real ref
-   is (``:main``, ``HEAD:main``, ``+main``, ``refs/heads/main``,
-   ``--force``/``-f``, ``-u`` via the trailing-ref rules, ``--tags``).
-   Anchored on ``git push`` (the spelling this repo's own tooling emits);
-   wrapper-prefixed invocations (``git -C ... push``) are outside the
-   fence - documented, not silent.
-2. the ``gh workflow run --ref main`` fence (spec Q4): the coordinator
+1. the push-to-``main`` fence set (spec 3.3): leading-``*`` ``git push``
+   globs, so a ``sudo``/``env``/``xargs`` prefix does not escape the fence,
+   with a space before ``main`` so a lane merely containing "main"
+   (``main2``) is not fenced, while every spelling of the real ref is
+   (``:main``, ``HEAD:main``, ``+main``, ``refs/heads/main``,
+   ``--force``/``-f``, ``--tags``); plus the H2 forms without the word
+   "main" as a ref (``--all``/``--mirror`` in both positions, any ``HEAD``
+   push, a bare ``git push`` with no refspec - exact for the bare command,
+   ``* ``-prefixed for the bare command under a prefix); plus the H3
+   wrapper/option forms (``git -C ... push``, ``git --git-dir=... push``,
+   ``git -c ... push`` - each denies every push through that argv shape,
+   lane refs included, because a wrapper push is never pre-granted).
+2. the ``gh workflow run --ref main`` fence (spec Q4): the L1
    ``gh workflow run`` grant stays, an explicit ``--ref main`` (or
    ``--ref=main``) dispatch does not.
 3. the secret/credential entries of ``fences.bash_deny_all``, selected by
@@ -44,7 +63,7 @@ Claude Code evaluates deny before allow - so this order is for reviewers):
    ``set``, ``/proc``). Operational fences (``git merge``/``rebase``,
    ``gh *``, ``rm -rf``, ``sudo``, ``docker`` ...) are deliberately NOT
    rendered: under deny-precedence a rendered ``gh *`` would swallow the
-   coordinator ``gh workflow run`` grant the spec pre-approves. They stay
+   L1 ``gh workflow run`` grant the spec pre-approves. They stay
    fenced by the harness overlay for non-claude clients.
 4. every ``fences.read_deny_all`` pattern as a ``Read(...)`` deny.
 5. profile-specific secret extras the harness does not list
@@ -64,28 +83,25 @@ Two deny-precedence consequences a reviewer must know (both pinned by
 - Leaf profiles (``l3-*``) additionally render ``fences.bash_deny_leaf``
   verbatim: a leaf inherits the leaf fences unchanged (spec 2 - a profile
   may make a leaf grant smaller, never larger), so a lane push denies on
-  leaves while coordinators pre-grant it.
+  leaves while L1 pre-grants it.
 
 Role table (spec 2 launch identities; the Q2 default - the ``role`` field
 carries the launch identity, the MCP document rides as ``mcpConfig``):
 
-- ``l0-router``, ``l1-coordinator``, ``l1-routing`` map to harness
-  ``orchestrator`` (top of the tree: plans, briefs, spawns); only
-  ``l1-routing`` extends the coordinator grant set with the gateway
-  ``apply.sh`` run grant (A1-D4, the MISTRALFIX precedent - the model may
-  run the script but stays denied reading its key, which the script reads
-  in its own process).
-- ``l2-orchestrator`` maps to harness ``suborchestrator`` (owns one lane).
+- ``l1-coordinator`` and ``l1-routing`` are the only roles with
+  pre-grants (review round 1, spec 3.2): the lane-branch push and
+  ``gh workflow run`` grants, with ``l1-routing`` alone extending them
+  with the gateway ``apply.sh`` run grant (A1-D4, the MISTRALFIX precedent
+  - the model may run the script but stays denied reading its key, which
+  the script reads in its own process).
+- ``l0-router`` and ``l2-orchestrator`` map to the orchestrator harness
+  roles but carry no pre-grant: unlisted stays fail-closed under the
+  launch flags.
 - ``l3-worker``/``l3-reviewer`` map to the leaf harness roles with an
   empty pre-grant set (spec Q9 default: no pre-grants beyond read-only).
 - ``mcpConfig`` names the restart-spec section 8 documents
   (``configuration/mcp/<stem>.json``); those files land in a later lane,
   the reference is by name only.
-- ``permissionMode: auto`` and ``permissionPrompts: none`` are the spec
-  3.1 / Q8 defaults, verified as real ``claude --help`` choices at CLI
-  2.1.283 (``--permission-mode`` choices include ``auto``;
-  ``--permission-prompts none`` means anything that would prompt is
-  denied automatically - fail closed for unattended runs).
 
 Stdlib only. Path-independent: everything is anchored on the repository
 root derived from this file's own location.
@@ -103,17 +119,18 @@ DEFAULT_OUT_DIR = ROOT / "configuration" / "launch-profiles"
 
 # Launch identity -> harness role, MCP document stem, grant set.
 ROLES = {
-    "l0-router": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "coordinator"},
+    "l0-router": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "none"},
     "l1-coordinator": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "coordinator"},
     "l1-routing": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "routing"},
-    "l2-orchestrator": {"harness": "suborchestrator", "mcp": "l2-orchestrator", "grants": "coordinator"},
+    "l2-orchestrator": {"harness": "suborchestrator", "mcp": "l2-orchestrator", "grants": "none"},
     "l3-worker": {"harness": "leaf-implementer", "mcp": "l3-worker", "grants": "leaf"},
     "l3-reviewer": {"harness": "leaf-reviewer", "mcp": "l3-reviewer", "grants": "leaf"},
 }
 
-# The shared grant sets, rendered per role so they cannot drift: every
-# coordinator role shares one allow list, l1-routing extends it with exactly
-# the apply.sh grant, leaves carry no pre-grant (spec 3.2, A1-D4, Q9).
+# The shared grant sets, rendered per role so they cannot drift: only the L1
+# roles share the lane-push / workflow pre-grants, l1-routing extends them
+# with exactly the apply.sh grant, every other role carries no pre-grant
+# (spec 3.2 as fixed in review round 1, A1-D4, Q9).
 COORDINATOR_ALLOW = (
     "Bash(git push:*)",
     "Bash(gh workflow run:*)",
@@ -123,25 +140,44 @@ APPLY_ALLOW = "Bash(bash configuration/omniroute/apply.sh:*)"
 GRANT_SETS = {
     "coordinator": tuple(COORDINATOR_ALLOW),
     "routing": tuple(COORDINATOR_ALLOW) + (APPLY_ALLOW,),
+    "none": (),
     "leaf": (),
 }
 
-# Push-to-main fence set: anchored `git push *...` globs (spec 3.3).
+# Push-to-main fence set (spec 3.3, H2, H3): leading-`*` globs so a
+# sudo/env/xargs prefix does not escape the fence. The space before `main`
+# keeps a lane merely containing "main" (`main2`) outside the fence.
 MAIN_FENCE = (
-    "Bash(git push * main)",
-    "Bash(git push * main *)",
-    "Bash(git push * main:*)",
-    "Bash(git push *:main*)",
-    "Bash(git push *HEAD:*main*)",
-    "Bash(git push *+*main*)",
-    "Bash(git push *refs/heads/main*)",
-    "Bash(git push *--force*)",
-    "Bash(git push *-f *)",
-    "Bash(git push *-f)",
-    "Bash(git push *--tags*)",
+    "Bash(*git push * main)",
+    "Bash(*git push * main *)",
+    "Bash(*git push * main:*)",
+    "Bash(*git push *:main*)",
+    "Bash(*git push *HEAD:*main*)",
+    "Bash(*git push *+*main*)",
+    "Bash(*git push *refs/heads/main*)",
+    "Bash(*git push *--force*)",
+    "Bash(*git push *-f *)",
+    "Bash(*git push *-f)",
+    "Bash(*git push *--tags*)",
+    # H2: push forms without the word `main` as a ref - denied on every
+    # role. A bare `git push` pushes the checked-out branch, which may be
+    # main; --all/--mirror push every ref, which includes main.
+    "Bash(*git push --all*)",
+    "Bash(*git push * --all*)",
+    "Bash(*git push --mirror*)",
+    "Bash(*git push * --mirror*)",
+    "Bash(*git push * HEAD*)",
+    "Bash(git push)",
+    "Bash(* git push)",
+    # H3: wrapper/option argv shapes - the push hides behind another argv
+    # form, so the anchored fence cannot see it. Each denies every push
+    # through that shape, lane refs included.
+    "Bash(git -C * push*)",
+    "Bash(git --git-dir* push*)",
+    "Bash(git -c * push*)",
 )
 
-# gh workflow run naming main stays denied under the coordinator grant.
+# gh workflow run naming main stays denied under the L1 grant.
 GH_REF_MAIN = (
     "Bash(gh workflow run *--ref *main*)",
     "Bash(gh workflow run *--ref=*main*)",
@@ -195,7 +231,13 @@ def bash_secret_patterns(bash_deny_all, read_deny_all):
 
 
 def render_role(role, harness):
-    """Render one profile document (pure: no I/O)."""
+    """Render one profile document (pure: no I/O).
+
+    The permission rules live under ``permissions`` - the only shape the
+    CLI reads. ``role``/``harnessRole``/``mcpConfig`` are AutoOS metadata
+    the CLI ignores. Fail-closed for non-interactive sessions comes from
+    the launch flags (Phase 2), not from this file.
+    """
     fences = harness["fences"]
     spec = ROLES[role]
     deny = list(MAIN_FENCE)
@@ -215,10 +257,10 @@ def render_role(role, harness):
         "role": role,
         "harnessRole": spec["harness"],
         "mcpConfig": "configuration/mcp/%s.json" % spec["mcp"],
-        "permissionMode": "auto",
-        "permissionPrompts": "none",
-        "allow": list(GRANT_SETS[spec["grants"]]),
-        "deny": deny,
+        "permissions": {
+            "allow": list(GRANT_SETS[spec["grants"]]),
+            "deny": deny,
+        },
     }
 
 

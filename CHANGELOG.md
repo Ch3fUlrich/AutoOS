@@ -10,11 +10,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`configuration/launch-profiles/<role>.settings.example.json`** (new, six
   roles): per-role pre-reviewed grant bundles (spec
   `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §2–§3).
-  Coordinator roles pre-grant lane-branch push and `gh workflow run`;
-  `l1-routing` alone adds the gateway `apply.sh` run grant; leaves carry no
-  pre-grant. Every profile denies push-to-`main` (fence set, not one string),
-  secret access and `~/.claude.json` writes, with `permissionPrompts: none`
-  (fail closed). Runtime `<role>.settings.json` files are git-ignored.
+  The L1 roles (`l1-coordinator`, `l1-routing`) pre-grant lane-branch push
+  and `gh workflow run`; `l1-routing` alone adds the gateway `apply.sh` run
+  grant; `l0-router`, `l2-orchestrator` and the leaves carry no pre-grant.
+  Every profile denies push-to-`main` (fence set, not one string: ref
+  spellings plus `--all`/`--mirror`/`HEAD`/bare, `-C`/`--git-dir`/`-c`
+  wrappers, compound and prefixed spellings), secret access and
+  `~/.claude.json` writes. Rules live under `permissions` (the only shape
+  the CLI reads); fail-closed for non-interactive sessions comes from the
+  launch flags, not from this file. Runtime `<role>.settings.json` files
+  are git-ignored.
+- **Branch protection is load-bearing:** text-only command fencing cannot see git config or the checked-out branch (a bare `git push` on `main`, or a push via an alias), so server-side branch protection on `main` is load-bearing, not a backstop.
 - **`tools/launch_profiles.py`** (new): the one home of the deny render —
   `read_deny_all` plus the secret/credential entries of `bash_deny_all`
   plus the profile-specific always-deny entries. `render --check` fails
@@ -23,8 +29,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   wiring), fleet cutover and REVIVE stay later lanes.
 - **`tests/test_launch_profiles.py`** (new, stdlib unittest): branch-scope
   and secret-scope tables over the rendered matchers (documented matcher
-  model: `Bash(prefix:*)` / glob and `Read/Edit` path-glob forms, deny
-  wins) and the A1-D5 contradiction test (a contradictory `allow` still
+  model: `Bash(cmd:*)` prefix / exact / `*` glob with `&&`/`||`/`;`/`|`
+  splitting and `Read/Edit` path-glob forms, deny wins) and the A1-D5 contradiction test (a contradictory `allow` still
   decides `deny`; precedence re-checked at CLI 2.1.283/2.1.267 —
   `claude --help` prints no precedence rule). Wired into the Linux suite
   (`tests/linux/33-documentation.sh` "launch profiles: ...").
