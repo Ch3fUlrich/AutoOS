@@ -10845,6 +10845,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
                         "the runtimes parent is world-readable: %o"
                         % stat.S_IMODE(os.stat(parent).st_mode))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlinks, uid and chmod modes")
     def test_provisioning_refuses_a_parent_that_is_a_symlink(self):
         # FF1 Sonnet LOW: the leaf got this treatment in FF1c, the parent did
         # not — os.path.isdir follows a link, so the create-and-chmod below it
@@ -10879,6 +10880,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
             self.assertIsNone(self.agent.provision_runtime_dir(target))
         self.assertFalse(os.path.exists(target), "the leaf was created anyway")
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlinks, uid and chmod modes")
     def test_provisioning_creates_the_leaf_itself_not_through_a_parent_link(self):
         # os.mkdir is the atomic half: no O_CREAT-after-O_EXCL window on the
         # leaf, and an existing competitor's dir is caught, not merged into.
