@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — memoised identical dry runs and split part 13 across two shards (WS-PART13)
+
+- **`tests/linux/13-end-to-end-dry-run-only.sh`**: identical `setup.sh` runs are
+  served from a memo (`memo_dry_run`, keyed on argv + every `AUTOOS_*` variable
+  + `PATH` + the e2e/real home mode), so the repeated `--profile ai-coding` and
+  `--check-catalog` runs happen once. Filesystem-asserting tests and the
+  determinism pair keep real runs; a guard test pins the keying.
+- **`tests/linux/41-end-to-end-retirement.sh`** (new): the four retirement tests
+  moved out of part 13 onto their own shard (`g 41` in `tests/ci-shards.txt`),
+  so the two halves run in parallel.
+
 ### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
 
 - **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one paid
