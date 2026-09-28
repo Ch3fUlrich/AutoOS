@@ -90,10 +90,17 @@ child's own spawns read that variable and store it as their `parent_run_id`, so 
 --tree` prints the spawn tree (an orphan whose parent record is gone is a top-level row that says
 `(parent <id> gone)`; `ps --json` carries the edge untruncated, the tree being a display of it). A
 record also keeps the host it ran on, the `logs/agents/<id>` run dir it was given
-(`AUTOOS_TASK_DIR`, which the MCP server still names with its own id - `autoos_agent_mcp.py`
-`spawn`), and the resolver's whole `route_plan`, so a run stays auditable after the probes and
-cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
+(`AUTOOS_TASK_DIR`) and the resolver's whole `route_plan`, so a run stays auditable after the probes
+and cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
 included.
+
+The id may also be handed in rather than minted here (FLEETP0b, FLEETSPEC §5.1): `run --run-id <id>`
+takes a canonical id and refuses a shape that is not one with exit 2. That is how the MCP server's
+`spawn` keeps its promise — it calls the same `mint_run_id`, names its own `logs/agents/<id>` dir
+with the result and passes it as `--run-id`, so an MCP spawn has one id and not a run-dir id beside a
+record id. The `parent_run_id` edge is still only ever the caller's own `AUTOOS_AGENT_RUN_ID` at
+spawn time, never the handed-in id: a child that read its own new id as its parent would be its own
+parent.
 
 A live probe that gets HTTP 503 is retried with a backoff (5 s, 15 s, 45 s) before it is
 reported: OmniRoute answers 503 "resource pressure" when the host is short of memory, which

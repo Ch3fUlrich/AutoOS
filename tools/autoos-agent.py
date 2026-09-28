@@ -62,7 +62,12 @@ chars). It names the sandbox dir, the `agent/<id>` branch, logs/workers/<id>.jso
 and the child's AUTOOS_AGENT_RUN_ID, and rides the gateway as X-AutoOS-Run-Id
 beside x-omniroute-session-id. The record also stores the parent's id (that env
 var at spawn time), the host, and the full route_plan the run was scored on;
-`ps --tree` prints the spawn tree from the parent edge. docs/routing.md.
+`ps --tree` prints the spawn tree from the parent edge. An id minted elsewhere
+still keeps one spawn to one id: `run --run-id <id>` takes that id (the MCP
+server's `spawn` does, since it names its own run dir with it) and refuses a
+shape that is not canonical with exit 2. The parent edge is only ever the
+caller's own env var, never the handed-in id - else a child would be its parent.
+docs/routing.md.
 
 Usage:
     python3 tools/autoos-agent.py list
@@ -73,6 +78,7 @@ Usage:
     python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
+    python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --tier 3 --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -736,6 +742,26 @@ def slugify(text: str, cap: int = 40) -> str:
 # from the task text, the worker record a separate UTC id - and nothing tied a
 # run dir, a record and a branch together.
 RUN_ID_SLUG_CAP = 24
+# The exact shape mint_run_id produces, and the check `run --run-id` holds an
+# id to: a run id is a filename, a branch name and a header value at once, so
+# anything else (a path, an empty or over-long slug, a stamp that is not a real
+# date and time, a non-hex tail) is refused rather than written into those three
+# places. A well-shaped stamp from the wrong clock cannot be told apart here -
+# that is why the minting lives in one function, not in each caller.
+RUN_ID_RE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{6})$")
+
+
+def is_canonical_run_id(run_id) -> bool:
+    """True for exactly what mint_run_id mints (a real UTC stamp, a slug of at
+    most RUN_ID_SLUG_CAP chars, a 6-hex tail)."""
+    match = RUN_ID_RE.match(run_id or "")
+    if not match or len(match.group(2)) > RUN_ID_SLUG_CAP:
+        return False
+    try:
+        datetime.datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return False
+    return True
 
 
 def mint_run_id(title: str | None, task: str, now=None) -> str:
@@ -1665,8 +1691,15 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # worker record and the child's own environment all carry this one id, so
     # one run is nameable from any of the four (and the child that spawns again
     # knows who its parent is).
-    run_id = mint_run_id(title, args.task)
-    if sandbox is not None and (sandbox.get("branch") or "").startswith("agent/"):
+    # FLEETP0b: the caller may hand the id in instead (--run-id, which is how the
+    # MCP server's spawn keeps ONE id for a run it also names its own state dir
+    # with). A handed-in id wins over everything, including the sandbox-reuse
+    # line below: the caller owns the identity, and a handed-in id that disagreed
+    # with the clone it was told to reuse would be a lie either way.
+    given_run_id = getattr(args, "run_id", None)
+    run_id = given_run_id or mint_run_id(title, args.task)
+    if sandbox is not None and not given_run_id \
+            and (sandbox.get("branch") or "").startswith("agent/"):
         # a fallthrough re-run shares the first attempt's clone and branch, so it
         # shares its id: one spawn is one id, not one per attempt.
         run_id = sandbox["branch"][len("agent/"):] or run_id
@@ -3903,6 +3936,14 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
+    # that is not the canonical one is refused here - before any clone, record or
+    # client start (and before the MCP server's own state dir is created for it).
+    if getattr(args, "run_id", None) and not is_canonical_run_id(args.run_id):
+        return refuse("--run-id %r is not a canonical run id "
+                      "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
+                      "the spawner or the MCP server's spawn)"
+                      % (args.run_id, RUN_ID_SLUG_CAP), 2)
     # SPAWNCAP (S2): decide the client from the task's shell/write needs before
     # anything is planned or started. An explicit --client that lacks one is
     # refused with the capable clients named; with no --client the first capable
@@ -4530,6 +4571,11 @@ def _parser_run(sub):
                           "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
                           "run without this flag")
     run.add_argument("--title")
+    run.add_argument("--run-id", dest="run_id", metavar="ID",
+                     help="use this id (a canonical one, as minted by the MCP server's spawn) "
+                          "instead of minting a new one, so one spawn has one id: it names the "
+                          "branch, the sandbox, logs/workers/<id>.json and the child env; a bad "
+                          "shape is refused with exit 2")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
 

@@ -8940,7 +8940,7 @@ class CanonicalRunIdTests(unittest.TestCase):
             free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
             isolate=False, auto=True, joinable=False, model=None,
             clean=False, allow_training=False, max_depth=None, lean=False,
-            title=None)
+            read_only=False, title=None, run_id=None)
         for key, value in overrides.items():
             setattr(ns, key, value)
         return ns
@@ -9048,6 +9048,141 @@ class CanonicalRunIdTests(unittest.TestCase):
         self.assertIsNotNone(match, r.stdout)
         self.assertTrue(RUN_ID_RE.match(match.group(1)), match.group(1))
 
+    # --- the caller may hand the id in (FLEETP0b, FLEETSPEC §5.1) ----------
+    # The MCP server's `spawn` used to mint its own local-time id for the run
+    # dir while the spawner minted a second canonical one: one spawn, two ids
+    # again. `run --run-id <id>` lets the caller mint once and both sides share.
+
+    GIVEN_ID = "20260928-092516-fix-the-router-abc123"
+
+    def test_a_given_id_names_the_branch_the_dir_the_child_env_and_the_header(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = self.cli.build_plan(
+                self._args(title="Something Else Entirely", isolate=True,
+                           run_id=self.GIVEN_ID), self._cfg())
+        self.assertEqual(plan["run_id"], self.GIVEN_ID)
+        self.assertEqual(plan["sandbox"]["branch"], "agent/%s" % self.GIVEN_ID)
+        self.assertEqual(os.path.basename(plan["sandbox"]["path"]),
+                         "%s-%s" % (os.path.basename(self.cli.ROOT), self.GIVEN_ID))
+        self.assertEqual(plan["env"]["AUTOOS_AGENT_RUN_ID"], self.GIVEN_ID)
+        headers = self._overlay(plan)["providers"]["omniroute"]["headers"]
+        self.assertEqual(headers[self.cli.RUN_ID_HEADER], self.GIVEN_ID)
+        # the title did not leak in either: the caller owns the whole id
+        self.assertNotIn("else", plan["run_id"])
+
+    def test_run_accepts_a_canonical_id_and_prints_the_one_it_was_given(self):
+        r = run_agent("run", "--dry-run", "--tier", "2", "--run-id", self.GIVEN_ID,
+                      "t", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("run-id: %s" % self.GIVEN_ID, r.stdout)
+
+    def test_run_refuses_an_id_that_is_not_the_canonical_shape(self):
+        bad = (
+            "not-an-id",
+            "20260928-09251-fix-the-router-abc123",       # stamp too short
+            "2026-09-28-092516-fix-the-router-abc123",    # dashed date
+            "20260928-092516-fix_the_router-abc123",      # underscore in slug
+            "20260928-092516--abc123",                    # no slug
+            "20260928-092516-fix-the-router-abc12",       # tail too short
+            "20260928-092516-fix-the-router-zbc123",      # tail not hex
+            "20260928-092516-fix-the-router-ABC123",      # tail not lowercase
+            "20260928-092516-" + "a" * 25 + "-abc123",    # slug past the cap
+            "20261302-092516-fix-the-router-abc123",      # month 13
+            "20260928-092566-fix-the-router-abc123",      # minute 66
+            self.GIVEN_ID + "/../../etc",                 # a path, not an id
+            self.GIVEN_ID + " ",                          # trailing space
+        )
+        for wrong in bad:
+            r = run_agent("run", "--dry-run", "--tier", "2", "--run-id", wrong, "t",
+                          env=clean_env())
+            self.assertEqual(r.returncode, 2, (wrong, r.stdout, r.stderr))
+            self.assertIn("--run-id", r.stderr, wrong)
+            self.assertIn(wrong, r.stderr, wrong)  # names what it refused
+
+
+class McpCanonicalRunIdTests(unittest.TestCase):
+    """FLEETP0b: the MCP server's `spawn` mints the spawner's own canonical id
+    (tools/autoos-agent.py `mint_run_id`) and hands it to the run it launches,
+    so `logs/agents/<id>`, `logs/workers/<id>.json`, the branch and the child's
+    env are one string (FLEETSPEC §5.1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN",
+                                                   "AUTOOS_AGENT_RUN_ID")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        os.environ.pop("AUTOOS_AGENT_RUN_ID", None)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _job(self, out):
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertIsNotNone(job, out)
+        return job
+
+    def test_spawn_mints_a_canonical_id_for_its_run_dir(self):
+        out = mcp_server.spawn({"task": "t", "title": "Fix The Router", "cwd": str(ROOT)})
+        self.assertNotIn("error", out)
+        match = RUN_ID_RE.match(out["id"])
+        self.assertIsNotNone(match, out["id"])
+        self.assertEqual(match.group(2), "fix-the-router")  # slug from the title
+        self.assertEqual(os.path.basename(out["dir"]), out["id"])
+        self.assertEqual(out["dir"], os.path.join(self.tmp, "agents", out["id"]))
+
+    def test_spawn_hands_the_id_to_the_run_it_launches(self):
+        out = mcp_server.spawn({"task": "do the thing", "cwd": str(ROOT)})
+        job = self._job(out)
+        self.assertEqual(job["run_id"], out["id"])
+        self.assertEqual(job["id"], out["id"])
+        argv = job["argv"]
+        self.assertEqual(argv[-1], "do the thing")     # the task stays last
+        self.assertEqual(argv[argv.index("--run-id") + 1], out["id"])
+
+    def test_build_argv_places_run_id_before_the_task(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "title": "x"},
+                                        "20260928-092516-fix-the-router-abc123")
+        i = argv.index("--run-id")
+        self.assertEqual(argv[i + 1], "20260928-092516-fix-the-router-abc123")
+        self.assertEqual(argv[-1], "t")
+
+    def test_a_spawn_the_cli_refuses_leaves_no_run_dir(self):
+        # build_argv is given the id before the CLI ever sees it, so a bad id
+        # must not leave a directory behind that status() would list.
+        with mock.patch.object(mcp_server, "preflight", return_value="nope"):
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected")
+        self.assertEqual(mcp_server.status()["runs"], [])
+        root = os.path.join(self.tmp, "agents")
+        self.assertEqual(os.listdir(root) if os.path.isdir(root) else [], [])
+
+    def test_the_caller_run_id_flows_as_the_parent_not_the_child_own(self):
+        """run_job must not stamp the child with the id of the run it is
+        starting: the CLI reads THIS process's AUTOOS_AGENT_RUN_ID as the
+        parent edge, so overwriting it here makes a child its own parent."""
+        parent = "20260928-080000-parent-run-000aaa"
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"], box["env"] = argv, kw.get("env")
+            return 0
+
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": parent}), \
+                mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            self.assertEqual(mcp_server.run_job(out["dir"]), 0)
+        self.assertEqual(box["argv"][-1], "t")
+        self.assertEqual(box["argv"][box["argv"].index("--run-id") + 1], out["id"])
+        self.assertEqual(box["env"]["AUTOOS_AGENT_RUN_ID"], parent)
+        self.assertEqual(box["env"]["AUTOOS_TASK_DIR"], out["dir"])
+
 
 class RunIdRecordTests(_WorkerRecordBase):
     """FLEETSPEC P0 items 2-4: the worker record carries the canonical run id,
@@ -9079,13 +9214,14 @@ class RunIdRecordTests(_WorkerRecordBase):
             client="opencode", task="do it", free=False, dry_run=False, card=None,
             clean=False, tier=2, joinable=False, lean=False, isolate=False, auto=True,
             title="t", model=None, free_model=self.agent.DEFAULT_FREE_MODEL,
-            max_depth=None, allow_training=False, no_defer=False)
+            max_depth=None, allow_training=False, no_defer=False, run_id=None)
 
-    def _cmd_run(self, plan, parent=None, task_dir=None):
+    def _cmd_run(self, plan, parent=None, task_dir=None, run_id=None):
         """Run cmd_run with the client replaced; return (rc, record, child_env).
 
         `parent`/`task_dir` are what the *spawner's own* environment carries:
         None removes the variable, so a top-level run is the tested case.
+        `run_id` is `run --run-id`: an id the caller minted and handed in.
         """
         seen = {}
         additions = {}
@@ -9102,6 +9238,8 @@ class RunIdRecordTests(_WorkerRecordBase):
             seen["env"] = dict(child_env)
             return self.agent.ClientExit(0)
 
+        args = self._args()
+        args.run_id = run_id
         with mock.patch.dict(os.environ, additions), \
                 mock.patch.object(self.agent, "build_plan", return_value=plan), \
                 mock.patch.object(self.agent, "run_client", side_effect=fake_run), \
@@ -9115,7 +9253,7 @@ class RunIdRecordTests(_WorkerRecordBase):
                     os.environ.pop(name, None)
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
-                rc = self.agent.cmd_run(self._args(), {})
+                rc = self.agent.cmd_run(args, {})
         return rc, seen.get("rec"), seen.get("env")
 
     def test_the_record_id_is_the_canonical_run_id_and_the_child_inherits_it(self):
@@ -9134,6 +9272,41 @@ class RunIdRecordTests(_WorkerRecordBase):
         _rc, rec, _env = self._cmd_run(
             self._plan(), parent="20260928-080000-parent-run-000aaa")
         self.assertEqual(rec["parent_run_id"], "20260928-080000-parent-run-000aaa")
+
+    # --- the caller may hand the id in (FLEETP0b) --------------------------
+    GIVEN_ID = "20260928-092516-fix-the-router-abc123"
+
+    def test_an_id_handed_in_is_still_parented_to_the_caller_not_to_itself(self):
+        _rc, rec, env = self._cmd_run(self._plan(), parent="20260928-080000-parent-run-000aaa",
+                                      run_id=self.GIVEN_ID)
+        self.assertEqual(rec["id"], self.GIVEN_ID)
+        self.assertEqual(rec["parent_run_id"], "20260928-080000-parent-run-000aaa")
+        self.assertEqual(env["AUTOOS_AGENT_RUN_ID"], self.GIVEN_ID)
+
+    def test_an_id_handed_in_by_a_top_level_spawner_leaves_no_parent(self):
+        # the parent is the CALLER's env, never the id this run is starting with:
+        # reading it from there would make a child its own parent.
+        _rc, rec, _env = self._cmd_run(self._plan(), run_id=self.GIVEN_ID)
+        self.assertEqual(rec["id"], self.GIVEN_ID)
+        self.assertIsNone(rec["parent_run_id"])
+
+    def test_a_malformed_handed_in_id_is_refused_before_anything_is_planned(self):
+        args = self._args()
+        args.run_id = "2026-09-28T09:25:16Z"
+        planned = []
+
+        def spy(*a, **k):
+            planned.append(1)
+            return self._plan()
+
+        with mock.patch.object(self.agent, "build_plan", side_effect=spy), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = self.agent.cmd_run(args, {})
+        self.assertEqual(rc, 2)
+        self.assertEqual(planned, [], "the id must be checked before any clone or start")
+        self.assertIn("--run-id", err.getvalue())
+        self.assertIn(args.run_id, err.getvalue())
 
     def test_the_run_dir_the_child_asks_back_in_is_recorded(self):
         _rc, rec, _env = self._cmd_run(

@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added - `run --run-id`, so an MCP spawn and its run share one id (FLEETP0b, 2026-09-28)
+
+- **`tools/autoos-agent.py`**: FLEET left one open item - the MCP server's `spawn`
+  still minted `logs/agents/<id>` with its own local-time `stamp-hex6` (no slug),
+  so an MCP spawn had two ids again (FLEETSPEC §5.1 says one). `run` now takes
+  `--run-id <id>`: the caller's id is used instead of a mint, and names the same
+  four places a minted one does - `agent/<id>`, the `--isolate` clone dir,
+  `logs/workers/<id>.json`, the child's `AUTOOS_AGENT_RUN_ID` (and so the
+  `X-AutoOS-Run-Id` header). A run id is a filename, a branch and a header value,
+  so a shape that is not the canonical one is refused with exit 2 by
+  `is_canonical_run_id` (a real UTC stamp, a slug within `RUN_ID_SLUG_CAP`, a
+  6-hex tail) before any clone, record or client start. The `parent_run_id` edge
+  is unchanged and stays the caller's own `AUTOOS_AGENT_RUN_ID`: a handed-in id
+  is never read from that variable, or the child would name itself its parent.
+- **`tools/autoos_agent_mcp.py`**: `spawn` mints with the agent module's own
+  `mint_run_id` (the module it already loads via importlib for `route`), keeps the
+  collision retry, names its run dir with that id, records it in `job.json`
+  (`run_id`, beside the `id` `status()` reads) and passes it to the CLI as
+  `--run-id` - built into the argv *before* the dry-run preflight, so the CLI
+  checks the id it will actually be started with and a refusal still creates no
+  run dir. `run_job`'s environment is untouched, so the server's own
+  `AUTOOS_AGENT_RUN_ID` (when the MCP client is itself a spawned run) stays the
+  parent of everything it spawns. Its local-time mint and the `secrets` import
+  that only it used are gone.
+- **`tests/test_autoos_spawner.py`**: `McpCanonicalRunIdTests` (canonical id for
+  the run dir, `--run-id` in the argv with the task still last, `job.json`
+  carrying `run_id`, a refused spawn leaving no dir, the caller's id flowing as
+  the parent), plus `run --run-id` cases in `CanonicalRunIdTests` (one id in
+  branch + dir + child env + header, the CLI printing the id it was given, 13
+  malformed shapes refused at exit 2) and in `RunIdRecordTests` (a handed-in id
+  is parented to the caller, not to itself; a top-level one leaves no parent; a
+  malformed one is refused before `build_plan`). Red before: **8 failed**; green
+  after: **700 passed / 111 subtests** on `tests/test_autoos_spawner.py
+  tests/test_autoos_heartbeat.py`, with `test_agent_harness.py`,
+  `test_autoos_context.py`, `test_autoos_inbox.py`, `test_autoos_tokenrate.py`,
+  `test_autoos_track.py` and `test_autoos_usage.py` at 227 passed. An MCP dry-run
+  spawn end to end prints one id: its run dir, the argv and the CLI's `run-id:`
+  line agree (`20260928-102313-mcp-id-check-9362d5`).
+
 ### Added - one canonical run id per spawn, its parent edge, and the route it was scored on (FLEET, 2026-09-28)
 
 - **`tools/autoos-agent.py`**: a spawn minted **two** ids from **two** clocks and nothing tied them
