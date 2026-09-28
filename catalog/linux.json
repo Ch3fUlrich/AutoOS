@@ -629,6 +629,25 @@
           "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {
+          "id": "omnigraph-client",
+          "name": "Omnigraph MCP client",
+          "description": "Pinned Omnigraph bridge, env file and MCP wrapper",
+          "provider": "custom",
+          "package": "omnigraph-client",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_omnigraph_client",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "omnigraph_url",
+          "homepage": "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp",
+          "notes": "Needs the omnigraph_url answer and the omnigraph_token key (or OMNIGRAPH_TOKEN) and skips with a hint when either is missing. Writes ~/.autoos-omnigraph.env (mode 600), pre-installs the pinned bridge into a private npm prefix instead of npx, and installs the omnigraph-mcp-autoos wrapper that reads the env file itself."
+        },
+        {
           "id": "neovim",
           "name": "Neovim + LazyVim",
           "description": "Editor with the LazyVim starter config",

@@ -5,6 +5,249 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides
+  whether a backup goes through `secret_backup.py` (private, born 0600) or
+  `cp -p` (the source's own mode) matched `OMNIGRAPH_TOKEN=[^[:space:]]` — a
+  non-space *immediately* after the `=` — while every reader of these files
+  decides on the *trimmed* value (`tools/omnigraph-mcp-autoos.sh` and the rc line
+  `install.sh` writes strip the whitespace around it; `has_token` in
+  `omnigraph_env_state` compares the stripped line). So `OMNIGRAPH_TOKEN=   secret`,
+  `export OMNIGRAPH_TOKEN= secret` and a tab after `export ` were live credentials
+  to the wrapper and invisible to the gate: that file took the `cp -p` branch and
+  left a 0644 copy of the bearer token behind the edit that removed the line. The
+  gate now uses the readers' rule — non-empty after trimming — so bare `KEY=`, a
+  whitespace-only value and `KEY = value` (not an assignment, and the readers skip
+  it) still get an ordinary backup that keeps the user's own mode. A quoted value
+  counts as a token even when it is `""`: the gate does not strip quotes, and the
+  error is only ever in the direction of a more private copy.
+- **`lib/linux/secret_backup.py`** (`main`): `argv[2]` was read unguarded, so the
+  call the usage line itself documents as optional — `secret_backup.py <path>` —
+  died with an `IndexError` traceback and exit 1. `backup_file_before_write` turns
+  any non-zero from the helper into "could not back up", so the defect would have
+  made the rc-file edit refuse to run at all rather than take the copy. The stamp
+  is now read only when it is there, and defaults to the clock exactly as the
+  in-process caller does.
+- Tests (`tests/linux/38-omnigraph-client.sh`): the gate is asserted *against the
+  shipped wrapper's own verdict* per form — one rule, two consumers, so the
+  definitions cannot drift again without a test noticing — and the CLI is called
+  with the stamp omitted, passed empty (the shell call site's shape), and with too
+  many arguments (still the usage error).
+
+### Fixed - token-bearing files: backups and temp files (A3 review 4, S1-S2, 2026-09-28)
+
+- **`lib/linux/secret_backup.py`** (new, `lib/linux/install.sh` uses it from both
+  sides): the one implementation of "back up a file that holds a live credential".
+  It creates the copy `O_CREAT | O_EXCL` at `0600` - mode and exclusivity in the
+  same syscall - copies the bytes in, carries only the source's *times* across
+  (`copystat` would copy the mode too and so would widen it), keeps the
+  repository's `<path>.autoos-backup-<stamp>[-N]` name shape, and leaves nothing
+  behind when the copy fails. The shell reaches it through
+  `backup_file_before_write`; `omnigraph_env_state` imports it inside the very
+  process that renames the new bytes into place, because the copy of the old token
+  has to land before the replace that destroys it, not in a second run that could
+  disagree with the first about whether anything changed.
+- **`lib/linux/install.sh`** (`backup_file_before_write`,
+  `file_holds_omnigraph_token`, `append_line_once`,
+  `omnigraph_retire_rc_token_lines`, `replace_or_append_marked_line`): the rc-file
+  edits backed the user's dotfile up with `backup_file`, i.e. `cp -p`, which
+  creates the destination with the *source's* mode - so a 0644 `.bashrc` got a 0644
+  backup holding `OMNIGRAPH_TOKEN=...`, and that copy outlives the line the step
+  deletes: the backup becomes the place the bearer token stays readable to every
+  local user (and survives the rotation, and the checkout, and the machine). Every
+  edit a token-bearing file can reach now takes its copy through
+  `backup_file_before_write`, which hands that case to `secret_backup.py` and keeps
+  `backup_file` - mode and times included - for every other file, unchanged for all
+  its other callers. That is four sites, not the one the finding named: on a first
+  run the rc file is opened by `append_line_once` (the current line is missing)
+  *before* the retire step ever runs, so fixing only the retire step would have
+  left the same leak on the path production takes first.
+  This corrects the claim in the entry below that `cp -p` was clean: it is clean as
+  to the *window* (coreutils creates the destination with the source's mode, so no
+  group-readable instant exists), which is not the same question as whether the
+  finished copy may be read - and a 0644 copy of a token is the leak either way.
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the rewrite staged the new
+  bytes at the fixed, guessable name `<path>.tmp`, opened `O_CREAT | O_TRUNC`.
+  Anyone able to write in the home - another user on a shared or NFS box, a
+  component that ran earlier - could plant a symlink there, and the step then
+  truncated and overwrote the target they chose with the token's bytes before
+  renaming that link onto `~/.autoos-omnigraph.env` itself (the new test reproduces
+  exactly that: the env file came out a link and mode 777). Two AutoOS runs in one
+  second shared the one name too. The temp is now `tempfile.mkstemp(dir=<dirname>,
+  prefix=<basename>.autoos-tmp-)`: unpredictable, exclusive, `0600` from the birth,
+  fsynced, renamed, and unlinked if anything in between fails - the same shape
+  `lib/linux/serve.py`'s `write_secret` and the Claude Code settings writer already
+  use.
+- **`tests/linux/38-omnigraph-client.sh`**: four cases - the retire step under
+  `umask 022` (a `sitecustomize` probe records the mode each backup is *born* with,
+  so a `cp -p` followed by a `chmod 600` cannot pass), a sweep that reads every
+  `.autoos-backup-*` the component run left behind and refuses any that holds a
+  token line and is group- or world-readable, each of the three rc-writing branches
+  (append, purge, replace), and the planted-symlink temp case. The existing
+  env-backup case now asserts the exclusive `0600` creation across the writer *and*
+  the shared helper, and that the writer imports it rather than re-typing it.
+- Not changed here, and the same defect: `setup_opencode_config` stages
+  `opencode.json.tmp` at a fixed name (`lib/linux/install.sh`, the writer that
+  merges the api-key file) - a separate component, so a separate brief.
+
+### Fixed - a token-bearing backup is created 0600 and never widened (A3 final review S1, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the backup taken before the
+  env file is rewritten holds the **previous token**, still a live bearer
+  credential until the server expires it, and `shutil.copy2` creates the
+  destination with `open(dst, "wb")` — mode `0666 & ~umask`, i.e. **0644 on any
+  normal machine** — and only tightens it *after* the bytes landed. On a shared or
+  NFS home another local user could read the token inside that window (measured:
+  the probe saw the backup born 0644). The writer now creates it with
+  `os.open(path, O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — the restrictive mode
+  and the exclusive create in one syscall, so a same-second backup is never
+  clobbered — copies the bytes in, and carries the times across itself
+  (`os.utime`) rather than with `copystat`, which would have copied the mode too.
+  `backup_file` (`cp -p`) was probed the same way and is clean: coreutils creates
+  the destination with the source's mode, so no rc-file backup ever opens.
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): the replace branch
+  assigned `rc=0` with no `local`, unlike the purge branch a few lines above it, so
+  the step's exit status overwrote the *caller's* `rc` — the variable every step
+  here uses to report a failed write.
+- **`tests/linux/38-omnigraph-client.sh`**: a `sitecustomize` shadow hooks
+  `builtins.open` and `os.open` (the idiom `32-answer-file-templates.sh` already
+  uses) and asserts the mode every backup is created with under `umask 022`, that
+  the backup holds the pre-edit bytes and the source's times, and — so a future
+  rewrite that dodges both hooks cannot pass by accident — that the writer holds no
+  `copy2` call and does create with `O_EXCL`. The `rc` leak is asserted
+  behaviourally: a caller whose `rc` is a sentinel still holds it after the step.
+
+### Fixed — the rc-line writer is contained and byte-safe; one value rule for all three readers (A3 review 2, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): both of its
+  heredocs read and wrote the rc file as strict UTF-8 *text*, unguarded. On an
+  undecodable `.bashrc`/`.zshrc` the python died — aborting the run outright
+  where errexit was live (measured: under `set -euo pipefail` the step never
+  returned), and where `run_post_install` contained it, printing a traceback into
+  the log, **announcing "replaced the … line" for a file it had not touched**,
+  and recording nothing. A refused write was the same story. Editing one line of
+  a dotfile also re-encoded the whole thing, converting every CRLF neighbour to
+  LF. Both edits now go through one helper, `autoos_rc_edit_lines` — the
+  byte-safe, contained form the retire step had already learned, and which gave
+  up its private copy of that python. A file that cannot be written is a warning
+  plus `autoos_record_failure`, the run continues, and a replacement line keeps
+  the newline of the line it replaced.
+- The same helper's `replace` mode now leaves **one** line. With two stale
+  AutoOS lines in one file it wrote two copies of the new one — reachable for
+  the first time through the version bump below.
+- **The rc tag went `AutoOS:omnigraph-env-v2` → `-v3`**, with the tag held in one
+  function (`omnigraph_rc_marker`). A bump is *required* whenever the rc line's
+  shape changes: the writer recognises a line by the tag alone, so a changed body
+  under an unchanged tag leaves every machine already carrying the old line
+  sitting on it, while the gate — which compares the whole line — never reads
+  current again. The tag without its `-vN` tail is still the older-line marker,
+  so this one bump replaces v1 and v2 alike.
+- **One value rule, three readers.** `KEY= value` produced a token with a leading
+  space in `tools/omnigraph-mcp-autoos.sh` and a trimmed one in the `.ps1` twin,
+  so one env file yielded different tokens per platform; a quoted value that was
+  quoted *after* a space was never unquoted at all. The rule is *whitespace round
+  a value is not part of it, then one layer of matching quotes goes*, applied
+  identically by the shell wrapper, its PowerShell twin (which already had it)
+  and the rc line install.sh writes — verified for all three under bash, zsh and
+  `pwsh` in one test. Whitespace a quoted value keeps *inside* its quotes
+  survives, as it must.
+
+### Fixed — the `omnigraph-client` gate compares the values it would write; the retire step is contained and byte-safe (A3 review S2, 2026-09-28)
+
+- **`lib/linux/install.sh`**: `omnigraph_client_is_current` (the skip gate
+  `install_component` asks *before* any postInstall runs) compared "a token is in
+  the file" and an unanchored `grep -F` of the URL — so a **rotated token stayed
+  stale forever**, and a commented `# OMNIGRAPH_BASE_URL=…` or a
+  `…invalid.evil` suffix URL read as current. It now compares the resolved URL
+  *and* token, as whole `KEY=value` lines, plus the `environment.d` link, the rc
+  line this run would write, and no retired line left; the env-file half is asked
+  of `omnigraph_env_state … check`, the writer's own code path in a new mode, so
+  the gate and the write cannot disagree, and the values reach python in the
+  environment — never printed. A bridge pin with an empty `@version` (`name@`)
+  no longer equals an empty installed version, and a **symlink** at the wrapper
+  path is refused instead of counting as the copy it promises (a `cp` through
+  such a link writes into the tracked checkout).
+- **`lib/linux/install.sh`** (`omnigraph_retire_rc_token_lines`): the heredoc ran
+  unguarded under the runner's `set -euo pipefail` and in text mode, so an
+  undecodable dotfile printed a python traceback into the log, *claimed the line
+  was removed* and left it there, and a read-only file aborted the step; the
+  whole file was also re-encoded (CRLF neighbours converted to LF). It now edits
+  bytes, is contained like every other step (warn +
+  `autoos_record_failure omnigraph-client`, the run continues), and leaves every
+  other line untouched.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: hand-edited env lines —
+  `export KEY=value`, an indent, `"…"`/`'…'` round a value — were kept literally
+  or skipped, so the bridge started with no or wrong token; both twins now strip
+  those forms (one layer of matching quotes, nothing else), ignore every key but
+  the three, are CRLF-safe and still never evaluate a value. The env-file writer
+  recognises the same forms, so a stale hand line is normalised rather than left
+  to shadow the resolved value.
+- **Disproved, not fixed**: `exec "$bridge" "$@"` with no arguments under
+  `set -u` on bash 3.2 (stock macOS) — measured on real `bash:3.2.57` (the
+  `bash:3.2` image): the wrapper starts the bridge with `argc=0`, token exported,
+  exit 0, and `set -u; printf %s "$@"` with no positional parameters exits 0.
+  The bash-4.4 nounset entry that is usually cited here covers `${a[@]}` on an
+  *empty array* (which does fail on 3.2, verified), not `$@`; the portable
+  `${1+"$@"}` form would be noise. A zero-arg case is now tested as a guard.
+- **`tests/linux/38-omnigraph-client.sh`**: 11 cases added, each written against
+  the bug first — env rotation via `$OMNIGRAPH_TOKEN` and via `api-keys.yml`,
+  commented/suffix URL, deleted rc line, reappeared retired line, lost
+  environment.d link, CRLF and non-UTF-8 rc files, unwritable rc file through
+  `run_post_install` (the production shape), decorated env rows normalised,
+  empty-pin refusal, symlinked wrapper refusal, export/quoted/CRLF/injection
+  parsing and the zero-arg start.
+
+### Added — `omnigraph-client`: a pinned bridge, the env file, and the wrapper that reads it (A3, 2026-09-27)
+
+- **`catalog/linux.json`**, **`catalog/macos.json`**: new `custom` component
+  `omnigraph-client` (profiles `workstation`, `ai-coding`, `light`; **not**
+  `server`, which the spec leaves open), `requires: nodejs`, prompt
+  `omnigraph_url`, postInstall `install_omnigraph_client`.
+- **`lib/linux/install.sh`**: `install_omnigraph_client` resolves the base URL
+  from the `omnigraph_url` answer (`omnigraph_url_answer` is now the one strip
+  rule, with `omnigraph_base_url` keeping the localhost default for its existing
+  callers) and the token from `$OMNIGRAPH_TOKEN` else the git-ignored
+  `configuration/api-keys.yml` key `omnigraph_token`, through the one parser
+  `tools/keys_file.py`. With either missing it warns with the exact thing to set
+  and returns 0 as `skipped: no omnigraph URL` / `skipped: no omnigraph token` —
+  not a failure, and nothing written. Then four idempotent steps: the env file
+  (via `write_omnigraph_env`, which now takes the token as an optional second
+  argument so a resolved secret never has to be exported into setup's shell, and
+  publishes `OMNIGRAPH_ENV_STATE`); the pinned bridge
+  (`catalog/agent-harness.json`, `mcp_package omnigraph`) installed with
+  `npm install -g --prefix ~/.local/share/autoos/omnigraph-mcp` — pre-installed
+  because npx start-up measured 6.7–9.3 s median over 16 parallel bridges
+  (decision D9), skipped when the prefix's own `package.json` already holds the
+  pin and reinstalled when the pin moves; the wrapper copy to
+  `~/.local/bin/omnigraph-mcp-autoos` (mode 755, copied not linked, replaced only
+  on a content difference *and* only when the file carries AutoOS's marker — the
+  user's own file there is left alone with a warning and a recorded refusal, as
+  is a file that cannot be backed up); and spec §C's recognised-only removal: an
+  rc-file line that both reads from the retired `agent-skills` tree and names
+  `OMNIGRAPH_TOKEN` is removed after a backup, anything else in the file stays.
+  `custom_is_installed` learns the component, so a second run reports `skipped`
+  at the package level too and every step says `unchanged`. A `--dry-run`
+  announces each step and ends `dry run: nothing was written` — it never claims
+  the machine is already current, because a dry run compares nothing.
+- **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: the bridge launcher an MCP
+  client calls. It reads `~/.autoos-omnigraph.env` itself — only the three
+  `OMNIGRAPH_*` keys, values assigned and never evaluated, a value already in the
+  env winning — then `exec`s the pre-installed bridge; no bridge is one stderr
+  line naming the component and exit `127`. The token is never printed. Windows
+  *wiring* is a later lane; the twin is tracked now so the two cannot drift.
+- **`configuration/api-keys.example.yml`**: the commented `omnigraph_token`
+  placeholder, with the line saying the token is issued by the graph server.
+- **`docs/omnigraph.md`** ("The `omnigraph-client` component", "Token rotation")
+  and **`docs/catalog.md`**: the inputs, the output file, the wrapper, the skip
+  hint, and the fact that the env file is the token's only home on the machine.
+- **`tests/linux/38-omnigraph-client.sh`**: 15 cases with `SYS_HOME` in a temp
+  dir and npm stubbed to land the tree `npm install -g --prefix` lands — both
+  skip paths (no failure recorded, nothing on disk), the keys-file token path
+  with no printed value, a full run's modes and contents, the second run all
+  skipped, a moved pin reinstalled, the user's own wrapper kept and AutoOS's
+  replaced with a backup, the retired rc line removed and its neighbours kept,
+  the wrapper's env precedence and its 127, and a dry run that writes nothing.
 ### Fixed — flock's post-lockfile shell stop is still a stop behind a leading `--` (hx3 review LOWs, S1, 2026-09-28)
 
 Fast-follow on the hx3 Sonnet FINAL review: one LOW in the policy, one in a test message. Failing tests written first (8 red assertions).
