@@ -2769,19 +2769,43 @@ def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
 
 # The return contract (docs/agent-protocol.md): a finished worker prints a
 # REPORT heading, optionally wrapped in markdown (`**REPORT**`, `# REPORT:`).
-# Prose that merely mentions a report is not one, and neither is a word that
-# only starts with the same letters ("REPORTED").
-REPORT_HEADING_RE = re.compile(r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?\b")
+# Prose that merely mentions a report is not one; neither is a word that only
+# starts with the same letters ("REPORTED") or a file named after it
+# ("REPORT.md" — measured in work/L1-routing/A7spike.out, whose run wrote its
+# report to a file and named it in its closing line).
+REPORT_HEADING_RE = re.compile(
+    r"(?im)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])")
 
-# The same token anywhere in a line. A heading line that carries it twice is
-# QUOTING the contract ("# REPORT heading, optionally wrapped in markdown
-# (`**REPORT**`, `# REPORT:`)."), which is exactly what a worker dumping the
-# spawner's source prints - not a report about its own run.
-REPORT_TOKEN_RE = re.compile(r"\breport\b", re.IGNORECASE)
+# An inline-code span (backticks) or a string/regex literal (quotes): the shapes
+# a line carries when it QUOTES something instead of saying something.
+_QUOTED_SPAN_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")
 
-# A markdown/ASCII code-fence delimiter: text between an opening and a closing
-# one is quoted, never the client's own message.
-_CODE_FENCE_RE = re.compile(r"^\s*(?:```+|~~~+)")
+# The word rendered AS the heading convention: markup touching it (`**REPORT**`,
+# `# REPORT:`) or a regex escape next to it (\breport\b). A span that quotes an
+# ordinary message string ("RESEARCH: report only") names a message the worker
+# saw, and a real report does exactly that (SPAWNFIX3c.out).
+_SELFQUOTE_MARKUP_RE = re.compile(
+    r"[*#>?+|]{1,3}\s*\breport\b"        # `**REPORT**`, `# REPORT:`
+    r"|\breport\b\s*[*#>?+|]"            # the bold close, `REPORT*`
+    r"|\\[a-zA-Z][*+?\s]*report"         # \breport, \s*report
+    r"|report[*+?\s]*\\[a-zA-Z]",        # report\b, report\s*
+    re.IGNORECASE)
+
+
+def is_self_quoting(line: str) -> bool:
+    """True when a heading line displays the heading convention itself.
+
+    The old rule counted the word "report" in the line and rejected two or more
+    mentions; that also rejected the real headers of SPAWNFIX3c.out and
+    OR34spike.out, which say it twice because they are long lines of prose.
+    Only a QUOTED mention that carries the markup counts: the spawner's own
+    comment is out, a run's own sentence is in.
+    """
+    for span in _QUOTED_SPAN_RE.findall(line):
+        if _SELFQUOTE_MARKUP_RE.search(span):
+            return True
+    return False
+
 
 # The lines a client's harness prints for its own tool calls, as opposed to its
 # message text. Everything before the LAST of them is transcript: a REPORT
@@ -2810,44 +2834,41 @@ def final_message_segment(output: str, brief: str = "") -> str:
     run_client merges the child's stdout+stderr and keeps the last TAIL_LIMIT
     bytes verbatim, so the tail is the whole raw transcript: the task text the
     client echoed, its tool output, and only at the end the assistant's final
-    message. Three things come out of it here:
+    message. Two things come out of it here:
 
     - everything up to the last tool-call line (FINAL_SEGMENT_MARKER_RES): the
-      client was still working there;
+      client was still working there, and whatever it or its tools printed in
+      that part is the transcript, quotations included;
     - the brief's own lines: a worker that cats or echoes its brief prints a
       line starting "REPORT:" (every brief ends with the return contract's field
-      list) and that is the spawner's text, not the worker's report;
-    - anything inside a ``` fence: quoted code or prose, not a message.
+      list) and that is the spawner's text, not the worker's report.
 
     What is left is what the client's final message said. A tool RESULT printed
     plainly after its own command echo is indistinguishable from message text in
     a merged stream, which is why the brief rule above is the one that carries
-    the measured case.
+    the measured case - and why fences are not stripped: in the final message a
+    fenced REPORT heading is the message (SPAWNFIX3d).
     """
     quoted = {ln.strip() for ln in (brief or "").splitlines() if ln.strip()}
-    segment, fenced = [], False
-    for raw in (output or "").splitlines():
-        if _CODE_FENCE_RE.match(raw):
-            fenced = not fenced
-            continue
-        line = _ANSI_RE.sub("", raw).strip()
-        if fenced or not line or line in quoted:
-            continue
-        if any(m.match(line) for m in FINAL_SEGMENT_MARKER_RES):
-            del segment[:]
-            continue
-        segment.append(line)
-    return "\n".join(segment)
+    lines = [(_ANSI_RE.sub("", raw).strip()) for raw in (output or "").splitlines()]
+    start = 0
+    for i, line in enumerate(lines):
+        if line and any(m.match(line) for m in FINAL_SEGMENT_MARKER_RES):
+            start = i + 1
+    return "\n".join(ln for ln in lines[start:] if ln and ln not in quoted)
 
 
 def has_report(output: str, brief: str = "") -> bool:
     """True when the client's FINAL MESSAGE carries a REPORT heading line.
 
     `brief` is the text this run sent the client (plan["brief"]): its lines never
-    count, because echoing the brief back is not reporting on the task.
+    count, because echoing the brief back is not reporting on the task (that is
+    final_message_segment's filter). A heading line that renders the heading
+    markup itself quotes the contract instead of filing a report
+    (is_self_quoting).
     """
     for line in final_message_segment(output, brief).splitlines():
-        if REPORT_HEADING_RE.search(line) and len(REPORT_TOKEN_RE.findall(line)) < 2:
+        if REPORT_HEADING_RE.search(line) and not is_self_quoting(line):
             return True
     return False
 
@@ -3815,7 +3836,11 @@ def cmd_run(args, cfg: dict) -> int:
         # SPAWNFIX3c (S2) item 2: the reflog lengths as the clone stands up, so a
         # later read sees only what the run appended. Kept in the dict, which a
         # provider-stop fallthrough re-run inherits with the sandbox itself.
-        sb["reflog"] = sandbox_reflog_snapshot(sb["path"], sb["branch"])
+        # SPAWNFIX3d (S2) item 3: only a read-only run is judged on an untouched
+        # sandbox, so only it pays for the snapshot - exactly like the diff stat
+        # at the summary below (sandbox_reflog_writes is never called otherwise).
+        if plan["route"].get("read_only"):
+            sb["reflog"] = sandbox_reflog_snapshot(sb["path"], sb["branch"])
         print("sandbox: %s (branch %s)" % (sb["path"], sb["branch"]))
     start = time.time()
     # Every finished --isolate run is captured (tee'd to our stdout), so the

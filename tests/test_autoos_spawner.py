@@ -2418,15 +2418,20 @@ class ReportProvenanceTests(unittest.TestCase):
         self.assertFalse(self.cli.has_report(quoted, ""))
         self.assertFalse(self.cli.has_report(quoted, quoted))
 
-    def test_a_dump_of_a_report_template_inside_a_fence_is_not_a_report(self):
-        # docs/agent-protocol.md's own template line quoted at the end of a tail:
-        # it matches the heading pattern once, so only the fenced-block rule
-        # (and the brief rule, when the brief quoted it) keeps it out.
+    def test_a_report_inside_a_fence_that_closes_before_the_message_continues_is_no_report(self):
+        # SPAWNFIX3d rewrote this test (it asserted the opposite). The rule at
+        # stake is WHICH fence hides a heading: a block that is followed by more
+        # tool activity is a quotation in the TRANSCRIPT, and the transcript is
+        # cut at the last tool line, so it never counts. What the old version
+        # also forbade — a heading inside a fence in the FINAL message — is a
+        # report: measured 2026-09-28, five corpus runs wrapped their whole
+        # closing message in one fence (R5ARATE.out, review-mcpb.out) or sat
+        # behind one that never closed (FULLGUARD.out, OR3.out, A5e2.out).
         tail = ("Here is the contract this repo uses:\n"
                 "```\n"
                 "REPORT <id> · <status> · <files> · <tests> · <blockers> · <lessons>\n"
                 "```\n"
-                "I'll follow it at the end.\n")
+                "jetski: running command git status\n")
         self.assertFalse(self.cli.has_report(tail, ""))
 
     def test_a_report_that_is_not_the_last_thing_the_client_printed(self):
@@ -2523,6 +2528,164 @@ class ReportProvenanceTests(unittest.TestCase):
                            capture_output=True, text=True, check=True).stdout.strip(), "")
         self.assertTrue(cli.sandbox_reflog_writes(clone, snap2, base),
                         "a stashed change must read as the write it is")
+
+
+class ReportFenceAndProseTests(unittest.TestCase):
+    """SPAWNFIX3d (S2, after the Sonnet re-check of the real corpus).
+
+    The 2026-09-25 corpus (work/L1-routing/*.out, read-only, 208 files) has real
+    REPORT headings the SPAWNFIX3c detector throws away, in two shapes:
+
+    - the fence toggle: a ``` that never closes discards everything to its EOF,
+      so a report printed after it is gone, and an odd fence count anywhere in a
+      long transcript leaves the toggle stuck open (FULLGUARD.out, OR3.out,
+      R5ARATE.out, review-mcpb.out, A5e2.out);
+    - the two-mentions rule: a heading that says the word "report" twice — once
+      as its own heading and once in prose — is a real report, not a quotation of
+      the contract (SPAWNFIX3c.out, OR34spike.out).
+
+    Both over-reached: a run that finished was graded INCOMPLETE and relaunched.
+    The protections that stay are the ones that identified the measured escape:
+    the cut at the last tool line, the brief's own lines, and a heading line that
+    renders the heading MARKUP itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    # work/L1-routing/R5ARATE.out: the client wrapped its whole closing message
+    # in one fence, and the spawner's summary follows it.
+    WRAPPED_REPORT = "\n".join((
+        "route: t2-worker reason=public-default routing=1",
+        "sandbox: /tmp/sb (branch agent/x)",
+        "```",
+        "REPORT R5ARATE (RESTART R5a, S2)",
+        "",
+        "sha: 533fb58 · lesson: a fence around the message is still the message",
+        "```",
+        "",
+        "sandbox changes (uncommitted):",
+        "  (none)",
+    ))
+
+    # work/L1-routing/A5e2.out: a ```bash opened in a tool transcript (line 223
+    # of 1123) never closes, and the report is 878 lines later.
+    DANGLING_FENCE = "\n".join((
+        "$ bash <<'EOF'",
+        "```bash",
+        "grep -n 'REPORT' tools/autoos-agent.py",
+        "EOF",
+        "2774: a finished worker prints a heading",
+        "> t2-worker · cheaperinference/kimi-k3",
+        "REPORT:",
+        "- sha: 2e985967",
+        "- tests: 26/26",
+    ))
+
+    # work/L1-routing/FULLGUARD.out: the report is the final message and its own
+    # body carries a nested, closed fence.
+    NESTED_FENCE = "\n".join((
+        " ```",
+        " quoted tool output from two turns ago",
+        " ```",
+        "> t2-worker · deepseek-v4.1-flash",
+        "REPORT",
+        "",
+        "- sha: 2661544",
+        "  ```",
+        "  run-tests.sh: refusing an unfiltered run",
+        "  ```",
+        "- lesson: a code refusal with an explicit opt-in does.",
+    ))
+
+    def test_a_report_wrapped_in_a_fence_is_a_report(self):
+        self.assertTrue(self.cli.has_report(self.WRAPPED_REPORT, ""),
+                        self.WRAPPED_REPORT)
+
+    def test_a_fence_that_never_closes_does_not_discard_the_report(self):
+        self.assertTrue(self.cli.has_report(self.DANGLING_FENCE, ""))
+        self.assertTrue(self.cli.has_report(self.NESTED_FENCE, ""))
+
+    def test_the_segment_is_the_final_message_not_the_transcript(self):
+        # The heading still has to be in the client's closing message: a report
+        # printed before the next tool call is the worker mid-run.
+        tail = self.DANGLING_FENCE + "\nBash(git status)\nOn branch agent/x\n"
+        self.assertNotIn("REPORT:", self.cli.final_message_segment(tail, ""))
+        self.assertFalse(self.cli.has_report(tail, ""))
+
+    def test_a_heading_that_says_the_word_report_twice_is_a_report(self):
+        # SPAWNFIX3c.out: '**REPORT** … the brief-echo exited 0 printing
+        # `RESEARCH: report only`)' — the second mention quotes a spawner MESSAGE,
+        # and OR34spike.out's is plain prose. Neither renders the heading.
+        for head in (
+                "**REPORT** `ff5ebe9` · status: done · tests: before 595 passed "
+                "(18 failed: the read-only brief-echo exited 0 printing "
+                "`RESEARCH: report only`) · after 610 passed · blockers: none.",
+                "# REPORT — OR34spike one-router steps 3+4 "
+                "(lane attribution + usage report)"):
+            with self.subTest(head=head[:60]):
+                self.assertTrue(self.cli.has_report(head, ""), head)
+
+    def test_a_heading_that_renders_the_heading_markup_is_not_a_report(self):
+        # The spawner's own comment, quoted: the extra mentions display the
+        # convention (`**REPORT**`, `# REPORT:`, \breport\b), which no run files
+        # as its result line.
+        self.assertFalse(self.cli.has_report(
+            "# REPORT heading, optionally wrapped in markdown "
+            "(`**REPORT**`, `# REPORT:`).", ""))
+        self.assertFalse(self.cli.has_report(
+            '# REPORT: the check is `\\breport\\b` in a regex literal.', ""))
+
+    def test_a_brief_line_never_counts_even_when_it_is_a_heading(self):
+        brief = "**REPORT** sha, tests before/after, lesson:, open:."
+        self.assertFalse(self.cli.has_report("Working on it.\n" + brief, brief))
+
+    def test_a_file_named_after_the_contract_is_not_a_heading(self):
+        # work/L1-routing/A7spike.out: the research run wrote its report to
+        # ./REPORT.md and its closing line says so. The relaxation above must not
+        # make that a filed report — a heading may end a word, but it may not be
+        # one ("REPORTED"), and it may not be a filename ("REPORT.md").
+        for line in ("**REPORT.md** written to `./REPORT.md`. Here's what it covers:",
+                     "REPORT.md is the artifact this run produced.",
+                     "The REPORTED numbers were taken from the same transcript."):
+            with self.subTest(line=line[:40]):
+                self.assertFalse(self.cli.has_report(line, ""), line)
+        # and the same run, when it does print the heading, is not missed:
+        self.assertTrue(self.cli.has_report(
+            "**REPORT** `f0fa2bb` · router D-045 implemented test-first · "
+            "files: `tools/autoos_tokenrate.py` (+87/-19) · lesson: - · open: -", ""))
+
+
+class ReflogSnapshotCostTests(unittest.TestCase):
+    """SPAWNFIX3d (S2) item 3: only the verdict that reads the reflog pays for
+    the snapshot. sandbox_reflog_writes() runs for a read-only run only
+    (autoos-agent.py:4010), exactly like the diff stat at :4016, but the
+    snapshot taken right after the clone — a `rev-list --all` over the whole
+    history plus three reflog reads — ran for every --isolate worker."""
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_only_a_read_only_run_snapshots_the_reflog(self):
+        case = IsolateContainmentTests("setUp")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        root, stub, state = case.make_root(), case.make_fake_agy(), case.make_state()
+        real = case.agent.sandbox_reflog_snapshot
+        calls = []
+
+        def spy(path, branch):
+            calls.append(os.path.basename(path))
+            return real(path, branch)
+
+        with mock.patch.object(case.agent, "sandbox_reflog_snapshot", spy):
+            writer_rc, _out, _err = case.run_isolated(root, stub, state, "report")
+        self.assertEqual(calls, [], "a writer run is not judged on its reflog")
+        with mock.patch.object(case.agent, "sandbox_reflog_snapshot", spy):
+            read_only_rc, out, _err = case.run_isolated(
+                root, stub, state, "report", read_only=True)
+        self.assertEqual(len(calls), 1, out)
+        self.assertEqual(read_only_rc, 0, out)
+        self.assertEqual(writer_rc, 5, "the writer still ends NO-OP: it reported, changed nothing")
 
 
 class IncompleteRunEndToEndTests(unittest.TestCase):
