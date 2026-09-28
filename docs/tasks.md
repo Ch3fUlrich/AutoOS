@@ -39,6 +39,18 @@ their contemporary names.
 | Leaf self-spawn fence: leaf harness denies `autoos-agent.py run/spawn` in bash + MCP, brief return contract ends at REPORT, worker health stall class "self-spawn" (D-103 lesson, fleetspec-fix8) | autoos-L1-routing (in FREEFENCE) | 2026-09-28 | FREEFENCE test case proves a leaf cannot spawn | Queued — est. Claude ~10k |
 | Web Router-tiers backend (apply/switch) | — | — | — | Closed 2026-09-28: superseded by the FLEETSPEC console (OmniRoute-grade) |
 | Agent Canvas re-evaluation | — | — | — | Closed 2026-09-28: superseded — operator rejected OpenHands as the hub; FLEETSPEC replaces it |
+| ORCH-C1 REVIVE: restore bg orchestrators + router on user-manager start and on crash; snapshots include bg sessions; 5-min watchdog with `RUN/STOP` marker; logout never stops sessions (D-117/D-119/D-121) | autoos-L1-backlog | 2026-09-28 | kill test: bg sessions come back after a user-manager restart; watchdog skips on STOP; tests; Sonnet final | Running — est. Claude ~40k |
+| ORCH-A1 role launch profiles with pre-granted permissions (spec first) | autoos-L1-backlog | 2026-09-28 | spec OK by routing-00, then every orchestrator/worker launched from a per-role settings file (tests) | Queued after C1 — est. Claude ~60k |
+| ORCH-B1 event-driven wake-ups: `inbox --follow --actionable` + Monitor instead of cron beats (spec first) | autoos-L1-routing | 2026-09-28 | spec OK, then an idle orchestrator spends 0 turns/h (measured) | Queued (spec now) — est. Claude ~50k |
+| ORCH-B2 machine-checked readies: `ready-check` writes a JSON record (sha, CI run+conclusion, reviewers+verdicts, overrides) | autoos-L1-routing | 2026-09-28 | record written + verified by a test; routerctl side is routing-00's | Queued — est. Claude ~30k |
+| ORCH-B5 free-leg health gate: nightly probe per free leg, `unavailable_until` + digest line | autoos-L1-routing (FREEHEALTH) | 2026-09-28 | a failing leg is marked and skipped; DeepSeek never default writer (test) | Running in FREEHEALTH — est. Claude ~20k |
+| ORCH-A2 policy via versioned `policy/*.yml`, read at session start | autoos-L1-routing | 2026-09-28 | caps/review/budget read from policy files; a merged commit changes behaviour (test) | Queued — est. Claude ~40k |
+| ORCH-D1–D3 skill as index ≤150 lines + role cards ≤60 lines, rules tagged enforced/advisory, today's rules (spec first for D1) | autoos-L2-general (spec) → L1-routing (skill owner) | 2026-09-28 | spec OK; CI fails when an enforced rule loses its test | Queued (D1 spec now) — est. Claude ~60k |
+| ORCH-A3 operator inbox page (artifact) from QUESTIONS/OS steps | autoos-L2-general | 2026-09-28 | one page lists every open OS step as copy-paste block | Queued — est. Claude ~25k |
+| ORCH-B3 structured JSONL inbox + per-reader offsets | autoos-L1-routing | 2026-09-28 | no missed ready in a replay test | Queued — est. Claude ~40k |
+| ORCH-B4 budget governor normal/budget/emergency + fallback router | autoos-L1-routing | 2026-09-28 | mode switches from measured usage (test) | Queued after CLAUDEBUDGET — est. Claude ~30k |
+| ORCH-A4 auto-accept reversible defaults in routerctl | routing-00 (routing repo) | — | — | Not AutoOS code — routing-00's |
+| ORCH-D4 archive dormant PS runner/CAO parts (PLAN §7) | autoos-L1-backlog | 2026-09-28 | files moved to an archive path, links + tests green | Queued (last) — est. Claude ~15k |
 
 ## App comparison (why a file, not a new app)
 
