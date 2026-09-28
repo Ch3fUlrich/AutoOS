@@ -803,16 +803,32 @@ def mint_run_id(title: str | None, task: str, now=None) -> str:
     The slug comes from the title the run is named by - a titleless spawn's
     title is build_plan's own `tN <task head>`, so this is the same text a human
     reads in `ps`, capped at RUN_ID_SLUG_CAP chars and reduced to [a-z0-9-]. A
-    run id is a filename, a branch name and a header value at once, so nothing
-    past the slug is task text (a brief can carry a key). The hex tail is what
-    keeps two spawns in the same second apart (measured 2026-09-25, the bug
-    `unique_suffix` names).
+    run id is a filename, a branch name and a header value at once, so the slug
+    is scrubbed first (`slug_source`) and nothing past it is task text at
+    all. The hex tail is what keeps two spawns in the same second apart
+    (measured 2026-09-25, the bug `unique_suffix` names).
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     if now.tzinfo is not None:
         now = now.astimezone(datetime.timezone.utc)
     return "%s-%s-%s" % (now.strftime("%Y%m%d-%H%M%S"),
-                         slugify(title or task or "", RUN_ID_SLUG_CAP), unique_suffix())
+                         slugify(slug_source(title or task or ""),
+                                 RUN_ID_SLUG_CAP), unique_suffix())
+
+
+def slug_source(text: str) -> str:
+    """The scrubbed copy of `text` that a slug is about to be cut from.
+
+    Both slug producers use it (`mint_run_id`, `session_tag`), because both cut
+    BELOW the length of a vendor key - 24 and 40 characters - so the cap that was
+    meant to keep task text out of an id kept a pasted key in it whole, into the
+    branch name, the sandbox dir, the gateway header and the printed `run-id:`
+    line. The shared redactor masks first; the mask token is then dropped rather
+    than slugged (an id that reads "autoos-redacted" names nothing and still
+    shows that a secret was there).
+    """
+    scrubbed = redact.Redactor().text(text or "")
+    return scrubbed.replace(redact.TEXT_MASK, " ")
 
 
 # --- redacting the worker's output (SPAWNREDACT item 2) --------------------
@@ -853,8 +869,12 @@ def _redact_value(value):
         return redact_output(value)
     if isinstance(value, dict):
         return {k: _redact_value(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(v) for v in value]
+    # FLEETP0 review LOW: this walked dicts and lists only, so a secret inside
+    # any other container reached the record, `ps` and the log intact. The
+    # container type is kept, because the record's shape is what `ps --tree` and
+    # the console read.
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return type(value)(_redact_value(v) for v in value)
     return value
 
 
@@ -869,11 +889,54 @@ def report_redactions() -> None:
         _OUTPUT_REDACTOR.reset_count()
 
 
-SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+SESSION_TAG_MAX_LEN = 120
+SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._/-]{1,%d}$" % SESSION_TAG_MAX_LEN)
 SESSION_TAG_HEADER = "x-omniroute-session-id"
 # FLEETSPEC P0 item 5: the run id goes next to the session tag, so a gateway
 # row can be tied back to one spawn's sandbox, record and branch.
 RUN_ID_HEADER = "X-AutoOS-Run-Id"
+# Measured in the running gateway build (read-only, 2026-09-28): OmniRoute keys a
+# conversation on `headers.get("x-omniroute-session-id").trim().slice(0, 128)`
+# (resolveConversationId, in .build/next/server/chunks) and no charset check runs
+# on it at all. So the limit is a LENGTH and it is a silent TRUNCATION: a value
+# past 128 chars loses its tail, and the tail is where the run id lives. `/` is
+# accepted, which is what D-063 relies on.
+OMNIROUTE_SESSION_ID_MAX = 128
+
+
+def session_header_value(tag: str, run_id: str | None = None) -> str:
+    """The `x-omniroute-session-id` value for one run: `<tag>/<run-id>` (D-063).
+
+    OmniRoute's conversationTracker/chatCore path takes the header verbatim as
+    the conversation id, so one value per run threads every leg of that run
+    through one Conversation while the part before the first `/` stays the lane
+    (`autoos_usage.py --by lane`) and the part after the last `/` is the run
+    (`--by run`). `X-AutoOS-Run-Id` still rides beside it, unchanged.
+
+    A tag long enough that tag + "/" + run id would pass the gateway's 128-char
+    truncation is sent alone, with one warning: a silently cut run id would make
+    every run of that lane share one conversation and look like a working id.
+    """
+    if not run_id:
+        return tag
+    combined = "%s/%s" % (tag, run_id)
+    if len(combined) <= OMNIROUTE_SESSION_ID_MAX:
+        return combined
+    print("autoos-agent: session tag %r + run id would pass the gateway's %d-char "
+          "%s cap, sending the tag alone (this run is not traceable by session id, "
+          "only by %s)" % (tag, OMNIROUTE_SESSION_ID_MAX, SESSION_TAG_HEADER,
+                           RUN_ID_HEADER), file=sys.stderr)
+    return tag
+
+
+def gateway_headers(tag: str, run_id: str) -> dict:
+    """The two request headers one run stamps its gateway calls with (D-063).
+
+    One dict, so every client that can carry headers carries the same pair -
+    the session id (tag + run id, the conversation) and the bare run id.
+    """
+    return {SESSION_TAG_HEADER: session_header_value(tag, run_id),
+            RUN_ID_HEADER: run_id}
 
 
 def session_tag(title: str, env=None) -> str:
@@ -895,7 +958,9 @@ def session_tag(title: str, env=None) -> str:
     # The worktree name is not ours to trust: keep the header charset and
     # leave room for "/<slug>" (slugify caps it at 40) inside 120 chars.
     lane = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(ROOT)).strip("-")[:79] or "lane"
-    return "%s/%s" % (lane, slugify(title))
+    # The title is the same untrusted text the run id is cut from, and this tag
+    # rides the same gateway header (FLEETP0 review HIGH, item 3): scrubbed first.
+    return "%s/%s" % (lane, slugify(slug_source(title)))
 
 
 def unique_suffix() -> str:
@@ -1745,7 +1810,14 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             and (sandbox.get("branch") or "").startswith("agent/"):
         # a fallthrough re-run shares the first attempt's clone and branch, so it
         # shares its id: one spawn is one id, not one per attempt.
-        run_id = sandbox["branch"][len("agent/"):] or run_id
+        # FLEETP0 review LOW: only when that suffix IS a run id. A branch named
+        # by hand, or one from before the canonical id existed, is not an id, and
+        # pasting its tail into the header, the record and `ps` unvalidated is
+        # exactly what is_canonical_run_id was written to refuse. A fresh id
+        # still names a fresh record; the reused clone is unchanged either way.
+        inherited = sandbox["branch"][len("agent/"):]
+        if is_canonical_run_id(inherited):
+            run_id = inherited
     env["AUTOOS_AGENT_RUN_ID"] = run_id
     tag = None
     if client.name == "opencode":
@@ -1768,10 +1840,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         if (model or "").startswith("omniroute/"):
             tag = session_tag(title)
             prov = overlay.setdefault("providers", {}).setdefault("omniroute", {})
-            prov.setdefault("headers", {})[SESSION_TAG_HEADER] = tag
+            # D-063: the value is the tag AND the run id, one conversation per run.
             # item 5: the same requests also carry the run id, so a call_logs
             # row is not merely a lane's, it is one spawn's.
-            prov["headers"][RUN_ID_HEADER] = run_id
+            prov.setdefault("headers", {}).update(gateway_headers(tag, run_id))
         cmd = ["opencode", "run", "--standalone", "--agent", agent, "--model", model,
                "--title", title]
         if args.auto:
@@ -1790,7 +1862,19 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             args.isolate = True
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
-        cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable)
+        # FLEETP0 review item 4: the identity headers are not opencode's alone.
+        # Every gateway client that can put a header on its own requests gets the
+        # same pair (clients.HEADER_CLIENTS; the carriers and the qwen dead end
+        # are measured in autoos_clients.py and docs/routing.md), so a call_logs
+        # row is one spawn's wherever the work ran.
+        headers = None
+        if client.name in clients.HEADER_CLIENTS:
+            tag = session_tag(title)
+            headers = gateway_headers(tag, run_id)
+            if client.name == "gemini":
+                env[clients.GEMINI_CUSTOM_HEADERS_ENV] = clients.gemini_custom_headers(headers)
+        cmd = clients.build_command(client, args.task, route["combo"], level, model,
+                                    joinable, headers)
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
@@ -3722,6 +3806,13 @@ def _worker_record_start(plan: dict, args, directory: str):
     pid = os.getpid()
     task = (args.task or "").splitlines()
     route = plan.get("route") or {}
+    # FLEETP0 review LOW: the caller's own id is the parent, EXCEPT when it is
+    # this run's id - a fallthrough re-run adopts the reused branch's id, and a
+    # caller can hand --run-id down to the very run it spawned. A record parented
+    # to itself is a cycle in the tree `ps --tree` prints.
+    parent = os.environ.get("AUTOOS_AGENT_RUN_ID") or None
+    if parent == wid:
+        parent = None
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
@@ -3730,7 +3821,7 @@ def _worker_record_start(plan: dict, args, directory: str):
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
         "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0],
-        "parent_run_id": os.environ.get("AUTOOS_AGENT_RUN_ID") or None,
+        "parent_run_id": parent,
         "host": socket.gethostname(),
         "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
         "route_plan": route.get("route_plan")})
