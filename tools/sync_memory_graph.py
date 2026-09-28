@@ -217,8 +217,16 @@ def parse_task_board(root):
 
 def decide_rule_severity(statement):
     """All current R-*-NN lines are phrased mandatory; an explicitly softer one
-    (may/consider/optionally) maps to should."""
-    if re.search(r"\b(may|consider|optionally|preferred|usually)\b", statement, re.I):
+    (may/consider/optionally) maps to should. Softening words inside a trailing
+    non-normative parenthetical (e.g. the ``(why: ...)`` rationale clause) do
+    not count - only the normative part is matched."""
+    normative = statement
+    while True:
+        stripped = re.sub(r"\s*\([^()]*\)\s*$", "", normative)
+        if stripped == normative:
+            break
+        normative = stripped
+    if re.search(r"\b(may|consider|optionally|preferred|usually)\b", normative, re.I):
         return "should"
     return "must"
 
@@ -276,6 +284,26 @@ def mark(root=None, state=None, batch=None):
         f.writelines(k + "\n" for k, _, _ in batch)
 
 
+def load_confirmed(res, sent):
+    """True when the load response confirms the batch landed. A response with
+    no per-table detail carries no evidence of failure (preserve prior
+    behavior); otherwise every reported table must be error-free and must
+    report rows when records were sent."""
+    tables = (res or {}).get("tables", [])
+    if not tables:
+        return True
+    for t in tables:
+        if t.get("error"):
+            return False
+        try:
+            rows = int(t.get("rows_loaded", 0))
+        except (TypeError, ValueError):
+            return False
+        if sent > 0 and rows == 0:
+            return False
+    return True
+
+
 def post_load(base_url, token, lines):
     body = json.dumps({"branch": "main", "mode": "merge",
                        "data": "\n".join(lines) + "\n"}).encode()
@@ -301,6 +329,12 @@ def main(argv=None, root=None, env=None):
                         env["OMNIGRAPH_TOKEN"], lines)
         print("loaded:", {t["table_key"]: t["rows_loaded"]
                            for t in res.get("tables", [])}, file=sys.stderr)
+        if not load_confirmed(res, len(lines)):
+            print("ERROR: load NOT confirmed by server response "
+                  f"({res!r}); refusing to mark {len(new)} records as loaded. "
+                  "Ledger untouched - fix the load and retry.",
+                  file=sys.stderr)
+            return 1
         argv = list(argv) + ["--mark"]
     if "--mark" in argv:
         mark(root, ledger_path(root), new)

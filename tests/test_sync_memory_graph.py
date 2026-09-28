@@ -194,5 +194,53 @@ class LoadModeTests(unittest.TestCase):
             self.assertTrue("type" in rec or "edge" in rec)
 
 
+class SeverityTests(unittest.TestCase):
+    def test_why_clause_softening_word_ignored(self):
+        """B1: R-router-02 is mandatory; 'usually' lives only in the
+        trailing non-normative (why: ...) rationale clause."""
+        mod = load_script()
+        statement = (
+            "Diagnose against host and route state before declaring failure. "
+            "(why: first verdict is usually wrong; "
+            "source: review-b3c1.out 2026-09-26T07:33Z)"
+        )
+        self.assertEqual(mod.decide_rule_severity(statement), "must")
+
+    def test_genuinely_soft_statement_still_should(self):
+        """Guard against overcorrection: a normative softening word stays."""
+        mod = load_script()
+        self.assertEqual(
+            mod.decide_rule_severity("You may retry the load once on 504."),
+            "should",
+        )
+
+
+class LoadConfirmTests(unittest.TestCase):
+    def test_failed_load_does_not_mark_and_exits_nonzero(self):
+        """B2: a --load whose response reports zero/failed rows for records
+        sent must not touch the ledger; main must exit non-zero."""
+        mod = load_script()
+        root = fixture_root()
+        ledger = root / ".state" / "graph-loaded.txt"
+        pending = mod.emit(root, ledger)
+        self.assertGreater(len(pending), 0)
+        orig = mod.post_load
+        mod.post_load = lambda *a, **k: {
+            "tables": [{"table_key": "Rule", "rows_loaded": 0,
+                        "error": "simulated failure"}]
+        }
+        try:
+            rc = mod.main(["--load"], root=root,
+                          env={"OMNIGRAPH_TOKEN": "test-token",
+                               "OMNIGRAPH_BASE_URL": "http://localhost:1"})
+        finally:
+            mod.post_load = orig
+        self.assertNotEqual(rc, 0)
+        if ledger.exists():
+            self.assertEqual(ledger.read_text().split(), [])
+        # Nothing was marked, so the full batch is still pending.
+        self.assertEqual(len(mod.emit(root, ledger)), len(pending))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
