@@ -632,6 +632,13 @@ fi
 
 if it "orchestration skill rules pass skill-rules check"; then out="$(python3 tools/skill-rules.py check 2>&1)" && pass || fail "$out"; fi
 
+# tools/affected-tests.py: the --filter a registry change actually needs
+# (lessons PROVPIN, MUSEPIN 2026-09-27: a hand-picked filter list missed the
+# shell and Pester cases naming a flipped id, and CI went red twice).
+if it "affected-tests: registry ids reach every shell, Pester and pytest case naming them (unit tests)"; then
+    out="$(python3 tests/test_affected_tests.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
