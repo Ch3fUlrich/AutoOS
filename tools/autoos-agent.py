@@ -910,8 +910,15 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
         return (model, None,
                 "note: %s is not a gateway client, so --model stays the caller's; "
                 "policy.reviewers picked %s" % (client.name, asked))
-    # resolve_model raises ValueError when opencode.jsonc does not declare the
-    # heading -- exactly the failure the operator must see, not a silent fallback.
+    # The gateway only serves a route the client config declares, so a combo
+    # spelling is checked -- an undeclared heading is exactly the failure the
+    # operator must see, not a silent fallback (item 4).
+    # A model spelled on the client's OWN provider (opencode's zen free models,
+    # the same shape a --free run passes today) is the client's to resolve:
+    # there is no gateway route behind it to declare, and refusing it here would
+    # bench a reviewer that runs fine.
+    if not entry["model"].partition("#")[0].startswith("omniroute/"):
+        return entry["model"], None, "reviewer-model: %s" % asked
     return (resolve_model(cfg, tier, False, entry["model"]),
             entry["model"].partition("#")[0].replace("omniroute/", "", 1),
             "reviewer-model: %s" % asked)

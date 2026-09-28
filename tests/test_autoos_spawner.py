@@ -6251,6 +6251,71 @@ class ProviderResetStateTests(unittest.TestCase):
         self.assertIs(live["providers"]["cheap-p"]["available"], False)
 
 
+class ReviewerSpawnabilityTests(unittest.TestCase):
+    """REVROUTE (S2) item 4: the reviewer a card resolves to must be a model this
+    host can actually START. A reviewer list that names an undeclared heading is
+    a review that never happens, so this reads the real files -- the registry the
+    operator edits and the opencode.jsonc `tools/sync-ide-models.py` renders --
+    instead of a fixture that could disagree with both.
+
+    Two spellings, two rules:
+    - `omniroute/<route>` is the gateway's, and the gateway only serves a route
+      the client config declares (the same check that refuses a typo'd combo).
+    - `opencode/<model>` is opencode's own provider -- the identical shape a
+      `--free` run already uses every day -- so the client resolves it and the
+      gateway-declaration check has nothing to say about it.
+    """
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def real_cfg(self):
+        return self.agent.load_jsonc(os.path.join(self.REPO, "opencode.jsonc"))
+
+    def real_reviewers(self):
+        with io.open(os.path.join(self.REPO, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            return json.load(fh)["policy"]["reviewers"]
+
+    def test_the_paid_muse_reviewer_heading_is_declared_in_the_repo_config(self):
+        # The brief's requirement, on the files a real run reads: the default
+        # reviewer is the paid Meta leg, reached as the gateway's own heading.
+        entry = self.real_reviewers()[0]
+        self.assertEqual((entry["client"], entry["model"], entry["family"],
+                          entry["paid"]),
+                         ("opencode", "omniroute/spark-1.3-contributor", "meta", True))
+        cfg = self.real_cfg()
+        self.assertIn(entry["model"], self.agent.declared_models(cfg),
+                      "run tools/sync-ide-models.py: the paid Muse reviewer must be "
+                      "declared for opencode to start it")
+        self.assertEqual(self.agent.resolve_model(cfg, 3, False, entry["model"]),
+                         "omniroute/spark-1.3-contributor")
+
+    def test_every_gateway_spelled_reviewer_is_declared(self):
+        declared = self.agent.declared_models(self.real_cfg())
+        missing = [e["model"] for e in self.real_reviewers()
+                   if e["client"] == "opencode"
+                   and e["model"].partition("#")[0].startswith("omniroute/")
+                   and e["model"] not in declared]
+        self.assertEqual(missing, [],
+                         "policy.reviewers names a gateway route opencode.jsonc does "
+                         "not declare: the run would be refused before it started")
+
+    def test_a_reviewer_on_the_clients_own_provider_is_not_gateway_validated(self):
+        # opencode-zen's free models (the same strings --free runs) reach the
+        # child as the model, not as a combo the gateway has to serve.
+        client = argparse.Namespace(name="opencode", gateway=True)
+        review = {"state": "resolved",
+                  "reviewer": {"client": "opencode", "model": "opencode/deepseek-v4.1-flash"}}
+        model, combo, note = self.agent.reviewer_run_override(
+            review, client, self.real_cfg(), 3, "omniroute/t3-driver", None, False)
+        self.assertEqual(model, "opencode/deepseek-v4.1-flash")
+        self.assertIsNone(combo, "no gateway combo to rename: the route stands")
+        self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
+
+
 def _reviewer_client_state():
     return {name: {"installed": True, "signed_in": True, "reason": ""}
             for name in ("opencode", "gemini", "qoder", "claude")}
