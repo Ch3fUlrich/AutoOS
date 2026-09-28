@@ -28,7 +28,8 @@ jobs:
         id: plan
         run: |
           python3 tests/test_ci_shards.py
-          echo "matrix=$(python3 tests/ci-shards.py)" >> "$GITHUB_OUTPUT"
+          matrix="$(python3 tests/ci-shards.py)"  # its own line, so its exit code fails the step
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   linux-shard:
     name: Linux suite shard ${{ matrix.shard }}
