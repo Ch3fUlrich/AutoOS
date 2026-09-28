@@ -288,23 +288,32 @@ Quota is tracked per **pool** in `cao/budget.py`, which fails *open* on an unkno
 pool — the detection patterns are unverified until a real limit is measured, and
 falsely cooling a healthy pool costs more than a missed wall.
 
-**`deepseek_review.sh`** runs a cross-family review through that pool from Git
-Bash, reading the key from the untracked secrets file so it never appears in a
-command line or a log. Two limits, both measured 2026-09-17 (OpenCode 1.18.30):
+**`deepseek_review.sh <prompt-file> [model] [timeout]`** runs a cross-family
+review from Git Bash or any POSIX shell with Python 3.9+, through
+`deepseek_call.py` over plain HTTP (no opencode, no WSL): the whole prompt file
+is one user message, the answer goes to stdout, one `served: <model> via <leg>`
+line to stderr.
 
-- **`--file` attaches only ~1,000 lines, and the truncation is silent.** A
-  bigger file is not rejected — the model reviews the first ~1,000 lines and
-  says nothing about the rest, so a review that looks complete may have seen a
-  fifth of the diff.
-- **The prompt file must live under `/tmp/cross-review`** inside WSL.
-  Anywhere else, opencode auto-rejects the read as "external directory" — the
-  exact symptom of getting this wrong.
+- **Route:** the OmniRoute combo `deepseek-v4.1-flash` first (skipped when
+  `/api/health` does not answer), then OpenRouter `deepseek/deepseek-v4.1-flash`.
+  Never local Ollama; both legs failing exits 1 and says so.
+- **Model policy is the registry's:** a served model passes only when it is one
+  of route `deepseek-v4.1-flash`'s legs that `policy.leg_rules` allows (today
+  `deepseek/deepseek-flash`), and the OpenRouter leg runs only while the rules
+  allow `openrouter/deepseek/deepseek-v4.1-flash`. V4 Pro never passes, in any
+  spelling. A combo that re-routed in silence is a failure, not a review.
+- **Keys** are read in-process from AutoOS `configuration/api-keys.yml`
+  (`omniroute:` / `openrouter:`; `$AUTOOS_API_KEYS`, `$AUTOOS_ROOT`, then the
+  main checkout), never passed in argv or printed; an error body that echoes a
+  key is scrubbed.
 
-For any diff over ~900 lines, use `deepseek_chunked_review.sh <label>
-<base-sha> <merge-sha> <done-means-file> <out-md> [repo] [paths...]` instead:
-it splits the diff into <=900-line parts, copies each part's prompt into
-`/tmp/cross-review` itself before calling opencode, and concatenates the
-per-part reviews.
+The opencode path it replaced (measured 2026-09-17, OpenCode 1.18.30) silently
+reviewed only the first ~1,000 lines of an attached file. For a diff over ~900
+lines, `deepseek_chunked_review.sh <label> <base-sha> <merge-sha>
+<done-means-file> <out-md> [repo] [paths...]` still splits it into <=900-line
+parts (a closer read), reviews each with the same instruction and concatenates
+them under `## Part i/n`; per-part failures and `served:` lines go to
+`$DSR_WORKDIR/dsr_<label>/err.log`.
 
 ### 9.8 Memory and isolation
 

@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — DeepSeek cross-family reviews go over HTTP, with the registry's model policy (WS-DSCALL)
+
+- **`.agents/skills/unattended-orchestration/deepseek_call.py`** (new): one
+  completion, the OmniRoute combo `deepseek-v4.1-flash` first, then OpenRouter
+  direct; never local Ollama. Which served models count is
+  `catalog/ai-registry.json`'s call: a leg of route `deepseek-v4.1-flash` that
+  `policy.leg_rules` allows (via `tools/registry.leg_denied`), and the OpenRouter
+  leg only while the rules allow it, so V4 Pro never passes in any spelling. Keys
+  come from `configuration/api-keys.yml` in-process, never argv, scrubbed from
+  errors.
+- **`deepseek_review.sh`, `deepseek_chunked_review.sh`** call it instead of
+  opencode in WSL, whose `--file` silently reviewed only the first ~1,000 lines
+  and whose key file (`~/.config/autoos/api_keys.conf`) no longer existed.
+  Re-created from the operator's local work (2026-09-25) and reworked for the
+  DSBACK policy (2026-09-28).
+
 ### Fixed — a run id cannot carry a key, the session header carries the run too, and the containers `redact_record` missed (FLEETP0c, 2026-09-28)
 
 Muse's review of FLEETP0 (`work/L1-routing/rev-fleetp0.out`) found six defects in
