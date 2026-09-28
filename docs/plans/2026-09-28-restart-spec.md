@@ -1,16 +1,17 @@
-# RESTART — cheap relaunches: state card + context pack (spec v3.4)
+# RESTART — cheap relaunches: state card + context pack (spec v3.5)
 
 Owner: autoos-L1-routing. Operator decisions D-040 (restart) and D-042 (provenance), 2026-09-28,
 relayed by the L0 router.
 Status: SPEC v3 (v2 Sonnet FIX-FIRST resolved, table under Delivery). v1 (0fbed20, c16ac78) got a cross-family first pass (Qwen,
 `work/L1-routing/review-restart-spec.out`: 7 blockers, 11 high); v2 resolves every finding (§R at
-the end). Next: the lanes (v3.4's Muse FIX-FIRST is resolved, table under Delivery).
+the end). Next: the lanes (v3.5's Sonnet FIX-FIRST is resolved, table under Delivery).
 v3.2 (RSTAMEND, 2026-09-28): new §7 size limits, crash recovery through the pack (§4), the L2 cap
 decision (§5), and two delivery lanes (R2c, R8).
 v3.3 (RSTAMEND2, 2026-09-28, Sonnet FIX-FIRST on 86da423): §7 rotate now archives only what a
 covering `→ done:` names, and only under the new §0 inbox lock; §7 stops calling `status/<name>.md`
-the card (§1 owns that path); §4 liveness points at the §3 snapshot; §5 takes the L2 cap to 250k
-(router D-085) and new §8 attacks the fresh-session baseline behind it (lane R9).
+the card (§1 owns that path); §4 liveness points at the §3 snapshot; §5 takes the L2 cap to D-085's
+interim 250k — superseded by D-088 in v3.5 — and opens new §8 after the fresh-session baseline behind
+it (lane R9).
 v3.4 (RSTAMEND3, 2026-09-28, Muse FIX-FIRST on ae6696c): §7 matches a `→ done:` to a record by that
 record's **full leading stamp and its line**, and refuses to archive same-second records a done
 cannot name unambiguously; §0 says *every* inbox writer takes the lock — a bare `echo … >> inbox` is
@@ -18,6 +19,14 @@ forbidden, sessions go through `inbox append` — and pins both lock timeouts (r
 10 s); §7 cites §1's card budget and §0's marker list instead of restating either; §8 pins the argv
 (`--mcp-config` + `--strict-mcp-config`, verified against `claude --help`), names the three role
 files and what each lists, and defines the baseline measurement exactly (lane R9).
+v3.5 (RSTAMEND4, 2026-09-28, Sonnet FIX-FIRST on 2ecc900): §7 closes the hole §0's non-order list
+opened — a `ready <branch> <sha>` record is a non-order, so rule (a) archived it unanswered while §3's
+open-readies scan (`--since-card`, which never reads the archive) lost the lane it was waiting on; §7
+now owns the one closing rule for a ready and §3 points at it. §0 names `autoos-agent.py ready` as a
+writer already covered by the lock inside `append_inbox_line`, and says plainly that R8's bare-`>>`
+grep only reaches shell recipes. §5 takes the L2 cap from the operator's D-088 (orchestration 500k,
+workers min(40 %, 400k), lane CAPD088), which supersedes D-085's interim 250k, and §8 keeps only the
+baseline work.
 
 ## Why (measured)
 
@@ -30,8 +39,8 @@ files and what each lists, and defines the baseline measurement exactly (lane R9
   The byte-identical prefix pays off *within* a session (every later turn reads it from cache). A
   successor's first request pays the full input once, and that is what the ≤8k variable part keeps small.
 - What a relaunch actually reads, measured on a crash-recovery relaunch (routing-00 12:3xZ; L1-main
-  from L1-backlog session 8e409b42's transcript): the L2 policy cap then was 150k (§5 carries the
-  current number), and the relaunch reached 153.9k after 28 tool results / 143k chars. About 70k of
+  from L1-backlog session 8e409b42's transcript): the L2 policy cap then was 150k (§5 names the cap now
+  in force), and the relaunch reached 153.9k after 28 tool results / 143k chars. About 70k of
   that were whole-file reads — inbox 52k chars, handoff 19k, status 17k, `briefs/common.md` 9.5k,
   three log dumps 9–11k each. L1-routing's own crash relaunch (12:1xZ) read the same kind of files
   whole. §7 puts a hard budget on each of them.
@@ -70,7 +79,8 @@ code from state the session keeps small at every wave. Then the context cap drop
   ask for the future — a `ready` line, a pong, and an `info` line — with a test per shape. It is the
   ONE "is this an order" answer, and each reader says which part of it it uses: §1 takes the subset
   that closes something for staleness, §3 cites it for readies, §7 takes the whole list for
-  archivability.
+  archivability — with the one exception §7 states, that a `ready` line is not archivable until it is
+  closed, because §3 is still waiting to read it.
 - **Inbox lock:** every write and every rotation of `<RUN>/inbox/<name>.md` takes `flock` on
   `<RUN>/inbox/<name>.lock` — one lock, two modes. `append_inbox_line` holds it **shared** and only
   for the write (several appenders may hold it at once; the file is opened `a`, one complete line each).
@@ -80,12 +90,20 @@ code from state the session keeps small at every wave. Then the context cap drop
 - **Who is a writer:** anything that appends, not only the code path. A bare
   `echo … >> <RUN>/inbox/<name>.md` is **forbidden** — it appends straight into the rotation window,
   and it is the shape a shell session reaches for first. A session appends with
-  `autoos-agent.py inbox append <name> <text>` (new verb in R8; it calls `append_inbox_line`, so the
-  lock has exactly one implementation), and anything that cannot call the tool wraps the redirect in
-  the lock itself, with the wait cap below:
-  `flock -s -w 10 <RUN>/inbox/<name>.lock -c 'printf … >> <file>'`. R8 lands the test that greps the
-  tracked skill and brief files for a bare `>> …/inbox/` and fails naming file and line; R6 —
-  SKILL.md's only writer — lands the rule line that cites this bullet.
+  `autoos-agent.py inbox append <name> <text>` (new verb in R8), and anything that cannot call the
+  tool wraps the redirect in the lock itself, with the wait cap below:
+  `flock -s -w 10 <RUN>/inbox/<name>.lock -c 'printf … >> <file>'`.
+  **The lock lives inside `append_inbox_line`, and that is the whole coverage story for Python**: any
+  caller of it is locked the moment R1 puts the `flock` there, one implementation for all of them.
+  `autoos-agent.py ready` (`cmd_ready`) is already such a writer — it appends the
+  `ready <branch> <sha>` line through `append_inbox_line` — so it needs no lane of its own, and R8's
+  `inbox append` verb joins it rather than adding a second path. It also means a *new* Python writer
+  must call `append_inbox_line` instead of opening the file itself.
+  R8's test greps the tracked skill and brief files for a bare `>> …/inbox/` and fails naming file and
+  line — that grep covers **shell recipes only**: a `.py` that writes the inbox directly is invisible
+  to a text search for `>>`, which is why the coverage above is stated as "call
+  `append_inbox_line`" and not as "the grep will catch it". R6 — SKILL.md's only writer — lands the
+  rule line that cites this bullet.
 - **No deadlock, bounded waits:** one lock per inbox, and it is never upgraded — an appender that
   holds shared never asks the same lock for exclusive, so no holder waits on something it already
   holds, and with one lock resource per inbox there is no cycle to form. Both waits are capped. A
@@ -159,9 +177,13 @@ printed. The order is:
    - **Live workers** is the only place a successor learns what is running: `ps` for spawned workers,
      plus `systemctl --user` for the heartbeat units, both through `heartbeat`. It is a snapshot line,
      so no relaunch prompt restates it (§4).
-   - An **open ready** is a `ready <branch> <sha>` record this session wrote into its parent's inbox
-     for which no later record in its own inbox from the parent contains the first 7 hex of `<sha>`
-     together with `main=`.
+   - An **open ready** is a `ready <branch> <sha>` record — the line a session appends into its
+     parent's inbox (§0's `cmd_ready`) — that nothing has closed yet, and **§7 owns the closing rule**:
+     it states both closers in one place, because rotate must apply exactly the same test before it may
+     archive that line. This scan sees readies through `--since-card`, which §7's Reads rule confines to
+     the live file, so an unclosed ready that rotate had moved would disappear from every later pack
+     and the parent's successor would never merge the lane. Read §7's `ready` bullet for what closes
+     one; the closer is stated once, there.
    - **Open questions** are NOT inferred from inbox text. Measured: real answers are free text
      ("Q-008 (a) -> REDACTMERGE queued", "answers Q-001/Q-003"), and mentions of an id are not
      questions, so no pattern classifies them (Sonnet v3 review). The source of truth is the card:
@@ -205,18 +227,33 @@ printed. The order is:
   D-040, D-044). If Fable's before/after numbers show a quality loss, the row is split then. `tools/autoos_context.py` `DEFAULT_CAPS` (the unreadable-registry fallback) and its
   pinned tests change in the same lane. `tools/registry.py validate` asserts
   `cap_tokens == window × cap_fraction`.
-- **L2 cap (router L1-routing D-085, 2026-09-28): 250k.** v3.2 held L2 at 150k and named its revisit
-  trigger; the trigger is measured and met. L1-backlog hands off every ~15 min, and a fresh sonnet L2
-  baseline is **55.5k** — system prompt + MCP tools + CLAUDE.md, read off the first turn of session
-  967be39d. At 150k that leaves ~95k of work per session, so the handoffs, not the work, were what
-  cost. The number lives in the registry, never in prose: a new `claude-sonnet-1m` `handoff_caps` row
-  (sonnet, `window` 1000000, `cap_tokens` 250000 / `cap_fraction` 0.25 — the invariant
-  `tools/registry.py validate` asserts). `cap_for` matches by substring and the FIRST row wins, and a
-  trailing `[1m]` is stripped before matching, so the row must be inserted **before** the `*` 200k-class
-  row — appended after it, sonnet would silently keep matching `*` and stay at 150k. The test pins a
-  `…sonnet…[1m]` id resolving to 250000, not to the wildcard. Lane CAPL2. §8 goes after the 55.5k
-  itself, and its protocol — not this sample — is what measures the number that gates this row: lower
-  it again once R3/R4 land and a measured relaunch costs < ~20k.
+- **L2 cap: operator D-088 (2026-09-28)** — orchestration sessions **500k**, workers **min(40 % of
+  window, 400k)**, in `policy.handoff_caps` (lane **CAPD088**); supersedes D-085/CAPL2's interim 250k.
+  Only §8's baseline work remains. What D-085 measured is why a cap is a number at all and stands
+  untouched: L1-backlog was handing off every ~15 min against a fresh sonnet L2 start cost of **55.5k**
+  (system prompt + MCP tools + CLAUDE.md, session 967be39d's first turn), so the handoffs, not the work,
+  were what cost. That 55.5k is §8's pre-R9 anchor, not a cap. The cap numbers live in the registry,
+  never in prose, and CAPD088 inherits three obligations from the row format.
+  - **The split is per role, and `cap_for` is per model today.** `tools/autoos_context.py` `cap_for`
+    takes a model id and no role, so the two D-088 numbers cannot both come from one row: CAPD088 keys
+    rows by (family, role), reads the role from §4's run.json `role` field (§8's three stems —
+    `l2-orchestrator` is an orchestration session, `l3-worker` and `l3-reviewer` are workers), and only
+    lets the role select among rows that *name* a role — a family with a single row resolves exactly as
+    it does today. That keeps D-088's scope to what it decided: these are the L2 numbers, and the
+    `claude-opus-1m` row above stays D-044's, not reopened here. A caller with no role to name takes the
+    orchestration row, so an existing `context`/`heartbeat` call never changes meaning.
+  - **Order.** `cap_for` matches by substring and the FIRST row wins, and a trailing `[1m]` is stripped
+    before matching, so every new row goes **before** the `*` 200k-class row — appended after it, the
+    model silently keeps matching `*`. A test pins each role's id resolving to its own number and not to
+    the wildcard.
+  - **The invariant.** `tools/registry.py validate` asserts `cap_tokens == window × cap_fraction`, and a
+    `min()` cap satisfies it only where the written-down `cap_fraction` is the ratio that reproduces the
+    token number (1M-window worker: 400000 / 0.4; a 200k-class worker: 80000 / 0.4). Where the `min()`
+    binds, `cap_fraction` records the resulting ratio, and `DEFAULT_CAPS` mirrors the same rows in the
+    same order.
+  - **Revisit.** §8's protocol is what measures what a session pays to start; its before/after numbers
+    go to the L0 router, and revisiting D-088 is the operator's call — this spec sets no trigger for it
+    (v3.3's "lower it again once a relaunch costs < ~20k" went with the row it gated).
 - **Metric: `autoos-agent.py token-rate --since <ts> [--until <ts>]`.** This is a new verb; `usage`
   stays gateway-only, so the metric needs no gateway.
   - Its numerator is the orchestrator sessions' weighted tokens: every usage record in the Claude
@@ -303,6 +340,17 @@ and the writer that produces it enforces the budget. A limit no code checks is p
     Anything else is an open order and stays live **whatever its position**. (why: with position as
     the only test, an unrelated `→ done:` that happened to follow a PAUSE archived the PAUSE and the
     successor never saw the order again.)
+  - **The `ready` exception — a non-order that something still waits on** (this is the ONE home of the
+    rule; §3 points here). Rule (a) is not enough for a `ready <branch> <sha>` record. §0 classes it as
+    a non-order because it answers no one, but the parent's pack lists it as an open ready from
+    `--since-card`, and this section's Reads rule confines that mode to the live file — so archiving an
+    **unanswered** ready does not tidy up history, it deletes the only remaining reminder that a lane is
+    unmerged. A ready is therefore archivable only once **closed**, and closed means a later record in
+    the same inbox that is either: (i) a `→ done:` that names it exactly as (b) names an order, or (ii)
+    a line pairing `main=` with the first 7 hex of the ready's `<sha>` — the merge answer, matched
+    against a record's own text, never a timestamp quoted in a body. Until one of those exists the ready
+    is treated as an open order: it stays live **whatever its position**, and rotate counts it in
+    `kept N records: no covering done` — "done" there names either closer.
   - **"Names it", exactly** — a record's address is its **full leading stamp**
     `YYYY-MM-DDTHH:MM:SSZ` **plus its line number**. A `→ done:` closes it only if all of:
     - the done line is at a **greater line number** than the record's stamp line — file order, which
@@ -342,11 +390,12 @@ and the writer that produces it enforces the budget. A limit no code checks is p
   handoff, status, brief or log whole. A log is read with `tail -n 40` or a grep. The only prompt a
   relaunch gets is §4's one line; R6 writes the rule.
 
-## 8. Fresh-session baseline (router D-085, 2026-09-28)
+## 8. Fresh-session baseline (the problem D-085 named, 2026-09-28; the cap that rode it out is D-088's)
 
-§5 raised the L2 cap to 250k to *ride out* the baseline. The baseline is what a fresh session pays
-before it reads anything of its own — for a sonnet L2, the D-085 sample measures 55.5k of system
-prompt + MCP tool schemas + CLAUDE.md. That sample is the anchor, not the method: the number that
+§5's L2 cap is set high to *ride out* the baseline (D-088: 500k for orchestration sessions). The
+baseline is what a fresh session pays before it reads anything of its own — for a sonnet L2, the
+D-085 sample measures 55.5k of system prompt + MCP tool schemas + CLAUDE.md. That sample is the
+anchor, not the method: the number that
 decides before/after is defined by the protocol in the last bullet below. The system prompt is not
 ours; the other two are, and both are cut per role, not per model.
 
@@ -413,21 +462,23 @@ ours; the other two are, and both are cut per role, not per model.
 | R2a card | `card check` + extend `_NOT_AN_ORDER_RE` (the ready/pong/info shapes too, §7); `card check` takes a path so it also caps `status/<name>.md` until R6 retires it | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
 | R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
 | R2c handoff cap | §7 `l1_handoff.py` budget (refuse over 5k, name the section), line dedupe, no embedded status file | .agents/skills/unattended-orchestration/l1_handoff.py, tests |
-| R8 rotate | §7 `inbox rotate` verb: archivable = non-order (§0 list) or named by a later `→ done:` at a **greater line number** (full stamp, or a short stamp only while it is unique among open records; `#<n>` = §0's ordinal), the two `kept N:` counts, exclusive §0 lock + re-read, tmp/`fsync`/rename swap, §0's 30 s rotate / 10 s appender timeouts, heartbeat hook (≤1/hour/inbox), archive read rules; plus §0's `inbox append` verb (calls `append_inbox_line`, so the shared lock keeps one implementation) and the test grepping tracked skill/brief files for a bare `>> …/inbox/` | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
+| R8 rotate | §7 `inbox rotate` verb: archivable = non-order (§0 list) or named by a later `→ done:` at a **greater line number** (full stamp, or a short stamp only while it is unique among open records; `#<n>` = §0's ordinal), **plus §7's `ready` exception** (a `ready` line is archivable only once §7's closing rule has closed it, and rotate counts an unclosed one in the `no covering done` total), the two `kept N:` counts, exclusive §0 lock + re-read, tmp/`fsync`/rename swap, §0's 30 s rotate / 10 s appender timeouts, heartbeat hook (≤1/hour/inbox), archive read rules; plus §0's `inbox append` verb (calls `append_inbox_line`, so the shared lock keeps one implementation, joining the existing `ready` caller) and the test grepping tracked skill/brief files for a bare `>> …/inbox/` — shell recipes only | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
 | R3 pack | `pack`, budget, `l1_handoff.py --pack` | tools/autoos-agent.py, .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R7 provenance | §6 store, manifests, events, `gen=`, spawn manifests, card versions, prune, replay/diff | tools/autoos_context_store.py (new), tools/autoos-agent.py, tests |
 | R4 relaunch | `relaunch-line`, run.json schema + example (its `role` field is §8's stems — R4 owns the field, R9 consumes it) | tools/autoos-agent.py, configuration/run.example.json (new), tests |
 | R5a metric | `token-rate` verb + all-records iterator; the before-number | tools/autoos_tokenrate.py (new), tools/autoos-agent.py, tests |
 | R5b cap | shared opus/fable row 350k (D-044), DEFAULT_CAPS + pinned tests, validate invariant | catalog/ai-registry.json, tools/autoos_context.py, tools/registry.py, tests |
-| CAPL2 | §5 new `claude-sonnet-1m` handoff_caps row 250k/0.25 (D-085), inserted **before** the `*` row, + the same ordering in DEFAULT_CAPS; test pins a sonnet id resolving to 250000 | catalog/ai-registry.json, tools/autoos_context.py, tests |
+| CAPL2 (retired, 2026-09-28) | §5's interim `claude-sonnet-1m` 250k row, superseded by D-088 before it was built — the lane number is not reused. CAPD088 carries the ordering and pinned-test obligations named there | — |
+| CAPD088 | §5 D-088 numbers in `policy.handoff_caps`: orchestration 500k, workers min(40 % of window, 400k); the (family, role) row key + `cap_for`'s role argument read from R4's `role` field, a single-row family resolving unchanged; every new row **before** the `*` row, `cap_fraction` the ratio that reproduces `cap_tokens` so `validate`'s invariant holds, + the same rows in the same order in DEFAULT_CAPS; tests pin each role resolving to its own number, not the wildcard | catalog/ai-registry.json, tools/autoos_context.py, tests |
 | R6 skill | R-coord-06/08 text; `references/state-file.md` becomes the card spec (its only writer); the stale `briefs/common.md` rule sources; the rule line telling a session to append with §0's `inbox append` (§0 owns the fact, R6 only words the rule) | SKILL.md, references/ |
 | R9 baseline | §8: the three named strict `--mcp-config` role documents, the pinned `--mcp-config … --strict-mcp-config` argv (claude/qoder only, `MCP_STRICT_CLIENTS`) passed by `relaunch-line` and `run --client claude` from R4's `role` field, the always-loaded trim, and the `baseline` protocol (probe `Reply OK`, pinned model + role document, 3 runs, median, non-sidechain first assistant turn) | configuration/mcp/ — `l2-orchestrator.json.example`, `l3-worker.json.example`, `l3-reviewer.json.example` (new, plus the ignore rule for the un-suffixed runtime documents), tools/autoos-agent.py (relaunch-line, run), tools/autoos_tokenrate.py, AGENTS.md, CLAUDE.md, tests |
 
 Order: R1 first (it freezes the dispatch). Then R2a and R5a in parallel (different files except one
 dispatch-table line each), then R2b. Then R2c and R8, right after R2b and before R3. Then R3, R7 (after
-REDACTMERGE is on main), R4, R5b (after the before-number), CAPL2 (after R5b — the same registry and
-fallback files, one writer at a time), R9 (after R4, since it adds a flag to `relaunch-line`, and after
-R5a, since it extends the token-rate module), and R6. Every lane after R1 merges main
+REDACTMERGE is on main), R4, R5b (after the before-number), CAPD088 (after R5b — the same registry and
+fallback files, one writer at a time — and after R4, since it reads R4's `role` field), R9 (after R4,
+since it adds a flag to `relaunch-line`, and after R5a, since it extends the token-rate module), and
+R6. Every lane after R1 merges main
 before it starts. Each lane is at most three items per worker run.
 
 Two cross-lane details are decided here so no lane discovers them mid-run: the `role` field §4's
@@ -453,7 +504,7 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 | HIGH: rotate's read-to-rename window drops a concurrent §0 append | §0 inbox lock (`<inbox>.lock`): shared and short on every append, exclusive across rotate's re-read → tmp → `fsync` → rename; §7 points at it |
 | HIGH: §7 called `status/<name>.md` "the card" while §1 fixes the card at `status/<name>.card.md` | §7 keeps one path (§1's) and says the free-form file is retired when R6 lands; until then it carries the §1 cap |
 | MEDIUM: §4 sent liveness to §3 item 6 and carried its sources there | Liveness is the §3 item 2 snapshot line, sources named once there; §4 only says it never goes into a prompt |
-| L2 cap 150k vs the measured trigger | §5 D-085: trigger met (handoff every ~15 min, 55.5k fresh sonnet baseline), new `claude-sonnet-1m` row at 250k, lane CAPL2 |
+| L2 cap 150k vs the measured trigger | §5 D-085: trigger met (handoff every ~15 min, 55.5k fresh sonnet baseline), new `claude-sonnet-1m` row at 250k, lane CAPL2 (v3.5: D-088 supersedes that interim number and CAPL2 is retired unbuilt — §5 carries the cap now, and the 55.5k stays as §8's anchor) |
 | what the cap was riding out | new §8: lean per-role `--mcp-config` + trimmed always-loaded set, measured before/after per role, lane R9 |
 
 | v3.3 Muse finding (on ae6696c) | v3.4 resolution |
@@ -465,6 +516,12 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 | MEDIUM: §8 said "a strict `--mcp-config` file" without the argv, without the empty-document form, without saying which role files exist or what each lists | §8 pins `claude --mcp-config configuration/mcp/<role>.json --strict-mcp-config` (both flags checked against `claude --help`, CLI 2.1.283), names the three role documents and exactly what each holds, points at the code already using the pair, limits it to `MCP_STRICT_CLIENTS`, and says which verbs pass it from §4's `role` field — an unknown role is an error, not a silent no-tools session |
 | MEDIUM: "the baseline is one fresh session's first-turn input tokens" is not a measurement, so before/after would not be comparable and 55.5k not reproducible | §8 defines it: the non-sidechain **first assistant turn's** `input + cache_creation + cache_read`, unweighted and output-free, on the fixed probe prompt `Reply OK` with a pinned model and the role's document, 3 runs, the median, reported per role to L0. §5's 55.5k is the pre-R9 anchor only |
 
+| v3.4 Sonnet finding (on 2ecc900) | v3.5 resolution |
+|---|---|
+| HIGH: §0 classes a `ready` line as a non-order, so §7's rule (a) archives it **unanswered** — and §3's open-readies scan reads `--since-card`, which never opens the archive, so the successor loses the only reminder that a lane is unmerged | §7 adds the `ready` exception as the rule's one home: a ready is archivable only once a later record in the same inbox closes it, either a `→ done:` naming it exactly as rule (b) names an order or a line pairing `main=` with the first 7 hex of its `<sha>`; until then it is an open order, stays live whatever its position, and rotate counts it in `kept N records: no covering done`. §3 and §0's marker bullet point at §7 instead of defining a closer, §R's "open readies" row follows the move, and the R8 lane scope names the exception so it is built, not discovered |
+| MEDIUM: §0 named only the two future appenders, so a reader could not see that the `ready` line already in every real inbox is written by a locked path — nor that the grep would never catch an unlocked Python writer | §0 states where the lock lives (`append_inbox_line`) and names `autoos-agent.py ready` (`cmd_ready`) as a covered caller that needs no lane of its own; it says plainly that R8's bare-`>>` grep reaches **shell recipes only**, and that a new Python writer's obligation is to call `append_inbox_line`, not to survive a text search |
+| §5 still presented D-085's interim 250k as the L2 cap | §5 leads with operator D-088 (orchestration 500k, workers min(40 % of window, 400k), lane CAPD088) and keeps only what is still true from D-085 — the ~15 min handoff and 55.5k measurements, which are §8's anchor. CAPL2 is retired unbuilt, the ordering trap moves to CAPD088 with the (family, role) keying `cap_for` needs, §8's lead and the v3.3 table row stop naming 150k/250k as current, and only §8's baseline work is left open |
+
 ## §R. v1 review findings → v2 resolution
 
 | finding | resolution |
@@ -475,7 +532,7 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 | `fill_from_transcript` keeps one record | §5 new iterator over all records |
 | no role brief file in the skill | §3 prefix = rules + main-orchestrator.md; run brief is variable |
 | `.claude/handoff.config.json` is tracked and stale | §4 git-ignored `<RUN>/run.json` + tracked example |
-| open readies unmatched | §3 pair on sha prefix + `main=` in the parent's answer |
+| open readies unmatched | §7's closing rule for a ready (a `→ done:` naming it, or a line pairing `main=` with the sha prefix); §3's scan points at it |
 | cache weight open | §5 weighted headline, naive as diagnostic |
 | metric measures context, not work; actors differ | §5 same-actor denominator, bias stated |
 | worker cost invisible | §5 gateway lane tokens as diagnostic |
