@@ -477,6 +477,10 @@ CLAUDE_BUDGET_ALLOWED_KINDS = ("final",)
 # itself. An environment variable only the spawning process can set (and which
 # the spawner strips from every child, see `autoos-agent.py` CLAUDE_ENV_PREFIX)
 # is the difference between a declaration and an excuse.
+# Accepted residual (CLAUDEBUDGET-h, finding 1 REJECTED by the operator): the
+# declaration is still forgeable by a worker that re-exports `AUTOOS_CLAUDE_*` in
+# its own shell, because this is a budget control that rationates an operator's
+# credits, not a security fence that denies a hostile principal.
 CLAUDE_CRITICAL_ENV = "AUTOOS_CLAUDE_CRITICAL"
 
 # CLAUDEBUDGET-d item 1: the same rule for the `final` exemption. D-102 reserved

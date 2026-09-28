@@ -120,6 +120,41 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
             "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] + inner
 
 
+# CLAUDEBUDGET-h item 2 (Muse#high on 4fc082b..d1eb9c8, findings 2+4): ONE table
+# naming how each client receives the model that answers it, written against
+# build_command above — and, for opencode, against autoos-agent.py's build_plan,
+# the only place its argv is built. The last-mile Claude gate prices through it,
+# so it prices what the process is actually handed instead of one literal
+# `--model` token, and a client it cannot read is refused rather than assumed
+# free. Kinds:
+#   ("flag", NAME)     argv `NAME <value>` or `NAME=<value>` — the string the
+#                      client's own parser reads (`agy` takes it BEFORE -p,
+#                      `qodercli` after, `omniroute run` before the `--`)
+#   ("route",)         the gateway combo the run resolves to legs through
+#                      (gateway clients only: an own-account client never
+#                      receives it)
+#   ("config", NAME)   the launch config: "agent" is the tier agent's own model in
+#                      opencode.jsonc, "overlay" the OPENCODE_CONFIG_CONTENT
+#                      document build_plan injects into the child env, which the
+#                      client merges LAST and so overrides both the file and argv
+#   ("registry", KEY)  the `clients` row this host resolves for the client before
+#                      it builds anything (`effective_spawn_model` reads it ahead
+#                      of the adapter constant)
+# A client with no row here is unpriceable, and under a budget unpriceable is a
+# refusal. A row must exist for every client in CLIENTS — the test that says so
+# is what keeps this table from drifting out of build_command.
+MODEL_INPUT = {
+    "opencode": (("flag", "--model"), ("config", "overlay"), ("config", "agent"),
+                 ("route",)),
+    "claude":   (("flag", "--model"), ("registry", "default_model")),
+    "agy":      (("flag", "--model"), ("registry", "default_model")),
+    "qoder":    (("flag", "--model"), ("registry", "default_model")),
+    "codex":    (("flag", "--model"), ("route",)),
+    "gemini":   (("flag", "--model"), ("route",)),
+    "qwen":     (("flag", "--model"), ("route",)),
+}
+
+
 def signin_state(client: Client, env: dict | None = None) -> tuple:
     """(True, "") signed in, (False, reason) not usable, (None, "") not installed or no probe.
 

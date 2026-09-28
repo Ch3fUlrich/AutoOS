@@ -494,11 +494,13 @@ class ClientCommandTests(unittest.TestCase):
         self.assertIn("qodercli -p --permission-mode dont_ask", r.stdout)
         self.assertNotIn("bypass_permissions", r.stdout)
 
-    def test_qoder_explicit_model_is_kept(self):
+    def test_a_declared_qoder_explicit_model_is_kept(self):
         # CLAUDEBUDGET-g item A: "Efficient" is a qoder-native name no registry row
         # carries, and under the shipped budget an unpriceable caller-named model is
         # a refusal. This test measures the argv, so it declares the run the way an
-        # orchestrator would (the suite's `claude_env` convention).
+        # orchestrator would (the suite's `claude_env` convention) -- the declared
+        # path only; the undeclared refusal is
+        # `ClaudeBudgetLastMileTests.test_an_undeclared_claude_model_on_qoder_is_refused`.
         r = plan_of("--client", "qoder", "--model", "Efficient", "t", env=claude_env())
         self.assertIn("--model Efficient", r.stdout)
         self.assertNotIn("Qwen3.8-Flash", r.stdout)
@@ -3578,8 +3580,13 @@ class RawTailClassificationTests(unittest.TestCase):
 
     def _run_verdict(self, exit_obj):
         fake_plan = {
-            "agent": "t2-worker", "client": "qoder", "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"], "env": {},
+            "agent": "t2-worker", "client": "qoder",
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: the argv a real qoder launch carries (build_command
+            # always names a model), because the last-mile gate now prices the plan
+            # it reads instead of falling back to a value the plan does not carry.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"], "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
                       "card": None},
@@ -4171,8 +4178,11 @@ class RouteCliTests(unittest.TestCase):
         fake_plan = {
             "agent": "t2-worker",
             "client": "qoder",
-            "model": "qoder-model",
-            "cmd": ["qodercli", "do the thing"],
+            "model": "qwen/qwen3.8-flash",
+            # CLAUDEBUDGET-h: a real qoder argv names its model (see the fixture in
+            # RawTailClassificationTests._run_verdict); the gate prices the plan.
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"],
             "env": {},
             "route": {"combo": "qoder-model", "reason": "test",
                       "privacy": "public", "review": False, "tier": 2,
@@ -9906,3 +9916,145 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         self.assertTrue(pairs, pairs)
         self.assertNotIn("--model", [source for _, source in pairs], pairs)
         self.assertIsNone(self.last_mile(args, plan)[0])
+
+    # --- CLAUDEBUDGET-h item 1: an unpriceable plan refuses, it does not pass ---
+
+    def test_a_plan_that_names_no_readable_model_is_refused(self):
+        # Muse#high finding 3: nothing in this plan says what the client answers
+        # with — no argv token, no route combo, no agent the config can read. HEAD
+        # fell back to the early resolution, which is the value this gate exists to
+        # replace, and launched. Under a budget, "unpriceable" is the spend side.
+        plan = {"client": "opencode", "agent": "no-such-agent",
+                "cmd": ["opencode", "run", "--standalone", "--title", "t", "x"],
+                "route": {}, "env": {}}
+        self.assertEqual([("", "no model in the final plan")],
+                         self.agent.plan_launch_models(plan, self.args(), self.cfg(),
+                                                       self.registry))
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, "an unpriced plan must not launch: %s" % note)
+        self.assertIn("claude_budget", refusal)
+        self.assertIn("no model", refusal)
+
+    def test_a_bad_card_at_the_last_mile_is_a_routing_error_not_a_budget_label(self):
+        # Finding 5: `plan_launch_models` swallowed the router's ValueError and
+        # priced the argv strictly, so a card the router refuses left as a
+        # `claude_budget:` refusal — wrong door, next steps hidden.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(card="role=bogus")
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, "a refused card must not launch")
+        self.assertTrue(refusal.startswith("routing error:"), refusal)
+        self.assertIn("expected one of", refusal)
+        self.assertFalse(refusal.startswith("claude_budget"), refusal)
+
+    def test_a_bad_card_outside_budget_mode_still_launches_the_ordinary_error(self):
+        # Out of budget the last-mile gate has no opinion and stays out of the way:
+        # the router's own ValueError is cmd_run's business (its CLI words are
+        # asserted by test_the_cli_still_prints_the_router_words_for_a_bad_card).
+        cli = self.agent
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = cli.claude_plan_refusal(self.args(card="role=bogus"), plan,
+                                                env={}, registry=self.off(),
+                                                cfg=self.cfg())
+        self.assertIsNone(refusal, refusal)
+        self.assertIsNone(note)
+
+    # --- CLAUDEBUDGET-h item 2: price the model each client really receives -----
+
+    def test_a_clients_row_that_names_claude_is_refused_behind_a_free_argv(self):
+        # Finding 2: the registry clients row is a model this host resolves and
+        # hands the client (`effective_spawn_model` reads it first), and an
+        # operator swapping it to a Claude model was never priced, because the
+        # gate read the argv token and stopped there.
+        self.registry["clients"]["qoder"] = {"id": "qoder", "default_model": "cc/opus",
+                                             "capabilities": {"shell": True,
+                                                              "write": True}}
+        plan = {"client": "qoder", "agent": "qoder",
+                "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                        "--model", "Qwen3.8-Flash", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        refusal, note = self.last_mile(self.args(client="qoder"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("cc/opus", refusal)
+        self.assertIn("clients row", refusal)
+
+    def test_the_config_overlay_the_launcher_injects_is_priced_too(self):
+        # Finding 4, and it is not hypothetical: `free_overlay` is written into the
+        # child's OPENCODE_CONFIG_CONTENT (build_plan), where it OVERRIDES the jsonc
+        # and the argv for opencode. A model named there is a model the process
+        # receives, and a `--model` scan never saw it.
+        plan = {"client": "opencode", "agent": "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                        "--model", "omniroute/r-cheap", "--title", "t", "x"],
+                "route": {"combo": "r-cheap"},
+                "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
+                    {"model": "omniroute/claude-route",
+                     "agents": {"t2-worker": {"model": "omniroute/claude-route"}}})}}
+        refusal, note = self.last_mile(self.args(), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_that_names_its_model_with_another_flag_is_priced(self):
+        # Finding 4: the flag is not the gate's to assume. This row says qwen's
+        # model arrives as `-m`, and the gate follows the row — which is what makes
+        # the row, not a literal scan, the authority.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertIn("qwen", table)
+        with mock.patch.dict(table, {"qwen": (("flag", "-m"),)}):
+            plan = {"client": "qwen", "agent": "qwen",
+                    "cmd": ["omniroute", "run", "qwen", "--model", "omniroute/r-cheap",
+                            "--", "-m", "omniroute/claude-route", "-p", "x"],
+                    "route": {"combo": "r-cheap"}, "env": {}}
+            pairs = self.agent.plan_launch_models(plan, self.args(client="qwen"),
+                                                 self.cfg(), self.registry)
+            self.assertIn("omniroute/claude-route", [v for v, _ in pairs], pairs)
+            self.assertNotIn("omniroute/r-cheap", [v for v, _ in pairs], pairs)
+            refusal, note = self.last_mile(self.args(client="qwen"), plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("claude-route", refusal)
+
+    def test_a_client_the_table_does_not_describe_is_refused_not_the_early_value(self):
+        # A client with no row has no readable model input, so nothing here can say
+        # the run is free — and falling back to the early resolution is exactly the
+        # fail-open finding 4 names. The argv spelling a free model is not evidence
+        # from a process nobody describes.
+        plan = {"client": "mystery", "agent": "mystery",
+                "cmd": ["mystery", "--model", "omniroute/r-cheap", "x"],
+                "route": {"combo": "r-cheap"}, "env": {}}
+        args = self.args(client="mystery")
+        pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
+        self.assertEqual([("", "no model in the final plan")], pairs, pairs)
+        refusal, note = self.last_mile(args, plan)
+        self.assertIsNotNone(refusal, note)
+        self.assertIn("mystery", refusal)
+
+    def test_the_table_covers_every_client_the_adapter_can_build(self):
+        # One home, and it cannot drift: every client `clients.CLIENTS` can build a
+        # command for has a model-input row, or the gate would bench it as
+        # unpriceable. Derived from the same table that builds the argv.
+        table = self.agent.clients.MODEL_INPUT
+        self.assertEqual(sorted(self.agent.clients.CLIENTS), sorted(table),
+                         "MODEL_INPUT rows vs CLIENTS rows")
+
+    # --- CLAUDEBUDGET-h item 4: the undeclared Claude path refuses on its own ---
+
+    def test_an_undeclared_claude_model_on_qoder_is_refused(self):
+        # The declared path keeps its argv (test_a_declared_qoder_explicit_model_is_
+        # kept); this is the other half, with NO AUTOOS_CLAUDE_CRITICAL in the
+        # environment: a caller naming a Claude model on an own-account client is
+        # refused whatever the client is.
+        env = {k: v for k, v in clean_env().items()
+               if not k.startswith(self.agent.CLAUDE_ENV_PREFIX)}
+        self.assertNotIn(self.agent.resolver.CLAUDE_CRITICAL_ENV, env)
+        r = run_agent("run", "--client", "qoder", "--model", "opus", "--dry-run",
+                      "--card", "role=review", "t", env=env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_budget", r.stderr)
+        self.assertIn("opus", r.stderr)
+        self.assertNotIn("would run:", r.stdout)

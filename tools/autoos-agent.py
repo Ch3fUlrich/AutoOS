@@ -946,6 +946,43 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
                        resolver.CLAUDE_CRITICAL_ENV), None)
 
 
+def _argv_flag_values(cmd, flag) -> list:
+    """Every value of `flag <value>` / `flag=<value>` in argv (CLAUDEBUDGET-h 2).
+
+    The `=` spelling is the same flag to every parser here and used to be
+    invisible to this gate, which read only the two-token form.
+    """
+    out = [cmd[index + 1] for index, token in enumerate(cmd[:-1]) if token == flag]
+    out += [token.split("=", 1)[1] for token in cmd
+            if str(token).startswith(flag + "=")]
+    return out
+
+
+def _overlay_models(env):
+    """The models in the OPENCODE_CONFIG_CONTENT document, or None if unreadable.
+
+    `free_overlay` writes `model` and every agent's model there (build_plan), and
+    opencode merges that document last, so it beats the jsonc AND the argv: a model
+    named in it is a model the process answers with. A document that will not parse
+    is a channel this gate cannot read, and None says so — the caller refuses rather
+    than pricing half of it.
+    """
+    raw = (env or {}).get("OPENCODE_CONFIG_CONTENT") or ""
+    if not str(raw).strip():
+        return []
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    out = [doc["model"]] if doc.get("model") else []
+    for agent in (doc.get("agents") or {}).values():
+        if isinstance(agent, dict) and agent.get("model"):
+            out.append(agent["model"])
+    return out
+
+
 def plan_launch_models(plan, args=None, cfg: dict | None = None,
                       registry: dict | None = None) -> list:
     """``[(value, source)]`` the FINAL plan can answer with (CLAUDEBUDGET-g item A).
@@ -955,65 +992,87 @@ def plan_launch_models(plan, args=None, cfg: dict | None = None,
     resolution swaps in the model the review list picked
     (`reviewer_run_override`), a v2 card runs on whatever combo the resolver
     settled on (`_resolve_route_v2`), and `--free` replaces the model with the
-    promo one. So the authority prices everything the launch itself carries:
+    promo one. So the authority prices everything the launch itself carries.
 
-      * each ``--model`` token of the argv — the string the client process gets;
-      * the plan's route combo, which for a gateway client is what the gateway
-        resolves to its legs (an all-Claude route is a Claude spend even where no
-        argv token names a model);
-      * the tier agent's own model in opencode.jsonc, which the argv normally
-        repeats — and where it does not, the run carries a spelling no resolution
-        ever priced.
+    CLAUDEBUDGET-h item 2 (findings 2+4) is *how* it reads them: through
+    `clients.MODEL_INPUT`, the one table that says how each client receives its
+    model — its argv flag, whatever that client spells it and in either spelling,
+    the gateway route it resolves to legs, the config documents (opencode.jsonc's
+    tier-agent model and the overlay injected through the child env), and the
+    registry `clients` row this host resolves ahead of the adapter constant. HEAD
+    scanned argv for the literal `--model` and nothing else, so a row swap or a
+    config model reached the process unpriced.
+
+    What it does NOT do is fall back to `effective_spawn_model` when the plan names
+    nothing readable (finding 4): that resolution is the early value this gate
+    exists to replace, and pricing it is gating a run on a value the launch may
+    never carry. An unreadable plan — a client with no row, a client whose every
+    channel is empty, an overlay that will not parse — comes back as the single
+    ``("", …)`` entry, which the budget gate reads as a refusal.
+
+    Raises the router's ``ValueError`` for a card or tier it refuses (finding 5):
+    that is a routing error, and the caller has to label it one.
 
     An argv value that IS the resolution's own answer keeps that resolution's
     source, so a default compiled into the adapter is still read by name; every
     other value is priced as a caller-named model, the strict reading.
     """
     client = (plan or {}).get("client") or getattr(args, "client", None) or ""
-    try:
-        eff, eff_source = effective_spawn_model(
-            client, getattr(args, "model", None), getattr(args, "card", None),
-            registry, cfg, getattr(args, "tier", None),
-            bool(getattr(args, "free", False)),
-            getattr(args, "free_model", None) or DEFAULT_FREE_MODEL,
-            bool(getattr(args, "clean", False)))
-    except ValueError:
-        # The resolution refused; the plan is what it is, and every value in it is
-        # priced as caller-named.
-        eff = eff_source = None
+    eff, eff_source = effective_spawn_model(
+        client, getattr(args, "model", None), getattr(args, "card", None),
+        registry, cfg, getattr(args, "tier", None),
+        bool(getattr(args, "free", False)),
+        getattr(args, "free_model", None) or DEFAULT_FREE_MODEL,
+        bool(getattr(args, "clean", False)))
     out = []
     seen = set()
 
     def add(value, source):
         text = str(value or "").strip()
-        if text and (model_route_id(text), source) not in seen:
-            seen.add((model_route_id(text), source))
+        if not text:
+            return
+        if eff and model_route_id(text) == model_route_id(eff):
+            source = eff_source or source
+        key = (model_route_id(text), source)
+        if key not in seen:
+            seen.add(key)
             out.append((text, source))
 
-    cmd = (plan or {}).get("cmd") or []
-    for index, token in enumerate(cmd[:-1]):
-        if token == "--model":
-            value = cmd[index + 1]
-            same = bool(eff) and model_route_id(value) == model_route_id(eff)
-            add(value, eff_source if same else "--model")
-    # The route combo is what the gateway resolves, so it is a launch model for a
-    # gateway client -- and for nothing else: an own-account client never receives
-    # it, and `--free` replaces it with the promo model before the argv is built.
-    # Pricing it anyway would bench a free run for a route it does not run.
-    if _gateway_client(client) and not bool(getattr(args, "free", False)):
-        add(((plan or {}).get("route") or {}).get("combo"), "route combo")
-    agent = (plan or {}).get("agent")
-    if agent:
-        add(((cfg or {}).get("agents") or {}).get(agent, {}).get("model"),
-            "opencode.jsonc agent %s" % agent)
-    if not out:
-        # Nothing in the argv names a model, so the client answers with its own
-        # default, and that is what gets priced -- under whatever named it, so a
-        # resolution that said `--model` is still read strictly. Only when even
-        # the default is unknown is the run unpriced, which under a budget is a
-        # refusal, not a free pass.
-        add(eff, eff_source or "no model in the final plan")
-    if not out:
+    cmd = [str(token) for token in ((plan or {}).get("cmd") or [])]
+    route = (plan or {}).get("route") or {}
+    env = (plan or {}).get("env") or {}
+    row = ((registry or {}).get("clients") or {}).get(client) or {}
+    unreadable = False
+    for entry in clients.MODEL_INPUT.get(client, ()):
+        kind, key = entry if len(entry) == 2 else (entry[0], "")
+        if kind == "flag":
+            for value in _argv_flag_values(cmd, key):
+                add(value, "argv %s" % key)
+        elif kind == "route":
+            # The route combo is what the gateway resolves to its legs, so it is a
+            # launch model for a gateway client (only gateway clients carry the
+            # row) -- and `--free` replaces it with the promo model before the argv
+            # is built, so pricing it anyway would bench a free run for a route it
+            # does not run.
+            if not bool(getattr(args, "free", False)):
+                add(route.get("combo"), "route combo")
+        elif kind == "config" and key == "agent":
+            agent = (plan or {}).get("agent")
+            if agent:
+                add(((cfg or {}).get("agents") or {}).get(agent, {}).get("model"),
+                    "opencode.jsonc agent %s" % agent)
+        elif kind == "config" and key == "overlay":
+            models = _overlay_models(env)
+            if models is None:
+                unreadable = True
+            else:
+                for value in models:
+                    add(value, "OPENCODE_CONFIG_CONTENT overlay")
+        elif kind == "registry":
+            add(row.get(key), "registry clients row %s" % key)
+    if unreadable or not out:
+        # Nothing the table names says what this process answers with. Under a
+        # budget that is a refusal, never a free pass (finding 3).
         out.append(("", "no model in the final plan"))
     return out
 
@@ -1032,6 +1091,16 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
     through the CLI it invokes; the early gate stays, for the fast message that
     comes before any planning.
 
+    CLAUDEBUDGET-h (Muse#high on 4fc082b..d1eb9c8): it prices the model the way
+    each client receives it, through `clients.MODEL_INPUT` (findings 2+4); an
+    unpriceable plan is a refusal rather than a fallback to the early value
+    (findings 3+4); and a card the router refuses leaves as the routing error it
+    is, with the router's own words, never as a `claude_budget:` refusal (finding
+    5). Accepted residual, stated rather than fixed: the `AUTOOS_CLAUDE*`
+    declaration this gate honours is forgeable by a worker that re-exports it in
+    its own shell — this is a budget control, not a security fence, and children
+    are stripped of it on the way out (`strip_claude_env`).
+
     Like the early gate it reads the model, not the client name, and refuses both a
     Claude answer and one that cannot be priced — an own-account client handed a
     model string no registry row describes answers with whatever it is handed, so
@@ -1045,8 +1114,17 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
         # launches exactly as it did before this gate existed.
         return None, None
     client = plan.get("client") or getattr(args, "client", None) or "opencode"
+    try:
+        pairs = plan_launch_models(plan, args, cfg, registry)
+    except ValueError as exc:
+        # Finding 5: the router refused the card, and the router's door is the one
+        # the caller has to be pointed at — a budget label here hides the next
+        # steps behind a policy that had no opinion on the card.
+        return ("routing error: %s (claude_budget: the run stopped before anything "
+                "was priced, so nothing was spent; the words above are the router's, "
+                "and `list` prints the values a card may take)" % exc), None
     spends = []
-    for value, source in plan_launch_models(plan, args, cfg, registry):
+    for value, source in pairs:
         verdict = spawn_spends_claude(client, value, registry, source)
         if verdict is not False:
             spends.append((value, source, verdict))
@@ -1056,8 +1134,20 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
     named = ", ".join("%s (from %s)" % (value, source) for value, source, _ in spends)
     if allowed:
         # The record cites the authority and the value it let through — the same
-        # rule as the early gate, on the model the run really starts on.
+        # rule as the early gate, on the model the run really starts on. The
+        # declaration is the orchestrator taking responsibility for whatever
+        # answers, priced or not, which is why it is read before the refusal below.
         return None, "%s (final plan for %s: %s)" % (gate, client, named)
+    if not any(value for value, _s, _v in spends):
+        return ("claude_budget: the plan %s is about to launch cannot be priced at "
+                "all — no argv flag this client is known to take, no route combo, no "
+                "injected config model and no registry clients row says what answers "
+                "(clients.MODEL_INPUT reads no model input for %r, or the plan "
+                "carries none). The budget is on, so an unpriced launch is a refusal, "
+                "not a free pass: name a model the registry can price, declare this "
+                "run with %s=<why>, or add the client's model input to "
+                "clients.MODEL_INPUT." % (client, client,
+                                          resolver.CLAUDE_CRITICAL_ENV), None)
     return ("claude_budget: the plan %s is about to launch carries %s, which this "
             "budget holds for finals and nothing declares: %s. This is the last "
             "gate, after every model the flags implied was rewritten (the "
