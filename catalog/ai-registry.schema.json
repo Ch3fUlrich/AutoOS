@@ -53,6 +53,17 @@
       "description": "ISO-8601 UTC instant, e.g. \"2026-10-01T09:05:00Z\" (pattern-checked here; parseability is enforced by tools/registry.py check rule 7).",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
     },
+    "review_count": {
+      "type": "object",
+      "description": "One risk class's review bill (policy.review_counts).",
+      "required": ["cross_family", "final", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "cross_family": { "type": "integer", "minimum": 0, "description": "reviewers the resolver picks from a family other than the author's." },
+        "final": { "type": "boolean", "description": "whether the Claude-client Sonnet close (spec 5.7 D2) runs on top." },
+        "source": { "$ref": "#/$defs/source_tag" }
+      }
+    },
     "sourced_number": {
       "type": "object",
       "description": "The one consistent shape (D20) for a policy number that is not itself a data table: the value plus where it came from.",
@@ -84,7 +95,7 @@
     },
     "provider_limits": {
       "type": "object",
-      "description": "providers.<id>.limits entry (brief R4, 2026-09-27): one per model spelling. rpm/rpd/tpm/tpd are each optional non-negative ints (the resolver reads only tpm today); source is required (D20).",
+      "description": "providers.<id>.limits entry (brief R4, 2026-09-27): one per model spelling. rpm/rpd/tpm/tpd are each optional non-negative ints; source is required (D20). MISTRALFIX (2026-09-28): the resolver reads rpm and plan_available too, not only tpm - `rpm: 0` (a zero request quota, measured 429) and `plan_available: false` (the model is not on this plan, measured 403) both mean the leg cannot serve, and tools/registry.py plan_dead_reasons() skips such a leg. plan_available must be a real boolean: the string 'false' is truthy at the gate, so rule 10 rejects a non-bool.",
       "required": ["source"],
       "additionalProperties": false,
       "properties": {
@@ -92,6 +103,7 @@
         "rpd": { "type": "integer", "minimum": 0 },
         "tpm": { "type": "integer", "minimum": 0 },
         "tpd": { "type": "integer", "minimum": 0 },
+        "plan_available": { "type": "boolean" },
         "source": { "type": "string" }
       }
     },
@@ -125,6 +137,16 @@
         "unavailable_until": {
           "$ref": "#/$defs/until_tag",
           "description": "Additive field, not in spec 3.1 (brief UNTIL 2026-09-26, skill rule R-gateway-12): time-bounded unavailability - the entry is unavailable until this UTC instant, then counts as available again on its own (the resolver's reason says 're-probe'; a multi-day quota reset never needs a hand edit to undo). Resolver-only: the renders and their CI drift gates never read it."
+        },
+        "monthly_cap_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Hard monthly spend cap in USD for a paid provider (WS-DSCALL, 2026-09-28): a paid caller refuses at or above it, or when spend cannot be read. Distinct from autoos_usage.SPEND_WARN_USD, the warning line. Read through autoos_usage.monthly_cap_usd; tools/registry.py requires a positive number and a monthly_cap_source."
+        },
+        "monthly_cap_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who set monthly_cap_usd and when (e.g. an operator decision)."
         },
         "trains_on_prompts": {
           "type": "boolean",
@@ -477,19 +499,42 @@
             }
           }
         },
+        "risk_audit_percent": {
+          "type": "object",
+          "description": "RISKTIER-a (operator Q-013, 2026-09-28): how much of the normal-risk work gets the final check on top of its cross-family reviews. tools/autoos_risk.py audit() draws the sample as int(sha[:12], 16) % 100 < value, so the answer is a property of the commit, never of the clock or the machine.",
+          "required": ["value", "source"],
+          "additionalProperties": false,
+          "properties": {
+            "value": { "type": "integer", "minimum": 0, "maximum": 100 },
+            "source": { "$ref": "#/$defs/source_tag" },
+            "$comment": { "$ref": "#/$defs/comment" }
+          }
+        },
         "risk_rules": {
           "type": "array",
-          "description": "spec 5.7: what auto-raises risk to high. Two rule shapes: a path glob matched against the card's declared paths, or a diff-shape trigger (a deletion anywhere in the diff).",
+          "description": "spec 5.7, applied by tools/autoos_risk.py classify() to the DIFF (RISKTIER-a: the writer does not grade its own work). Four rule shapes: path_glob (a changed path matching `pattern`), diff_deletion (any deleted file), added_regex (an added line matching `pattern`, optionally only in files matching `paths`; case-sensitive and textual), registry_policy (the diff changes this registry's `policy` object). `pattern` is required of path_glob and added_regex, must compile as a regex for added_regex, and `paths` means added_regex only -- tools/registry.py validate enforces all of it, and classify() raises on an unknown type rather than ignoring a rule it cannot apply.",
           "items": {
             "type": "object",
             "required": ["type", "reason", "source"],
             "additionalProperties": false,
             "properties": {
-              "type": { "enum": ["path_glob", "diff_deletion"] },
+              "type": { "enum": ["path_glob", "diff_deletion", "added_regex", "registry_policy"] },
               "pattern": { "type": "string" },
+              "paths": { "type": "string", "description": "added_regex only: a path glob limiting which changed files are scanned." },
               "reason": { "type": "string" },
               "source": { "$ref": "#/$defs/source_tag" }
             }
+          }
+        },
+        "review_counts": {
+          "type": "object",
+          "description": "RISKTIER-a (operator Q-013, 2026-09-28): what each risk class costs in review eyes. Only the two classes a card can carry (spec 4: normal | high) are spellable here; an absent key leaves tools/autoos_resolver.py on its own fallback counts (normal 1, high 2).",
+          "required": ["normal", "high"],
+          "additionalProperties": false,
+          "properties": {
+            "normal": { "$ref": "#/$defs/review_count" },
+            "high": { "$ref": "#/$defs/review_count" },
+            "$comment": { "$ref": "#/$defs/comment" }
           }
         },
         "seed_priors": {

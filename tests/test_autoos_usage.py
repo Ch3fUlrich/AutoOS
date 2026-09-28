@@ -101,6 +101,25 @@ class FakeFetch:
                 for c in self.calls]
 
 
+class MonthlyCapTests(unittest.TestCase):
+    """WS-DSCALL (2026-09-28): the one reader of providers.<id>.monthly_cap_usd."""
+
+    def test_the_cap_is_read_from_the_registry(self):
+        reg = {"providers": {"deepseek": {"monthly_cap_usd": 25}}}
+        self.assertEqual(usage.monthly_cap_usd(reg), 25.0)
+
+    def test_a_missing_or_bad_cap_raises(self):
+        for entry in ({}, {"monthly_cap_usd": 0}, {"monthly_cap_usd": "25"},
+                      {"monthly_cap_usd": True}):
+            with self.assertRaises(ValueError):
+                usage.monthly_cap_usd({"providers": {"deepseek": entry}})
+        with self.assertRaises(ValueError):
+            usage.monthly_cap_usd({})
+
+    def test_the_warning_line_is_not_the_cap(self):
+        self.assertEqual(usage.SPEND_WARN_USD, 20.0)
+
+
 class UsageCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -143,6 +162,7 @@ class ParseSinceTests(unittest.TestCase):
 
 
 class AggregationTests(unittest.TestCase):
+
     def test_groups_by_each_dimension(self):
         rows = [
             row(iso(NOW - datetime.timedelta(minutes=5)), rid="a",
@@ -172,7 +192,9 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual([g["key"] for g in by["provider"]], ["groq", "openrouter"])
 
         self.assertEqual({g["key"] for g in by["combo"]}, {"tier2", "tier3"})
-        self.assertEqual({g["key"] for g in by["lane"]}, {"or4/lane-a", "or4/lane-b"})
+        # D-063: a lane is the part of the session id before the first slash, so
+        # both rows' "or4" worktree names group into one lane.
+        self.assertEqual({g["key"] for g in by["lane"]}, {"or4"})
         model = {g["key"]: g for g in by["model"]}
         self.assertEqual(model["gpt-oss-120b"]["calls"], 2)
         self.assertEqual(model["deepseek-v4.1-flash"]["calls"], 2)
@@ -184,7 +206,7 @@ class AggregationTests(unittest.TestCase):
         by = usage.aggregate(rows, ["lane"])
         lanes = {g["key"]: g["calls"] for g in by["lane"]}
         self.assertEqual(lanes["(untagged)"], 2)
-        self.assertEqual(lanes["or4/lane-a"], 1)
+        self.assertEqual(lanes["or4"], 1)
 
     def test_no_combo_grouped_as_none(self):
         rows = [row(iso(NOW), rid="a", combo=None)]
@@ -340,7 +362,7 @@ class CliTests(UsageCliTests):
         self.assertIn("lane", out)
         self.assertLess(out.index("groq"), out.index("openrouter"))
         self.assertIn("(untagged)", out)
-        self.assertIn("or4/lane-a", out)
+        self.assertIn("or4", out)
         self.assertNotIn(FIXTURE_KEY, out)
 
     def test_bad_since_exit2(self):
@@ -737,6 +759,116 @@ class SpendTests(UsageCliTests):
             self.assertIn("api-docs.deepseek.com/quick_start/pricing", w["source"])
 
 
+class SessionIdSplitTests(unittest.TestCase):
+    """D-063: the gateway session header carries `<session tag>/<run-id>` so
+    OmniRoute threads one Conversation per run. The report must still group by
+    lane across both shapes — lane is everything before the FIRST slash, run is
+    the part after the LAST one when it is a run id."""
+
+    LANE = "L1-routing-R1INBOX"
+    TAG = "L1-routing-R1INBOX/rev-r1fix2"
+    RUN_ID = "20260928-114305-fleetp0c-21a45c"
+    RUN_ID_2 = "20260928-115000-fleetp0c-99ff00"
+
+    def rows(self):
+        t = NOW
+        return [
+            # the new shape: tag + "/" + run id
+            row(iso(t), rid="a", tag="%s/%s" % (self.TAG, self.RUN_ID)),
+            row(iso(t - datetime.timedelta(seconds=1)), rid="b",
+                tag="%s/%s" % (self.TAG, self.RUN_ID)),
+            row(iso(t - datetime.timedelta(seconds=2)), rid="c",
+                tag="%s/%s" % (self.TAG, self.RUN_ID_2)),
+            # an old tag: the same lane, no run id at all
+            row(iso(t - datetime.timedelta(seconds=3)), rid="d", tag=self.TAG),
+            # a bare lane tag with no slash at all, and an untagged row
+            row(iso(t - datetime.timedelta(seconds=4)), rid="e", tag="lane-a"),
+            row(iso(t - datetime.timedelta(seconds=5)), rid="f", tag=None),
+        ]
+
+    def lanes(self):
+        by = usage.aggregate(self.rows(), ["lane"])
+        return {g["key"]: g["calls"] for g in by["lane"]}
+
+    def test_old_and_new_session_ids_group_into_the_same_lane(self):
+        self.assertEqual(self.lanes(),
+                         {self.LANE: 4, "lane-a": 1, "(untagged)": 1})
+
+    def test_the_lane_never_keeps_a_run_id(self):
+        # grouping by the whole session id would split one lane into one bucket
+        # per spawn, which is what --by run is for.
+        self.assertNotIn(self.RUN_ID, self.lanes())
+        for key in self.lanes():
+            self.assertNotIn("/", key)
+
+    def test_by_run_splits_the_same_lane_into_its_spawns(self):
+        by = usage.aggregate(self.rows(), ["run"])
+        runs = {g["key"]: g["calls"] for g in by["run"]}
+        self.assertEqual(runs, {self.RUN_ID: 2, self.RUN_ID_2: 1,
+                               usage.NO_RUN_LABEL: 3})
+
+    def test_a_session_tail_that_is_not_a_run_id_is_not_a_run(self):
+        # A tag is [A-Za-z0-9._/-]{1,120}: "or4/lane-a" has a slash and its tail
+        # is a lane name, not a run id. Reading it as one would invent a run.
+        rows = [row(iso(NOW), rid="a", tag="or4/lane-a"),
+                row(iso(NOW), rid="b", tag="lane/20260928-092516-fix-the"),
+                row(iso(NOW), rid="c", tag="lane/x-20260928-092516-fix-the-router-abc123")]
+        runs = {g["key"] for g in usage.aggregate(rows, ["run"])["run"]}
+        self.assertEqual(runs, {usage.NO_RUN_LABEL})
+
+    def test_a_canonical_run_id_with_a_dashed_slug_and_a_hex_tail_is_a_run(self):
+        rid = "20260928-092516-fix-the-router-abc123"
+        rows = [row(iso(NOW), rid="a", tag="lane/title/" + rid)]
+        runs = {g["key"] for g in usage.aggregate(rows, ["run"])["run"]}
+        self.assertEqual(runs, {rid})
+
+    def test_a_run_id_slug_past_the_spawner_cap_is_not_a_run(self):
+        long_slug = "a" * 25
+        rows = [row(iso(NOW), rid="a",
+                    tag="lane/t/20260928-092516-%s-abc123" % long_slug)]
+        runs = {g["key"] for g in usage.aggregate(rows, ["run"])["run"]}
+        self.assertEqual(runs, {usage.NO_RUN_LABEL})
+
+    def test_run_is_an_accepted_by_dimension_and_reported(self):
+        rep = usage.build_report(self.rows(), ["lane", "run"], CUTOFF, 1, False)
+        self.assertEqual(set(rep["by"]), {"lane", "run"})
+        runs = {g["key"]: g["calls"] for g in rep["by"]["run"]}
+        self.assertEqual(runs[self.RUN_ID], 2)
+        self.assertEqual([g["calls"] for g in rep["by"]["run"]],
+                         sorted([g["calls"] for g in rep["by"]["run"]], reverse=True),
+                         "sorted by calls desc")
+
+
+class SessionIdCliTests(UsageCliTests):
+    """`--by run` end to end, and the documented default left alone."""
+
+    def test_run_is_a_listed_by_dimension(self):
+        rc, out, err = self.run_cli(["--since", "1h", "--by", "run"],
+                                    FakeFetch({0: (200, [
+                                        row(iso(NOW), rid="a",
+                                            tag="lane/t/20260928-092516-fix-the-router-abc123")]
+                                    )}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("run", out)
+        self.assertIn("20260928-092516-fix-the-router-abc123", out)
+
+    def test_the_lane_table_groups_both_shapes_together(self):
+        rows = [row(iso(NOW), rid="a", tag="L1-routing-R1INBOX/rev/20260928-092516-fix-the-router-abc123"),
+                row(iso(NOW), rid="b", tag="L1-routing-R1INBOX/rev")]
+        rc, out, err = self.run_cli(["--since", "1h", "--by", "lane"],
+                                    FakeFetch({0: (200, rows)}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("L1-routing-R1INBOX", out)
+        self.assertNotIn("20260928-092516", out,
+                         "the lane table never shows a run id")
+
+    def test_the_default_by_is_unchanged(self):
+        rc, out, err = self.run_cli(["--since", "1h"], FakeFetch({0: (200, [])}))
+        self.assertEqual(rc, 0, err)
+        rep = self.json_report(["--since", "1h"], FakeFetch({0: (200, [])}))
+        self.assertEqual(set(rep["by"]), {"provider", "combo", "lane"})
+
+
 class DelegationTests(unittest.TestCase):
     """tools/autoos-agent.py `usage` delegates the remaining argv to autoos_usage.main."""
 
@@ -760,6 +892,18 @@ class DelegationTests(unittest.TestCase):
             rc = self.agent.main(["usage", "--since", "24h", "--by", "provider", "--cost"])
         m.assert_called_once_with(["--since", "24h", "--by", "provider", "--cost"])
         self.assertEqual(rc, 0)
+
+    def test_the_run_id_shape_matches_the_one_the_spawner_mints(self):
+        # usage cannot import the spawner (autoos-agent.py delegates `usage`
+        # here, so the import would be circular), which leaves the run-id shape
+        # written twice. This test is what keeps the two copies one fact.
+        self.assertEqual(usage.RUN_ID_SHAPE.pattern, self.agent.RUN_ID_RE.pattern)
+        self.assertEqual(usage.RUN_ID_SLUG_CAP, self.agent.RUN_ID_SLUG_CAP)
+
+    def test_every_id_the_spawner_mints_is_a_run_to_usage(self):
+        for _ in range(20):
+            rid = self.agent.mint_run_id("Fix The Router", "task")
+            self.assertTrue(usage.is_run_id(rid), rid)
 
 
 if __name__ == "__main__":

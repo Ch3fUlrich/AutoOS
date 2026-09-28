@@ -32,6 +32,19 @@ def card(spec="exact", kind="implement"):
     return {"spec": spec, "kind": kind}
 
 
+def clean_head_leg(registry):
+    """The leg `t2-worker-clean` heads with, read from the registry.
+
+    Three cases below need "a private-safe leg that a probe has proven
+    tool_calls on" without reading the git-ignored probe overlay, so they prove
+    this leg in an inline overlay instead of naming a model. MISTRALFIX
+    (2026-09-28) moved them off the old name: mistral/mistral-small-latest is
+    no longer a leg of any route (0 rpm on the measured plan), and since DSBACK
+    the native DeepSeek leg heads both -clean twins.
+    """
+    return registry["routes"]["t2-worker-clean"]["legs"][0]
+
+
 class TableTests(unittest.TestCase):
     def test_table_holds_the_section_5_2_points(self):
         t = r.DEFAULT_BUCKET_TABLE
@@ -873,11 +886,13 @@ class FallThroughTests(unittest.TestCase):
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
         # Every model in the real catalog is tool_calls unproven today (no
-        # probe has proven one yet); marking mistral/mistral-small-latest
+        # probe has proven one yet); marking the -clean routes' head leg
         # proven in the overlay is enough to keep t2-worker-clean alive, even
-        # though its other legs (deepseek/deepseek-flash included, provider-
-        # gated 402 since 2026-09-27T16:4xZ) stay unproven.
-        overlay = {"legs": {"mistral/mistral-small-latest": {
+        # though its other legs (openrouter/deepseek, gated by its provider,
+        # and opencode-zen/deepseek-v4.1-flash, gated on the route) stay
+        # unproven. MISTRALFIX 2026-09-28: this used to prove
+        # mistral/mistral-small-latest, which is no longer a leg of the route.
+        overlay = {"legs": {clean_head_leg(registry): {
             "tool_calls": {"value": "proven", "source": "test"}}}}
         survivors, removed = r.filter_routes(card, features, client_state,
                                              registry, overlay)
@@ -1930,6 +1945,65 @@ class PlanTests(unittest.TestCase):
             "reason": "cross-family reviewer(s): r-free, r-cheap",
         })
 
+    def test_review_counts_come_from_the_policy_when_the_registry_declares_them(self):
+        # RISKTIER-a: what a class costs is registry data, not a constant here.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 2, "final": False, "source": "test"},
+            "high": {"cross_family": 1, "final": True, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        # r-free (alpha) chosen: the two cheapest other families are r-cheap
+        # (beta) and r-mid (gamma); r-frontier is alpha again, so it stays out.
+        self.assertEqual(plan["reviewers"]["routes"], ["r-cheap", "r-mid"])
+        self.assertIsNone(plan["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["routes"], ["r-cheap"])
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
+    def test_review_counts_declaring_no_final_leaves_the_closer_out(self):
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "high": {"cross_family": 2, "final": False, "source": "test"},
+        }
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["closer"], None)
+
+    def test_a_policy_asking_for_no_cross_family_reviewer_gets_none(self):
+        # zero means zero. The pick loop breaks on the cap BEFORE appending, so
+        # a 0-count policy routes no reviewer at all; an append-then-check loop
+        # (what the hard-coded table made harmless) would always return one.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 0, "final": False, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        self.assertEqual(plan["reviewers"]["routes"], [])
+        self.assertIsNone(plan["reviewers"]["closer"])
+        self.assertIn("cross-family reviewer(s):", plan["reviewers"]["reason"])
+
+    def test_an_absent_review_counts_key_falls_back_to_d2s_numbers(self):
+        # The constants stay as the fallback, so a registry that predates
+        # policy.review_counts routes exactly as it did before the field.
+        registry = self.registry()
+        registry["policy"].pop("review_counts", None)
+        normal = r.plan(self.card(), self.features(), self.state(), registry,
+                        {}, [], "orch", self.now())
+        self.assertEqual(normal["reviewers"]["routes"], ["r-cheap"])
+        self.assertIsNone(normal["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(len(high["reviewers"]["routes"]), 2)
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
     def test_escalation_logic_raises_one_rung_capability_moves_up_a_class(self):
         result = self.s3_plan()
         self.assertEqual(result["escalation"], [
@@ -1988,13 +2062,10 @@ class PlanTests(unittest.TestCase):
         """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
         sensitive-routing regression below needs an agentic kind's
         tool_calls proven for at least one private-safe leg, but
-        logs/routing/measured.json (the real probe's overlay) is
-        git-ignored and absent on a fresh clone or in CI. Marks
-        mistral/mistral-small-latest proven (mistral direct, private-safe:
-        paid tier, trains_on_prompts false, no model-level override;
-        deepseek/deepseek-flash was the proven leg until providers.deepseek
-        went 402/unavailable 2026-09-27T16:4xZ - an unavailable leg never
-        survives the filters no matter what the overlay says) and every
+        the real probe's overlay (tools/autoos_overlay.py) is never in
+        git and absent on a fresh clone or in CI. Marks the -clean routes'
+        head leg (clean_head_leg: private-safe — paid tier,
+        trains_on_prompts false, no model-level override) proven and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
         ["value"]``) -- so this test never depends on that file."""
@@ -2002,7 +2073,7 @@ class PlanTests(unittest.TestCase):
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
-        overlay["legs"]["mistral/mistral-small-latest"] = {"tool_calls": {"value": "proven"}}
+        overlay["legs"][clean_head_leg(registry)] = {"tool_calls": {"value": "proven"}}
         return overlay
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
@@ -2011,7 +2082,7 @@ class PlanTests(unittest.TestCase):
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
         # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
         # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
-        # instead of reading the git-ignored logs/routing/measured.json --
+        # instead of reading the machine-wide overlay --
         # see
         # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
         # below for the real-probe-overlay variant, which may still skip.
@@ -2037,13 +2108,17 @@ class PlanTests(unittest.TestCase):
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
         # Extra (PRIV2): the same regression against the real probe's
-        # overlay, when one happens to be on disk. logs/routing/measured.json
-        # is git-ignored, so this skips on a fresh clone or in CI rather than
-        # failing -- the inline-overlay test above is the one that must run.
-        overlay_path = (Path(__file__).resolve().parent.parent
-                        / "logs" / "routing" / "measured.json")
-        if not overlay_path.is_file():
-            self.skipTest("no logs/routing/measured.json overlay to probe with")
+        # overlay, when one happens to be on disk. The machine-wide overlay
+        # (autoos_overlay, OVERLAYHOME) is never in git, so this skips on a
+        # fresh clone or in CI rather than failing -- the inline-overlay test
+        # above is the one that must run. Read-only: it never writes the file.
+        import autoos_overlay
+        found = autoos_overlay.found(
+            autoos_overlay.default_path(),
+            autoos_overlay.legacy_path(str(Path(__file__).resolve().parent.parent)))
+        if found is None:
+            self.skipTest("no tool_calls overlay on this machine to probe with")
+        overlay_path = Path(found)
         registry_path = (Path(__file__).resolve().parent.parent
                          / "catalog" / "ai-registry.json")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -2171,9 +2246,23 @@ class GatewayOrderTests(unittest.TestCase):
         # models through paid APIs (no cheaperinference/claude-*, no
         # cheaperinference/gpt-*): too expensive" - "DROP the review combo on
         # cheaperinference/claude-sonnet-5".
+        #
+        # AUTHORS (S1) 2026-09-28 rewrote the two models-table limbs as the leg
+        # test they were standing in for. "claude-sonnet-5 is not in models" was
+        # never the rule; "nothing routes to it" is, and registering the
+        # orchestrator's own model as an AUTHOR id -- so `review-status` can read
+        # a record the Sonnet final wrote instead of refusing it -- says nothing
+        # about legs. An author row carries no provider and no route names it;
+        # what keeps Claude and GPT off a paid API is policy.leg_rules
+        # deny-claude-paid-api / deny-gpt-paid-api, checked by registry rule 9.
         registry = self.registry()
-        self.assertNotIn("claude-sonnet-5", registry["models"])
-        self.assertNotIn("gpt-5.6-terra", registry["models"])
+        legs = {leg for route in registry["routes"].values()
+                for leg in (route.get("legs") or [])
+                + list(route.get("unavailable_legs") or {})}
+        for mid in ("claude-sonnet-5", "gpt-5.6-terra"):
+            self.assertEqual([leg for leg in sorted(legs)
+                              if leg.split("/", 1)[1:2] == [mid]], [],
+                             "%s is an author id, never a routable leg" % mid)
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 self.assertFalse(leg.startswith("cheaperinference/claude"), leg)
@@ -2206,8 +2295,8 @@ class GatewayOrderTests(unittest.TestCase):
         # (tools/autoos_resolver.py usable_legs) still holds it for an
         # implement (agentic) card over the now-larger real registry, using
         # the same inline overlay shape PlanTests._inline_toolcalls_overlay
-        # builds (mistral/mistral-small-latest proven, every other real leg
-        # explicitly unproven).
+        # builds (the -clean head leg proven, every other real leg explicitly
+        # unproven).
         registry = self.registry()
         overlay = PlanTests._inline_toolcalls_overlay(registry)
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
@@ -2221,10 +2310,10 @@ class GatewayOrderTests(unittest.TestCase):
         self.assertIsNotNone(result["route"], result)
         # result["leg"] is the route's first *usable* leg (per-leg tool_calls
         # filter already applied by usable_legs/score_route), not merely its
-        # first serving one - every leg but mistral/mistral-small-latest is
+        # first serving one - every leg but clean_head_leg(registry) is
         # explicitly unproven in this overlay, so that is the only leg an
         # agentic (implement) card may land on.
-        self.assertEqual(result["leg"], "mistral/mistral-small-latest")
+        self.assertEqual(result["leg"], clean_head_leg(registry))
 
 
 class DecomposeTests(unittest.TestCase):
@@ -3142,6 +3231,121 @@ class PlanReviewCardTests(unittest.TestCase):
                                 risk="normal", privacy="sensitive")
         if result["reviewer"] is not None:
             self.assertNotEqual(result["reviewer"]["family"], "meta")
+
+
+class PlanLimitsGateTests(unittest.TestCase):
+    """MISTRALFIX (S1) 2026-09-28: a plan limit that says the model cannot serve
+    at all is a per-leg skip, not a fall-through onto a dead leg.
+
+    Measured on api.mistral.ai with the operator's key (x-ratelimit headers):
+    `mistral-small-latest` returns 429 at **0 requests/minute** on this plan,
+    and a 403 model is simply not on the plan. Before this rule the resolver
+    read only `tpm` from providers.<id>.limits, so an `rpm: 0` leg was planned
+    as if it served -- the gateway burned the call and fell through.
+
+    Inline registry only, so the gate is isolated: no policy.leg_rules, no
+    unavailable_legs, one 0-rpm leg, one plan_available:false leg, one healthy
+    fallback.
+    """
+
+    def setUp(self):
+        self.registry = {
+            "providers": {
+                "mistral": {
+                    "id": "mistral", "tier": "paid", "trains_on_prompts": False,
+                    "limits": {
+                        "mistral-small-latest": {
+                            "rpm": 0,
+                            "source": "L1-routing direct probe 2026-09-28"},
+                        "mistral-large-latest": {
+                            "plan_available": False,
+                            "source": "L1-routing direct probe 2026-09-28"},
+                        "codestral-latest": {
+                            "rpm": 125, "tpm": 625000,
+                            "source": "L1-routing direct probe 2026-09-28"},
+                    }},
+            },
+            "models": {
+                "mistral-small-latest": {
+                    "id": "mistral-small-latest", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "mistral-large-latest": {
+                    "id": "mistral-large-latest", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+                "codestral-latest": {
+                    "id": "codestral-latest", "tool_calls": "proven",
+                    "context_usable": {"tokens": 131072, "source": "default"}},
+            },
+            "routes": {
+                "r-mixed": {"id": "r-mixed", "legs": [
+                    "mistral/mistral-small-latest",
+                    "mistral/mistral-large-latest",
+                    "mistral/codestral-latest"]},
+                "r-all-dead": {"id": "r-all-dead", "legs": [
+                    "mistral/mistral-small-latest",
+                    "mistral/mistral-large-latest"]},
+            },
+        }
+
+    def card(self):
+        return {"kind": "review", "privacy": "public"}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def legs(self, route_id):
+        return r.usable_legs(self.registry["routes"][route_id], self.card(),
+                             {"need_tokens": 1000}, self.state(),
+                             self.registry, {})
+
+    def test_an_rpm_0_leg_is_skipped_with_reason_plan_0_rpm(self):
+        legs, skipped, _ = self.legs("r-mixed")
+        self.assertNotIn(("mistral", "mistral-small-latest"), legs)
+        self.assertIn("mistral/mistral-small-latest", skipped)
+        self.assertIn("plan: 0 rpm", skipped["mistral/mistral-small-latest"])
+
+    def test_a_plan_available_false_leg_is_skipped_naming_the_flag(self):
+        legs, skipped, _ = self.legs("r-mixed")
+        self.assertNotIn(("mistral", "mistral-large-latest"), legs)
+        self.assertIn("mistral/mistral-large-latest", skipped)
+        self.assertIn("plan: plan_available false",
+                      skipped["mistral/mistral-large-latest"])
+
+    def test_an_rpm_positive_leg_is_kept(self):
+        # The gate is about *no* capacity, not about a small one: 125 rpm is a
+        # working leg and must stay plannable.
+        legs, skipped, _ = self.legs("r-mixed")
+        self.assertIn(("mistral", "codestral-latest"), legs)
+        self.assertNotIn("mistral/codestral-latest", skipped)
+
+    def test_a_leg_with_both_dead_flags_reports_both_reasons(self):
+        # Never stop at the first reason: usable_legs collects every reason that
+        # applies, same contract as the context/tpm/leg_rules filters.
+        entry = self.registry["providers"]["mistral"]["limits"]["codestral-latest"]
+        entry["rpm"] = 0
+        entry["plan_available"] = False
+        _, skipped, _ = self.legs("r-mixed")
+        self.assertEqual(
+            skipped["mistral/codestral-latest"],
+            ["plan: 0 rpm", "plan: plan_available false"])
+
+    def test_a_route_whose_every_leg_is_plan_dead_is_dropped_naming_plan(self):
+        survivors, removed = r.filter_routes(
+            self.card(), {"need_tokens": 1000}, self.state(), self.registry, {})
+        self.assertNotIn("r-all-dead", survivors)
+        self.assertIn("r-all-dead", removed)
+        joined = " ".join(removed["r-all-dead"])
+        self.assertIn("no usable leg", joined)
+        self.assertIn("plan", joined)
+        self.assertEqual(r.no_route(removed)["state"], "input_required")
+
+    def test_a_leg_with_no_limits_row_is_never_gated(self):
+        # No measurement is not a deny: the same leg with its row removed (and a
+        # provider with no limits table at all) stays plannable.
+        del self.registry["providers"]["mistral"]["limits"]["mistral-small-latest"]
+        legs, skipped, _ = self.legs("r-mixed")
+        self.assertIn(("mistral", "mistral-small-latest"), legs)
+        self.assertNotIn("mistral/mistral-small-latest", skipped)
 
 
 if __name__ == "__main__":

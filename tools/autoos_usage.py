@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Usage report from the OmniRoute gateway: calls, ok/errors and tokens by
-provider, combo, lane and model. The operator-facing name is the subcommand:
+provider, combo, lane, model and run. The operator-facing name is the subcommand:
 
-    autoos-agent.py usage --since 1h [--by provider,combo,lane,model] [--json]
+    autoos-agent.py usage --since 1h [--by provider,combo,lane,model,run] [--json]
     autoos-agent.py usage --since 24h --by provider --cost   # the spend guard
+    autoos-agent.py usage --since 1h --by lane,run           # the lane and its spawns
     autoos-agent.py usage --since 1h --spend-since --balance-usd 19.99   # the cap
 
 It pages GET /api/usage/call-logs with the manage-scoped key the ai-stack
@@ -34,7 +35,9 @@ tag - build to this, not to a guess):
   (NESTED object {in, out, cacheRead, cacheWrite, reasoning, compressed},
   callLogs.ts:475-482), apiKeyId, apiKeyName, comboName, comboStepId,
   comboExecutionKey, error (string|null), correlationId, sessionTag
-  (callLogs.ts:505 - OR3 sets it to "<orchestrator-worktree>/<lane>").
+  (callLogs.ts:505 - the row's conversation id, which for an AutoOS spawn is
+  the whole `x-omniroute-session-id` header: OR3's
+  "<orchestrator-worktree>/<title>", plus "/<run-id>" since D-063).
 - Error predicate (route.ts:49-51): Number(status) >= 400 OR truthy error
   field. Ok (route.ts:52-53): 200 <= status < 300. This report counts a row
   as error if the error predicate holds, else ok if the ok predicate holds,
@@ -45,8 +48,11 @@ tag - build to this, not to a guess):
   ${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}/manage.key
   (read the same way as configuration/omniroute/apply.sh).
 
-Grouping: lane is the row's sessionTag, "(untagged)" when empty; combo is
-comboName, "(none)" when empty; provider/model "(unknown)" when empty. Rows
+Grouping: lane is the part of the row's sessionTag before the FIRST '/' - the
+session tag and the D-063 `<tag>/<run-id>` value therefore group into the same
+lane - "(untagged)" when empty; run is the part after the LAST '/' when it is a
+canonical run id, "(no run id)" otherwise; combo is comboName, "(none)" when
+empty; provider/model "(unknown)" when empty. Rows
 with a timestamp older than --since are dropped; rows without a parseable
 timestamp are kept (they are almost always in-flight rows).
 
@@ -98,14 +104,54 @@ DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
 MAX_PAGES = 20
 TIMEOUT_S = 15
-DIMENSIONS = ("provider", "combo", "lane", "model")
+DIMENSIONS = ("provider", "combo", "lane", "model", "run")
 UNTAGGED_LANE = "(untagged)"
+NO_RUN_LABEL = "(no run id)"
+# The --by table's key column: wide enough for one whole canonical run id.
+KEY_MAX = 48
+
+# D-063: the gateway session header carries `<session tag>/<run-id>` — one
+# session tag per lane, one conversation per run. So a call-log row's sessionTag
+# splits two ways: lane = everything before the FIRST '/', run = the part after
+# the LAST '/' when it is a run id. An old tag (`<lane>/<title>`) has no run
+# part and groups into the same lane as the new `<lane>/<title>/<run-id>`, which
+# is why the lane is the HEAD and not the whole value.
+# The run-id shape is tools/autoos-agent.py `mint_run_id`'s own, written twice
+# because the spawner delegates `usage` HERE (importing it back would be
+# circular); test_the_run_id_shape_matches_the_one_the_spawner_mints pins the two
+# copies to each other and test_every_id_the_spawner_mints_is_a_run_to_usage
+# checks them against real minted ids.
+RUN_ID_SHAPE = re.compile(r"^(\d{8}-\d{6})-([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{6})$")
+RUN_ID_SLUG_CAP = 24
+
+
+def is_run_id(value) -> bool:
+    """True for the `<slug>`-capped id shape the spawner mints (same bounds as
+    its `is_canonical_run_id`, less the calendar check: a grouping key only has
+    to be recognisable, and a stamp with an impossible date is still one run)."""
+    match = RUN_ID_SHAPE.match(value or "")
+    return bool(match) and len(match.group(2)) <= RUN_ID_SLUG_CAP
+
+
+def lane_of(session_id) -> str:
+    """The lane part of a session id: everything before the first '/'."""
+    return (session_id or "").split("/")[0] or UNTAGGED_LANE
+
+
+def run_of(session_id) -> str:
+    """The run part: what follows the LAST '/', but only when it is a run id.
+
+    A tag's tail (`<lane>/<title>`) is a title slug, not an id; calling it a run
+    would invent a run per title and split one spawn's rows in two.
+    """
+    tail = (session_id or "").rsplit("/", 1)[-1]
+    return tail if is_run_id(tail) else NO_RUN_LABEL
 
 # DSGUARD: the one paid provider the operator budgets in dollars per month, the
 # cap itself, and the balance floor under which the next top-up is late.
 SPEND_PROVIDER = "deepseek"
 SPEND_PROVIDER_LABEL = "DeepSeek"
-SPEND_WARN_USD = 20.0      # the operator's monthly DeepSeek cap
+SPEND_WARN_USD = 20.0      # the warning line; the hard cap is providers.<id>.monthly_cap_usd
 BALANCE_FLOOR_USD = 5.0    # warn before the balance runs out mid-lane
 
 # Registry path for cost lookup
@@ -189,6 +235,18 @@ def price_for(model, prices):
         if tail in prices:
             return prices[tail]
     return None
+
+
+def monthly_cap_usd(registry, provider=SPEND_PROVIDER):
+    """providers.<provider>.monthly_cap_usd as a float: the hard monthly cap a paid
+    caller must stay under (WS-DSCALL, 2026-09-28). SPEND_WARN_USD stays the
+    warning line. ValueError when the cap is absent or not a positive number."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    cap = entry.get("monthly_cap_usd") if isinstance(entry, dict) else None
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        raise ValueError("providers.%s.monthly_cap_usd is missing or not a positive number"
+                         % provider)
+    return float(cap)
 
 
 def month_start(now):
@@ -400,7 +458,9 @@ def _group_key(dim, row):
     if dim == "combo":
         return row.get("comboName") or "(none)"
     if dim == "lane":
-        return row.get("sessionTag") or UNTAGGED_LANE
+        return lane_of(row.get("sessionTag"))
+    if dim == "run":
+        return run_of(row.get("sessionTag"))
     return row.get("model") or "(unknown)"
 
 
@@ -544,7 +604,11 @@ def render_text(report, dims):
         if not entries:
             lines.append("  (no rows)")
             continue
-        width = min(40, max([len(dim)] + [len(str(e["key"])) for e in entries]))
+        # A canonical run id is at most 15+1+24+1+6 = 47 characters
+        # (mint_run_id: stamp, RUN_ID_SLUG_CAP slug, hex tail), so the key column
+        # is capped at one that fits - a truncated run id cannot be pasted into
+        # `ps` or a branch name. --json was always the untruncated source.
+        width = min(KEY_MAX, max([len(dim)] + [len(str(e["key"])) for e in entries]))
         lines.append("%-*s  %s" % (width, "",
                                      "  ".join(h.rjust(w) for h, w, _f in columns)))
         for e in entries:
@@ -559,7 +623,7 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     ap = argparse.ArgumentParser(
         prog="autoos-agent.py usage",
         description="Usage report from the OmniRoute gateway: calls, ok/errors and "
-                    "tokens by provider, combo, lane and model.")
+                    "tokens by provider, combo, lane, model and run.")
     ap.add_argument("--since", required=True,
                     help="window start: ISO-8601 UTC or a relative window like 30m, 6h, 2d")
     ap.add_argument("--by", default="provider,combo,lane",

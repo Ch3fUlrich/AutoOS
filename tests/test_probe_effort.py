@@ -926,7 +926,8 @@ class ProbeCommonTests(unittest.TestCase):
             overlay = {"models": {"m": {"context_usable": {"tokens": 8000}}}}
             self.common.save_overlay(path, overlay)
             self.assertEqual(self.common.load_overlay(path), overlay)
-            self.assertEqual(os.listdir(tmpdir), ["measured.json"])
+            # The lock file beside it is deliberate (OVERLAYHOME: locked read-modify-write).
+            self.assertEqual(sorted(os.listdir(tmpdir)), ["measured.json", "measured.json.lock"])
         finally:
             for name in os.listdir(tmpdir):
                 os.remove(os.path.join(tmpdir, name))

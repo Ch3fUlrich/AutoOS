@@ -8,9 +8,13 @@ asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
-AUTOOS_STATE_DIR overrides <repo>/logs):
+AUTOOS_STATE_DIR overrides <repo>/logs), where <id> is the spawner's own
+canonical run id (tools/autoos-agent.py mint_run_id) handed to the run as
+`run --run-id`, so the run dir, logs/workers/<id>.json, the branch and the
+child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
-    job.json     the request, the autoos-agent.py argv, pid, route, start time
+    job.json     the request, the canonical run id, the autoos-agent.py argv
+                 (which carries that id as --run-id), pid, route, start time
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
@@ -34,8 +38,10 @@ route, list_agents and context (spec 6.1/6.2) are resolver v2: they import
 tools/autoos-agent.py as a module (its own hyphenated filename, loaded via
 importlib the way the test suite's load_agent() does) and call its
 route_plan_for/context_state directly, so this server and the CLI can never
-disagree on a plan. Nothing is spawned for them; they only read the registry,
-the git-ignored overlay/track-record and each client's own sign-in probe.
+disagree on a plan. spawn calls the same module's mint_run_id for the same
+reason: one id, minted in one place. Nothing is spawned for the three; they only
+read the registry, the git-ignored overlay/track-record and each client's own
+sign-in probe.
 
 Start it the way the registrations do (the `mcp` pin lives in
 catalog/agent-harness.json):
@@ -54,7 +60,6 @@ import io
 import json
 import os
 import re
-import secrets
 import signal
 import subprocess
 import sys
@@ -175,12 +180,13 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
     try:
         now = agent.parse_now(None)
         registry = agent.load_registry(agent.REGISTRY_PATH)
-        overlay = agent.load_overlay(agent.MEASURED_OVERLAY_PATH)
+        overlay, overlay_missing_at = agent.load_measured_overlay()
         track_record = agent.track.load(agent.TRACK_RECORD)
         client_state = agent.measure_mod.client_state(agent.clients)
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
-                                      registry, overlay, track_record, client_state)
+                                      registry, overlay, track_record, client_state,
+                                      overlay_missing_at=overlay_missing_at)
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:
@@ -283,8 +289,12 @@ def context_info(transcript: str | None = None) -> dict:
     return data
 
 
-def build_argv(req: dict) -> tuple:
-    """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one."""
+def build_argv(req: dict, run_id: str | None = None) -> tuple:
+    """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
+
+    `run_id` is the canonical id this server minted for the run (FLEETP0b): it
+    goes to the CLI as `--run-id`, so the run dir named here and the record,
+    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1)."""
     client = req.get("client") or "opencode"
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
@@ -321,6 +331,8 @@ def build_argv(req: dict) -> tuple:
     for opt in ("model", "title", "max_depth"):
         if req.get(opt) is not None:
             argv += ["--" + opt.replace("_", "-"), str(req[opt])]
+    if run_id:
+        argv += ["--run-id", run_id]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
         argv.append("--dry-run")
     argv.append(task)
@@ -369,19 +381,25 @@ def spawn(req: dict) -> dict:
             os.environ.get("AUTOOS_AGENT_TRANSCRIPT")))
         if pause["active"]:
             return _refused("PAUSE active (%s): %s" % (pause["at"], pause["text"]))
-    try:
-        argv, route = build_argv(req)
-    except (ValueError, clients.DepthError) as exc:
-        return _refused(str(exc))
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
-    refused = preflight(argv, cwd)
-    if refused:
-        return _refused(refused)
     max_attempts = 5
     for attempt in range(max_attempts):
-        run_id = "%s-%s" % (datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
+        # FLEETP0b (FLEETSPEC §5.1): the spawner's own mint, so this run dir, the
+        # CLI's record/branch/child env and the gateway header carry one id. The
+        # 6-hex tail is what separates two spawns in the same second; the retry
+        # stays for the id that still collides with a live run dir. The argv is
+        # built with it, so the CLI's dry run checks the id it will be started
+        # with, and nothing is created before that says yes.
+        run_id = agent.mint_run_id(req.get("title"), req.get("task") or "")
+        try:
+            argv, route = build_argv(req, run_id)
+        except (ValueError, clients.DepthError) as exc:
+            return _refused(str(exc))
+        refused = preflight(argv, cwd)
+        if refused:
+            return _refused(refused)
         path = os.path.join(state_root(), run_id)
         try:
             # Private like the spawner's workers dir: the run dir holds the task
@@ -398,7 +416,8 @@ def spawn(req: dict) -> dict:
                 return {"error": "Failed to create run directory after %d attempts" % max_attempts,
                         "state": "failed"}
             continue
-    job = {"id": run_id, "request": {k: v for k, v in req.items() if k != "task"},
+    job = {"id": run_id, "run_id": run_id,
+           "request": {k: v for k, v in req.items() if k != "task"},
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
