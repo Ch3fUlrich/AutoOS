@@ -1352,6 +1352,19 @@ class FreeAiProviderTests(unittest.TestCase):
             legs = self.reg["routes"][route_id]["legs"]
             self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
 
+    def test_t2_worker_ends_with_the_free_ai_stopgap_leg(self):
+        """BRIEF T2FREE (S1, urgent stopgap 2026-09-28): the routing-00 smoke
+        run got 503 ALL_TARGETS_SKIPPED from t2-worker — every leg ahead of
+        this one was down at the time (gemini 429 cooldown, agy out of quota,
+        meta-api not registered) — so the leg measured answering 200 is the
+        route's last resort. The free-only routes already carried it last."""
+        route = self.reg["routes"]["t2-worker"]
+        self.assertEqual(route["legs"][-1], "free_ai/qwen7b")
+        comment = route.get("$comment")
+        self.assertIsInstance(comment, str, "$comment provenance is missing")
+        self.assertIn("stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)",
+                      comment)
+
     def test_no_clean_route_carries_free_ai(self):
         # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
         # and its rendered omniroute_id (free-ai/) - so a regression that emits
@@ -1388,7 +1401,8 @@ class MetaApiProviderTests(unittest.TestCase):
     t1-orchestrator-paid and spark-1.3-contributor. It trains on prompts by
     contributor contract, so it is never private-safe and never enters a
     -clean route; on t2-worker/t3-driver it is a paid escalation placed AFTER
-    that route's free legs."""
+    that route's free legs (the trailing T2FREE stopgap free leg on t2-worker
+    excepted — it is last on purpose, see FreeAiProviderTests)."""
 
     LEG = "meta_api/muse-spark-1.3-contributor"
 
@@ -1473,11 +1487,16 @@ class MetaApiProviderTests(unittest.TestCase):
             provider_id = registry.resolve_leg(leg, self.reg)[0]
             return providers[provider_id]["tier"]
 
+        # T2FREE (2026-09-28) appended the free stopgap leg LAST on t2-worker,
+        # i.e. behind this paid escalation; every other free leg still comes
+        # first, which is what this pins.
+        stopgap = "free_ai/qwen7b"
         for route_id in ("t2-worker", "t3-driver"):
             legs = self.reg["routes"][route_id]["legs"]
             self.assertIn(self.LEG, legs, route_id)
             last_free = max(i for i, leg in enumerate(legs)
-                            if leg != self.LEG and tier_of(leg) == "free")
+                            if leg not in (self.LEG, stopgap)
+                            and tier_of(leg) == "free")
             self.assertGreater(legs.index(self.LEG), last_free, route_id)
 
     def test_no_clean_route_carries_the_leg(self):
