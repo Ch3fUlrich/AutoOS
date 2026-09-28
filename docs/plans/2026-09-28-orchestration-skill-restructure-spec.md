@@ -29,8 +29,8 @@ stay verbatim — `.agents/skills/unattended-orchestration/tests/cao/test_cli.py
 scans this file for every `python -m cao ...` string and checks each against
 the real parser (corrected 2026-09-28, Sonnet final: the writer's path dropped
 the `.agents/skills/unattended-orchestration/` prefix — verified the scanner
-itself at that file's `_COMMAND` regex + `SKILL.md`-glob, lines ~756–763);
-`.agents/skills/unattended-orchestration/SKILL.md` lines 143–145), and a
+itself at that file's `_COMMAND` regex + `SKILL.md`-glob, lines ~756–764);
+`.agents/skills/unattended-orchestration/SKILL.md` lines 149–163), and a
 provenance note (generated files, single source).
 
 Before (verified 2026-09-28, `wc -l` = 166; section starts by `grep -n`):
@@ -49,7 +49,7 @@ After — proposed index section list with line budgets (sum 138 ≤ 150):
 | `## Rules` roster | 30 | Format contract (today's lines 65–70) + rule id roster with one-line pointers to cards; full rule text moves to `rules.yaml` + cards |
 | Code-migration + binding notes | 12 | Keep condensed (today's lines 72–92); `references/rule-map.md` stays the code-pointer list |
 | Card pointers (L0/L1/L2/L3 → file + when) | 8 | New; 2 lines per level |
-| `## CAO quickstart` commands + provenance | 24 | Command block stays verbatim (scanner, lines 143–145); prose trimmed, rest already in `references/cao-runbook.md` |
+| `## CAO quickstart` commands + provenance | 24 | Command block stays verbatim (scanner, lines 149–163); prose trimmed, rest already in `references/cao-runbook.md` |
 | Generation note (source file, render command) | 14 | New; points at `rules.yaml` + `skill-rules.py render` (§3) |
 | **Total** | **138** | Headroom 12 for future shared lines |
 
@@ -74,8 +74,11 @@ paragraph lines 90–92):
 
 Dedup rule, named explicitly — **index-homes-shared-rules**: a rule (or note)
 that applies to all four levels lives exactly once in the index and in zero
-cards; a card carries a rule iff that rule's topic is its level (plus the
-heartbeat exception above, which is cited — not restated — in the L2 card).
+cards; a card carries a rule iff that rule's topic is its level, plus two
+stated exceptions: the heartbeat exception above (R-coord-07/08, cited — not
+restated — in the L2 card) and the N-compact exception (§6: L2 sizes the task
+at brief time, L3 lives inside it, so the budget rule is cited in L2 brief
+discipline and owned in full by the L3 card).
 Rationale: `coding-principles` Principle 1, one authoritative home
 (`.agents/skills/coding-principles/SKILL.md` lines 17–26). The generator (§3)
 enforces it mechanically: a rule tagged to all four levels renders only in the
@@ -114,11 +117,16 @@ Input file (new, name open in §8): one record per rule. Shape:
   why: "hand-rolls drift from gates"
   source: "operator 04:50Z, REVGATE.record.md"
   enforcement: enforced
+  # new, lane 3: no test gates the spawn path today (the closest existing
+  # tests cover leaf-never-spawns, not spawn-only-via-MCP — see §5 R-coord-09),
+  # so lane 3 writes it; `check` fails until it exists.
   enforced_by: ["tests/test_agent_harness.py::test_spawn_only_via_agent"]
 ```
 
 `levels` drives card membership (multi-level allowed, e.g. R-coord-07/08 carry
-`[L1, L2]` per lines 90–92); `enforcement`/`enforced_by` drive §5. `render`
+`[L1, L2]` per lines 90–92 — with the §2 heartbeat exception: they render full
+text only in the L1 card and are cited, not restated, in the L2 card);
+`enforcement`/`enforced_by` drive §5. `render`
 writes the 4 cards + the index's `## Rules` roster; `check` validates tags,
 membership, and the §5 mapping.
 
@@ -136,7 +144,11 @@ SKILL.md whole — see §7 for why both readings agree.
 Definitions: `enforced` = mechanically checkable by a named test/lint that CI
 runs; `advisory` = needs judgment, no such check exists or is possible. Every
 rule below gets exactly one tag; an enforced rule names its check, an advisory
-rule says why no check can cover it.
+rule says why no check can cover it. A rule whose text mixes a
+mechanically-checkable fragment with a judgment fragment ships under one tag —
+`advisory`, with a note naming the enforced fragment (applied to R-orch-06 and
+R-worker-10 below, and to D-115 in §6) — so the exactly-one-tag rule holds
+without pretending the judgment part is checkable.
 
 Tag home: a sibling YAML/JSON the generator reads (`rules.yaml`, `enforcement`
 + `enforced_by` fields as in §3) — not SKILL.md front matter. Front matter
@@ -172,15 +184,15 @@ Worked tagging of all 33 current rules (lines verified by `grep -n`):
 | R-coord-06 | 106 | advisory | cap detection is code, but "successor resumes from state alone" judges rewrite quality |
 | R-coord-07 | 107 | enforced (new, lane 3) | beat-liveness check: 10-min CronCreate beat present from launch to stop, recreated after relaunch/clear |
 | R-coord-08 | 108 | enforced (new, lane 3) | staleness watchdog test: status stamp freshness, WIP-commit/pong behavior, quiet-child->25-min relaunch |
-| R-coord-09 | 109 | enforced (existing) | spawn-path gate: `tools/autoos-agent.py` / MCP `spawn` is the only L3 path; hand-rolls fail closed (cf. REVGATE record; code list lines 80–88) |
+| R-coord-09 | 109 | enforced (new, lane 3) | spawn-path gate: `tools/autoos-agent.py` / MCP `spawn` is the only L3 path; no test gates this today — the closest existing tests (`test_check_fails_when_a_leaf_role_can_spawn`, `test_check_fails_when_a_non_spawning_role_gets_the_spawner`) cover leaf-never-spawns, not spawn-only-via-MCP — so lane 3 writes the gate test (cf. REVGATE record; code list lines 80–88) |
 | R-orch-01 | 113 | advisory | terseness/one-line-per-fact is style judgment (field presence could schema-lint later — promotion candidate) |
 | R-orch-02 | 114 | advisory | "one file + exact spec" sufficiency is brief-author judgment |
 | R-orch-04 | 115 | advisory | inline-vs-path feeding choice depends on isolation context, judgment |
-| R-orch-06 | 116 | enforced (existing shape) | runner never resumes a no-change child (relaunch path); the worktree/WIP-scope verification fragment stays advisory |
+| R-orch-06 | 116 | advisory | never-resume-a-no-change-child is mechanically checkable (relaunch-path lint, promotion candidate), but the worktree/WIP-scope verification fragment needs judgment, so the whole rule ships advisory |
 | R-orch-08 | 117 | advisory | "record refusals verbatim" verbatim-ness + lane-identity choice need judgment |
 | R-orch-10 | 118 | advisory | classifying a change as privileged/installer/state-mutating needs judgment; resolver promotion possible later |
 | R-orch-11 | 119 | enforced (new, lane 3) | consumer-coverage check: a route-id/return-code change must touch every consumer in the lanes.md list + catalog postInstall (CI cases cited in the rule) |
-| R-orch-12 | 120 | enforced (existing) | `trust_worktree.py` approval gate blocks first session (the "three lanes blocked in 3s" incident is the gate firing) |
+| R-orch-12 | 120 | enforced (existing shape) | `trust_worktree.py` approval gate before a fresh worktree's first session: the tool exists, but the session-behavior gate is not enforced in code today — `cao/worktree.py` only prints the `trust_worktree.py` line (fire-and-forget, `|| true`) per `references/rule-map.md` — so lane 3 wires the gate (the "three lanes blocked in 3s" incident is what the gate must prevent) |
 | R-orch-13 | 121 | advisory | "bucket-table-big" + same-family-blind-spot judgments; review happened, but sufficiency is judgment |
 | R-orch-14 | 122 | advisory | "never skip a slow free reviewer" is process discipline, unobservable after the fact |
 | R-orch-15 | 123 | advisory | lesson-line quality + "only a tested lesson becomes a rule" is owner judgment |
@@ -194,9 +206,9 @@ Worked tagging of all 33 current rules (lines verified by `grep -n`):
 | R-worker-07 | 134 | enforced (new, lane 3) | recipe grep lint: forbid `shellcheck tests/run-tests.sh`, require MemoryMax=2G wrapper for >2 GB jobs |
 | R-worker-08 | 135 | enforced (new, lane 3) | recipe lint: detached-copy idiom required (`--no-hardlinks`/`--detach`), bare worktree `cp` forbidden |
 | R-worker-09 | 136 | enforced (new, lane 3) | brief/recipe grep + MCP fence: no `activate_project` from a worktree path |
-| R-worker-10 | 137 | enforced (existing shape) | redaction corpus test per new raw-data consumer (SPAWNFIX3d/REDACTFIX3 lineage); lane 3 wires any missing consumers |
+| R-worker-10 | 137 | advisory | the per-consumer redaction test is mechanically checkable (corpus test per new raw-data consumer, SPAWNFIX3d/REDACTFIX3 lineage — promotion candidate once lane 3 wires any missing consumers), but accepting a detector/redactor on the real corpus needs judgment, so the whole rule ships advisory |
 
-Result: 14 enforced (4 existing-shape, 10 new), 19 advisory. Every new check is
+Result: 13 enforced (1 existing, 1 existing-shape, 11 new), 20 advisory. Every new check is
 a lane-3 deliverable (§9); until it lands, its rule ships tagged `enforced`
 with `enforced_by` pointing at the specified new test, and `check` fails while
 the test is absent — the tag is the promise, the failing check is the debt
@@ -207,18 +219,29 @@ ledger. (Applies `coding-principles` Principle 2 fail-first to process itself.)
 | # | Rule (imperative, one line) | Tag | Home | Why this tag/home |
 |---|---|---|---|---|
 | D-118 | L0 spot-checks a sample of relayed claims and records the sample | advisory | L0 card | which sample is "enough" is judgment; a lint can confirm *some* spot-check evidence exists but not sufficiency |
-| D-115 | A NOT-READY override is written down (what, who, why, where) and auditable | enforced (record shape) | index (index-homes-shared-rules: every level can face an override) | state-file record schema lint checks the four fields (new, lane 4); known limit, stated: no check can observe an override that left no trace — the rule exists to make that impossible |
+| D-115 | A NOT-READY override is written down (what, who, why, where) and auditable | advisory | index (index-homes-shared-rules: every level can face an override) | the four-field record shape is schema-lintable once written (new, lane 4), but no check can observe an override that left no trace — the lint only sees written records, which is the rule's entire point — so the whole rule ships advisory |
 | D-099 | Compaction claims cite pre-compaction lines | advisory | index (all levels compact) | citation sufficiency is judgment, as with R-worker-04 |
 | N-relay | Relayed policy is never typed fresh, only forwarded verbatim from A1/A2-sourced text | advisory | index (binds every relay: L0→L1→L2) | the source often lives outside the repo (chat/brief text), so no lint can diff it; verbatim-ness is reviewer judgment |
-| N-compact | A worker task (brief + expected output) fits under the auto-compaction threshold | enforced (brief-time budget) | L3 card + L2 brief discipline (L2 sizes the task, L3 lives inside it) | brief token count + depth budget is measurable at brief time (cf. the 3-tier depth budget in `unattended-orchestration.md`, SKILL.md line 37); the runtime tail is unobservable upfront — stated limit |
+| N-compact | A worker task (brief + expected output) fits under the auto-compaction threshold | enforced (brief-time budget) | L3 card, with citation in L2 brief discipline (second stated exception to index-homes-shared-rules alongside heartbeat, §2) | brief token count + depth budget is measurable at brief time (cf. the 3-tier depth budget in `unattended-orchestration.md`, SKILL.md line 37); the runtime tail is unobservable upfront — stated limit; L2 sizes the task, L3 lives inside it, so both levels need the rule |
 | N-lane | One control-plane lane at a time, fleet-wide | advisory | index | likely advisory permanently: "fleet-wide" spans machines/repos with no single observable mutex, so no one test sees every host; enforcement would need a shared lock service that does not exist — until it does, this is L0/operator judgment. Promotion condition: a fleet lock exists → re-tag enforced with the lock-contention test |
 
 ## 7. Migration (additive, no disagreement)
 
-SKILL.md keeps working as a single read for sessions without the SessionStart
-injection: the index's Files map, Levels table, rule roster, and CAO block are
-self-sufficient to find any rule within two reads (index → card/reference), so
-nothing the old whole-file read could reach becomes unreachable. Old
+This migration story holds, today, only where a SessionStart injection path
+exists or is about to: Claude Code, once the sibling HOOKS spec's SessionStart
+injection (L2-general/hooks-spec, unmerged) lands — the injected session gets
+index + its own card without asking. It does not yet hold for opencode, which
+reads project `.agents/skills` natively with no injection mechanism
+(`AGENTS.md` client table, lines 269–276): a non-injected opencode session
+reading only the index gets pointers, not the rule text itself, and nothing
+enforces that it follows them. Until opencode also gets an injection path (or
+equivalent wiring, §8 Q4), its sessions must be told to load their card
+explicitly — "index suffices" is not true for them yet, and this spec does not
+claim otherwise.
+
+What stays true for every client: nothing the old whole-file read could reach
+becomes unreachable — the index's Files map, Levels table, rule roster, and
+CAO block find any rule within two reads (index → card/reference). Old
 whole-file reads and new indexed reads cannot disagree because they render from
 the same source: `rules.yaml` generates both the index roster and the cards, so
 same content, different packaging, by construction. Checked three ways in CI:
@@ -235,14 +258,14 @@ land as `rules.yaml` edits with regenerated output in the same change
 ## 8. Open questions
 
 `docs/plans/2026-09-28-fleet-console-spec.md` does not exist in this checkout
-(verified: no fleet-console file under `docs/plans/`), so §12's format cannot
-be cited — using the fallback format
+(verified: no fleet-console file under `docs/plans/`), so that spec's §12
+format cannot be cited — using the fallback format
 `Q: ORCHD1 | topic | question | options: ... | default: ... | blocks: ... | reversible: ...`:
 
 - Q: ORCHD1 | generator home | extend `tools/skill-rules.py` with `render`/`check` vs new `tools/skill-cards.py` | options: extend (one home, no new CI wiring) / new module (cleaner diff, second owner) | default: extend | blocks: lane 1 | reversible: yes (thin wrapper either way)
 - Q: ORCHD1 | tag home | sibling `rules.yaml` vs SKILL.md front matter vs sibling JSON | options: YAML sibling (readable, commented) / front matter (colocated, eats index budget) / JSON (stricter, no comments) | default: YAML sibling | blocks: lanes 1, 3 | reversible: yes (mechanical conversion)
 - Q: ORCHD1 | rule-map | extend `references/rule-map.md` (old→new ids, tested by `tests/test_skill_rules.py`, SKILL.md line 36) with enforced/advisory columns vs keep the mapping only in `rules.yaml` | options: extend rule-map (human-readable) / rules.yaml only (single home) | default: rules.yaml only, rule-map keeps id→code pointers | blocks: lane 3 | reversible: yes
-- Q: ORCHD1 | non-Claude agents | SessionStart injection is a Claude Code hook; AGENTS.md's client table (lines 269–276) shows opencode reads project `.agents/skills` natively with no injection — is index+manual-card-load sufficient there, or does each agent need its own wiring lane | options: index suffices (cards are plain files) / per-agent wiring | default: index suffices | blocks: lane 2 acceptance | reversible: yes
+- Q: ORCHD1 | non-Claude agents | SessionStart injection is a Claude Code hook; AGENTS.md's client table (lines 269–276) shows opencode reads project `.agents/skills` natively with no injection — is index+manual-card-load sufficient there, or does each agent need its own wiring lane | options: index suffices (cards are plain files) / per-agent wiring | default: per-agent wiring (§7: index-only is not sufficient for opencode until it gets an injection path) | blocks: lane 2 acceptance | reversible: yes
 - Q: ORCHD1 | card budget | hard-fail CI above 60 lines per card vs warn-only | options: fail (budgets mean something) / warn (flex for L2, the largest card) | default: fail, L2 gets the §2 exception process via index-homes-shared-rules review | blocks: lane 2 | reversible: yes
 
 ## 9. Delivery lanes
@@ -255,5 +278,5 @@ weighted tokens; nothing to flag.
 |---|---|---|---|---|
 | G1 | Generator + input shape: `rules.yaml` schema, `render`/`check` in `tools/skill-rules.py`, 2-rule pilot render | ~150k weighted tokens | ~2 h | Q1–Q2 answers (§8) |
 | G2 | Index rewrite (≤150-line budget, §1) + first 4 cards (≤60 lines each, §2), render-diff green | ~200k weighted tokens | ~4 h | G1, Q4–Q5 answers |
-| G3 | Tagging pass (all 33 rules, §5 table) + CI wiring: `enforced_by` resolution both directions, no-new-normative-verbs lint, 10 new lints | ~250k weighted tokens | ~6 h | G1, Q3 answer |
-| G4 | D3 rule wiring (§6): state-file override schema + brief-budget check, 4 advisory wordings into index/cards | ~120k weighted tokens | ~3 h | G2, G3 |
+| G3 | Tagging pass (all 33 rules, §5 table) + CI wiring: `enforced_by` resolution both directions, no-new-normative-verbs lint, 11 new lints | ~250k weighted tokens | ~6 h | G1, Q3 answer |
+| G4 | D3 rule wiring (§6): state-file override schema + brief-budget check, 5 advisory wordings into index/cards | ~120k weighted tokens | ~3 h | G2, G3 |
