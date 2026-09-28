@@ -72,6 +72,51 @@ Adding software means adding a catalog entry — no code changes. See
 | `prompt` | | Key into the catalog's `prompts` object |
 | `notes` | | Shown under the plan entry |
 | `launcher` | | `none` when the component installs a background service and no command. Without it the post-run report hunts for an executable and tells the user "no launcher found yet", which for a service is a wrong answer rather than a blank one. |
+| `tombstone` | | `true` — the component is retired: the id stays known and selecting it installs nothing ([why](#retiring-a-component-tombstone)) |
+| `note` | | tombstone only — why it went away; it is printed in the skip line |
+
+### Retiring a component (tombstone)
+
+An `id` is a contract: it lives in saved state files, in `--only` / `-Only` flags
+and in whatever a user ticked on their last machine. Deleting the entry turns
+every one of those into "Unknown component id", so a retired component is
+**marked, not removed**:
+
+```jsonc
+{
+  "id": "old-thing",
+  "name": "Old Thing",
+  "description": "Retired — wired by new-thing now.",
+  "provider": "custom",
+  "package": "old-thing",
+  "tombstone": true,
+  "note": "wired by new-thing now"
+}
+```
+
+What that changes, on both platforms:
+
+- The id stays accepted everywhere it was accepted before — `--only`,
+  `--from-state` / `-FromState`, the menu.
+- Selecting it does nothing: the run reports `skipped: retired (<note>)`, asks no
+  prompt, runs no post-install step, and never counts it as installed or as
+  failed. An old state file replays clean instead of failing.
+- Profiles never pre-tick it, so a fresh profile run does not plan it at all.
+  Something chosen by hand is still planned, with the row marked `(retired)` —
+  `--list` / `-ListComponents` and the menu say the same thing.
+- It is never *detected* as installed either: the `✓` on a retired id would
+  answer for a product AutoOS no longer offers, and the cache that report comes
+  from is the one the rest of the run reads.
+- `postInstall`, `prompt`, `requires` and `verify` may all be absent — they only
+  mean something for something that installs. No other entry may `require` a
+  tombstone: that dependency could never be satisfied, so the validator rejects
+  it, and a tombstone drags nothing in when it is chosen.
+- `tombstone` must be the boolean `true` (a truthy string would silently retire a
+  live entry), and `note` is rejected on an entry that installs something.
+
+`note` is the retirement reason; `notes` is the ordinary plan-entry line above.
+They are different fields on purpose: a live component can have `notes`, and a
+tombstone's `note` is what makes its skip line readable.
 
 ## Providers
 

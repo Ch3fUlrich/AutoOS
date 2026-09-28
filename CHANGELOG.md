@@ -5,6 +5,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a retired component keeps its id and installs nothing (A7a, 2026-09-28)
+
+An `id` is a contract (AGENTS.md §3): saved state files, `--only` / `-Only` flags
+and a user's last selection all name it. Deleting a component that stops being
+installable turned all of those into "Unknown component id" and a red run, and
+there was no way to say "this used to be a thing, here is what replaced it". The
+catalog can now mark one instead: `"tombstone": true` with an optional `"note"`.
+**Mechanism only — no real component is retired by this change**; deciding which
+ids become tombstones is a separate, catalog-only edit.
+
+- **`lib/linux/catalog.sh`**: the field is read in one place — `catalog_is_tombstone`
+  — which the profile expansion, the dependency walk, the loader and the installed
+  probe all ask rather than each re-deriving it. `catalog_load` carries
+  `CAT_TOMBSTONE` / `CAT_RETIRE_NOTE` beside the other columns;
+  `catalog_profile_defaults` never pre-ticks a retired id; `catalog_resolve` keeps
+  the id in the plan but drags nothing in behind it; `catalog_detect_installed`
+  reports a tombstone as not installed. `catalog_validate` accepts the field (a
+  tombstone may omit `postInstall`, `prompt`, `requires` and `verify` — they only
+  mean something for something that installs) and rejects `"tombstone"` that is
+  not the boolean `true`, an empty `note`, a `note` on a live entry, and any entry
+  that `requires` a tombstone.
+- **`lib/linux/install.sh`** (`catalog_probe_installed`): skipped for a retired id,
+  so the `✓` and the "Installed apps" line cannot answer for a product AutoOS no
+  longer offers — the same reason the cache in Detect is gated on Windows.
+- **`setup.sh`**: `--list` and the menu mark the row `(retired)`, the plan row is
+  tagged, the questions loop asks a tombstone nothing, and execution prints
+  `skipped: retired (<note>)` and counts it as already present — never installed,
+  never failed, identical on the second run. A retired component is not in the
+  post-run "where to find them" hunt, because for it "no launcher found yet" would
+  be a wrong answer rather than a blank one.
+- **`lib/windows/AutoOS.Catalog.psm1`** — the twin: `Test-AutoOSTombstone` (reads
+  the raw JSON field and the flattened projection's, and tests the type because
+  PowerShell would coerce `'1'` to `$true`), `Format-AutoOSTombstoneSkip` (one home
+  for the skip wording, so `setup.ps1` and the suite cannot drift),
+  `Test-AutoOSProfileDefault` + `Get-AutoOSProfileDefaults` (the profile rule the
+  menu row and the `-Yes` expansion shared by copy-paste now share as code), plus
+  the same four validator rules, the `Tombstone`/`RetireNote` projection fields,
+  the menu's `(retired)` label, and the dependency walk that expands nothing behind
+  a retired id.
+- **`lib/windows/AutoOS.Detect.psm1`** (`Get-AutoOSInstalledStatus`): returns
+  `not-detected` for a tombstone before the cache and before any probe — one gate
+  that `Set-AutoOSInstalledStatus`, `Test-AutoOSInstalled`,
+  `Get-AutoOSInstalledComponents`, `-Installed`, `-ListComponents` and the
+  installer's own skip check all read through.
+- **`setup.ps1`**: `-ListComponents` marks `(retired)`, the plan row is tagged, the
+  prompt collection and the `-Yes` expansion skip retired ids, execution prints the
+  skip line into `results.skipped`, and the "Where to find them" report excludes them.
+- Tests (**`tests/fixtures/catalog-tombstone.json`** — a fixture, so no real catalog
+  was touched — `tests/linux/39-catalog-tombstone.sh` 18 cases, 21 cases in
+  `tests/run-tests.ps1`'s `catalog tombstone` group): validator accepts and rejects,
+  projection keeps the facts, profile expansion and menu tick leave it alone, a
+  retired id is never detected as installed *while an ordinary id with the same
+  package still is*, the plan keeps the known id and pulls no dependency, the skip
+  line is pinned with and without a note, and the Linux side runs `setup.sh` itself
+  against a scratch tree — `--only`, a state file written by a real run replayed
+  with `--from-state`, `--list`, the summary counts and a second run.
+- Docs: **`docs/catalog.md`** gained the two Fields rows and a
+  *Retiring a component (tombstone)* section — the rules above, and why `note` and
+  `notes` are different fields.
+
 ### Fixed - the secret gate reads a padded token; the backup CLI's stamp really is optional (A3 review 5, LOW 1-2, 2026-09-28)
 
 - **`lib/linux/install.sh`** (`file_holds_omnigraph_token`): the gate that decides

@@ -352,7 +352,10 @@ if ($ListComponents) {
         foreach ($c in $cat.components) {
             $profs = if ($c.PSObject.Properties.Name -contains 'profiles') { $c.profiles -join ',' } else { '' }
             $instMark = if ($installedMap.ContainsKey($c.id)) { (Format-AutoOSColor '✓' 'ok') + ' ' } else { '  ' }
-            Write-AutoOSLine ("  {0}{1,-18} {2,-10} {3}" -f $instMark, $c.id, $c.provider, $c.description)
+            # The id is listed rather than dropped - it is still what a saved
+            # selection or a -Only flag names - but it says what it is now.
+            $retired = if (Test-AutoOSTombstone -Component $c) { ' ' + (Format-AutoOSColor '(retired)' 'muted') } else { '' }
+            Write-AutoOSLine ("  {0}{1,-18} {2,-10} {3}{4}" -f $instMark, $c.id, $c.provider, $c.description, $retired)
             if ($profs) { Write-AutoOSLine ("    {0,-18} profiles: {1}" -f '', $profs) -Level muted }
         }
     }
@@ -509,7 +512,7 @@ if ($statePayload) {
     }
     $selectedIds = @($Only)
 } elseif ($Yes) {
-    $selectedIds = @($available | Where-Object { $_.Provider -ne 'manual' -and $InstallProfile -ne 'custom' -and $InstallProfile -in $_.Profiles } | ForEach-Object { $_.Id })
+    $selectedIds = @(Get-AutoOSProfileDefaults -Available $available -ProfileName $InstallProfile)
 } else {
     $installedMap = @{}
     foreach ($inst in (Get-AutoOSInstalledComponents -Components $available)) {
@@ -539,7 +542,9 @@ Write-AutoOSSection 'Plan'
 $i = 0
 foreach ($c in $plan) {
     $i++
-    $tag = if ($c.AutoAdded) { Format-AutoOSColor '(dependency)' 'muted' } else { '' }
+    $tag = if ($c.AutoAdded) { Format-AutoOSColor '(dependency)' 'muted' }
+          elseif (Test-AutoOSTombstone -Component $c) { Format-AutoOSColor '(retired)' 'muted' }
+          else { '' }
     Write-AutoOSLine ("  {0,2}. {1,-20} {2,-8} {3} {4}" -f $i, $c.Name, $c.Provider, $c.Package, $tag)
     if ($c.Installed) { Write-AutoOSLine (([char]0x2713) + ' Already installed - package will be skipped') -Level ok }
     if ($c.Notes) { Write-AutoOSLine "      $($c.Notes)" -Level muted }
@@ -553,7 +558,9 @@ if ($statePayload) { $answers = $statePayload.Answers }
 foreach ($k in $cfgAnswers.Keys) {
     if (-not $answers.ContainsKey($k)) { $answers[$k] = $cfgAnswers[$k] }
 }
-$needed = @($plan | Where-Object { $_.Prompt } | ForEach-Object {
+# A tombstone's prompt - if an old entry still carries one - must not stop a
+# run to ask about a component that is going to be skipped.
+$needed = @($plan | Where-Object { $_.Prompt -and -not (Test-AutoOSTombstone -Component $_) } | ForEach-Object {
     $_.Prompt -split '[, ]+' | Where-Object { $_ }
 } | Select-Object -Unique)
 
@@ -616,6 +623,16 @@ foreach ($c in $plan) {
     $n++
     Write-AutoOSLine "[$n/$($plan.Count)] $($c.Name)" -Level step
     Start-AutoOSComponentProgress -Id $c.Id -Name $c.Name -Done ($n - 1) -Total $plan.Count
+    if (Test-AutoOSTombstone -Component $c) {
+        # The whole mechanism in one line: the id is known so a saved selection
+        # replays clean, and selecting it changes nothing - not a package, not a
+        # post-install step, not an answer. AGENTS.md idempotency: this is also
+        # what makes the second run report the same thing as the first.
+        Write-AutoOSLine "$($c.Name): $(Format-AutoOSTombstoneSkip -Component $c)" -Level ok
+        $results.skipped += $c.Id
+        Write-AutoOSInstallProgress -Phase 'skipped' -Complete
+        continue
+    }
     $state = 'failed'
     $abortRun = $false
     try {
@@ -657,7 +674,8 @@ if ($results.failed.Count) {
 # software with no command on PATH, and the reasonable next question is where it
 # went and how to open it. Resolved from the live machine, so a blank line means
 # genuinely not found rather than a guess that reads like a fact.
-$landed = @($plan | Where-Object { $results.installed -contains $_.Id -or $results.skipped -contains $_.Id })
+$landed = @($plan | Where-Object { ($results.installed -contains $_.Id -or $results.skipped -contains $_.Id) `
+                                   -and -not (Test-AutoOSTombstone -Component $_) })
 if ($landed.Count) {
     Write-AutoOSSection 'Where to find them'
     if ($DryRun) {
