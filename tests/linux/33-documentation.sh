@@ -233,6 +233,23 @@ PY
     if (( ok )); then pass; else fail "the resilience settings are not applied"; fi
 fi
 
+if it "omniroute apply.sh probe streams, so a slow first byte cannot time it out"; then
+    # Muse's first byte outlives a whole-body read (measured 2026-09-28:
+    # 3-32 s at minimal/low/medium, the high leg past the gateway's 30 s
+    # response-start ceiling). The probe asks which leg answered, and the
+    # first SSE chunk already names it.
+    f="configuration/omniroute/apply.sh"
+    probe="$(sed -n '/^# ─── Probe:/,/^echo "Done/p' "$f")"
+    ok=1
+    grep -q '"stream": True' <<<"$probe" \
+        || { ok=0; echo "the probe request is not streaming" >&2; }
+    grep -q 'data:' <<<"$probe" \
+        || { ok=0; echo "the probe never reads an SSE chunk" >&2; }
+    grep -q 'served = json.loads(resp.read()' <<<"$probe" \
+        && { ok=0; echo "the probe still waits for the whole non-stream body" >&2; }
+    if (( ok )); then pass; else fail "omniroute apply.sh probe streaming"; fi
+fi
+
 if it "combos.json carries no phantom legs (probe-falsified refs stay out)"; then
     # Regression gate for the 2026-09-22 finding: three legs shipped that the
     # gateway 400s on ("not available in the active live catalog"), which only
