@@ -659,6 +659,162 @@ Test-Case 'the git post-install step exists and is callable' {
         "post-install '$($git.PostInstall)' is not a loaded function"
 }
 
+
+# ─── Catalog tombstone (a retired id stays known, installs nothing) ─────────
+Describe-Group 'catalog tombstone'
+
+$tombstoneFixture = Join-Path $Root 'tests\fixtures\catalog-tombstone.json'
+
+function New-TombstoneCatalog {
+    # The fixture, never a real catalog: this lane builds the mechanism, another
+    # lane decides which components are retired (AGENTS.md: catalog is data).
+    param([scriptblock]$Mutate = $null)
+    $cat = (Get-Content -Path $tombstoneFixture -Raw -Encoding UTF8) | ConvertFrom-Json
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat
+}
+
+function Set-TombstoneField {
+    param($Catalog, [string]$Id, [string]$Field, $Value)
+    $target = @($Catalog.categories.components | Where-Object { $_.id -eq $Id })[0]
+    $null = $target | Add-Member -NotePropertyName $Field -NotePropertyValue $Value -Force
+    $Catalog
+}
+
+$tombAvailable = @(Get-AutoOSAvailableComponents -Catalog (New-TombstoneCatalog) -SystemInfo (New-FakeSystem))
+
+Test-Case 'tombstone: a catalog with a tombstone validates' {
+    # Also the case that a tombstone may omit postInstall, prompt, requires and
+    # verify: the fixture entry does, and it must still pass.
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: a non-boolean tombstone is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'tombstone' 'yes'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'boolean') "expected a boolean complaint, got: $joined"
+}
+
+Test-Case 'tombstone: a note on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'note' 'orphan note'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'only meaningful on a tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty note is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' ''
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match "'note' is present but empty") "got: $joined"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'requires' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'tombstone that installs nothing') "got: $joined"
+}
+
+Test-Case 'tombstone: projection carries the flag and the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $t) -and ($t.RetireNote -eq 'wired by keep-demo now')) `
+        "projection lost the flag or the note: [$($t.Tombstone)] [$($t.RetireNote)]"
+}
+
+Test-Case 'tombstone: a component that never declares the field is not a tombstone' {
+    # Set-StrictMode -Version Latest throws on a missing property, and the suite
+    # hands Resolve-AutoOSPlan hand-built components that have no such field.
+    $plain = [pscustomobject]@{ Id = 'plain'; Name = 'Plain'; Provider = 'winget'; Package = 'Contoso.Plain' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $plain)) 'a component with no tombstone field read as retired'
+}
+
+Test-Case 'tombstone: a truthy string is not the boolean true' {
+    # PowerShell coerces '1' -eq $true, so the predicate must test the type, not
+    # the truthiness — otherwise a typo'd catalog silently retires a live id.
+    $fake = [pscustomobject]@{ Id = 'x'; tombstone = '1' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $fake)) "'1' was accepted as a tombstone"
+}
+
+Test-Case 'tombstone: a raw catalog entry is recognised too' {
+    # -Installed and -ListComponents iterate the raw JSON (lower-case field);
+    # the plan iterates the flattened projection (upper-case). Both must read it.
+    $raw = @(New-TombstoneCatalog).categories.components | Where-Object { $_.id -eq 'retired-demo' }
+    Assert-True (Test-AutoOSTombstone -Component $raw) 'the lower-case JSON field was missed'
+}
+
+Test-Case 'tombstone: a retired id is never detected as installed' {
+    $retired = New-FakeComponent -Package 'Contoso.Widget'
+    $null = $retired | Add-Member -NotePropertyName Tombstone -NotePropertyValue $true -Force
+    $status = Get-AutoOSInstalledStatus -Component $retired -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-True ($status -ne 'installed') "a tombstone was detected as [$status]"
+}
+
+Test-Case 'tombstone: an ordinary id with the same package is still detected' {
+    # The guard above must not be paid for by breaking real detection.
+    $live = New-FakeComponent -Package 'Contoso.Widget'
+    Assert-Equal (Get-AutoOSInstalledStatus -Component $live -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))) 'installed'
+}
+
+Test-Case 'tombstone: a retired entry is not pre-ticked by its profile' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True (-not $item.Selected) 'a tombstone was ticked by the workstation profile'
+}
+
+Test-Case 'tombstone: an ordinary entry beside it is still pre-ticked' {
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $item = New-AutoOSMenuItem -Component $k -ProfileName 'workstation'
+    Assert-True $item.Selected 'keep-demo should still be ticked'
+}
+
+Test-Case 'tombstone: the menu labels a retired entry' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True ($item.Description -match '\(retired\)') "description was: [$($item.Description)]"
+}
+
+Test-Case 'tombstone: profile expansion leaves retired ids out' {
+    $ids = @(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'workstation')
+    Assert-True (($ids -contains 'keep-demo') -and ($ids -notcontains 'retired-demo')) "expansion was: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the custom profile expands to nothing still' {
+    Assert-Equal (@(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'custom').Count) 0
+}
+
+Test-Case 'tombstone: a retired id is still a known id in the plan' {
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-Contains $ids 'retired-demo'
+}
+
+Test-Case 'tombstone: a retired id pulls no dependency' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'requires' @('pulled-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-True ($ids -notcontains 'pulled-demo') "a tombstone pulled in: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the plan node keeps the retirement facts' {
+    # setup.ps1 prints the row and decides to skip from the plan node alone.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $node = $plan | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $node) -and ($node.RetireNote -eq 'wired by keep-demo now')) `
+        "the plan node lost the retirement facts: [$($node.RetireNote)]"
+}
+
+Test-Case 'tombstone: the skip line names the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired (wired by keep-demo now)'
+}
+
+Test-Case 'tombstone: the skip line without a note' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' $null
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $t = $avail | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired'
+}
+
 # ─── PATH handling (the critical regression) ────────────────────────────────
 Describe-Group 'PATH handling'
 
