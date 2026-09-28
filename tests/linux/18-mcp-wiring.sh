@@ -630,7 +630,7 @@ fi
 # run_post_install contains a non-zero step, so each keeps failing on its own.
 if it "no installer calls the mcp-* postInstalls from another component"; then
     ok=1
-    for fn in install_agent_skills install_agent_skill_links install_omnigraph_client; do
+    for fn in install_agent_skill_links install_omnigraph_client; do
         body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
         for sub in install_mcp_graphify install_mcp_serena install_mcp_playwright install_mcp_context7; do
             if grep -q "^[[:space:]]*$sub" <<<"$body"; then
@@ -641,36 +641,105 @@ if it "no installer calls the mcp-* postInstalls from another component"; then
     if (( ok )); then pass; else fail "an mcp-* postInstall is still called from another component"; fi
 fi
 
-if it "agent-skills is retired: its step says where the work went and does nothing else"; then
-    tmp="$(mktemp -d)"
-    # A repo that *has* skills to link: were the retired step still doing the
-    # work, its output would show up in the checks below.
-    mkdir -p "$tmp/repo/.agents/skills/alpha"
-    printf -- '---\nname: alpha\ndescription: demo\n---\n' >"$tmp/repo/.agents/skills/alpha/SKILL.md"
-    mkdir -p "$tmp/repo"
-    printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
-    mkdir -p "$tmp/home"
-    out="$( (
-        SYS_HOME="$tmp/home"; AUTOOS_ROOT="$tmp/repo"; AUTOOS_DRY_RUN=0
-        AUTOOS_EXTRA_FAILURES=()
-        install_agent_skills 2>&1
-        printf 'rc=%s state=%s recorded=[%s]\n' "$?" "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
-    ) )"
-    problems=""
-    [[ "$out" == *"agent-skills is retired"* ]] || problems+="[nothing named the retirement: $(tail -n 3 <<<"$out")] "
-    for home in agent-skill-links omnigraph-client 'mcp-*'; do
-        [[ "$out" == *"$home"* ]] || problems+="[the retirement line does not name $home] "
-    done
-    [[ "$out" == *"rc=0"* ]] || problems+="[the retired step returned non-zero: $out] "
-    [[ "$out" == *"state=skipped"* ]] || problems+="[the retired step did not report skipped] "
-    # Nothing left to do means nothing on disk: no client dir, no recorded failure.
-    [[ ! -e "$tmp/home/.gemini" ]] || problems+="[the retired step still links into ~/.gemini] "
-    [[ ! -e "$tmp/home/.claude" ]] || problems+="[the retired step still links into ~/.claude] "
-    [[ ! -e "$tmp/home/.agents" ]] || problems+="[the retired step still links into ~/.agents] "
-    [[ "$out" == *"recorded=[]"* ]] || problems+="[the retired step recorded a failure: $out] "
-    [[ ! -e "$tmp/repo/.claude/skills" ]] || problems+="[the retired step still wrote the repo's .claude/skills] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+if it "agent-skills: the catalog entry is a tombstone and names its successors"; then
+    # A7: the retirement moves from a function that prints a line to the catalog
+    # that carries the fact. Every field an installer needed is gone with the
+    # installer; the note and the successor ids are what the run prints and plans.
+    out="$(python3 - <<'PY'
+import json, sys
+successors = ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+              "mcp-serena", "mcp-playwright", "mcp-context7"]
+problems = []
+for f in ("catalog/linux.json", "catalog/macos.json"):
+    data = json.load(open(f, encoding="utf-8"))
+    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skills"]
+    if len(found) != 1:
+        problems.append("%s: %d agent-skills entries" % (f, len(found))); continue
+    c = found[0]
+    ids = {x.get("id") for g in data["categories"] for x in g["components"]}
+    retired = {x.get("id") for g in data["categories"] for x in g["components"]
+               if x.get("tombstone") is True}
+    if c.get("tombstone") is not True:
+        problems.append(f + ": 'tombstone' is %r, expected the boolean true" % (c.get("tombstone"),))
+    if not str(c.get("note") or "").strip():
+        problems.append(f + ": a tombstone with no note prints an empty skip line")
+    if c.get("replaced_by") != successors:
+        problems.append("%s: replaced_by is %r, expected %r" % (f, c.get("replaced_by"), successors))
+    for r in c.get("replaced_by") or []:
+        if r not in ids:
+            problems.append("%s: replaced_by names unknown component '%s'" % (f, r))
+        if r in retired:
+            problems.append("%s: replaced_by names the tombstone '%s'" % (f, r))
+    # A profile pre-selects what should get installed; a retired id installs
+    # nothing, so it belongs to none.
+    if c.get("profiles"):
+        problems.append(f + ": still pre-ticked by %r" % (c.get("profiles"),))
+    # Nothing installs, so nothing runs an installer, asks a question or waits on
+    # a package: these four only mean something for something that does.
+    for dead in ("postInstall", "prompt", "requires", "verify"):
+        if c.get(dead):
+            problems.append("%s: a tombstone still carries %s (%r)" % (f, dead, c.get(dead)))
+# Windows is a later lane's work; the entry must still install there.
+win = json.load(open("catalog/windows.json", encoding="utf-8"))
+for g in win["categories"]:
+    for c in g["components"]:
+        if c.get("id") == "agent-skills" and c.get("tombstone") is True:
+            problems.append("catalog/windows.json: retired on Windows in this lane")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+)" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
+    && pass || fail "agent-skills tombstone: ${out:0:400}"
+fi
+
+if it "agent-skills: the retirement leaves no installer behind"; then
+    # The pointer function and its detection branch existed to answer "what does
+    # the retired id do?" from inside the installer. The catalog carries that
+    # answer now and setup.sh's tombstone branch prints it, so both are dead code:
+    # an orphan function is a test fixture, not a feature, and a second home for a
+    # fact the catalog already holds.
+    ok=1
+    declare -F install_agent_skills >/dev/null \
+        && { ok=0; echo "install_agent_skills is still defined in lib/linux/install.sh" >&2; }
+    grep -q 'install_agent_skills' lib/linux/install.sh \
+        && { ok=0; echo "lib/linux/install.sh still names install_agent_skills" >&2; }
+    grep -qE '^[[:space:]]+agent-skills\)' lib/linux/install.sh \
+        && { ok=0; echo "custom_is_installed still has an agent-skills branch" >&2; }
+    grep -q '"postInstall": "install_agent_skills"' catalog/linux.json catalog/macos.json \
+        && { ok=0; echo "a catalog still points a postInstall at it" >&2; }
+    if (( ok )); then pass; else fail "the retired id left code behind"; fi
+fi
+
+if it "agent-skills: detection never reports the retired id installed"; then
+    # Detection is stubbed to "everything on this machine is here" (AGENTS.md §5:
+    # synthetic system objects, never the live machine) — `custom_is_installed`
+    # for the custom rows and the python3 probe stub of
+    # tests/linux/13-end-to-end-dry-run-only.sh:224 for the package-manager ones,
+    # so no dpkg or snap is read and no live probe is worth 10 s of every run.
+    # The retired row is the one that must still come back NOT installed: a ✓
+    # would advertise machinery AutoOS no longer provides, in the "Installed
+    # apps" line, in the plan's "already installed" note and in the saved state
+    # alike.
+    stub_bin="$(mktemp -d)"
+    cat > "$stub_bin/python3" <<'EOS'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-" ]] || exit 1
+printf 'installed\n'
+EOS
+    chmod +x "$stub_bin/python3"
+    out="$(
+        catalog_load catalog/linux.json x64 0
+        i="$(catalog_index_of agent-skills)"
+        j="$(catalog_index_of agent-skill-links)"
+        custom_is_installed() { return 0; }
+        PATH="$stub_bin:$PATH" catalog_probe_installed
+        printf 'tombstone=%s ordinary=%s listed=%s flagged=%s\n' \
+            "${CAT_INSTALLED[i]:-}" "${CAT_INSTALLED[j]:-}" \
+            "$(catalog_installed_ids | tr ' ' '\n' | grep -cxF 'agent-skills' || true)" \
+            "$(catalog_is_tombstone "$i" && echo yes || echo no)"
+    )"
+    rm -rf "$stub_bin"
+    assert_eq "$out" "tombstone=0 ordinary=1 listed=0 flagged=yes"
 fi
 
 if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded for the summary"; then
@@ -1036,30 +1105,6 @@ if it "a refused agent harness records OpenCode under the id being installed, on
     rm -rf "$tmp"
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
     fi
-fi
-
-if it "custom_is_installed: the retired agent-skills id reports done whatever is on disk"; then
-    # A7b: agent-skills has no work left, so "installed" is always true — it is
-    # the answer to "is there anything this component would write?". Answering
-    # false instead would have setup.sh report the retired id as *installed* on
-    # every run, and the plan would claim work that never happened. The skills
-    # links now have a gate of their own (the agent-skill-links cases below).
-    tmp="$(mktemp -d)"; ok=1
-    probe() { ( SYS_HOME="$1" AUTOOS_ROOT="$2" custom_is_installed agent-skills ); }
-    # Nothing on the machine at all.
-    probe "$tmp/empty" "$tmp/empty" || { ok=0; echo "an empty machine was not detected" >&2; }
-    # A checkout with vendored skills and .mcp.json (the old new location).
-    mkdir -p "$tmp/repo/.agents/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' >"$tmp/repo/.agents/skills/test-skill/SKILL.md"
-    printf '{"mcpServers":{}}\n' >"$tmp/repo/.mcp.json"
-    probe "$tmp/home1" "$tmp/repo" || { ok=0; echo "a vendored checkout was not detected" >&2; }
-    # The retired external clone (the old fallback location).
-    mkdir -p "$tmp/home2/Documents/code/agent-skills/skills/test-skill"
-    printf -- '---\nname: test-skill\ndescription: test\n---\n' \
-        >"$tmp/home2/Documents/code/agent-skills/skills/test-skill/SKILL.md"
-    probe "$tmp/home2" "$tmp/nowhere" || { ok=0; echo "the retired-clone machine was not detected" >&2; }
-    rm -rf "$tmp"
-    if (( ok )); then pass; else fail "the retired id does not always report done"; fi
 fi
 
 if it "custom_is_installed detects a populated native CAO home"; then
@@ -1490,13 +1535,6 @@ for f in ("catalog/linux.json", "catalog/macos.json"):
 win = json.load(open("catalog/windows.json", encoding="utf-8"))
 if any(c.get("id") == "agent-skill-links" for g in win["categories"] for c in g["components"]):
     problems.append("catalog/windows.json: the component is not built on Windows in this lane")
-# The retired step must stop asking a question it no longer answers.
-for f in ("catalog/linux.json", "catalog/macos.json"):
-    data = json.load(open(f, encoding="utf-8"))
-    for g in data["categories"]:
-        for c in g["components"]:
-            if c.get("id") == "agent-skills" and c.get("prompt"):
-                problems.append(f + ": retired agent-skills still carries a prompt")
 print("\n".join(problems))
 sys.exit(1 if problems else 0)
 PY
@@ -1508,7 +1546,7 @@ if it "the rehomed postInstalls name functions that exist"; then
     # postInstall is not schema-validated: run_post_install only warns when the
     # named function is missing, so a typo silently installs nothing.
     ok=1
-    for fn in install_agent_skill_links install_omnigraph_client install_agent_skills; do
+    for fn in install_agent_skill_links install_omnigraph_client; do
         declare -F "$fn" >/dev/null || { ok=0; echo "$fn is not defined in lib/linux/install.sh" >&2; }
     done
     if (( ok )); then pass; else fail "a catalogued postInstall names no function"; fi
@@ -2570,13 +2608,11 @@ if it "homelab: the report runs once, from the omnigraph component"; then
     # print the line twice per run. The body is taken whole; a fixed window of
     # lines would miss the call as the function grows.
     body="$(awk '/^install_omnigraph_client\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-    retired="$(awk '/^install_agent_skills\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
     links="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
     calls="$(grep -c 'report_stale_homelab_mcp_entry' <<<"$body" || true)"
     total="$(grep -cE '^[[:space:]]+report_stale_homelab_mcp_entry$' lib/linux/install.sh || true)"
     problems=""
     [[ "$calls" == "1" ]] || problems+="[install_omnigraph_client calls it $calls times] "
-    grep -q 'report_stale_homelab_mcp_entry' <<<"$retired" && problems+="[the retired step still calls it] "
     grep -q 'report_stale_homelab_mcp_entry' <<<"$links" && problems+="[the skills linker calls it too] "
     [[ "$total" == "1" ]] || problems+="[$total call sites in lib/linux/install.sh] "
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi

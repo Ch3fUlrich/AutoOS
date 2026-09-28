@@ -5,6 +5,24 @@
 # ─── End-to-end plan stability ──────────────────────────────────────────────
 describe "end-to-end (dry run only)"
 
+# e2e_setup <setup.sh args...> — the real entry point, for a machine that has
+# nothing on it. HOME is a scratch dir and SUDO_USER a name with no passwd entry,
+# so SYS_HOME falls back to HOME (lib/linux/detect.sh:200; the same device as
+# tests/linux/22-herdr-sessions.sh:1049). Against the developer's own home a run
+# answers for that machine instead of for the plan: here
+# ~/.local/bin/graphify-mcp is uv's link, the graphify post-install refuses to
+# move it, and the dry run exits 1 for a reason no check here has anything to do
+# with. Prints the output, returns the exit code.
+e2e_setup() {
+    local home out rc
+    home="$(mktemp -d)"
+    out="$(SUDO_USER='autoos-no-such-user-e2e' HOME="$home" \
+        bash setup.sh "$@" 2>&1)"; rc=$?
+    rm -rf "$home"
+    printf '%s\n' "$out"
+    return "$rc"
+}
+
 if it "a dry run exits cleanly"; then
     out="$(bash setup.sh --profile light --dry-run --yes --no-color 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]]; then pass; else fail "exit $rc: $(printf '%s' "$out" | tail -5)"; fi
@@ -30,39 +48,91 @@ if it "a dry run creates none of the files its installers would"; then
     assert_eq "$now_marker" "$had_marker"
 fi
 
-if it "the retired agent-skills step plans no work of its own"; then
-    # A7b: agent-skills' duties moved to agent-skill-links, omnigraph-client and
-    # the mcp-* components. The retired id must still run (its postInstall is
-    # the retirement notice) and must plan nothing: these three phrases are the
-    # work it used to do, and none of them belongs to the other components this
-    # selection pulls in (git, nodejs).
-    out="$(bash setup.sh --only agent-skills --dry-run --yes --no-color 2>&1)"; rc=$?
+if it "--only agent-skills plans the components that took its work"; then
+    # A7: agent-skills is a tombstone, so a hand-chosen retired id is expanded
+    # before the plan (docs/catalog.md, "replaced_by"): the row that was chosen
+    # stays and reports `skipped: retired`, and the successors do the work the
+    # state file, the menu or the flag could no longer ask of it.
+    out="$(e2e_setup --only agent-skills --dry-run --yes --no-color)"; rc=$?
+    planned="$(printf '%s\n' "$out" | grep -E '^\s+[0-9]+\.' || true)"
     problems=""
-    (( rc == 0 )) || problems+="[exit $rc] "
-    [[ "$out" == *"agent-skills is retired"* ]] || problems+="[no retirement notice in the run] "
-    for gone in 'would link skills from' 'would approve project MCP server' \
-                'omnigraph image, network and token' 'would write'; do
-        if grep -qF -- "$gone" <<<"$out"; then problems+="[$gone is still planned] "; fi
+    (( rc == 0 )) || problems+="[exit $rc: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$out" == *"agent-skills is retired: replaced by"* ]] \
+        || problems+="[the expansion was announced as nothing: $(printf '%s\n' "$out" | grep -i retired | head -3)] "
+    for want in agent-skill-links omnigraph-client mcp-graphify mcp-serena \
+                mcp-playwright mcp-context7; do
+        grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
+            || problems+="[$want is not in the plan] "
     done
+    # The retired row stays in the plan and in the report — what the reader chose
+    # is what they are told about — and it is labelled, never claimed installed.
+    grep -qE '^\s+[0-9]+\.\s+agent-skills \(retired\).*\(retired\)$' <<<"$planned" \
+        || problems+="[the retired row is missing or unlabelled: $(grep -F 'agent-skills' <<<"$planned")] "
+    [[ "$out" != *"agent-skills is already installed"* ]] \
+        || problems+="[the retired row was claimed already installed] "
+    skipped="$(printf '%s\n' "$out" | grep -c 'skipped: retired' || true)"
+    [[ "$skipped" == "1" ]] || problems+="[$skipped 'skipped: retired' lines, expected 1] "
+    grep -qE 'skipped: retired \(.*moved to agent-skill-links' <<<"$out" \
+        || problems+="[the skip line does not carry the retirement note: $(grep -F 'skipped: retired' <<<"$out")]"
+    # Nothing that belonged to the retired step may leak back in: the fetch and
+    # the skills link are the successors' work now, named by their own rows.
+    grep -qiE '\bgit (clone|pull|-C)[[:space:]].*agent-skills' <<<"$out" \
+        && problems+="[the plan fetches the retired agent-skills repo] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "--profile never plans the retired agent-skills id"; then
+    # The profile list pre-selects what a run should get installed, and a retired
+    # id installs nothing, so it has no business there. Both profiles that used to
+    # carry agent-skills are asked.
+    all_problems=""
+    for profile in workstation ai-coding; do
+        out="$(e2e_setup --profile "$profile" --dry-run --yes --no-color)"; rc=$?
+        planned="$(printf '%s\n' "$out" | grep -E '^\s+[0-9]+\.' || true)"
+        problems=""
+        (( rc == 0 )) || problems+="[exit $rc: $(printf '%s\n' "$out" | tail -3)] "
+        grep -qE '^\s+[0-9]+\.\s+agent-skills' <<<"$planned" \
+            && problems+="[$profile planned the retired id] "
+        # The successors are profile members in their own right, so the work the
+        # retired id used to pre-tick is still planned by the same run.
+        for want in agent-skill-links omnigraph-client; do
+            grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
+                || problems+="[$want is not in the $profile plan] "
+        done
+        [[ -z "$problems" ]] || all_problems+="$problems "
+    done
+    if [[ -z "$all_problems" ]]; then pass; else fail "$all_problems"; fi
+fi
+
+if it "from-state: a state file saved before the retirement replays to the replacements"; then
+    # Hand-authored, because the file predates the tombstone: it names the
+    # retired id and none of the ids that inherited its work, and a replay that
+    # took it verbatim booked the retirement and installed nothing.
+    state="$(mktemp)"
+    printf '%s\n' '{"profile": "custom", "selected": ["agent-skills"], "answers": {}}' > "$state"
+    out="$(e2e_setup --from-state "$state" --dry-run --yes --no-color)"; rc=$?
+    planned="$(printf '%s\n' "$out" | grep -E '^\s+[0-9]+\.' || true)"
+    rm -f "$state"
+    problems=""
+    (( rc == 0 )) || problems+="[exit $rc: $(printf '%s\n' "$out" | tail -3)] "
+    [[ "$out" == *"agent-skills is retired: replaced by"* ]] \
+        || problems+="[a replayed retired id was not expanded] "
+    for want in agent-skill-links omnigraph-client mcp-context7; do
+        grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
+            || problems+="[$want is not in the replayed plan] "
+    done
+    [[ "$out" == *"skipped: retired"* ]] || problems+="[the retired row reported nothing] "
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 if it "the ai-coding plan carries the agent-skill-links and omnigraph-client homes"; then
-    # The machine this suite runs on has the retired clone or does not; either
-    # way the plan must never send anyone to fetch it, and the two components
-    # that inherited agent-skills' work must both be in the profile that used to
-    # carry agent-skills alone.
-    #
-    # The plan is taken from a scratch home (HOME plus a SUDO_USER with no passwd
-    # entry, so SYS_HOME falls back to HOME — lib/linux/detect.sh:200; the same
-    # device as tests/linux/22-herdr-sessions.sh:1049). Against the developer's
-    # own home the run answers for that machine instead of for the plan: here
-    # ~/.local/bin/graphify-mcp is uv's link, the graphify post-install refuses to
-    # move it, and the dry run exits 1 for a reason this check has nothing to do with.
-    e2e_home="$(mktemp -d)"
-    out="$(SUDO_USER='autoos-no-such-user-e2e' HOME="$e2e_home" \
-        bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"; rc=$?
-    rm -rf "$e2e_home"
+    # The A7 verify row: a fresh ai-coding dry run never *touches* the
+    # agent-skills repo. The machine this suite runs on has the retired clone or
+    # does not; either way the plan must never send anyone to fetch it, and the
+    # two components that inherited agent-skills' work must both be in the
+    # profile that used to carry agent-skills alone. (Run for an empty machine —
+    # see e2e_setup.)
+    out="$(e2e_setup --profile ai-coding --dry-run --yes --no-color)"; rc=$?
     problems=""
     (( rc == 0 )) || problems+="[exit $rc] "
     for want in 'agent-skill-links' 'omnigraph-client'; do

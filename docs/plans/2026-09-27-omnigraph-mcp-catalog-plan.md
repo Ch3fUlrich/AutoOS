@@ -14,7 +14,7 @@ Every component task runs twice: the second run must report "skipped / unchanged
 | A4 | `mcp-graphify`: `uv tool install 'graphifyy[mcp]==<pin>'`, idempotent; remove the recognised symlink into agent-skills; homepage points to upstream. | `command -v graphify-mcp` is in the uv tool dir; graphify is connected in three repos. |
 | A4b | Verify `mcp-serena` (uvx stdio, pinned), playwright and context7; report a recognised stale user-scope `homelab` entry (removal deferred by operator decision 2026-09-28, spec §C). | No "conflicting scopes" warning; all connected. |
 | A6 | After the operator provides the runner and registry project: `.forgejo/workflows/omnigraph-images.yml` builds the viewer (+ optional cluster-config image from a private input) and pushes SHA tags to `<registry>/autoos`. Registry and robots only as Forgejo secrets/vars. `infra/mcp-servers/cluster/cluster.example.yaml` + schema tracked; the live file never. | The image appears in the registry; GitHub CI still passes without LAN. |
-| A7 | `agent-skills` catalog entry becomes a tombstone (id known, installs nothing), documented in `docs/catalog.md`. | A fresh ai-coding dry run never touches the agent-skills repo. |
+| A7 | **Done on Linux and macOS** (2026-09-28); Windows is a later lane. `agent-skills` catalog entry becomes a tombstone (id known, installs nothing), documented in `docs/catalog.md`. | A fresh ai-coding dry run never touches the agent-skills repo. |
 
 Operator prerequisites for A6, tracked privately: start the LAN runner, connect AutoOS to Forgejo,
 create the registry project and robots.
