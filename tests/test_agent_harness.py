@@ -491,6 +491,35 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertEqual(real.read_bytes(), before)
             self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
 
+    def test_a_managed_skill_left_in_agent_skills_is_replaced_not_duplicated(self):
+        # 2026-09-25: after .agents/skills became the home, the merge appended the
+        # new coding-principles entry and kept the agent-skills one, so OpenCode
+        # loaded two diverged copies of the same skill.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        old = "C:\\Users\\x\\Documents\\Code\\agent-skills\\skills/%s/SKILL.md" % skill
+        user = {"instructions": [
+            old,
+            "my-rules.md",
+            "/home/x/agent-skills/notes/%s.md" % skill,   # not a SKILL.md: the user's
+            "/home/x/agent-skills/skills/unlisted-skill/SKILL.md",  # not managed: the user's
+        ]}
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertNotIn(old, doc["instructions"])
+        self.assertIn("%s/%s/SKILL.md" % (SKILLS_SOURCE, skill), doc["instructions"])
+        for kept in user["instructions"][1:]:
+            self.assertIn(kept, doc["instructions"])
+
+    def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
+        # No source means no replacement: dropping the old entry would leave
+        # OpenCode with no copy of the skill at all.
+        module = load_module()
+        harness = harness_data()
+        old = "/home/x/agent-skills/skills/%s/SKILL.md" % harness["rules"]["skills"][0]
+        doc = module.desired_opencode({"instructions": [old]}, harness, REPO_ROOT, "")
+        self.assertIn(old, doc["instructions"])
+
     def test_an_unexpected_instructions_type_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "opencode.json"

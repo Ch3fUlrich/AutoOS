@@ -277,6 +277,18 @@ def _role_bash(role, fences):
     return bash
 
 
+def _stale_skill_entry(entry, skills, skills_source):
+    """True for a managed skill's SKILL.md under an agent-skills clone, not `skills_source`."""
+    if not isinstance(entry, str):
+        return False
+    norm = entry.replace("\\", "/")
+    if norm.startswith(str(skills_source).replace("\\", "/").rstrip("/") + "/"):
+        return False
+    return "/agent-skills/" in norm and any(
+        norm.endswith("/%s/SKILL.md" % skill) for skill in skills
+    )
+
+
 def desired_opencode(user, harness, repo_root, skills_source):
     """Return the merged OpenCode config; `user` is the parsed existing config."""
     doc = copy.deepcopy(user)
@@ -314,6 +326,14 @@ def desired_opencode(user, harness, repo_root, skills_source):
     # a relative path that resolves nowhere but reads, in the merged config,
     # exactly like a skills install that worked.
     if skills_source:
+        # A managed skill still read from an agent-skills clone (the skills home
+        # before .agents/skills, retired 2026-09-25) would load the same skill
+        # twice, from two copies that have since diverged. Drop only those, and
+        # only here, where the replacement entry is about to be written.
+        instructions = [
+            entry for entry in instructions
+            if not _stale_skill_entry(entry, harness["rules"]["skills"], skills_source)
+        ]
         for skill in harness["rules"]["skills"]:
             entry = _join(skills_source, skill, "SKILL.md")
             if entry not in instructions:
