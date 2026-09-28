@@ -25,8 +25,11 @@ live there, not here (§4).
 What stays in SKILL.md: everything that is level-independent — the entry
 narrative, the Files map, the Levels table, a compact rule roster (ids +
 pointers, not full rule text), card pointers, the CAO command block (which must
-stay verbatim — `tests/cao/test_cli.py` scans this file for every
-`python -m cao ...` string and checks each against the real parser;
+stay verbatim — `.agents/skills/unattended-orchestration/tests/cao/test_cli.py`
+scans this file for every `python -m cao ...` string and checks each against
+the real parser (corrected 2026-09-28, Sonnet final: the writer's path dropped
+the `.agents/skills/unattended-orchestration/` prefix — verified the scanner
+itself at that file's `_COMMAND` regex + `SKILL.md`-glob, lines ~756–763);
 `.agents/skills/unattended-orchestration/SKILL.md` lines 143–145), and a
 provenance note (generated files, single source).
 
