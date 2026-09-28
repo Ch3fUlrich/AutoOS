@@ -549,6 +549,13 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RESTART spec §0/§2 (lane R1): the shared inbox reader (tools/autoos_inbox.py),
+# the `inbox` verb and the explicit verb->handler dispatch table. Fixtures are
+# temp files; nothing is spawned and no inbox outside the sandbox is read.
+if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch table (unit tests)"; then
+    out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
@@ -577,6 +584,13 @@ fi
 
 if it "autoos-agent context: fill from the session transcript (unit tests)"; then
     out="$(python3 tests/test_autoos_context.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/autoos_tokenrate.py (RESTART spec §5 metric): tokens per merged change,
+# summed over EVERY transcript usage record — the fixture projects dir and the
+# throwaway git repo mean this never reads the live transcripts.
+if it "autoos-agent token-rate: orchestrator tokens per merge (unit tests)"; then
+    out="$(python3 tests/test_autoos_tokenrate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07 migrated into code): pause,

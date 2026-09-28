@@ -246,8 +246,10 @@ content in docs.
 | `homelab-access` / `herdr-orchestration` | homelab commands / supervised persistent agents |
 
 Loading per agent: opencode reads `.agents/skills` as project-compat source
-natively; Claude Code reads `.claude/skills` — the installers link each skill
-there (idempotent step, guarded by existence check). OpenHands (SDK 1.36) reads
+natively; Claude Code reads `.claude/skills` — the `agent-skill-links` component
+links each skill there (`link_skill_dirs` is the one link rule: absent → linked,
+an AutoOS link that dangles → repointed, anything of yours → kept). OpenHands
+(SDK 1.36) reads
 the workspace's `.agents/skills/*/SKILL.md` natively and user skills from
 `~/.agents/skills` and `~/.openhands/skills` (`agent_context.load_user_skills`,
 which the installers write as true); the profiles carry no skills path. The
