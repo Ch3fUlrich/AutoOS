@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a token-bearing backup is created 0600 and never widened (A3 final review S1, 2026-09-28)
+
+- **`lib/linux/install.sh`** (`omnigraph_env_state`): the backup taken before the
+  env file is rewritten holds the **previous token**, still a live bearer
+  credential until the server expires it, and `shutil.copy2` creates the
+  destination with `open(dst, "wb")` — mode `0666 & ~umask`, i.e. **0644 on any
+  normal machine** — and only tightens it *after* the bytes landed. On a shared or
+  NFS home another local user could read the token inside that window (measured:
+  the probe saw the backup born 0644). The writer now creates it with
+  `os.open(path, O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` — the restrictive mode
+  and the exclusive create in one syscall, so a same-second backup is never
+  clobbered — copies the bytes in, and carries the times across itself
+  (`os.utime`) rather than with `copystat`, which would have copied the mode too.
+  `backup_file` (`cp -p`) was probed the same way and is clean: coreutils creates
+  the destination with the source's mode, so no rc-file backup ever opens.
+- **`lib/linux/install.sh`** (`replace_or_append_marked_line`): the replace branch
+  assigned `rc=0` with no `local`, unlike the purge branch a few lines above it, so
+  the step's exit status overwrote the *caller's* `rc` — the variable every step
+  here uses to report a failed write.
+- **`tests/linux/38-omnigraph-client.sh`**: a `sitecustomize` shadow hooks
+  `builtins.open` and `os.open` (the idiom `32-answer-file-templates.sh` already
+  uses) and asserts the mode every backup is created with under `umask 022`, that
+  the backup holds the pre-edit bytes and the source's times, and — so a future
+  rewrite that dodges both hooks cannot pass by accident — that the writer holds no
+  `copy2` call and does create with `O_EXCL`. The `rc` leak is asserted
+  behaviourally: a caller whose `rc` is a sentinel still holds it after the step.
+
 ### Fixed — the rc-line writer is contained and byte-safe; one value rule for all three readers (A3 review 2, 2026-09-28)
 
 - **`lib/linux/install.sh`** (`replace_or_append_marked_line`): both of its

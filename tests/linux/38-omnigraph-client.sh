@@ -386,6 +386,142 @@ if it "omnigraph-client: a rotated token opens the skip gate and the next run la
     (( ok )) && pass || fail "the token rotation is not visible to the skip gate"
 fi
 
+# The backup taken before the env file is rewritten holds the OLD token, which is
+# still a live bearer credential on a server that has not expired it. shutil.copy2
+# creates the destination with open(dst, "wb") — mode 0666 & ~umask, i.e. 0644 on
+# any normal machine — and only tightens it to the source's mode AFTER the bytes
+# landed. On a shared or NFS home another local user can read the token inside
+# that window. So the backup must be created 0600 by the same syscall that makes
+# it, and never widened afterwards (A3 final review, S1).
+#
+# The probe records the mode of every backup at the moment it is created, hooking
+# both creation paths (builtins.open and os.open), so the assertion does not
+# depend on which copy mechanism the writer uses — only on the mode the file was
+# born with. 32-answer-file-templates.sh uses the same sitecustomize-shadow idiom.
+if it "omnigraph-client: the env-file backup is created 0600 — the old token is never group/world readable"; then
+    tmp="$(oh_client_sandbox)"
+    env_file="$tmp/.autoos-omnigraph.env"
+    mkdir -p "$tmp/shadow"
+    cat >"$tmp/shadow/sitecustomize.py" <<'EOS'
+import builtins, os
+
+PROBE = os.environ.get("AUTOOS_MODE_PROBE", "")
+_real_open = builtins.open
+_real_os_open = os.open
+
+def _is_backup(path):
+    if not PROBE:
+        return False
+    try:
+        name = os.fsdecode(path)
+    except (TypeError, ValueError):
+        return False
+    return ".autoos-backup-" in name
+
+def _note(path, mode):
+    with _real_open(PROBE, "a", encoding="utf-8") as out:
+        out.write("%o %s\n" % (mode, os.fsdecode(path)))
+
+def probed_open(file, *args, **kw):
+    f = _real_open(file, *args, **kw)
+    if _is_backup(file):
+        try:
+            _note(file, os.fstat(f.fileno()).st_mode & 0o777)
+        except OSError:
+            pass
+    return f
+
+def probed_os_open(path, flags, mode=0o777, *args, **kw):
+    fd = _real_os_open(path, flags, mode, *args, **kw)
+    if _is_backup(path):
+        try:
+            _note(path, os.fstat(fd).st_mode & 0o777)
+        except OSError:
+            pass
+    return fd
+
+builtins.open = probed_open
+os.open = probed_os_open
+EOS
+    (
+        # The loosest umask a real home has — the one that makes a default-mode
+        # creation world-readable.
+        umask 022
+        omnigraph_env_state "$env_file" "https://graph.example.invalid" first-token-1111 write >/dev/null 2>&1 \
+            || printf 'FIRST WRITE rc=%s\n' "$?" >&2
+        stat -c %Y "$env_file" >"$tmp/src_mtime"
+        export PYTHONPATH="$tmp/shadow" AUTOOS_MODE_PROBE="$tmp/probe.txt"
+        omnigraph_env_state "$env_file" "https://graph.example.invalid" rotated-2222 write >/dev/null 2>&1 \
+            || printf 'ROTATING WRITE rc=%s\n' "$?" >&2
+    )
+    probe="$(cat "$tmp/probe.txt" 2>/dev/null || true)"
+    loose="$(python3 -c '
+import sys
+loose = [l.split(None, 1)[1].strip() for l in sys.stdin
+         if len(l.split(None, 1)) == 2 and int(l.split()[0], 8) & 0o077]
+print(len(loose))
+' <<<"$probe")"
+    backups="$(ls -1 "$env_file".autoos-backup-* 2>/dev/null | wc -l)"
+    backup="$(ls -1 "$env_file".autoos-backup-* 2>/dev/null | head -1)"
+    backup_mode="$(stat -c '%a' "$backup" 2>/dev/null || printf 'none')"
+    backup_old="$(grep -c '^OMNIGRAPH_TOKEN=first-token-1111$' "$backup" 2>/dev/null || true)"
+    backup_new="$(grep -c 'rotated-2222' "$backup" 2>/dev/null || true)"
+    backup_mtime="$(stat -c '%Y' "$backup" 2>/dev/null || printf 'none')"
+    src_mtime="$(cat "$tmp/src_mtime" 2>/dev/null || printf 'none')"
+    live_mode="$(stat -c '%a' "$env_file" 2>/dev/null || printf 'none')"
+    live_new="$(grep -c '^OMNIGRAPH_TOKEN=rotated-2222$' "$env_file" 2>/dev/null || true)"
+    # And the shape of the code, so a future rewrite that dodges both probed
+    # creation paths (a raw os.write on an fd, say) cannot pass by accident.
+    writer="$(sed -n '/^omnigraph_env_state()/,/^PY$/p' lib/linux/install.sh)"
+    copy2_gone=1
+    grep -q 'shutil\.copy2(' <<<"$writer" && copy2_gone=0
+    excl=1
+    grep -q 'os\.O_EXCL' <<<"$writer" || excl=0
+    rm -rf "$tmp"
+    ok=1
+    [[ -n "$probe" ]] || { ok=0; echo "the probe saw no backup being created - the assertion would be vacuous" >&2; }
+    [[ "$loose" == 0 ]] || { ok=0; echo "$loose backup(s) were created with group/world bits while the old token was copied" >&2; }
+    (( copy2_gone )) || { ok=0; echo "the env writer still backs up with shutil.copy2 (born at the default umask mode)" >&2; }
+    (( excl )) || { ok=0; echo "the env writer does not create its backup with O_EXCL at 0600" >&2; }
+    [[ "$backups" == 1 ]] || { ok=0; echo "the rewritten secret file had $backups backups" >&2; }
+    [[ "$backup_mode" == 600 ]] || { ok=0; echo "the backup ended up mode $backup_mode, not 600" >&2; }
+    [[ "$live_mode" == 600 ]] || { ok=0; echo "the env file itself is mode $live_mode" >&2; }
+    [[ "$backup_old" == 1 && "$backup_new" == 0 ]] \
+        || { ok=0; echo "the backup holds old=$backup_old new=$backup_new - not the pre-edit bytes" >&2; }
+    [[ "$backup_mtime" == "$src_mtime" ]] \
+        || { ok=0; echo "the backup lost the source's times ($backup_mtime vs $src_mtime)" >&2; }
+    [[ "$live_new" == 1 ]] || { ok=0; echo "the rotation did not land in the env file" >&2; }
+    (( ok )) && pass || fail "the token-bearing backup is not created 0600"
+fi
+
+# rc is how every step here reports "did the write work". A branch that assigns it
+# without `local` overwrites the CALLER's rc, so a caller that had recorded its own
+# failure code reads the marked-line step's value instead. The purge branch above
+# declares `local rc=0`; the replace branch below must too.
+if it "omnigraph-client: the marked-line writer keeps rc local in the replace branch too"; then
+    tmp="$(mktemp -d)"
+    marker="$(omnigraph_rc_marker)"
+    printf '# my shell\nexport OMNIGRAPH_TOKEN=$(cat "$HOME/.old-token-file")\n' >"$tmp/.bashrc"
+    out="$( (
+        AUTOOS_DRY_RUN=0
+        rc=sentinel-value
+        replace_or_append_marked_line "$tmp/.bashrc" '.old-token-file' "$marker" \
+            "test -r \"\$HOME/.autoos-omnigraph.env\" && . \"\$HOME/.autoos-omnigraph.env\"  # $marker"
+        printf 'RC %s\n' "$rc"
+    ) 2>&1)"
+    body="$(sed -n '/^replace_or_append_marked_line()/,/^}/p' lib/linux/install.sh)"
+    bare="$(printf '%s\n' "$body" | grep -cE '^[[:space:]]*rc=' || true)"
+    ours="$(grep -cF -- "$marker" "$tmp/.bashrc" || true)"
+    stale="$(grep -c '.old-token-file' "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$out" == *"RC sentinel-value"* ]] \
+        || { ok=0; echo "the step overwrote the caller's rc: [${out##*RC }]" >&2; }
+    [[ "$bare" == 0 ]] || { ok=0; echo "$bare rc assignment(s) in the function are not declared local" >&2; }
+    [[ "$ours" == 1 && "$stale" == 0 ]] || { ok=0; echo "the replace branch did not do its job ($ours/$stale)" >&2; }
+    (( ok )) && pass || fail "the marked-line writer leaks rc into its caller"
+fi
+
 if it "omnigraph-client: a token rotated in api-keys.yml opens the gate; the same token keeps it closed"; then
     tmp="$(oh_client_sandbox)"
     printf 'omnigraph_token: keys-first\n' >"$tmp/keys.yml"

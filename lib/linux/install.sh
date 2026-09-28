@@ -4221,9 +4221,34 @@ if mode == "check":
     print("written", "token" if has_token else "no-token")
     sys.exit(0)
 if old:
-    backup = "%s.autoos-backup-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
-    shutil.copy2(path, backup)
-    os.chmod(backup, 0o600)
+    # The file being replaced holds the PREVIOUS token, which is still a live
+    # bearer credential until the server expires it. shutil.copy2 creates the
+    # destination with open(dst, "wb") — mode 0666 & ~umask, i.e. 0644 on a normal
+    # machine — and only tightens it to the source's mode after the bytes landed,
+    # so on a shared or NFS home another local user could read the token inside
+    # that window. Create it 0600 in the same syscall that makes it, with O_EXCL so
+    # a same-second backup is never clobbered, then carry the times across only:
+    # copystat would copy the mode as well and this must never widen it.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    n = 0
+    while True:
+        backup = "%s.autoos-backup-%s%s" % (path, stamp, "" if n == 0 else "-%d" % n)
+        try:
+            bfd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            n += 1
+    try:
+        with open(path, "rb") as src, os.fdopen(bfd, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    except OSError:
+        try:
+            os.unlink(backup)
+        except OSError:
+            pass
+        raise
+    src_stat = os.stat(path)
+    os.utime(backup, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
 tmp = path + ".tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8", newline="\n", errors="surrogateescape") as f:
@@ -4690,7 +4715,7 @@ replace_or_append_marked_line() {
         autoos_record_failure "${AUTOOS_POST_COMPONENT:-omnigraph-client}"
         return 0
     fi
-    rc=0
+    local rc=0
     autoos_rc_edit_lines "$file" replace "$old_marker" "$line" || rc=$?
     if (( rc != 0 )); then
         ui_warn "could not edit ${file} - left unchanged (exit ${rc})"
