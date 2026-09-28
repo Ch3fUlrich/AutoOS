@@ -787,16 +787,18 @@ def _walk_wrapper_options(
     region, so their options keep parsing normally.
 
     ``--`` ends option parsing while options are still being scanned, but it
-    does not end the positional region, so the
-    token after it is read as the wrapper's own argument even when it starts
-    with ``-`` (``flock -- -c rm -rf /`` puts ``-c`` in the lockfile slot and
-    ``rm`` in the command slot) -- the reading that keeps a command region in
-    view whichever token ``--`` landed before."""
+    does not end the positional region, so the tokens after it still fill the
+    wrapper's own argument slots even when they start with ``-``
+    (``flock -- -c rm -rf /`` puts ``-c`` in the lockfile slot and ``rm`` in the
+    command slot) -- the reading that keeps a command region in view whichever
+    token ``--`` landed before. Filling those slots does not re-open option
+    parsing: what comes after the last one is judged by the rule above, so
+    ``flock -- /tmp/l -c id`` still ends on flock's shell stop."""
     i, n = 1, len(cur)
     problem: str | None = None
     options: list[str] = []
     positionals = 0
-    saw_dashdash = False
+    scanning = True  # False once `--` has ended option parsing
     while i < n:
         tok = cur[i]
         if not isinstance(tok, str):
@@ -810,77 +812,71 @@ def _walk_wrapper_options(
             # makes it the *first* non-option: a launcher with none to consume
             # would still parse its leading options normally.) The one program
             # that reads an option here is flock, and only for the exact spelling
-            # it special-cases -- which is a shell stop, not a command.
+            # it special-cases -- which is a shell stop, not a command. The same
+            # reading applies past a `--`, because `--` ends option parsing and
+            # not this region.
             if tok in spec.post_positional_stops:
                 options.append(tok.lstrip("-"))
                 return None, options, problem
             break
-        if tok == "--":
-            saw_dashdash = True
-            i += 1
-            break
-        if tok == "-" and spec.lone_dash_is_flag:
-            options.append("-")
-            i += 1
-            continue
-        if tok.startswith("--"):
-            name, eq, _val = tok[2:].partition("=")
-            canonical, prob = _resolve_long_option(name, spec.longs)
-            if prob is not None:
-                if problem is None:
-                    problem = (f"{spec.label}: {prob}; refusing to guess "
-                               "the wrapped command")
+        if scanning:
+            if tok == "--":
+                scanning = False
                 i += 1
                 continue
-            options.append(canonical)
-            if canonical in spec.stops:
-                return None, options, problem
-            mode = spec.longs[canonical]
-            i += 1 if (eq or mode != _LONG_REQUIRED) else 2
-            continue
-        if tok.startswith("-") and len(tok) > 1 and tok != "-":
-            rest = tok[1:]
-            consumed_next = False
-            stopped = False
-            for k, ch in enumerate(rest):
-                if ch in spec.stops:
+            if tok == "-" and spec.lone_dash_is_flag:
+                options.append("-")
+                i += 1
+                continue
+            if tok.startswith("--"):
+                name, eq, _val = tok[2:].partition("=")
+                canonical, prob = _resolve_long_option(name, spec.longs)
+                if prob is not None:
+                    if problem is None:
+                        problem = (f"{spec.label}: {prob}; refusing to guess "
+                                   "the wrapped command")
+                    i += 1
+                    continue
+                options.append(canonical)
+                if canonical in spec.stops:
+                    return None, options, problem
+                mode = spec.longs[canonical]
+                i += 1 if (eq or mode != _LONG_REQUIRED) else 2
+                continue
+            if tok.startswith("-") and len(tok) > 1 and tok != "-":
+                rest = tok[1:]
+                consumed_next = False
+                stopped = False
+                for k, ch in enumerate(rest):
+                    if ch in spec.stops:
+                        options.append(ch)
+                        stopped = True
+                        break
+                    if ch in spec.short_value:
+                        options.append(ch)
+                        consumed_next = k == len(rest) - 1
+                        break
+                    if ch in spec.short_optional:
+                        options.append(ch)
+                        break
+                    # An unrecognised short flag does not end the cluster; env
+                    # -vS must keep scanning past -v to reach -S.
                     options.append(ch)
-                    stopped = True
-                    break
-                if ch in spec.short_value:
-                    options.append(ch)
-                    consumed_next = k == len(rest) - 1
-                    break
-                if ch in spec.short_optional:
-                    options.append(ch)
-                    break
-                # An unrecognised short flag does not end the cluster; env
-                # -vS must keep scanning past -v to reach -S.
-                options.append(ch)
-            if stopped:
-                return None, options, problem
-            i += 2 if consumed_next else 1
-            continue
+                if stopped:
+                    return None, options, problem
+                i += 2 if consumed_next else 1
+                continue
         # A positional. flock's lockfile, chrt's priority and taskset's mask are
         # the ones a wrapper takes before its command; consume it, and the
         # scan-stop at the top of the loop catches the next token -- that token
         # is the command the program execs. Any later positional is the wrapped
-        # command.
+        # command. Past a `--` the token is read here whatever it looks like,
+        # which is what puts `-c` in flock's lockfile slot.
         if positionals < spec.positionals_before_command:
             positionals += 1
             i += 1
             continue
         break
-    if saw_dashdash:
-        # `--` ends option parsing, not the positional region, so the
-        # wrapper's own argument is still the next token even when it starts
-        # with '-' (flock -- -c rm -rf / puts -c in the lockfile slot and rm
-        # in the command slot). A wrapper whose positional was already
-        # consumed before the `--` hands this token over as the command
-        # instead.
-        while i < n and positionals < spec.positionals_before_command:
-            positionals += 1
-            i += 1
     if spec.trailing == "assignments":
         while i < n and _looks_like_assignment(cur[i]):
             i += 1

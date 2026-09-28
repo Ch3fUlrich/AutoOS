@@ -375,6 +375,13 @@ _FLOCK_COMMAND_FORMS = (
     (["flock", "--", "-c", "sh", "-c", "x"], "no-inline-shell"),
     (["flock", "--", "-c", "python3", "-c", "x"], "no-inline-shell"),
     (["flock", "--", "-c", "rm", "-rf", "/"], "destructive"),
+    # `--` ends option parsing, not the positional region, so the `-c` one token
+    # past the lockfile is still flock's shell form (measured in
+    # _NON_PERMUTING_HEADS) and the denial names the shell, not an unresolvable
+    # `-c` head.
+    (["flock", "--", "/tmp/l", "-c", "rm -rf /"], "no-inline-shell"),
+    (["flock", "--", "/tmp/l", "--command", "rm -rf /"], "no-inline-shell"),
+    (["nice", "flock", "--", "/tmp/l", "-c", "rm -rf /"], "no-inline-shell"),
 )
 
 # Harmless forms that must stay allowed: proving the walker does not simply
@@ -761,7 +768,10 @@ _NON_PERMUTING_HEADS = (
     # --comm` and `flock ./l -cX` -> `failed to execute -cX`. Options *before*
     # the lockfile keep full getopt parsing, `--` included (`flock -- ./l
     # /bin/echo C` prints C; `flock -s ./l /bin/echo F` prints F), and watch
-    # takes no positional at all.
+    # takes no positional at all. A `--` before the lockfile does not close the
+    # region after it either: `flock -- ./l -c '/bin/echo FIVE'` prints FIVE via
+    # sh -c while `flock -- ./l --comm x` and `flock -- ./l -cX` fail to execute
+    # that literal token, rc 69 -- so the honoured stop reads the same here.
     (["flock", "/tmp/l", "-c", "sh", "-c", "x"], []),
     (["flock", "/tmp/l", "--command", "sh -c x"], []),
     (["flock", "/tmp/l", "--", "ls"], [["--", "ls"]]),
@@ -769,6 +779,9 @@ _NON_PERMUTING_HEADS = (
     (["flock", "/tmp/l", "--comm", "x"], [["--comm", "x"]]),
     (["flock", "/tmp/l", "-cX"], [["-cX"]]),
     (["flock", "--", "/tmp/l", "ls"], [["ls"]]),
+    (["flock", "--", "/tmp/l", "-c", "sh -c x"], []),
+    (["flock", "--", "/tmp/l", "--command", "sh -c x"], []),
+    (["flock", "--", "/tmp/l", "--comm", "x"], [["--comm", "x"]]),
     (["flock", "-s", "/tmp/l", "ls"], [["ls"]]),
     (["flock", "-n", "-w", "5", "/tmp/l", "ls"], [["ls"]]),
     (["flock", "--", "-c", "rm", "-rf", "/"], [["rm", "-rf", "/"]]),
@@ -841,6 +854,30 @@ class NonPermutingGetoptTests(unittest.TestCase):
         self.assertNotIn("p", policy._walk_wrapper_options(["chrt", "5", "-p", "123"],
                                                            policy._CHRT_SPEC)[1])
         self.assertEqual(self._decide(["chrt", "5", "-p", "123"]).rule, "path-hijack")
+
+    def test_flock_shell_stop_survives_a_leading_dashdash(self):
+        # hx3 FINAL review LOW: the post-`--` catch-up filled the lockfile slot
+        # and then stopped consulting spec.post_positional_stops, so the `-c`
+        # flock still runs through sh -c was reported as the execed head and
+        # denied as path-hijack. It is a stop, so the audit reason is the shell.
+        for argv in (["flock", "--", "/tmp/l", "-c", "id"],
+                     ["flock", "--", "/tmp/l", "--command", "id"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(policy._direct_child_heads(argv), [])
+                self.assertIn(argv[3].lstrip("-"),
+                              policy._walk_wrapper_options(argv, policy._FLOCK_SPEC)[1])
+                decision = self._decide(argv)
+                self.assertFalse(decision.allow, f"{argv!r} was allowed")
+                self.assertEqual(decision.rule, "no-inline-shell", decision.problems)
+                self.assertIn("shell", " ".join(decision.problems).lower(),
+                              f"{argv!r}: {decision.problems}")
+        # Nested one wrapper deep, the same reading must reach the inner flock.
+        nested = ["nice", "flock", "--", "/tmp/l", "-c", "id"]
+        decision = self._decide(nested)
+        self.assertFalse(decision.allow, f"{nested!r} was allowed")
+        self.assertEqual(decision.rule, "no-inline-shell", decision.problems)
+        self.assertIn(["flock", "--", "/tmp/l", "-c", "id"],
+                      policy._command_heads(nested))
 
     def test_every_positional_wrapper_stops_at_its_positional(self):
         # Nobody permutes: flock, chrt and taskset are the only launchers that

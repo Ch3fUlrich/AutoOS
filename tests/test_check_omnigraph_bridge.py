@@ -334,8 +334,11 @@ class WedgedBridgeProcessTests(unittest.TestCase):
                                        time.monotonic() + 1, None)
         self.pids.append(client.proc.pid)
         try:
-            self.assertEqual(os.getpgid(client.proc.pid), client.proc.pid,
-                             "the bridge shares the benchmark's process group")
+            self.assertEqual(
+                os.getpgid(client.proc.pid), client.proc.pid,
+                "the bridge runs in somebody else's process group, so close()'s "
+                "killpg would signal that group — the benchmark's own processes "
+                "included")
         finally:
             client.close()
 
