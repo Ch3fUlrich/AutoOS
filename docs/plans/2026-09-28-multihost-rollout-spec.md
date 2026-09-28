@@ -15,11 +15,10 @@ spec wrong.** (1) fleet-node's **per-session capability token**: minted locally 
 fleet-node instance on each launch, scoped to one launched work unit — sibling branch
 `L2-general/fleetnode` §5 Security, not redesigned here. (2) OmniRoute's **`cli_access_tokens`**:
 a **host-level** named token per fleet host — "one named token per fleet host → attribution +
-one-click revocation" (sibling branch `L2-general/fleetspec`,
-`docs/plans/2026-09-28-fleet-console-spec.md` §12 — sibling reference, not a checkout
-citation: that file does not exist in this branch, verified by glob for `docs/plans/*fleet*`
-returning nothing). This spec designs only token (2): issuance, shape, revocation, and install-time
-pickup. Token (1) is cited, never re-derived.
+one-click revocation" (inference — private plan, OmniRoute's Access Tokens table:
+`cli_access_tokens`, name/scope/expiry/revocation/whoami, not in this checkout). This spec
+designs only token (2): issuance, shape, revocation, and install-time pickup. Token (1) is
+cited, never re-derived.
 
 Placeholder discipline follows the repo's own site-free precedent: every host, address, domain,
 and account here is a placeholder (`<tailnet>`, `<tailnet-cidr>`, `example.internal`), the way
@@ -51,6 +50,7 @@ marked `(inference)` where it is not.
 | Proxmox host | Orchestrators + heavy tests (inference) | **Yes** | (inference — no Proxmox reference found in this checkout) |
 | Homelab VMs | Light workers/watchers; keep headroom for their own services (inference) | No | (inference) |
 | Windows GPU workstation (`Workstation-AutoOS`) | i9-13900KF, RTX 3060 12GB, 128GB RAM, WSL2 (inference — hardware details from the private plan, not this checkout); already live as an L1 lane family under `L1-main` | **Yes** (GPU host holding model weights and serving legs counts as trusted; §7) | `docs/tasks.md:34` — "Workstation-AutoOS L1 lanes … Running", several lanes merged (`3f2df52`, `4cbd009`, `d17d1a4`, `b3e69c2`, `19db2c8`, `89eee6d`, `3a1e689`). No `briefs/Workstation.md` in this branch (verified — no `briefs/` dir exists), so the `L1-main` parenting and hardware spec are (inference) |
+| GPU worker host (any host running a model-serving leg) | Second and later GPU hosts, added via the §5 template; hold model weights and serve legs, same as the workstation | **Yes** (same rule: a GPU host holding model weights and serving legs counts as trusted; §7) | (inference — no second GPU host exists in this checkout yet; covered by the §5 template, §6 step 4) |
 | Laptops | Overflow workers, online-only, never hold state (inference) | No | (inference) |
 | Raspberry Pi | Light API-calling workers/watchers, ARM64 (inference) | No | Architecture gating precedent exists in-checkout: `catalog/linux.json:1560` and `catalog/linux.json:1571` carry `"arch": ["x64"]` (so ARM64 hosts already skip x64-only components); per-CLI ARM64 availability must be verified per component at onboarding time |
 | Android/Termux | Light API workers or console-client-only (inference) | No | (inference) |
@@ -71,12 +71,15 @@ Nothing below changes its shape, lifetime, or minting.
 OmniRoute, separate from and above the per-session tokens that host's fleet-node instance mints
 for work it launches.
 
-Field shape (one entry per fleet host: coding VM, Proxmox host, Windows PC, Pi, phone):
+Field shape (one entry per enrolled fleet host — any §2 host class that joins: coding VM,
+Proxmox host, Windows GPU workstation, homelab VMs, Pi; laptops and Android/Termux enroll as
+online-only overflow and hold their entry only for the enrolled session, not as a standing
+token):
 
 | Field | Meaning |
 |---|---|
 | `name` | Human-stable host name, e.g. `fleet-coding-vm`, `fleet-workstation` (placeholder names; real names stay in git-ignored operator files per `AGENTS.md:16-19`) |
-| `scope` | Least-privilege OmniRoute scope the host needs (run + steer legs it serves; never manage) |
+| `scope` | Least-privilege OmniRoute scope the host needs (serve/run + steer legs it serves; never manage) |
 | `expiry` | Bounded lifetime with rotation; expiry forces re-issuance, never silent persistence |
 | `revocation` | One-click revocation at the OmniRoute server — the fast "kick a compromised host off the fleet" lever (§7) |
 
@@ -84,15 +87,18 @@ Field shape (one entry per fleet host: coding VM, Proxmox host, Windows PC, Pi, 
 recorded in the DONE note — the same pattern this checkout already uses for operator-only steps:
 `configuration/hostexec/README.md:34-36` ("enabling hostexec on a real host is an operator step,
 done outside this public repository"), `docs/plans/2026-09-25-routing-v2-spec.md:430` (operator
-steps "recorded in the DONE note"), and `tools/probe-rtk.py:694` (missing manage key "exits …
-operator step"). No lane, worker, or fleet-node instance ever mints a host token for itself;
+steps "recorded in the DONE note"), and `tools/probe-rtk.py:694` (missing manage key exits
+non-zero as an operator-only setup step: `"operator-only: create a manage-scoped key for the
+gateway dashboard ..."`). No lane, worker, or fleet-node instance ever mints a host token for itself;
 self-issuance would let any compromised host enroll new hosts.
 
 **Install-time pickup: env var first, git-ignored config file as fallback.** When fleet-node is
 installed on a new host, it reads the host's token from `AUTOOS_OMNIROUTE_KEY` in the environment;
-if unset, from the host-local git-ignored config file the installers already use (the
-`~/.config/autoos` family — cf. `configuration/hostexec/README.md:42-44`, which copies the
-example policy to the git-ignored runtime path and edits it there). Justification: env-first
+if unset, from the installers' existing git-ignored OmniRoute key store,
+`configuration/api-keys.yml` — named as the file fallback in `opencode.jsonc:35`'s client-key
+comment, read via `$KEYS_FILE` in `configuration/autostart/run-opencode-serve.sh:77`, and
+deny-tested alongside `~/.config/autoos/ai-stack/client.key` and `manage.key` in
+`tests/linux/33-documentation.sh:822-826`. Justification: env-first
 keeps the secret out of every file the installer writes (composing with `AGENTS.md:16-21`,
 which bans secrets in tracked files absolutely), matches the existing env-var precedent
 (`AUTOOS_OMNIROUTE_KEY` is already read this way — `tests/linux/05-registry-model-reads.sh:165`),
@@ -105,15 +111,17 @@ A spawn decision picks a host in this order; no step redesigns fleet-node's admi
 step reuses it per-host (sibling branch `L2-general/fleetnode` admission §):
 
 1. **Capability match.** Does this host run this client/model? GPU work needs the GPU host
-   (`docs/tasks.md:35` names the RTX-class workstation leg); ARM64 hosts skip x64-only components
+   (`docs/tasks.md:35` names the workstation GPU leg as OmniRoute provider `ollama-ws`); ARM64 hosts skip x64-only components
    per the existing `"arch"` gating (`catalog/linux.json:1560`, `catalog/linux.json:1571`); a host
    that cannot serve the leg is not considered, never attempted-and-failed.
 2. **RAM headroom.** The host's fleet-node admission budget (measured per-session RAM against the
    host's ~15GB-class budget — §2) must admit the unit; a host that fails admission reports
    `skipped`-equivalent (not-placed), never half-launched. One admission concept fleet-wide: this
    spec adds no second budget, no parallel accounting.
-3. **Trust gate (hard).** Secret-touching work runs **only** on trusted hosts: the coding VM, the
-   Proxmox host, and the Windows GPU workstation (§2 table). Laptops, Pi, Termux, and homelab VMs
+3. **Trust gate (hard).** Secret-touching work runs **only** on trusted hosts — the rule, not
+   a fixed list (§2 table, §7): a GPU host holding model weights and serving legs counts as
+   trusted, so the coding VM, the Proxmox host, the Windows GPU workstation, and any GPU
+   worker host added via §5 qualify. Laptops, Pi, Termux, and homelab VMs
    never receive secret-touching units however idle they are. This is an invariant, not an
    optimization preference (§7).
 
@@ -134,9 +142,12 @@ The decided pattern a future GPU/specialty leg copies:
   description; the `:11434` convention itself is checkout-grounded: `catalog/ai-registry.json:726`
   serves the local Ollama leg at `http://127.0.0.1:11434/v1`, and `README.md:70` binds wider only
   for LAN/tailnet reach). The local-fallback behavior composes with the existing resolver
-  precedent: `lib/windows/AutoOS.Install.psm1:161-177` already probes `127.0.0.1` first, then
-  `host.docker.internal`, then falls back — a new tailnet leg slots into that probe order rather
-  than replacing it.
+  precedent: `lib/windows/AutoOS.Install.psm1:151-179` (`Resolve-AutoOSOllamaBaseUrl`) checks
+  `$env:OLLAMA_BASE_URL` first, then probes `host.docker.internal:11434/api/version`, then
+  returns `$null` — which leaves the catalog's `127.0.0.1:11434/v1` as the untested default
+  (there is no explicit probe of `127.0.0.1`). A new tailnet leg adds a second probe branch
+  to that function — new code following the existing pattern, not free reuse of an existing
+  multi-way probe.
 - **Free, slow, explicit purpose.** The leg exists for tests and for when free tiers run out —
   price-zero legs already exist in-checkout (`catalog/ai-registry.json:736-737` prices the local
   Ollama leg at 0), and the resolver already prefers free pools first (`.claude/handoff.config.json:58`
@@ -165,16 +176,24 @@ not redesigned):
    Windows-PC work is the `ollama-ws` leg (tailnet ACL via prox, provider + registry leg, drift 0
    + smoke), not the host enrollment this spec must not claim as pending.
 3. **Then move one orchestrator to a remote host.**
-4. **Then a GPU worker** (§5's template applied to a second GPU host).
+4. **Then a GPU worker** (§5's template applied to a second GPU host — a "GPU worker host"
+   §2 row, trusted by the §2 rule, so it may receive secret-touching work once admitted).
 
-**Acceptance gate for phase E:** "a cross-host spawn + steer works end-to-end" (inference — gap
+**Acceptance gate for phase E (covers steps 1–3; step 4 is outside the gate — see below):**
+"a cross-host spawn + steer works end-to-end" (inference — gap
 description wording, no checkout source). Concretely: an orchestrator on host A spawns a unit on
 host B through B's fleet-node admission, steers it mid-run, and the unit's per-session token
 (sibling branch `L2-general/fleetnode` §5) verifies end-to-end — while host A's and host B's
-distinct `cli_access_tokens` entries attribute each side (§3). The gate fails if placement fell
+distinct `cli_access_tokens` entries attribute each side (§3). Open dependency the gate assumes
+but does not resolve: token (1) is minted locally by host B's own fleet-node instance, and
+sibling `L2-general/fleetnode` §5 designs minting plus fleetd checks but no cross-host handoff
+of that token — so how host A's orchestrator steers against B's locally-minted token is
+designed nowhere yet (see `Q: MULTIHOST-07`). The gate fails if placement fell
 back to the local host silently: a cross-host test that ran locally proves nothing (the same
 fallacy the repo's test rules already ban — tests assert on the planned command, never on a
-convenient substitute).
+convenient substitute). The gate is not re-run after step 4 lands: the second GPU worker
+carries its own per-leg proof (drift 0 + smoke per the §5 template, exactly per
+`docs/tasks.md:35`'s DONE criteria) rather than a second full cross-host gate run.
 
 **Capacity cap during rollout:** building capacity is capped at one control-plane lane
 fleet-wide (inference — stated in the gap description as a live rule of this run; no
@@ -224,12 +243,13 @@ Format follows this branch's own card-`threads` Q-line convention
 no fleet-console §12 format exists in this branch (verified: no `*fleet*` file under
 `docs/plans/`), so the restart-spec convention is the one this branch can actually cite.
 
-- `Q: MULTIHOST-01 | trust tiers | asked 2026-09-28 | default: coding VM + Proxmox + Workstation trusted, all others untrusted (§2)` — is the homelab-VM exclusion right, or do some homelab VMs hold their own secrets and need a finer tier?
-- `Q: MULTIHOST-02 | token scope | asked 2026-09-28 | default: least-privilege run+steer, never manage (§3)` — which exact OmniRoute scopes does a fleet host need beyond serve/run/steer?
+- `Q: MULTIHOST-01 | trust tiers | asked 2026-09-28 | default: rule-based — hosts serving model weights/legs trusted (coding VM, Proxmox, Workstation, future GPU workers), all others untrusted (§2)` — is the homelab-VM exclusion right, or do some homelab VMs hold their own secrets and need a finer tier?
+- `Q: MULTIHOST-02 | token scope | asked 2026-09-28 | default: least-privilege serve/run+steer, never manage (§3)` — which exact OmniRoute scopes does a fleet host need beyond serve/run/steer?
 - `Q: MULTIHOST-03 | expiry | asked 2026-09-28 | default: bounded with rotation (§3)` — what lifetime, and does expiry revoke in-flight units or only block new spawns?
 - `Q: MULTIHOST-04 | ollama-ws ACL | asked 2026-09-28 | default: tailnet-only, coding VM on 11434 (§5)` — (inference) confirm the ACL peer/port before the leg leaves Queued.
 - `Q: MULTIHOST-05 | phase-E gate | asked 2026-09-28 | default: cross-host spawn + steer end-to-end (§6)` — who witnesses the gate, and does the first remote orchestrator move require the operator present?
 - `Q: MULTIHOST-06 | Pi/Termux clients | asked 2026-09-28 | default: console-client-only until a per-CLI ARM64 path is proven (§2)` — which CLIs are actually installable on ARM64/Termux, and does that change any host's trust tier?
+- `Q: MULTIHOST-07 | cross-host token handoff | asked 2026-09-28 | default: gate assumes it, nothing designs it (§6)` — host A's orchestrator steers a unit whose per-session token was minted locally by host B's fleet-node instance; sibling `L2-general/fleetnode` §5 covers minting plus fleetd checks but no cross-host handoff — where is that handoff designed, or does this spec need to design it?
 
 ## 10. Closing table
 
@@ -245,5 +265,5 @@ tokens would be flagged rather than under-estimated (no row below is near that l
 | MH-ACL | `ollama-ws` tailnet ACL + provider/registry leg + drift 0 + smoke = move `docs/tasks.md:35` Queued → Done (§5) | ~50k (matches the `docs/tasks.md:35` row's own est.) | ~3 h | Operator (tailnet ACL via prox) |
 | MH-PROXMOX | fleet-node on the Proxmox host first: install, host token, admission verify (§6 step 1) | ~60k (final only) | ~4 h | MH-TOKEN |
 | MH-ORCH-MOVE | Move one orchestrator to a remote host (§6 step 3) | ~60k (final only) | ~4 h | MH-PROXMOX, MH-ACL |
-| MH-GATE | Cross-host spawn + steer end-to-end proof (§6 gate) | ~30k (final only) | ~2 h | MH-ORCH-MOVE |
-| MH-GPU2 | Second GPU worker via the §5 template (bind, ACL, leg, smoke) | ~50k (final only) | ~3 h | MH-GATE |
+| MH-GATE | Cross-host spawn + steer end-to-end proof, steps 1–3 (§6 gate; not re-run after MH-GPU2) | ~30k (final only) | ~2 h | MH-ORCH-MOVE |
+| MH-GPU2 | Second GPU worker via the §5 template (bind, ACL, leg, smoke) — outside MH-GATE coverage, own drift-0+smoke proof (§6) | ~50k (final only) | ~3 h | MH-GATE |
