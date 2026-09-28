@@ -8619,6 +8619,8 @@ print('%s|%s|%s' % (
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
+        # DSBACK 2026-09-28: servable again (routes.deepseek-v4.1-flash declares 128k).
+        'deepseek-v4.1-flash' = '128k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
@@ -9066,7 +9068,8 @@ Test-Case 'apply scripts refresh the catalog between registering and reading /v1
            Read = '$resp = Invoke-RestMethod -Uri "$Gateway/v1/models'
            Write = '& omniroute combo create $combo.name' },
         @{ File = 'configuration/omniroute/apply.sh'
-           Add = 'omni providers add "$provider_id"'; Enum = 'omni models "$provider_id"'
+           # MUSEREG 2026-09-28: the connection binds to the provider NODE id ($add_id).
+           Add = 'omni providers add "$add_id"'; Enum = 'omni models "$provider_id"'
            Read = '"$GATEWAY/v1/models"'; Write = 'omni combo create "$name"' }
     )
     foreach ($s in $steps) {
