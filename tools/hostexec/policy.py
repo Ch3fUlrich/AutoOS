@@ -765,14 +765,14 @@ def _walk_wrapper_options(
     priority, taskset's mask).
 
     Two getopt dialects are modelled, and ``spec.permute`` says which a
-    launcher uses. GNU getopt -- flock, env, nice, timeout, stdbuf, ionice,
-    xargs, setsid, nohup and watch -- permutes an option that follows the
-    positional back into the option region, so the walk continues past it
-    (``flock /tmp/l -c cmd`` is ``flock -c cmd /tmp/l`` to the real program).
-    chrt and taskset pass util-linux a ``+``-prefixed optstring, whose scan
-    stops at the first non-option: past their positional nothing is an option
-    and the next token is the execed command, so the walk breaks there and
-    reports that token as the head however it is spelled.
+    launcher uses. GNU getopt -- the default here, and what flock and every
+    other launcher in _WRAPPER_SPECS except the two below call -- permutes an
+    option that follows the positional back into the option region, so the walk
+    continues past it (``flock /tmp/l -c cmd`` is ``flock -c cmd /tmp/l`` to the
+    real program). chrt and taskset pass util-linux a ``+``-prefixed optstring,
+    whose scan stops at the first non-option: past their positional nothing is
+    an option and the next token is the execed command, so the walk breaks
+    there and reports that token as the head however it is spelled.
 
     ``--`` ends option parsing in both dialects but only while options are
     still being scanned, and it does not end the positional region, so the
@@ -888,8 +888,9 @@ def _idx_after_env(s: Sequence[str]) -> int | None:
     return _walk_wrapper_options(s, _ENV_SPEC)[0]
 
 
-def _wrapper_child_heads(cur: Sequence[str],
-                         spec: _WrapperSpec) -> list[list[str]]:
+def _non_permuting_child_heads(
+        cur: Sequence[str], spec: _WrapperSpec,
+) -> list[list[str]]:
     """The command a `+`-mode (non-permuting) launcher hands to execvp.
 
     chrt and taskset stop option scanning at their positional, so the next
@@ -1111,7 +1112,7 @@ def _direct_child_heads(cur: Sequence[str]) -> list[list[str]]:
     if base in ("chrt", "taskset"):
         # The `+`-mode pair: their command is the token right after the
         # priority/mask, verbatim, so it is not dash-filtered here.
-        return _wrapper_child_heads(cur, _WRAPPER_SPECS[base])
+        return _non_permuting_child_heads(cur, _WRAPPER_SPECS[base])
     if base == "flock":
         idx = _idx_after_flock(cur)
         return [cur[idx:]] if idx is not None and cur[idx:] and not cur[idx].startswith("-") else []
