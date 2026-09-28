@@ -542,10 +542,16 @@ Write-AutoOSSection 'Plan'
 $i = 0
 foreach ($c in $plan) {
     $i++
-    $tag = if ($c.AutoAdded) { Format-AutoOSColor '(dependency)' 'muted' }
-          elseif (Test-AutoOSTombstone -Component $c) { Format-AutoOSColor '(retired)' 'muted' }
-          else { '' }
+    # Two independent tags, not one choice: a retired id that was pulled in as a
+    # dependency is both, and the row has to say so. setup.sh prints the same pair.
+    $tag = ''
+    if ($c.AutoAdded) { $tag = Format-AutoOSColor '(dependency)' 'muted' }
+    if (Test-AutoOSTombstone -Component $c) { $tag = "$tag $(Format-AutoOSColor '(retired)' 'muted')" }
     Write-AutoOSLine ("  {0,2}. {1,-20} {2,-8} {3} {4}" -f $i, $c.Name, $c.Provider, $c.Package, $tag)
+    # Announced while there is still nothing on the disk to undo: a requirement
+    # that installs nothing can never be satisfied, so this row will fail.
+    $refused = Get-AutoOSComponentProperty -Component $c -Name 'BlockedReason' -Default ''
+    if ($refused) { Write-AutoOSLine "$($c.Name) $refused - it cannot be installed" -Level warn }
     if ($c.Installed) { Write-AutoOSLine (([char]0x2713) + ' Already installed - package will be skipped') -Level ok }
     if ($c.Notes) { Write-AutoOSLine "      $($c.Notes)" -Level muted }
 }
@@ -559,8 +565,13 @@ foreach ($k in $cfgAnswers.Keys) {
     if (-not $answers.ContainsKey($k)) { $answers[$k] = $cfgAnswers[$k] }
 }
 # A tombstone's prompt - if an old entry still carries one - must not stop a
-# run to ask about a component that is going to be skipped.
-$needed = @($plan | Where-Object { $_.Prompt -and -not (Test-AutoOSTombstone -Component $_) } | ForEach-Object {
+# run to ask about a component that is going to be skipped. Nor may a component
+# resolve refused: it will not be installed either, and its answer can never be
+# used.
+$needed = @($plan | Where-Object {
+    $_.Prompt -and -not (Test-AutoOSTombstone -Component $_) `
+        -and -not (Get-AutoOSComponentProperty -Component $_ -Name 'BlockedReason' -Default '')
+} | ForEach-Object {
     $_.Prompt -split '[, ]+' | Where-Object { $_ }
 } | Select-Object -Unique)
 
@@ -631,6 +642,16 @@ foreach ($c in $plan) {
         Write-AutoOSLine "$($c.Name): $(Format-AutoOSTombstoneSkip -Component $c)" -Level ok
         $results.skipped += $c.Id
         Write-AutoOSInstallProgress -Phase 'skipped' -Complete
+        continue
+    }
+    # Resolve already announced this one and said why; the plan is not the report,
+    # so it is recorded as the failure it is rather than installed without the
+    # dependency it asked for.
+    $refused = Get-AutoOSComponentProperty -Component $c -Name 'BlockedReason' -Default ''
+    if ($refused) {
+        Write-AutoOSLine "$($c.Name): $refused" -Level error
+        $results.failed += $c.Id
+        Write-AutoOSInstallProgress -Phase 'failed' -Complete
         continue
     }
     $state = 'failed'

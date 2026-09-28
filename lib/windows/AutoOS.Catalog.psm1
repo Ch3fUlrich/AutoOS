@@ -295,7 +295,11 @@ function Resolve-AutoOSPlan {
         the result, so the catalog never has to be hand-ordered. Throws on a
         dependency cycle rather than silently dropping an entry.
       .OUTPUTS
-        Ordered component objects, dependencies first. Each carries AutoAdded.
+        Ordered component objects, dependencies first. Each carries AutoAdded, and
+        a BlockedReason that is empty unless resolve refused to install that row -
+        the validator rejects a 'requires' that names a tombstone, but a normal run
+        never validates, so the plan records it here and the entry point announces
+        and fails it rather than installing the dependent without its dependency.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Available,
@@ -308,6 +312,7 @@ function Resolve-AutoOSPlan {
     # transitive closure of requirements
     $wanted = New-Object System.Collections.Generic.HashSet[string]
     $queue  = New-Object System.Collections.Queue
+    $blockedIds = @{}
     foreach ($id in $SelectedIds) { if ($byId.ContainsKey($id)) { [void]$queue.Enqueue($id) } }
     while ($queue.Count -gt 0) {
         $id = $queue.Dequeue()
@@ -317,7 +322,34 @@ function Resolve-AutoOSPlan {
         # require belongs to whatever replaced it, not to this row.
         if (Test-AutoOSTombstone -Component $byId[$id]) { continue }
         foreach ($dep in $byId[$id].Requires) {
-            if ($byId.ContainsKey($dep)) { [void]$queue.Enqueue($dep) }
+            if ($byId.ContainsKey($dep)) {
+                # The dependent is refused, but the retired row stays in the plan:
+                # it is what the plan and the report both get to point at, and it
+                # installs nothing either way.
+                if (Test-AutoOSTombstone -Component $byId[$dep]) {
+                    $blockedIds[$id] = "requires retired $dep"
+                }
+                [void]$queue.Enqueue($dep)
+            }
+        }
+    }
+
+    # A component that needed one of those refused components cannot be installed
+    # either, and quietly dropping only the first would repeat the same defect one
+    # level up - so the refusal spreads until the set stops growing.
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($id in @($wanted)) {
+            if ($blockedIds.ContainsKey($id)) { continue }
+            if (Test-AutoOSTombstone -Component $byId[$id]) { continue }
+            foreach ($dep in $byId[$id].Requires) {
+                if ($blockedIds.ContainsKey($dep)) {
+                    $blockedIds[$id] = "requires $dep, which cannot be installed"
+                    $grew = $true
+                    break
+                }
+            }
         }
     }
 
@@ -344,6 +376,8 @@ function Resolve-AutoOSPlan {
         $node = $byId[$Id].PSObject.Copy()
         Add-Member -InputObject $node -NotePropertyName AutoAdded `
                    -NotePropertyValue (-not ($SelectedIds -contains $Id)) -Force
+        Add-Member -InputObject $node -NotePropertyName BlockedReason `
+                   -NotePropertyValue $(if ($blockedIds.ContainsKey($Id)) { $blockedIds[$Id] } else { '' }) -Force
         [void]$ordered.Add($node)
     }
 

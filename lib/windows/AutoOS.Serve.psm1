@@ -221,6 +221,11 @@ function Get-AutoOSServeState {
             installed = $InstalledStatus[$c.Id] -eq 'installed'
             installedStatus = $(if ($InstalledStatus.ContainsKey($c.Id)) { $InstalledStatus[$c.Id] } else { 'unknown' })
             platforms = @($platforms[$c.Id])
+            # The page resolves dependencies, pre-ticks profiles and collects
+            # prompts in the browser, so it can only honour a retired id if the
+            # row says so - the same two facts setup.ps1's own menu reads.
+            tombstone = [bool]$c.Tombstone
+            note = $c.RetireNote
         }
     }
     [ordered]@{

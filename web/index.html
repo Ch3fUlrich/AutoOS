@@ -386,6 +386,7 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
   border-color:var(--rule-strong);font-weight:700;
 }
 .chip-ok{background:var(--ok-soft);color:var(--ok)}
+.chip-retired{background:var(--surface-3);color:var(--ink-faint);border-color:var(--rule-strong)}
 .chip-missing{background:var(--warn-soft);color:var(--warn)}
 .providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
 .provider{
@@ -1194,7 +1195,11 @@ applyCols(PREF.get("cols", "auto"));
 
 /* ── dependency maths ─────────────────────────────────────────────────── */
 function canInstall(c, seen = new Set()) {
-  if (!c || c.provider === 'manual' || c.installable === false) return false;
+  // A retired id is not installable by definition: the catalog keeps it so old
+  // selections still resolve, and it installs nothing. Every path on the page —
+  // the profile pre-tick, the dependency closure, the questions, the quick
+  // install — asks this one function, so one answer here covers all of them.
+  if (!c || c.provider === 'manual' || c.tombstone || c.installable === false) return false;
   if (seen.has(c.id)) return true;
   seen.add(c.id);
   return (c.requires || []).every(id => canInstall(BY_ID.get(id), seen));
@@ -2275,6 +2280,9 @@ function platformChip(c) {
 }
 
 function installedChip(c) {
+  // A retired id is never reported installed: that is the one outcome a
+  // tombstone cannot claim, in the page exactly as in the terminal.
+  if (c.tombstone) return "";
   if (c.installed) return '<span class="chip chip-installed" title="Detected locally; package installation will be skipped">✓ Installed</span>';
   if (c.provider === 'manual') return '<span class="chip chip-manual">Vendor setup required</span>';
   return c.installedStatus === 'unknown' ? '<span class="chip" title="No reliable installed-app probe is available">Not checked</span>' : '';
@@ -2308,16 +2316,36 @@ function componentIcon(c) {
   return '<span class="item-icon" aria-hidden="true">' + esc(letter) + img + "</span>";
 }
 
+/* A retired id is shown, labelled and left where it is. Hiding the row would
+   hide the only answer to "where did that product go?", which is precisely why
+   the catalog still carries the id — so the page keeps it visible and makes it
+   un-tickable instead, the same choice the terminal menu makes. */
+function retiredChip(c) {
+  if (!c.tombstone) return "";
+  return '<span class="chip chip-retired" title="' +
+    esc(c.note || "Retired: the id stays known, nothing installs.") + '">retired</span>';
+}
+
+function itemDescription(c) {
+  if (!c.tombstone) return c.description;
+  // The same wording the terminal row uses, plus the note that names what
+  // replaced it: a reader comparing the two must read one product, not two.
+  return c.description + " (retired)" + (c.note ? " — " + c.note : "");
+}
+
 function itemHtml(c) {
   const name = c.homepage
     ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
       esc(c.name) + "</a>"
     : '<span class="item-name">' + esc(c.name) + "</span>";
-  const searchStr = (c.id + " " + c.name + " " + c.description + " " + c.package +
-    (c.installed ? " installed already-installed" : "")).toLowerCase();
+  const searchStr = (c.id + " " + c.name + " " + itemDescription(c) + " " + c.package +
+    (c.installed ? " installed already-installed" : "") +
+    (c.tombstone ? " retired" : "")).toLowerCase();
   const configBtn = c.id === "claude-autostart"
     ? '<button type="button" class="jump-link" data-configure-card="cardClaudeAutostart">⚙ Configure</button>'
-    : (c.prompt
+    // A retired entry keeps the prompt it had; nothing asks it, so offering to
+    // configure it would lead the reader to a field that changes nothing.
+    : (c.prompt && !c.tombstone
       ? '<button type="button" class="jump-link" data-configure-card="cardConfig" data-configure-field="cfg_' + esc(String(c.prompt).split(/[\s,]+/)[0]) + '">⚙ Configure</button>'
       : "");
 
@@ -2333,7 +2361,7 @@ function itemHtml(c) {
     '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '"' + (canInstall(c) ? '' : ' disabled aria-disabled="true"') + '>' +
     componentIcon(c) +
     "<span>" +
-      '<span class="item-title">' + name + installedChip(c) + quick +
+      '<span class="item-title">' + name + retiredChip(c) + installedChip(c) + quick +
         // Everything below is detail: which package exactly, which platforms,
         // where to configure it. Hidden unless the Details toggle is on.
         '<span class="item-detail">' +
@@ -2344,7 +2372,7 @@ function itemHtml(c) {
         "</span>" +
         '<span class="state-chips"></span>' +
       "</span>" +
-      '<span class="item-desc">' + esc(c.description) + "</span>" +
+      '<span class="item-desc">' + esc(itemDescription(c)) + "</span>" +
       '<span class="item-meta"></span>' +
     "</span></label>";
 }

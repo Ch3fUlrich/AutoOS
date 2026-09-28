@@ -73,7 +73,7 @@ const tombstones = [
 ];
 context.BY_ID = new Map(tombstones.map(c => [c.id, c]));
 context.STATE = { components: tombstones };
-for (const name of ['platformChip', 'installedChip', 'iconDomain', 'componentIcon', 'itemHtml', 'retiredChip']) {
+for (const name of ['platformChip', 'installedChip', 'iconDomain', 'componentIcon', 'itemHtml', 'retiredChip', 'itemDescription']) {
   const source = html.match(new RegExp('function ' + name + '\\([^]*?\\n\\}'));
   assert(source, name + ' exists');
   vm.runInContext(source[0], context);
