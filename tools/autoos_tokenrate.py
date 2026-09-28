@@ -30,12 +30,15 @@ the same `requestId` and the same usage, so `Totals.add` keys on
 `response_identity` (the message id and request id, else the uuid), counts the
 first record of a response, and lets a later duplicate only move it into the
 subagent view — never add usage. A turn mirrored into a `subagents/` file is
-still one turn's cost.
+still one turn's cost, and the R5A5 correction is what that promotion carries:
+the *counted* usage, not the duplicate's, because a streaming response's later
+records hold a different (larger) partial usage than the first, and the subagent
+view is a subset of the numerator, never more than it.
 
 Stdlib only; read-only over the transcripts and `git log`. `--json` prints
-`default` rather than the resolved `--projects-dir` when the user did not name
-one — that path carries the operator's username, and a transcript root is not
-part of the answer.
+`default` rather than the resolved `--projects-dir` or `--repo` when the user did
+not name one — both defaults are paths under the operator's home, and where the
+transcripts and the branch were read is not part of the answer.
 """
 from __future__ import annotations
 
@@ -113,9 +116,10 @@ class Totals:
     sum, never a subtraction from them: `weighted` already includes
     `subagent_weighted` (D-045).
 
-    `counted` maps a record `identity` to whether the copy that got counted
-    claimed a subagent, which is what lets a turn written to both a session file
-    and a `subagents/` file count once.
+    `counted` maps a record `identity` to what was actually summed for it — the
+    counted copy's `sidechain` claim and its `weighted`/`naive` — which is what
+    lets a turn written to both a session file and a `subagents/` file count
+    once, and what a later promotion re-uses instead of the duplicate's numbers.
     """
 
     records: int = 0
@@ -134,7 +138,11 @@ class Totals:
         the same response, or the same turn read out of a second file, so it adds
         nothing to `records`/`weighted`/`naive`; the one direction it can still
         move is *into* the subagent view, so a turn mirrored into a `subagents/`
-        file is reported as one there, too.
+        file is reported as one there, too. A promotion moves the *counted*
+        numbers, never the duplicate's own: the client writes the usage of a
+        streaming response as it grows, so the copy that arrived second can name
+        a different cost than the one that got summed, and the view has to stay a
+        subset of the numerator (R5A5).
         """
         weighted = record.weighted()
         naive = record.naive()
@@ -143,15 +151,16 @@ class Totals:
             self.session_ids.add(session)
         key = record.identity
         if key:
-            claimed = self.counted.get(key)
-            if claimed is not None:
+            counted = self.counted.get(key)
+            if counted is not None:
+                claimed, counted_weighted, counted_naive = counted
                 if record.sidechain and not claimed:
                     self.subagent_records += 1
-                    self.subagent_weighted += weighted
-                    self.subagent_naive += naive
-                    self.counted[key] = True
+                    self.subagent_weighted += counted_weighted
+                    self.subagent_naive += counted_naive
+                    self.counted[key] = (True, counted_weighted, counted_naive)
                 return
-            self.counted[key] = record.sidechain
+            self.counted[key] = (record.sidechain, weighted, naive)
         self.records += 1
         self.weighted += weighted
         self.naive += naive
@@ -435,9 +444,15 @@ def _fmt(moment) -> str:
 
 
 def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
-           branch_prefixes=(), since="48h", until=None, now=None) -> dict:
+           branch_prefixes=(), since="48h", until=None, now=None,
+           repo_defaulted=False) -> dict:
     """The §5 numbers: numerator, denominator, both rates, the subagent split,
-    and the stated bias."""
+    and the stated bias.
+
+    `repo_defaulted` is the caller's note that `repo` is its own default — the
+    current working directory — rather than a `--repo` the user named, and it
+    makes the echo say `default` for the same reason `projects_dir` does.
+    """
     projects_dir_named = projects_dir is not None
     projects_dir = Path(projects_dir) if projects_dir_named else (
         Path.home() / ".claude" / "projects")
@@ -464,7 +479,8 @@ def report(projects_dir=None, cwd_prefixes=(), repo=None, branch="main",
         "cwd_prefixes": list(cwd_prefixes),
         "branch_prefixes": list(branch_prefixes),
         "projects_dir": str(projects_dir) if projects_dir_named else "default",
-        "repo": str(repo) if repo else None,
+        "repo": (None if repo is None else
+                 ("default" if repo_defaulted else str(repo))),
         "branch": branch,
     }
 
@@ -543,7 +559,8 @@ def main(argv=None) -> int:
         data = report(projects_dir=args.projects_dir, cwd_prefixes=args.cwd_prefixes,
                       repo=repo if args.git else None, branch=args.branch,
                       branch_prefixes=args.branch_prefixes,
-                      since=_fmt(start), until=_fmt(end))
+                      since=_fmt(start), until=_fmt(end),
+                      repo_defaulted=args.repo is None)
     except ValueError as exc:
         print("token-rate: %s" % exc, file=sys.stderr)
         return 2

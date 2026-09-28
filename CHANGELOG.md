@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `token-rate` promotion re-uses the counted usage; `--json` hides the default repo (RESTART R5A5, Muse's fix-first review of R5A3+R5A4, 2026-09-28)
+
+- **`tools/autoos_tokenrate.py`** (HIGH): R5A4's `Totals.add` lets a second copy
+  of one response add no usage and still move it *into* the subagent view — and
+  the move carried the **duplicate's** numbers. The two are only equal while every
+  copy of a response repeats the same usage, which this client does not do:
+  measured over the R5a window, 872 of the 13,691 collapsed duplicates carry a
+  different usage than the record that got counted (the growing partial usage of
+  a streaming response, R5A4's own "first-wins, measured" note), so a promotion
+  could put more into `subagent_weighted` than `weighted` holds for that response
+  and break D-045's rule that the subagent columns are a *view onto* the
+  numerator. `counted` now stores what was summed beside the claim —
+  `(sidechain, weighted, naive)` per identity — and a promotion re-uses exactly
+  those. **Latent on this host**: 0 promotions occur over the whole R5a window
+  (parent and `subagents/` files share no response id, as R5A3 measured), so all
+  three rows re-ran to R5A4's numbers to the token — L1-routing 4,964 records /
+  104,768,807.8 weighted / 24,380,131.1 subagent / 23.3 % / 28 merges /
+  3,741,743.1 per merge, L1-backlog 6,205 / 135,999,291.6 / 62,663,439.9 /
+  46.1 % / 34 / 3,999,979.2, L1-main 4,034 / 107,119,446.4 / 45,288,117.6 /
+  42.3 % / 76 / 1,409,466.4. No before-number moved; R5b still compares against
+  the R5A4 table.
+- **`--json`**: an unnamed `--repo` prints `"default"` instead of the resolved
+  current directory. That was the same leak R5A3 closed for `--projects-dir`
+  (hard rule 1 — the path carries the operator's username), reached by a
+  different flag; a named `--repo` is still echoed as given, and `--no-git` still
+  reports no repo at all.
+- **`tests/test_autoos_tokenrate.py`**: 6 new cases — the promotion across the two
+  depths with a deliberately *larger* duplicate (the streaming shape), a property
+  sweep over the fixture usages at both depths asserting
+  `subagent_weighted <= weighted` and `subagent_naive <= naive` for every
+  ordering, and four `--json` repo cases (report-level and CLI-level, defaulted
+  and named). 15 red before the fix (the promotion case, 12 of its sweep
+  subtests, and the two repo echoes), **66 green + 32 subtests** after;
+  `python3 -m pytest -q tests/` 2,245 passed / 4 skipped,
+  `bash tests/run-tests.sh --filter token-rate` 1 passed / 0 failed.
+
 ### Changed — `token-rate` counts each API response once (RESTART R5A4, the metric owner's answer to R5A3's open caveat, 2026-09-28)
 
 - **`tools/autoos_tokenrate.py`**: R5A3 left the numerator counting *turns x

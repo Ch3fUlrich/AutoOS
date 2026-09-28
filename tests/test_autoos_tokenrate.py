@@ -166,6 +166,18 @@ def git(repo, *args, env_extra=None):
     return proc.stdout
 
 
+def init_repo(path):
+    """A throwaway checkout with a `main` and one plain commit, so `count_merges`
+    has a branch to read and 0 merges to report."""
+    repo = Path(path)
+    repo.mkdir(parents=True, exist_ok=True)
+    git(repo, "init", "-b", "main")
+    (repo / "f").write_text("1\n", encoding="utf-8")
+    git(repo, "add", "f")
+    git(repo, "commit", "-m", "chore: base")
+    return repo
+
+
 class WeightTests(unittest.TestCase):
     """The 0.1 cache-read weight and the four summed fields (spec §5)."""
 
@@ -570,6 +582,65 @@ class ResponseDedupTests(unittest.TestCase):
         self.assertEqual(res.subagent_records, 1)
         self.assertAlmostEqual(res.subagent_weighted, 400.0)   # not 800
 
+    def test_a_promoting_duplicate_adds_the_counted_usage_not_its_own(self):
+        """R5A5 finding 1 (HIGH): the streaming case makes the two copies of one
+        response *differ*. The parent file holds the first, partial record (50
+        weighted); the `subagents/` copy carries the finished usage (400). The
+        totals kept the first, so the promotion must reuse the first — otherwise
+        the view reports 400 of a 50 weighted numerator."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(input_tokens=50, mid="msg-grow-mirror")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-grow-mirror",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 50.0)          # the first record's
+        self.assertEqual(res.naive, 50)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 50.0)  # not the duplicate's 400
+        self.assertEqual(res.subagent_naive, 50)
+        self.assertLessEqual(res.subagent_weighted, res.weighted)
+
+    def test_the_promoted_view_is_always_a_subset_of_the_numerator(self):
+        """Property over the fixture set: `subagent_weighted` is a *view onto*
+        the records the plain field already sums (D-045), so it can never exceed
+        it — whatever order copies of one response arrive in, and whatever usage
+        each copy claims. Sweeps the fixture usages at both depths, deliberately
+        mismatching the parent's and the duplicate's numbers (the streaming
+        partial usage is what made the bug visible)."""
+        usages = [dict(self.BLOCK), dict(input_tokens=50),
+                  dict(input_tokens=10, output_tokens=20, cache_creation=30,
+                       cache_read=400),
+                  dict(input_tokens=0)]
+        for parent_usage, dup_usage in itertools.product(usages, usages):
+            for parent_sidechain in (False, True):
+                parent = [usage_line(**parent_usage, mid="msg-sweep",
+                                     sidechain=parent_sidechain)]
+                dups = [usage_line(**dup_usage, mid="msg-sweep",
+                                   sidechain=parent_sidechain),
+                        usage_line(**dup_usage, mid="msg-sweep", sidechain=True)]
+                first = tr.parse_record(parent[0])
+                total = tr.sum_records(tr.iter_usage_records(parent + dups))
+                with self.subTest(parent=parent_usage, dup=dup_usage,
+                                  parent_sidechain=parent_sidechain):
+                    self.assertEqual(total.records, 1)
+                    self.assertAlmostEqual(total.weighted, first.weighted())
+                    self.assertEqual(total.naive, first.naive())
+                    # the view re-uses the response that was counted, never the
+                    # duplicate's own numbers, and so stays inside the numerator
+                    self.assertEqual(total.subagent_records, 1)
+                    self.assertAlmostEqual(total.subagent_weighted,
+                                           first.weighted())
+                    self.assertEqual(total.subagent_naive, first.naive())
+                    self.assertLessEqual(total.subagent_weighted, total.weighted)
+                    self.assertLessEqual(total.subagent_naive, total.naive)
+                    self.assertLessEqual(total.summary().subagent_share_pct() or 0,
+                                         100.0)
+
     def test_the_report_and_the_cli_count_each_response_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             projects = Path(tmp)
@@ -587,7 +658,8 @@ class ResponseDedupTests(unittest.TestCase):
 
 class ProjectsDirEchoTests(unittest.TestCase):
     """`--json` must not print the default transcript root — it carries the
-    operator's username — unless the user named it."""
+    operator's username — unless the user named it. The repo path is the same
+    secret by the same route: its default is the current working directory."""
 
     def test_an_explicit_projects_dir_is_echoed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -598,6 +670,33 @@ class ProjectsDirEchoTests(unittest.TestCase):
                             since="2026-09-26T00:00:00Z",
                             until="2026-09-29T00:00:00Z")
         self.assertEqual(res["projects_dir"], str(projects))
+
+    def test_a_defaulted_repo_is_not_echoed(self):
+        """The default repo is the resolved cwd, and a cwd under the operator's
+        home is not part of the answer: say `default`, echo the path only when
+        the user named it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, repo_defaulted=True,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], "default")
+        self.assertNotIn(str(repo), json.dumps(res))
+
+    def test_a_named_repo_is_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], str(repo))
 
 
 class WindowTests(unittest.TestCase):
@@ -868,10 +967,10 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_tool(self, *args):
+    def run_tool(self, *args, cwd=None):
         return subprocess.run([sys.executable, str(TOKENRATE)] + list(args),
                               capture_output=True, text=True, env=self.env,
-                              cwd=str(ROOT), stdin=subprocess.DEVNULL)
+                              cwd=str(cwd or ROOT), stdin=subprocess.DEVNULL)
 
     def test_cli_prints_all_fields(self):
         proc = self.run_tool("--projects-dir", str(self.projects),
@@ -959,6 +1058,34 @@ class CliTests(unittest.TestCase):
                              "--until", "2026-09-28T00:00:00Z", "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["projects_dir"], str(self.projects))
+
+    def test_cli_json_without_repo_prints_default_not_the_cwd(self):
+        """The denominator's default is the current directory — on the
+        orchestrator's machine a path holding its username — so an unnamed
+        `--repo` is reported as `default`, exactly as `--projects-dir` is."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX,
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json",
+                                 cwd=str(repo))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], "default")
+        self.assertEqual(data["merges"], 0)
+        self.assertNotIn(str(repo), proc.stdout)
+
+    def test_cli_json_echoes_an_explicit_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX, "--repo", str(repo),
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], str(repo))
 
     def test_repeatable_branch_prefix(self):
         proc = self.run_tool("--projects-dir", str(self.projects), "--no-git",
