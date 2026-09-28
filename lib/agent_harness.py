@@ -277,19 +277,29 @@ def _role_bash(role, fences):
     return bash
 
 
+def _path_key(path):
+    """Comparison form of an instructions path: trimmed, '/' separators, case-folded.
+
+    Case-folded because Windows paths are case-insensitive and hand-written
+    entries vary the drive letter, the clone's spelling and SKILL.md's case.
+    """
+    return "/" + str(path).strip().replace("\\", "/").casefold().strip("/")
+
+
 def _stale_skill_entry(entry, skills, skills_source):
-    """True for a managed skill's SKILL.md under an agent-skills clone, not `skills_source`."""
+    """True for a managed skill's SKILL.md in the retired agent-skills clone layout.
+
+    That layout is exactly <clone>/agent-skills/skills/<skill>/SKILL.md (the
+    installers' old skills_source); anything else under a directory named
+    agent-skills is the user's, and so is anything under `skills_source`.
+    """
     if not isinstance(entry, str):
         return False
-    # Case-folded: Windows paths are case-insensitive, and hand-written entries
-    # vary the drive letter, the clone's spelling and SKILL.md's case.
-    norm = "/" + entry.replace("\\", "/").casefold().lstrip("/")
-    source = "/" + str(skills_source).replace("\\", "/").casefold().strip("/") + "/"
-    if norm.startswith(source):
+    norm = _path_key(entry)
+    if norm.startswith(_path_key(skills_source) + "/"):
         return False
-    return "/agent-skills/" in norm and any(
-        norm.endswith("/%s/skill.md" % skill.casefold()) for skill in skills
-    )
+    return any(norm.endswith("/agent-skills/skills/%s/skill.md" % skill.casefold())
+               for skill in skills)
 
 
 def desired_opencode(user, harness, repo_root, skills_source):
@@ -337,10 +347,14 @@ def desired_opencode(user, harness, repo_root, skills_source):
             entry for entry in instructions
             if not _stale_skill_entry(entry, harness["rules"]["skills"], skills_source)
         ]
+        # Same comparison form as the stale check, so the current entry in
+        # another spelling is not appended a second time.
+        present = {_path_key(e) for e in instructions if isinstance(e, str)}
         for skill in harness["rules"]["skills"]:
             entry = _join(skills_source, skill, "SKILL.md")
-            if entry not in instructions:
+            if _path_key(entry) not in present:
                 instructions.append(entry)
+                present.add(_path_key(entry))
     leaf_contract = _join(repo_root, harness["rules"]["leaf_contract"])
     if leaf_contract not in instructions:
         instructions.append(leaf_contract)
