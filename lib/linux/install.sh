@@ -4214,7 +4214,13 @@ install_omnigraph_client() {
     omnigraph_install_wrapper || return 1
     omnigraph_retire_rc_token_lines
 
-    if (( ! OMNIGRAPH_CLIENT_CHANGED )); then
+    if (( AUTOOS_DRY_RUN )); then
+        # A dry run only announces: it never sets the changed flags, so claiming
+        # "already installed and current" would report a comparison that did not
+        # happen. Say what the mode means instead.
+        ui_info "omnigraph-client: dry run: nothing was written"
+        INSTALL_SCRIPT_STATE=skipped
+    elif (( ! OMNIGRAPH_CLIENT_CHANGED )); then
         ui_info "omnigraph-client: skipped: already installed and current"
         INSTALL_SCRIPT_STATE=skipped
     fi

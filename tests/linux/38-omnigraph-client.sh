@@ -350,6 +350,11 @@ if it "omnigraph-client: a dry run announces and writes nothing"; then
     rm -rf "$tmp"
     ok=1
     [[ "$out" == *"would "* ]] || { ok=0; echo "nothing was announced: [${out:0:300}]" >&2; }
+    [[ "$out" == *"dry run: nothing was written"* ]] \
+        || { ok=0; echo "the dry run did not name itself: [${out:0:300}]" >&2; }
+    # A dry run compares nothing, so it must not claim the machine is already
+    # current — that message would read as "a real run has nothing to do".
+    [[ "$out" != *"already installed"* ]] || { ok=0; echo "the dry run claimed the state was current" >&2; }
     [[ "$out" != *"NPM RAN"* ]] || { ok=0; echo "npm ran in a dry run" >&2; }
     [[ "$files" == 0 ]] || { ok=0; echo "the dry run wrote $files files" >&2; }
     (( ok )) && pass || fail "the dry run is not clean"

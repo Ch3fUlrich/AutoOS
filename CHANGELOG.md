@@ -34,7 +34,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rc-file line that both reads from the retired `agent-skills` tree and names
   `OMNIGRAPH_TOKEN` is removed after a backup, anything else in the file stays.
   `custom_is_installed` learns the component, so a second run reports `skipped`
-  at the package level too and every step says `unchanged`.
+  at the package level too and every step says `unchanged`. A `--dry-run`
+  announces each step and ends `dry run: nothing was written` — it never claims
+  the machine is already current, because a dry run compares nothing.
 - **`tools/omnigraph-mcp-autoos.sh`**, **`.ps1`**: the bridge launcher an MCP
   client calls. It reads `~/.autoos-omnigraph.env` itself — only the three
   `OMNIGRAPH_*` keys, values assigned and never evaluated, a value already in the

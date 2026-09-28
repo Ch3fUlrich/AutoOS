@@ -155,6 +155,11 @@ installed`), and the wrapper file is replaced only when its content differs and
 only if it carries the `# AutoOS:omnigraph-mcp-autoos` marker — a file of the
 user's own at that path is left alone with a warning.
 
+`--dry-run` prints each of the four steps as a `would …` line and writes
+nothing. It cannot report "already current": a dry run compares nothing, so the
+last line is `dry run: nothing was written` rather than a claim about the
+machine.
+
 This repository's own `.mcp.json` still runs the bridge through `npx` at project
 scope: that entry is the repo's, not a machine default, and is unchanged here.
 
