@@ -170,18 +170,27 @@ Available standalone MCP components in the catalog:
 - `mcp-context7`: Real-time documentation lookups via `@upstash/context7-mcp`.
 - `omnigraph-client`: the machine half of `omnigraph` on all three platforms —
   the env file (`~/.autoos-omnigraph.env`, mode 600 on the shell side, user-only
-  ACL on the Windows side) holding the server URL and the bearer token, the
-  pinned bridge pre-installed into a private npm prefix, and the
-  `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with a
-  hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing —
-  it is the only component that asks for that answer.
-  See `docs/omnigraph.md` ("The `omnigraph-client` component", "On Windows").
+  ACL on the Windows side) holding the server URL and the
+  bearer token, the pinned bridge pre-installed into a private npm prefix, and
+  the `omnigraph-mcp-autoos` wrapper a user-scope MCP entry calls. It skips with
+  a hint when the `omnigraph_url` answer or the `omnigraph_token` key is missing.
+  It is also where the MCP *wiring* that names `omnigraph` lives: it approves this
+  checkout's project servers, warns about a user-scope `omnigraph` instead of
+  writing one, writes Antigravity's `omnigraph` entry (that config has no project
+  scope), and names the retired tree's user-scope `homelab` leftover without
+  removing it — the operator deferred the homelab MCP switch (2026-09-28), so the
+  entry stays until the server-side homelab MCP replaces it. Those four
+  steps run even when the URL answer is blank — only the artifacts that carry the
+  URL and token wait for it. See `docs/omnigraph.md`
+  ("The `omnigraph-client` component", "On Windows").
+- `agent-skill-links`: links this checkout's `.agents/skills` into every client's
+  skills directory — the table in AGENTS.md section 8 is which directory each
+  client reads, and `link_skill_dirs` is the one link rule they all go through.
 
-The `agent-skills` component wires the complete MCP stack above, along with
-`omnigraph` project-scoped memory, and links this repository's own skills into
-whatever directory each client reads. It clones nothing: the servers it wires are
-declared by this checkout's `.mcp.json`, and the machine half of `omnigraph` is
-`omnigraph-client`'s (SPEC-OMNI D14).
+The retired `agent-skills` component is a **tombstone**: the id stays known so an
+old selection or state file still resolves, its step installs nothing and only
+names the components that took its work — `agent-skill-links`, `omnigraph-client`
+and the four `mcp-*` components, which each register their own server.
 
 | Server | Scope | Configuration & Precedence |
 |---|---|---|
@@ -215,8 +224,12 @@ overwrite a config wholesale).
 ### What AutoOS does not do
 
 Omnigraph is a container talking to a graph server over a Docker network. AutoOS
-does not build the image, start the stack or issue credentials — it checks and
-names whichever of these is missing:
+does not build the image, start the stack or issue credentials. Its own check is
+the client side, run by the tool that can actually reach the server —
+`tools/check-omnigraph.py` names a missing token, a rejected token or a missing
+graph (the healthchecks call it; `docs/omnigraph.md` documents it). No install
+step guesses at readiness from across a machine it cannot see. These are still how
+a mis-set-up server shows up at MCP start-up:
 
 | Missing | How it fails at MCP start-up |
 |---|---|
