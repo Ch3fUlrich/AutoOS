@@ -11,7 +11,7 @@ Anything not verifiable in this checkout is marked `(inference)` or
 `(brief-sourced)`. Content from the sibling branches is cited by
 branch + file + line and explicitly flagged **(sibling-branch)** — those lines
 were verified with `git show <branch>:<file>` before citing, not trusted from
-the brief. Placeholders (`<management host>`, `<tailnet>`, `example.internal`)
+the brief. Placeholders (`<management host>`, `<tailnet>`, `example.com`)
 are never real values — this repository is public (`AGENTS.md:16`).
 
 Related specs (sibling branches, NOT in this checkout): fleet-node
