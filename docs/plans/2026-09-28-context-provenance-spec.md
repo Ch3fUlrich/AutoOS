@@ -108,9 +108,11 @@ missing is the file-store mechanics underneath, designed in §§4–5 here.
 
 1. **Lineage timeline** — generations 1..n for one agent identity, with the
    restart reason per generation. Query against the file store: §4 lineage scan
-   (filter `events.jsonl` on `session`, order by `generation`), or — once fleetd
-   exists — the sibling `generations` table. Renders one row per manifest:
-   generation, reason (RESTART's `reason` enum reused VERBATIM —
+   (filter `events.jsonl` on `session` AND `type=context_pack` — `card`
+   versions are excluded from this view, see §4 — order by `generation`), or —
+   once fleetd exists — the sibling `generations` table. Renders one row per
+   `context_pack` manifest:
+   generation (the manifest's `generation` field verbatim, packs only), reason (RESTART's `reason` enum reused VERBATIM —
    `cap`|`clear`|`crash`|`operator`|`first` — per
    `docs/plans/2026-09-28-restart-spec.md:303`; no new enum anywhere in this
    spec), pack item count, timestamp. No new fleetd endpoint: the sibling
@@ -152,7 +154,10 @@ forward pass, incrementally maintained — not queries against the files per vie
   full manifest inline (per `docs/plans/2026-09-28-restart-spec.md:298-299`).
   Cursor = `(byte_offset, line_count)` persisted beside the index; at-least-once
   re-read from the cursor is safe because manifest ids are content hashes —
-  re-indexing an id is idempotent.
+  re-indexing an id is idempotent. Concretely: `manifests` overwrites the same
+  key, while `lineage` and `blob_use` append a manifest_id only if it is not
+  already present in that key's list — builders hold a per-key seen-set during
+  a rebuild-from-cursor pass, so a re-read never duplicates a list entry.
 - **Shape** (three maps, all derived — no new stored truth):
   - `lineage: session_name → [manifest_id ordered by generation]` — answers
     "all manifests for lineage X". Generation order comes from the manifest's
@@ -161,15 +166,29 @@ forward pass, incrementally maintained — not queries against the files per vie
   - `manifests: manifest_id → byte_offset in events.jsonl` — O(1) point lookup
     for diff/why/replay without reparsing the stream. Full manifest JSON is
     re-read from the offset on demand; only the offset table stays resident.
-  - `blob_use: blob_sha → [manifest_id, …]` — answers "all generations that
-    used pack P" (equivalently: which successors inherited an identical prefix
-    blob, the dedup property of `docs/plans/2026-09-28-restart-spec.md:295-296`).
+    The stream is the index's source of truth — not the per-manifest files at
+    `manifests/<id>.json` (`docs/plans/2026-09-28-restart-spec.md:297`) —
+    because the stream gives global ordering plus a single sequential read
+    path, while the manifest files are the replay/diff source of record, read
+    on demand and never indexed directly. If `events.jsonl` is ever unreadable
+    while manifest files survive, the index rebuilds from a scan of
+    `manifests/*.json` (ordering via each manifest's `generation`/`parent`
+    chain), so the stream is the fast path, not the only path.
+  - `blob_use: blob_sha → [manifest_id, …]` — answers "which manifests
+    referenced blob B". "Which successors share pack P's prefix" is answered by
+    expanding P's own blob shas first (its `parts` map), then unioning
+    `blob_use` over them — identical-prefix successors fall out of the dedup
+    property of `docs/plans/2026-09-28-restart-spec.md:295-296`.
     Built by inverting each manifest's `parts` map
     (`docs/plans/2026-09-28-restart-spec.md:304`).
 - **Card versions** ride the same stream: `card`-type events index under
   `lineage[session]` with their `parent` chain
   (`docs/plans/2026-09-28-restart-spec.md:313-314`), so "diff any two waves" is
-  two point lookups, never a scan.
+  two point lookups, never a scan. View 1 (§3.1) excludes them by filtering its
+  query to `type=context_pack`, so its "generation" column is the manifest's
+  `generation` field (`docs/plans/2026-09-28-restart-spec.md:302`) over packs
+  only, shown verbatim — numbers may skip where an intervening `card` version
+  consumed a generation, and the view does not renumber them.
 - **fleetd ingestion** (inference: sibling lanes own both ends) is one consumer
   of this same pass: each new event line maps to rows in the sibling §4.5 tables
   (`generations`, `manifest_items`, `pack_blobs`, `output_links`,
@@ -191,10 +210,16 @@ decision" works off files alone:
   it by rule (`docs/plans/2026-09-28-restart-spec.md:307-309`).
 - **The one pin this spec adds**: the linkage token is always the literal suffix
   `gen=<16-hex-manifest-id>` (the id form at
-  `docs/plans/2026-09-28-restart-spec.md:297`), trailing the decision line
-  (ready line, `Q:`/`D-` entry) or carried in the memory write's `gen` field
-  (inference: the sibling MEMSPEC lane already records author session + restart
-  generation id on every write, §2 — files-side, the `gen` field IS the token).
+  `docs/plans/2026-09-28-restart-spec.md:297`) on decision lines — trailing the
+  ready line or `Q:`/`D-` entry. The same token is carried, not as a text
+  suffix, in the other two forms: mid-line in the card header
+  (`| gen=<manifest-id> |`, header shape at
+  `docs/plans/2026-09-28-restart-spec.md:141`) and as the JSON `gen` field value
+  on a memory write (inference: the sibling MEMSPEC lane on branch
+  `L1-backlog/memspec`, `docs/plans/2026-09-28-memory-facade-spec.md`
+  recall/version/event-envelope contract, already records author session +
+  restart generation id on every write — files-side, the `gen` field IS the
+  token).
   No second id scheme, no lookup table: the token resolves through the §4
   `manifests` map directly.
 - **What this deliberately does NOT add**: no signature, no ack, no backlink
@@ -210,10 +235,15 @@ Style follows the sibling console spec's §8 Mobile UX convention (sibling branc
 `L2-general/fleetspec`, `docs/plans/2026-09-28-fleet-console-spec.md` §8):
 ~40 cols, `+---+` boxes, `▸` affordances — these four views extend the sibling
 §§8.8–8.9 sketches to the file-store fields (manifest ids, reasons, prune
-states), they do not restyle them.
+states), they do not restyle them. Where the sibling §8.8 sketch shows
+`kind: spawn|restart` with its own reason strings (e.g. `"split"`,
+`"ctx 82% (RESTART)"`), the file-local views here use RESTART's own `reason`
+enum verbatim (`cap`|`clear`|`crash`|`operator`|`first`); reconciling the two
+vocabularies into the sibling column is owned by the §7 step-4 ingestion
+mapping, not by these sketches.
 
 ```
-Lineage: t2-a (4 gens)
+Lineage: t2-a (4 gens, context_pack only)
 +--------------------------------------+
 | t2-a · lineage               [live]  |
 | g-01 first    pack:ab12.. 12 items  |
