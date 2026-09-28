@@ -1418,6 +1418,14 @@
         }
       }
     },
+    "risk_audit_percent": {
+      "$comment": [
+        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): how much of the NORMAL-risk work gets the Sonnet final on top of its two cheap cross-family reviews. tools/autoos_risk.py audit() decides it as int(sha[:12], 16) % 100 < percent — deterministic in the commit itself, so re-running the classifier after an unlucky draw cannot shop for a friendlier bucket.",
+        "Why a sample instead of a rule: the final is the expensive eye. Paying it on 100% of normal work is the cost this routing scheme exists to avoid; paying it on 0% would make the audit meaningless. The value stays clock-free and machine-free (rule 5), so the draw is a property of the commit."
+      ],
+      "source": "operator Q-013 2026-09-28",
+      "value": 20
+    },
     "risk_rules": [
       {
         "pattern": "configuration/api-keys.yml",
@@ -1477,8 +1485,125 @@
         "reason": "security settings",
         "source": "default",
         "type": "path_glob"
+      },
+      {
+        "pattern": ".agents/skills/**",
+        "reason": "skill rules",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "AGENTS.md",
+        "reason": "policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "CLAUDE.md",
+        "reason": "policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "docs/plans/**",
+        "reason": "plans/specs (R-orch-13)",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "docs/agent-protocol.md",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "tools/autoos_agent_mcp.py",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "catalog/*.schema.json",
+        "reason": "public API/contract",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "tools/autoos_redact.py",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.key",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*secret*",
+        "reason": "secrets",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/migrations/**",
+        "reason": "data migrations",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/*.pg",
+        "reason": "data migrations",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "Windows/ansible/**",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/install*.sh",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "**/install*.ps1",
+        "reason": "installer",
+        "source": "operator Q-013 2026-09-28",
+        "type": "path_glob"
+      },
+      {
+        "pattern": "\\bsudo\\b",
+        "reason": "root/sudo (R-orch-10)",
+        "source": "operator Q-013 2026-09-28",
+        "type": "added_regex"
+      },
+      {
+        "reason": "routing policy",
+        "source": "operator Q-013 2026-09-28",
+        "type": "registry_policy"
       }
     ],
+    "review_counts": {
+      "$comment": [
+        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): what each risk class costs in review eyes. cross_family is how many reviewers tools/autoos_resolver.py _select_reviewers must pick from a family other than the author's; final is whether the Claude-client Sonnet close (spec 5.7 D2, the resolver's own _CLOSER) runs on top of them.",
+        "The class itself is no longer the writer's call: tools/autoos_risk.py reads it off the diff against policy.risk_rules, so these numbers are what a high-risk diff pays, not what it volunteers. Normal work gets two cheap cross-family reviews plus the sampled final (policy.risk_audit_percent); high work gets one cheap review plus the final, never two cheap passes standing in for it."
+      ],
+      "high": {
+        "cross_family": 1,
+        "final": true,
+        "source": "operator Q-013 2026-09-28"
+      },
+      "normal": {
+        "cross_family": 2,
+        "final": false,
+        "source": "operator Q-013 2026-09-28"
+      }
+    },
     "seed_priors": {
       "cheap": {
         "S0": {

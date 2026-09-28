@@ -74,6 +74,7 @@ Usage:
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
+    python3 tools/autoos-agent.py risk --sha <sha> --base origin/main   # the diff's risk class
 
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
@@ -169,6 +170,7 @@ import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
+import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
@@ -1235,6 +1237,43 @@ def print_review_report(label, report):
     if not report["entries"]:
         print("  note: write one line per review, e.g.: %s" % report["hint"])
     print("ready: %s" % ("yes" if report["ready"] else "no"))
+
+
+def cmd_risk(args) -> int:
+    """Classify a commit's diff by risk (RISKTIER-a, operator Q-013/D-060).
+
+    The writer does not grade its own work: the class comes from the diff, read
+    against `policy.risk_rules` by tools/autoos_risk.py. Prints
+
+        risk: high
+          reason: secrets handling: configuration/api-keys.yml
+        audit: no (20%)
+
+    on stdout; `--json` prints the whole assessment (reasons, the audit draw and
+    the changed files) instead. Exit 0 classified, 2 the diff or the registry
+    could not be read — an unclassified diff is never reported as `normal`,
+    because a secrets change that reads as low risk gets one cheap review.
+    """
+    try:
+        registry = load_registry(args.registry or REGISTRY_PATH)
+    except (OSError, ValueError) as exc:
+        print("risk: cannot read the registry %s: %s" % (args.registry or REGISTRY_PATH, exc),
+              file=sys.stderr)
+        return 2
+    try:
+        out = risk.assess(args.repo, args.base, args.sha, registry)
+    except risk.RiskError as exc:
+        print("risk: %s" % exc, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+    print("risk: %s" % out["risk"])
+    for reason in out["reasons"]:
+        print("  reason: %s" % reason)
+    print("audit: %s (%d%%)" % ("yes" if out["audit"] else "no",
+                                out["audit_percent"]))
+    return 0
 
 
 def cmd_review_status(args) -> int:
@@ -4467,6 +4506,25 @@ def _parser_route(sub):
     route.add_argument("--now", help="ISO 8601 UTC clock reading (default: now)")
 
 
+def _parser_risk(sub):
+    risk_p = sub.add_parser(
+        "risk", help="classify a commit's diff as normal or high risk from "
+                     "policy.risk_rules (RISKTIER-a): the writer does not grade "
+                     "its own work, the diff does")
+    risk_p.add_argument("--sha", required=True,
+                        help="the commit to classify (any rev git accepts)")
+    risk_p.add_argument("--base", default="origin/main",
+                        help="the diff's other end, compared at its merge base "
+                             "with --sha (default: %(default)s)")
+    risk_p.add_argument("--repo", default=".",
+                        help="git checkout to read the diff from (default: the cwd)")
+    risk_p.add_argument("--registry",
+                        help="registry holding policy.risk_rules "
+                             "(default: catalog/ai-registry.json)")
+    risk_p.add_argument("--json", action="store_true",
+                        help="print the whole assessment as one JSON object")
+
+
 def _parser_review_status(sub):
     review_status_p = sub.add_parser(
         "review-status", help="read a lane record and report whether it carries both "
@@ -4535,6 +4593,7 @@ VERB_PARSERS = {
     "context": _parser_context,
     "heartbeat": _parser_heartbeat,
     "route": _parser_route,
+    "risk": _parser_risk,
     "review-status": _parser_review_status,
     "ready": _parser_ready,
     "inbox": _parser_inbox,
@@ -4554,6 +4613,7 @@ VERB_HANDLERS = {
     "ready": lambda args, cfg: cmd_ready(args),
     "review-status": lambda args, cfg: cmd_review_status(args),
     "route": lambda args, cfg: cmd_route(args),
+    "risk": lambda args, cfg: cmd_risk(args),
     "run": lambda args, cfg: cmd_run(args, cfg),
 }
 

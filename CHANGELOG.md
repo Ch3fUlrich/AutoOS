@@ -5,6 +5,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the risk class of a change is decided from its diff, by code (RISKTIER-a, 2026-09-28)
+
+- **Operator Q-013 / D-060**: `card.risk` was the writer's own typing, and the
+  registry's `policy.risk_rules` were data no code read. `tools/autoos_risk.py`
+  (stdlib, pure, one injectable git runner) now applies every rule to the diff at
+  `merge-base(base, sha)`: `path_glob` and `diff_deletion` (the two declared
+  shapes), plus the two the operator asked for — `added_regex`, an added line
+  matching a pattern (`\bsudo\b`, case-sensitive and deliberately textual: a test
+  that only *mentions* sudo raises the class), and `registry_policy`, which loads
+  `catalog/ai-registry.json` at both ends and compares only its `policy` object,
+  so a models-only edit is not a routing-policy edit. `audit(sha, percent)` is
+  `int(sha[:12], 16) % 100 < percent`: a property of the commit, so re-running
+  after an unlucky draw cannot shop for a friendlier bucket. Any git failure
+  raises `RiskError` (exit 2) — an unreadable diff never reads as `normal`.
+- **`tools/registry.py` rule 12** validates the new shapes, and refuses a rule
+  field its type does not read. A `paths` on a `path_glob` looks like a scope and
+  is not one; `classify()` ignores it silently, so validate says it out loud.
+  `policy.risk_rules` grows the 17 operator rules; `risk_audit_percent` (20) and
+  `review_counts` (normal 2 cross-family / high 1 + final) carry their source.
+- **`tools/autoos_resolver.py:_review_policy()`** reads the count from
+  `policy.review_counts[risk].cross_family` and the Sonnet close from `final`,
+  falling back to D2's constants when a registry predates the field — tested both
+  ways. The zero-reviewer case now genuinely means zero (the cap is checked
+  before the pick, not after).
+- **Two silent-`normal` bugs found while reviewing this** (both red before the
+  fix, `tests/test_autoos_risk.py`): a developer's `diff.noprefix=true` removes
+  the `b/` the `+++` header is read through, so *every* added line vanishes and a
+  sudo change classifies as normal; and git escapes an added line that starts
+  with a plus by doubling it, so a line of `+++++ x` in a test fixture was
+  dropped as a header. The default runner now pins `core.quotepath`,
+  `diff.noprefix`, `color.diff` and `--no-ext-diff`, and the parser tells a
+  header from content by hunk position.
+- **CLI**: `python3 tools/autoos-agent.py risk --sha <sha> [--base origin/main]
+  [--repo .] [--json]`. Wiring that class into `ready`/`review-status` is the
+  sibling lane (RISKTIER-b). Tests: `tests/test_autoos_risk.py`, wired into both
+  harnesses.
+
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the

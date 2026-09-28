@@ -1930,6 +1930,65 @@ class PlanTests(unittest.TestCase):
             "reason": "cross-family reviewer(s): r-free, r-cheap",
         })
 
+    def test_review_counts_come_from_the_policy_when_the_registry_declares_them(self):
+        # RISKTIER-a: what a class costs is registry data, not a constant here.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 2, "final": False, "source": "test"},
+            "high": {"cross_family": 1, "final": True, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        # r-free (alpha) chosen: the two cheapest other families are r-cheap
+        # (beta) and r-mid (gamma); r-frontier is alpha again, so it stays out.
+        self.assertEqual(plan["reviewers"]["routes"], ["r-cheap", "r-mid"])
+        self.assertIsNone(plan["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["routes"], ["r-cheap"])
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
+    def test_review_counts_declaring_no_final_leaves_the_closer_out(self):
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "high": {"cross_family": 2, "final": False, "source": "test"},
+        }
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(high["reviewers"]["closer"], None)
+
+    def test_a_policy_asking_for_no_cross_family_reviewer_gets_none(self):
+        # zero means zero. The pick loop breaks on the cap BEFORE appending, so
+        # a 0-count policy routes no reviewer at all; an append-then-check loop
+        # (what the hard-coded table made harmless) would always return one.
+        registry = self.registry()
+        registry["policy"]["review_counts"] = {
+            "normal": {"cross_family": 0, "final": False, "source": "test"},
+        }
+        plan = r.plan(self.card(), self.features(), self.state(), registry,
+                      {}, [], "orch", self.now())
+        self.assertEqual(plan["reviewers"]["routes"], [])
+        self.assertIsNone(plan["reviewers"]["closer"])
+        self.assertIn("cross-family reviewer(s):", plan["reviewers"]["reason"])
+
+    def test_an_absent_review_counts_key_falls_back_to_d2s_numbers(self):
+        # The constants stay as the fallback, so a registry that predates
+        # policy.review_counts routes exactly as it did before the field.
+        registry = self.registry()
+        registry["policy"].pop("review_counts", None)
+        normal = r.plan(self.card(), self.features(), self.state(), registry,
+                        {}, [], "orch", self.now())
+        self.assertEqual(normal["reviewers"]["routes"], ["r-cheap"])
+        self.assertIsNone(normal["reviewers"]["closer"])
+
+        high = r.plan(self.card(risk="high"), self.features(), self.state(),
+                      registry, {}, [], "orch", self.now())
+        self.assertEqual(len(high["reviewers"]["routes"]), 2)
+        self.assertEqual(high["reviewers"]["closer"],
+                         {"client": "claude", "model": "sonnet"})
+
     def test_escalation_logic_raises_one_rung_capability_moves_up_a_class(self):
         result = self.s3_plan()
         self.assertEqual(result["escalation"], [

@@ -582,6 +582,14 @@ if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch ta
     out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
+# the glob matcher, every policy.risk_rules shape, the sha audit draw, assess()
+# against a temp git repo, and the `risk` verb. Fixtures are temp repos and
+# injected runners; no gateway, no network, nothing spawned.
+if it "autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)"; then
+    out="$(python3 tests/test_autoos_risk.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
