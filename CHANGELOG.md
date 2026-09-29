@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
 ### Added — role launch-profile templates rendered from the harness fences, with scope and contradiction tests (ORCH-A1 phase 1)
 
