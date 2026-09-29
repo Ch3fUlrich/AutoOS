@@ -34,6 +34,13 @@ there.
 - **Test** (`tests/test_autoos_spawner.py`, `FamilyFenceStringNameTests`): a string
   yields one `family_key`, and `family_fence` built from one string excludes exactly
   that family.
+- **Follow-up (same day):** 7508d2a landed that test and this entry but *not* the guard —
+  the red/green check reverted `tools/autoos-agent.py` to `HEAD` with `git restore` and the
+  fix was never re-applied before the commit, so the lane shipped a failing test. The full
+  suite caught it two items later; the guard is the same edit re-applied. Lesson recorded
+  where it belongs: `git restore --source=HEAD -- <file>` is a *destructive* way to prove a
+  test is red. Prove red on a copy of the tree, or re-read the diff into the commit message
+  before committing.
 
 ### Fixed — the free fallthrough re-plan carries the fence into the leg choice (FAMILYFENCE-3 N1, 2026-09-29)
 

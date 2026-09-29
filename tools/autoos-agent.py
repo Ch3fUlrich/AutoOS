@@ -3713,7 +3713,15 @@ def fence_family_names(values):
 
     The registry's own spelling is the only comparison form for a family (REVFIX:
     a record's "Meta" and the registry's "meta" are one family), so a caller typing
-    `--not-family NVIDIA` fences the same models as `nvidia`."""
+    `--not-family NVIDIA` fences the same models as `nvidia`.
+
+    A bare string is ONE name, not its letters: `family_fence` is reached from the
+    CLI (whose `append` action always hands over a list) and from callers that pass
+    one value directly, and iterating a string char-by-char fenced "m", "i", "o"
+    instead of "mimo" — nothing the registry carries, so the fence was a no-op that
+    read as a guard (FAMILYFENCE-3 N2)."""
+    if isinstance(values, str):
+        values = [values]
     out = []
     for value in (values or []):
         key = resolver.family_key(value)
