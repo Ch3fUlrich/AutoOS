@@ -5300,7 +5300,11 @@ elif mode in ("sandbox-write", "sandbox-write-provider-stop"):
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
     if mode.endswith("provider-stop"):
-        print("Error: Rate limit exceeded. Please try again later.")
+        # ERRCHANNEL (SB-B review 1): a rate-limit stop is the CLIENT's error
+        # line, and a CLI writes its errors to its own stderr — the spawner reads
+        # that channel and nothing the worker printed as content.
+        print("Error: Rate limit exceeded. Please try again later.",
+              file=sys.stderr)
     else:
         print("fake: wrote worker-new.txt in its sandbox")
 elif mode == "sandbox-write-conflicted":
@@ -5344,7 +5348,8 @@ elif mode == "refusal-then-provider-stop":
     # "provider", not 6 "logic".
     print('jetski: no output produced - a tool required the "command" '
           'permission that headless mode cannot prompt for, so it was auto-denied')
-    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached"')
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached"',
+          file=sys.stderr)
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
 elif mode == "sandbox-write-marker-mid-run":
@@ -5358,19 +5363,20 @@ elif mode == "sandbox-write-marker-mid-run":
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
 elif mode == "provider-stop-only":
-    print("Error: Rate limit exceeded. Please try again later.")
+    print("Error: Rate limit exceeded. Please try again later.", file=sys.stderr)
 elif mode == "agy-quota-rc3":
     # AGYFIX item 3 (K3 audit addendum 08:1xZ, measured 2026-09-27): agy
     # without --model ran its default Gemini, printed exactly this line and
     # exited 3 after ~157 s. It is a provider stop, so the spawner must
     # report PROVIDER-STOP (exit 8), not the client's own rc 3.
-    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached')
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
+          file=sys.stderr)
     sys.exit(3)
 elif mode == "parent-leak-provider-stop":
     # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
     with open(os.path.join(root, "tracked.txt"), "a") as fh:
         fh.write("leaked\\n")
-    print("Error: Rate limit exceeded. Please try again later.")
+    print("Error: Rate limit exceeded. Please try again later.", file=sys.stderr)
 sys.exit(0)
 '''
 
@@ -5964,6 +5970,62 @@ class IsolateContainmentTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNone(agent.provider_stop("working\n" + line + "\n"))
 
+    # ERRCHANNEL (SB-B review 1, MED): the widened rate-limit family is exactly
+    # the wording a worker quotes when it cats its own brief or a log — "Error:
+    # Rate limit exceeded. Please try again later." is line 6 of a real
+    # T1FREE.r2.out and line 1 of the next run's task text. So a RATE-limit line
+    # must be seen on the client's own stderr channel; other outage markers (503,
+    # credits, billing) keep the merged window, and a caller with no channel
+    # split (stderr_tail=None) keeps the pre-review behaviour exactly.
+
+    def test_a_rate_limit_line_the_stderr_channel_says_is_a_stop(self):
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n",
+                                              "working\n" + line + "\n"), line)
+
+    def test_a_rate_limit_line_only_in_the_workers_stdout_is_not_a_stop(self):
+        # The same line as CONTENT: the client's stderr said something else, so
+        # no provider refused anything and no provider gets benched.
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertIsNone(agent.provider_stop("working\n" + line + "\n",
+                                              "working\n" + "\n"))
+
+    def test_a_rate_limit_line_in_the_window_but_not_the_channel_is_not_a_stop(self):
+        # An empty-but-present channel is the shape of a run whose client never
+        # wrote to stderr: the requirement stays a requirement.
+        agent = self.agent
+        self.assertIsNone(agent.provider_stop(
+            "working\nError: 429 Too Many Requests\n", ""))
+
+    def test_the_channel_rule_is_ansi_clean_on_both_sides(self):
+        # The client colours its stderr, the spawner compares the cleaned line:
+        # one coloured copy on either side must still match the other.
+        agent = self.agent
+        coloured = "\x1b[91mError: \x1b[0mRate limit exceeded"
+        self.assertEqual(agent.provider_stop("working\n" + coloured + "\n",
+                                             "working\nError: Rate limit exceeded\n"),
+                         "Error: Rate limit exceeded")
+
+    def test_the_channel_rule_spares_a_non_rate_limit_stop(self):
+        # ERRCHANNEL is scoped to the rate-limit family on purpose: a 503-all
+        # targets or an exhausted-credits line is an outage wherever the client
+        # printed it, and losing those on the stdout channel would cost the
+        # fallthrough its other two causes.
+        agent = self.agent
+        for line in ("Error: All targets were skipped by pre-dispatch filters.",
+                     "error: your personal credits have been exhausted"):
+            with self.subTest(line=line):
+                self.assertEqual(agent.provider_stop("working\n" + line + "\n", ""), line)
+
+    def test_no_channel_split_keeps_the_pre_review_answer(self):
+        # Every unit caller and every non-capture client lands here: with no
+        # split made, nothing may be demanded of a channel that was never read.
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"), line)
+
     def test_provider_stop_matches_through_ansi_colour(self):
         # Clients colourise stderr: the prefix check must see past the ANSI
         # colour/bold codes wrapping the prefix (the returned line is the
@@ -5992,6 +6054,25 @@ class IsolateContainmentTests(unittest.TestCase):
         # initial commit and no WIP line was printed.
         self.assertNotIn("WIP-COMMITTED", out)
         self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_brief_quoting_a_rate_limit_is_not_a_stop(self):
+        # ERRCHANNEL the other way, end to end: a fallthrough brief quotes the
+        # client's own refusal line (it is line 6 of the measured T1FREE.r2.out),
+        # and a worker that cats its instructions puts that exact line in the
+        # last window on STDOUT while its stderr stays empty. Grading that as
+        # PROVIDER-STOP would bench every leg of a healthy route over a quotation.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        task = ("\n".join((
+            "BRIEF SB-B (FIX-FIRST).",
+            "2. provider_stop must not fire on this line when it is content:",
+            "   Error: Rate limit exceeded. Please try again later.",
+            "REPORT: sha, tests before/after, lesson:, open:.",
+        )))
+        rc, out, err = self.run_isolated(root, stub, state, "brief-echo", task=task)
+        self.assertNotIn("PROVIDER-STOP", out + err)
+        self.assertNotIn("falling through", out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_an_agy_quota_stop_that_exits_3_is_still_a_provider_stop(self):
@@ -6221,18 +6302,34 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
-def _fallthrough_registry(route_ids, policy=None):
+def _fallthrough_registry(route_ids, policy=None, legs=None):
     """A registry whose routes are exactly `route_ids`, plus the clients the
     capability gate reads and an optional `policy` section (SPAWNFREE: the
     ordered free-model list a --free fallthrough reads from here). The resolver
     itself is replaced by `_fallthrough_plan`, so providers/models are not
-    consulted."""
+    consulted.
+
+    `legs` (SB-B RATELIMITRETRY) is {route_id: ["provider/model", ...]}: the
+    spawner reads the provider that took a stop off the route's own legs, so a
+    test about "the next leg on a DIFFERENT provider" needs legs to name one.
+    The providers/models sections it derives are the minimum `resolve_leg`
+    accepts."""
+    legs = legs or {}
+    providers, models = {}, {}
+    for leg_list in legs.values():
+        for leg in leg_list:
+            pid, _, mid = leg.partition("/")
+            providers.setdefault(pid, {"id": pid})
+            models.setdefault(mid, {"id": mid, "provider_id": pid})
     return {
         "clients": {
             "opencode": {"capabilities": {"shell": True, "write": True}},
             "claude": {"capabilities": {"shell": True, "write": True}},
         },
-        "routes": {rid: {"id": rid, "class": "cheap", "legs": []} for rid in route_ids},
+        "providers": providers,
+        "models": models,
+        "routes": {rid: {"id": rid, "class": "cheap", "legs": list(legs.get(rid) or [])}
+                   for rid in route_ids},
         "policy": policy or {},
     }
 
@@ -6259,8 +6356,19 @@ def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, over
             "defer_until": None}
 
 
+def _cap_routes(cap):
+    """Route ids for a run that is meant to exhaust the fallthrough cap: one more
+    than the first attempt plus `cap` re-runs, so the cap — not an empty route
+    list — is the thing that ends the run. SB-B raised MAX_FALLTHROUGH from 2 to 3
+    (a rate-limit run burns a leg per provider), which is exactly when hard-coding
+    "3 attempts" in a test became a second, drifting copy of the constant."""
+    return ["r-free"] + ["r-cheap" if i == 1 else "r-cheap%d" % i
+                         for i in range(1, cap + 2)]
+
+
 def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
-                     stop_tail=None, env_over=None):
+                     stop_tail=None, env_over=None, legs=None, stop_rc=0,
+                     worker=None, select_combo=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -6280,6 +6388,13 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     `stop_tail` (REVROUTE item 3) is what a stopped attempt prints; the
     provider-state file is redirected into the same temp state dir and exposed
     as `case.provider_state`.
+
+    `legs` (SB-B RATELIMITRETRY) gives the routes legs, so a stop attributes to
+    a provider. `stop_rc` makes a stopped attempt EXIT with the client's own rc
+    instead of 0 — the shape the field actually failed in (rc 1 after ~15 s).
+    `worker` replaces the fake client's "writes attemptN.txt" step (SB-B
+    MODEFLIP: a worker that only flips file modes). `select_combo` replaces the
+    v1 card's route, so a write-role card can be routed to tier 1.
     """
     agent = case.agent
     root = _init_git_root()
@@ -6304,17 +6419,23 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
     calls = {"n": 0, "cwds": [], "cmds": [], "envs": [], "route_marks": [],
-             "free_models": [], "track": []}
+             "free_models": [], "cooldowns": [], "track": [], "attempts": []}
     real_build_plan = agent.build_plan
 
     def marking_build_plan(*a, **k):
         # Tag each plan's env with its route, so a re-run that kept the
         # first plan's env shows up as a stale mark.
+        calls["cooldowns"].append(dict(k.get("provider_cooldown") or {}))
         plan = real_build_plan(*a, **k)
         plan["env"]["AUTOOS_AGENT_TEST_MARK"] = plan["route"]["combo"]
         return plan
 
-    def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+    def fake_run_client(cmd, cwd, env, reap=True, capture=False,
+                        run_id=None, attempt=None):
+        # `run_id`/`attempt` (SB-B merge) are what the launch records in the
+        # runner-private kill store; the fake ignores the write and keeps the
+        # calls it counts.
+        calls["attempts"].append(attempt)
         calls["n"] += 1
         calls["cwds"].append(cwd)
         calls["cmds"].append(cmd)
@@ -6322,11 +6443,14 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         calls["route_marks"].append(env.get("AUTOOS_AGENT_TEST_MARK"))
         calls["free_models"].append(
             (json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}") or {}).get("model"))
-        with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
-                  encoding="utf-8") as fh:
-            fh.write("work\n")
+        if worker is not None:
+            worker(cwd, calls["n"])
+        else:
+            with open(os.path.join(cwd, "attempt%d.txt" % calls["n"]), "w",
+                      encoding="utf-8") as fh:
+                fh.write("work\n")
         if calls["n"] <= stops:
-            return agent.ClientExit(0, tail=stop_tail or "Error: Rate limit exceeded\n")
+            return agent.ClientExit(stop_rc, tail=stop_tail or "Error: Rate limit exceeded\n")
         return agent.ClientExit(0, tail="done\n")
 
     args = argparse.Namespace(
@@ -6338,6 +6462,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     env = dict(os.environ)
     env.update(env_over or {})
     env["AUTOOS_STATE_DIR"] = statedir
+    # RUNMODEL: a gateway run looks its writer up in the live call log with the
+    # host's manage key, and this host has one. The suite never reads a gateway:
+    # point the ai-stack config dir at the temp state dir, where no key file
+    # exists, so the lookup proves nothing and sends no request.
+    env["AUTOOS_AI_STACK_CONFIG"] = statedir
     # A gateway run needs a client key and a live gateway; both are faked
     # here. The key is what makes the run track-recorded at all.
     env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
@@ -6348,10 +6477,13 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     try:
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch.object(agent, "load_registry",
-                                   lambda path: _fallthrough_registry(route_ids, policy)):
+                                   lambda path: _fallthrough_registry(route_ids, policy,
+                                                                      legs)):
                 with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
                         mock.patch.object(agent, "build_plan", marking_build_plan), \
                         mock.patch.object(agent, "gateway_up", lambda: True), \
+                        mock.patch.object(agent.routing, "select_combo",
+                                          select_combo or agent.routing.select_combo), \
                         mock.patch.object(agent, "resolve_model",
                                           lambda cfg, tier, clean, override:
                                               override or "omniroute/r-t2"):
@@ -6561,13 +6693,30 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
         self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
 
+    def test_every_attempt_is_launched_as_its_own_numbered_attempt(self):
+        # SB-B merge (scope + kill store): each fallthrough re-start is a NEW
+        # session, so `cancel` must be aimed at the group that is running now. The
+        # spawner hands the launch its attempt number, and the launch re-records
+        # its own group under it (`run_client` → `record_attempt_group`); the
+        # scope that wraps them is the runner's, and one cgroup holds every
+        # setsid() child in it, so the attempt needs no scope of its own.
+        cap = self.agent.MAX_FALLTHROUGH
+        _, out, err, calls, _ = self._run(_cap_routes(cap), stops=cap + 2)
+        self.assertEqual(calls["attempts"], list(range(1, cap + 2)),
+                         "%s: %s" % (calls["attempts"], out + err))
+        self.assertEqual(calls["n"], cap + 1, "one launch per attempt number")
+        single = self._run(["r-free", "r-cheap"], stops=0)
+        self.assertEqual(single[3]["attempts"], [1], single[1] + single[2])
+
     def test_fallthrough_stops_after_the_cap_and_exits_8(self):
-        rc, out, err, calls, _ = self._run(
-            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        cap = self.agent.MAX_FALLTHROUGH
+        routes = _cap_routes(cap)
+        rc, out, err, calls, _ = self._run(routes, stops=cap + 2)
         self.assertEqual(rc, 8, out + err)
-        self.assertEqual(calls["n"], 3, "the first attempt plus MAX_FALLTHROUGH re-runs")
+        self.assertEqual(calls["n"], 1 + cap,
+                         "the first attempt plus MAX_FALLTHROUGH re-runs")
         lines = [ln for ln in (out + err).splitlines() if ln.startswith("provider stop on ")]
-        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(len(lines), cap, lines)
 
     def test_no_next_route_exits_8_without_a_fallthrough(self):
         rc, out, err, calls, _ = self._run(["r-free"], stops=5)
@@ -6608,13 +6757,12 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         self.assertEqual(by_route["r-cheap"], 1.0, out + err)  # not 2+ (cumulative)
 
     def test_the_cap_records_every_fallthrough_attempt(self):
-        _, out, err, calls, _ = self._run(
-            ["r-free", "r-cheap", "r-cheap2", "r-cheap3"], stops=5)
+        cap = self.agent.MAX_FALLTHROUGH
+        routes = _cap_routes(cap)
+        _, out, err, calls, _ = self._run(routes, stops=cap + 2)
         self.assertEqual(
             self._records(calls),
-            [("r-free", "fail", "provider"),
-             ("r-cheap", "fail", "provider"),
-             ("r-cheap2", "fail", "provider")], out + err)
+            [(rid, "fail", "provider") for rid in routes[:1 + cap]], out + err)
 
     # REVROUTE (S2) item 3: the stop line often states its own reset time, and
     # that is worth more than a track record -- it takes the provider out of the
@@ -6712,13 +6860,22 @@ class FreeModelFallthroughTests(unittest.TestCase):
                       % (FREE_MODELS[1], FREE_MODELS[0]), out + err)
 
     def test_a_free_run_respects_max_fallthrough_and_exits_8(self):
-        rc, out, err, calls, _ = self._run(stops=9)
+        # A long enough chain that the CAP, not an exhausted list, ends the run:
+        # SB-B raised MAX_FALLTHROUGH to 3 (a rate-limit run burns a leg per
+        # provider) and the registry's opencode chain has 3 models, so the real
+        # list would bind first and this test would prove nothing about the cap.
+        long_chain = FREE_MODELS + [m.replace("opencode/", "opencode/alt-")
+                                    for m in FREE_MODELS]
+        rc, out, err, calls, _ = self._run(
+            stops=9, policy={"free_client_models": {"opencode": long_chain}})
         self.assertEqual(rc, 8, out + err)
         self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH,
                          "the first attempt plus MAX_FALLTHROUGH re-runs")
-        self.assertEqual(calls["free_models"],
-                         [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]][:calls["n"]],
+        chain = [FREE_MODELS[1]] + [m for m in long_chain if m != FREE_MODELS[1]]
+        self.assertEqual(calls["free_models"], chain[:calls["n"]],
                          "the given model first, then the chain's order, never a repeat")
+        self.assertIn("giving up", err,
+                      "the run that ran out of legs said nothing about it")
 
     def test_a_free_run_with_no_chain_left_exits_8_after_one_attempt(self):
         rc, out, err, calls, _ = self._run(
@@ -6766,7 +6923,11 @@ class FreeModelFallthroughTests(unittest.TestCase):
         # the rc is the FINAL attempt's, not the crash's.
         rc, out, err, calls, _ = self._run(stops=9, isolate=False)
         self.assertEqual(rc, 8, out + err)
-        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH, out + err)
+        # Two bounds end the run: the cap and the length of the chain. The real
+        # opencode chain (3 models) is the shorter one now that SB-B raised
+        # MAX_FALLTHROUGH to 3, which is what this name promises.
+        self.assertEqual(calls["n"], min(1 + self.agent.MAX_FALLTHROUGH,
+                                         len(FREE_MODELS)), out + err)
         self.assertNotIn("TypeError", out + err)
 
     def test_a_free_run_without_a_sandbox_and_without_a_chain_exits_8(self):
@@ -11713,11 +11874,14 @@ class ChildRuntimeDirTests(unittest.TestCase):
         # the re-run's. The first launch site provisioned the stopped attempt's
         # pair and nothing did the second, leaving the fallthrough worker with
         # an XDG dir it would have to create itself, outside the 0700 rule.
-        # --free and non-isolate: KEYDENY3g refuses a SPAWNED tier (t2/t3) in
-        # place long before the launch site, so the fallthrough that re-mints
-        # its id runs on a t1- route — the stub's tier comes from the route id
-        # (_tier_for_route). Nothing but the launch sites touches the disk.
+        # --free and non-isolate: the isolation gate refuses a SPAWNED tier
+        # (t2/t3) and, since SB-B, a tier-1 WRITE card in place — both long
+        # before the launch site — so neutralise it (TierOneWriterIsolationTests
+        # is where that rule is tested) and run on a t1- route; the stub's tier
+        # comes from the route id (_tier_for_route). Nothing but the launch sites
+        # touches the disk.
         import stat
+        allow_in_place(self, self.agent)
         rc, out, err, calls, _ = _fallthrough_run(
             self, ["t1-free"], 1,
             args_over={"free": True, "free_model": FREE_MODELS[0],
@@ -11757,6 +11921,12 @@ class WorkerDirRefusalStopsLaunchTests(unittest.TestCase):
         cls.agent = load_agent()
 
     def setUp(self):
+        # These tests are about the directory fence, not about where the worker
+        # runs: their routes are tier-1 and non-isolate, which SB-B's write-role
+        # leg of the isolation gate would refuse before cmd_run ever reached
+        # provisioning. WorkerDirRefusalStopsLaunchTests is not the ground for
+        # that rule (TierOneWriterIsolationTests is).
+        allow_in_place(self, self.agent)
         # The state tree is pinned to a private tmp dir so the runtime/config
         # path the plan names is one this test can pre-plant before cmd_run
         # reaches it (the run id itself is pinned per test, see pin_run_ids).
@@ -13426,6 +13596,684 @@ class ReviewVerdictRecoveryTests(unittest.TestCase):
         self.assertEqual(st["state"], "canceled", st)
 
 
+class RateLimitFallthroughTests(unittest.TestCase):
+    """SB-B (D-103) item 1 (RATELIMITRETRY): a free worker died on a provider
+    'Rate limit' (rc=1 after ~15 s) and only queue timeouts were retried, because
+    the stop markers name the one wording somebody saw once ('rate limit exceeded')
+    and the 429 marker needs a leading space. A rate limit is a provider stop like
+    any other: the run tries the next fallback leg, on a DIFFERENT provider, and
+    benches the rate-limited one in-process (never in the registry file)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    # --- the classification: a provider error line, not the worker's prose ----
+
+    def test_a_429_error_line_is_a_stop(self):
+        line = "Error: 429 Too Many Requests"
+        self.assertEqual(self.agent.provider_stop("thinking\n" + line + "\n"), line)
+
+    def test_a_rate_limit_without_the_word_exceeded_is_a_stop(self):
+        for line in ("Error: Rate limit", "error: rate limit for model x",
+                     "agy_error: Too many requests", "Error: HTTP 429"):
+            self.assertEqual(self.agent.provider_stop("working\n" + line + "\n"),
+                             line, line)
+
+    def test_a_rate_limit_in_the_worker_s_own_text_is_not_a_stop(self):
+        # The prefix rule is what keeps the task's own words from being read as
+        # an outage: a line that does not START with the client's error prefix is
+        # content, however loudly it quotes 'rate limit'.
+        for line in ("Per the brief: rate limit exceeded, so I skipped it",
+                     'print("Error: Rate limit exceeded")  # the code under review',
+                     "handled 429 items in the log",
+                     "  # error: too many requests is the retry case"):
+            self.assertIsNone(self.agent.provider_stop(line + "\n"), line)
+
+    def test_rate_limit_stop_names_the_rate_limit_forms(self):
+        for line in ("Error: Rate limit exceeded", "Error: 429 Too Many Requests",
+                     "Error: too many requests"):
+            self.assertTrue(self.agent.rate_limit_stop(line), line)
+        for line in ("Error: credits exhausted",
+                     "Error: all targets were skipped by pre-dispatch filters",
+                     "Error: no active credentials for provider: x"):
+            self.assertFalse(self.agent.rate_limit_stop(line), line)
+
+    # --- the choice: a leg on another provider --------------------------------
+
+    def test_combo_providers_reads_the_route_s_own_legs(self):
+        registry = _fallthrough_registry(["r-a"], legs={"r-a": ["prov-a/m-1", "prov-a/m-2"]})
+        self.assertEqual(self.agent.combo_providers("r-a", registry), ["prov-a"])
+        self.assertEqual(self.agent.combo_providers("r-a", _fallthrough_registry(["r-a"])), [])
+
+    def _free_plan(self, chain, benched, given):
+        agent = self.agent
+        args = argparse.Namespace(free=True, free_model=given)
+        plan = {"model": given, "route": {"combo": given}, "sandbox": None}
+        planned = []
+
+        def stub_build_plan(*a, **k):
+            planned.append(k)
+            return {"model": k.get("model") or "next", "route": {"combo": "next"}}
+
+        with mock.patch.object(agent, "build_plan", stub_build_plan):
+            nxt, fell_from, fell_to = agent._free_fallthrough_plan(
+                args, {}, plan, chain, set(), benched=benched)
+        self.assertIsNotNone(nxt)
+        return fell_from, fell_to
+
+    def test_the_free_fallthrough_skips_a_model_on_the_rate_limited_provider(self):
+        # One free account per provider: re-running the same provider's next model
+        # is the same 429 fifteen seconds later.
+        got = self._free_plan(["alpha/m1-free", "alpha/m2-free", "beta/m3-free"],
+                              {"alpha"}, "alpha/m1-free")
+        self.assertEqual(got, ("alpha/m1-free", "beta/m3-free"))
+
+    def test_the_free_fallthrough_still_walks_the_chain_when_nothing_else_is_up(self):
+        # Preferring another provider is not the same as requiring one: opencode's
+        # own free models all sit on one provider, and giving up on the first 429
+        # would strand a run that had two healthy models left to try.
+        got = self._free_plan(["alpha/m1-free", "alpha/m2-free", "alpha/m3-free"],
+                              {"alpha"}, "alpha/m1-free")
+        self.assertEqual(got, ("alpha/m1-free", "alpha/m2-free"))
+
+    # --- the run loop ----------------------------------------------------------
+
+    def _run(self, route_ids, stops, **kw):
+        return _fallthrough_run(self, route_ids, stops, **kw)
+
+    def _free_over(self, **kw):
+        over = {"free": True, "card": None, "tier": 1}
+        over.update(kw)
+        return over
+
+    def test_a_429_that_exits_1_falls_through_to_the_next_leg(self):
+        # The measured shape: the client printed its error and exited 1, it did
+        # not exit 0 or 8. rc 1 with a rate-limit line is still a stop.
+        rc, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap"], stops=1, stop_rc=1,
+            stop_tail="Error: 429 Too Many Requests\n",
+            legs={"r-free": ["prov-a/m-a"], "r-cheap": ["prov-b/m-b"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the rate-limited attempt plus one re-run")
+        self.assertIn("falling through to r-cheap", out + err)
+
+    def test_a_rate_limited_provider_is_benched_for_this_process_only(self):
+        _, out, err, calls, _ = self._run(
+            ["r-free", "r-cheap"], stops=1, stop_rc=1,
+            stop_tail="Error: 429 Too Many Requests",
+            legs={"r-free": ["prov-a/m-a"], "r-cheap": ["prov-b/m-b"]})
+        self.assertEqual(calls["cooldowns"][0], {}, "the first plan benches nothing")
+        self.assertIn("prov-a", calls["cooldowns"][1], out + err)
+        self.assertNotIn("prov-b", calls["cooldowns"][1], "the next leg's provider is up")
+        self.assertFalse(os.path.exists(self.provider_state),
+                         "an in-process cooldown writes no registry state")
+
+    def test_the_free_run_falls_through_to_a_model_on_another_provider(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-free"], stops=1, stop_rc=1,
+            args_over=self._free_over(free_model="alpha/m1-free"),
+            stop_tail="Error: 429 Too Many Requests",
+            policy={"free_client_models": {"opencode": ["alpha/m1-free", "alpha/m2-free",
+                                                         "beta/m3-free"]}})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["free_models"], ["alpha/m1-free", "beta/m3-free"],
+                         out + err)
+
+    def test_rate_limit_fallthroughs_are_capped_at_three_then_fail_clearly(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-a", "r-b", "r-c", "r-d", "r-e"], stops=9, stop_rc=1,
+            stop_tail="Error: 429 Too Many Requests")
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH,
+                         "the first attempt plus MAX_FALLTHROUGH re-runs")
+        self.assertEqual(self.agent.MAX_FALLTHROUGH, 3)
+        self.assertIn("rate limit", out + err)
+        self.assertIn("giving up", out + err)
+
+    def test_the_bound_applies_to_every_provider_stop(self):
+        # MAX_FALLTHROUGH is the one bound: a 503-all-targets stop gets the same
+        # number of tries as a rate limit, not a second counter to keep in sync.
+        rc, _, _, calls, _ = self._run(["r-a", "r-b", "r-c", "r-d"], stops=9,
+                                       stop_tail="Error: all targets were skipped "
+                                                 "by pre-dispatch filters")
+        self.assertEqual(rc, 8, rc)
+        self.assertEqual(calls["n"], 1 + self.agent.MAX_FALLTHROUGH)
+
+
+class WorkerShellPinTests(unittest.TestCase):
+    """SB-B (D-103) item 2 (WSLSHELL): on Linux/WSL an opencode worker ran
+    PowerShell as its shell whenever pwsh was installed, because opencode reads
+    $SHELL (and its own `shell` config default) and the caller's $SHELL is the
+    operator's. The worker's shell is pinned to bash in the fenced env and in the
+    rendered config; the allowlist keeps its old job for every other name."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def _plan(self):
+        return {"cwd": "/tmp/worker-cwd", "env": {}}
+
+    @unittest.skipIf(os.name == "nt", "a POSIX shell pin")
+    def test_worker_env_pins_the_shell_to_bash_on_a_pwsh_host(self):
+        env = self.agent.worker_env(self._plan(), base={
+            "PATH": "/usr/local/bin:/usr/bin:/snap/bin",
+            "SHELL": "/usr/bin/pwsh", "HOME": "/home/operator", "USER": "operator"})
+        self.assertEqual(env["SHELL"], "/bin/bash")
+
+    @unittest.skipIf(os.name == "nt", "a POSIX shell pin")
+    def test_the_shell_pin_survives_a_plan_entry_and_the_allowlist_stands(self):
+        # The pin is a FORCED value, not a default: it is applied after the plan's
+        # env merge, and the allowlist rules are unchanged (no caller HOME leak,
+        # no secret-shaped name).
+        plan = {"cwd": "/tmp/w", "env": {"SHELL": "/usr/bin/pwsh"}}
+        env = self.agent.worker_env(plan, base={"PATH": "/usr/bin", "SHELL": "/usr/bin/pwsh",
+                                                "GH_TOKEN": "secret", "LC_ALL": "C.UTF-8"})
+        self.assertEqual(env["SHELL"], "/bin/bash")
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertEqual(env["LC_ALL"], "C.UTF-8")
+
+    @unittest.skipIf(os.name == "nt", "a POSIX shell pin")
+    def test_the_pin_names_a_real_bash_on_this_host(self):
+        self.assertTrue(os.path.exists(self.agent.WORKER_SHELL), self.agent.WORKER_SHELL)
+
+    def test_windows_keeps_its_own_shell(self):
+        # worker_shell() is the one decision both halves read; on Windows there is
+        # no /bin/bash and pwsh IS the shell the client needs.
+        with mock.patch.object(self.agent.os, "name", "nt"):
+            self.assertIsNone(self.agent.worker_shell())
+        with mock.patch.object(self.agent.os, "name", "posix"):
+            self.assertEqual(self.agent.worker_shell(), "/bin/bash")
+
+    def _build_args(self, **over):
+        ns = argparse.Namespace(client="opencode", tier=2, card=None, task="do the thing",
+                                free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+                                isolate=False, auto=True, joinable=False, model=None,
+                                clean=False, allow_training=False, max_depth=None,
+                                lean=False, title="T", run_id=None, read_only=False)
+        for k, v in over.items():
+            setattr(ns, k, v)
+        return ns
+
+    def _cfg(self):
+        return {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+                "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+
+    @unittest.skipIf(os.name == "nt", "a POSIX shell pin")
+    def test_the_rendered_opencode_config_sets_its_shell(self):
+        # opencode's config schema carries a top-level `shell` ("Default shell to
+        # use for terminal") that its own default fills from the host: a worker in
+        # a WSL checkout with pwsh installed gets PowerShell without the env pin
+        # ever being read. The config states it, so the pin is not env-only.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUTOOS_SESSION_TAG", None)
+            plan = self.agent.build_plan(self._build_args(), self._cfg())
+        overlay = json.loads(plan["env"].get("OPENCODE_CONFIG_CONTENT") or "{}")
+        self.assertEqual(overlay.get("shell"), "/bin/bash")
+
+
+@unittest.skipIf(os.name == "nt", "the mode bit: git core.fileMode and os.chmod "
+                                  "semantics the diff-fence test is written against")
+class ModeFlipRefusalTests(unittest.TestCase):
+    """SB-B (D-103) item 3 (MODEFLIP): a worker that only flipped file modes
+    (100644 <-> 100755, the WSL/core.fileMode artefact) was reported as work —
+    the diff was non-empty, so the run got a `take it:` line and a merge
+    candidate that changes no byte of content."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def _root(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "init.defaultBranch=master", "-c", "core.fileMode=true"]
+        subprocess.run(git + ["init", "-q", tmp], check=True)
+        path = os.path.join(tmp, "script.sh")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho hi\n")
+        subprocess.run(git + ["-C", tmp, "add", "script.sh"], check=True)
+        subprocess.run(git + ["-C", tmp, "commit", "-q", "-m", "init"], check=True)
+        return tmp, git
+
+    def _commit_mode(self, tmp, git):
+        base = subprocess.run(git + ["-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        os.chmod(os.path.join(tmp, "script.sh"), 0o755)
+        subprocess.run(git + ["-C", tmp, "commit", "-q", "-am", "mode"], check=True)
+        return base
+
+    def test_a_committed_mode_flip_is_mode_only(self):
+        tmp, git = self._root()
+        base = self._commit_mode(tmp, git)
+        head = subprocess.run(git + ["-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(self.agent.sandbox_mode_only(tmp, base, head),
+                         "100644 -> 100755 script.sh")
+
+    def test_a_content_change_is_not_mode_only(self):
+        tmp, git = self._root()
+        base = subprocess.run(git + ["-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        with open(os.path.join(tmp, "script.sh"), "a", encoding="utf-8") as fh:
+            fh.write("echo more\n")
+        os.chmod(os.path.join(tmp, "script.sh"), 0o755)
+        subprocess.run(git + ["-C", tmp, "commit", "-q", "-am", "content"], check=True)
+        head = subprocess.run(git + ["-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertIsNone(self.agent.sandbox_mode_only(tmp, base, head))
+
+    def test_an_untracked_file_is_not_mode_only(self):
+        tmp, git = self._root()
+        base = self._commit_mode(tmp, git)
+        with open(os.path.join(tmp, "new.txt"), "w", encoding="utf-8") as fh:
+            fh.write("work\n")
+        self.assertIsNone(self.agent.sandbox_mode_only(tmp, base, "HEAD"))
+
+    def test_an_empty_diff_is_not_mode_only(self):
+        # Nothing changed is the NO-OP verdict's own case; MODEFLIP is about a
+        # diff that LOOKS like work and is not.
+        tmp, git = self._root()
+        base = subprocess.run(git + ["-C", tmp, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertIsNone(self.agent.sandbox_mode_only(tmp, base, "HEAD"))
+
+    def test_a_mode_only_run_is_refused_and_offers_no_take_it_line(self):
+        def flip_worker(cwd, n):
+            os.chmod(os.path.join(cwd, "tracked.txt"), 0o755)
+
+        rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0,
+                                                  worker=flip_worker)
+        self.assertIn("mode-only diff (refused)", out + err)
+        self.assertNotIn("take it:", out + err, out + err)
+        self.assertEqual(rc, 5, out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_a_run_that_changes_content_is_offered_once(self):
+        # The positive control: the refusal must not also eat the honest run's
+        # take-it line, and one offer is one line (a duplicated offer reads as
+        # two ways to fetch the same branch).
+        rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("MODEFLIP", out + err)
+        self.assertEqual(1, len([ln for ln in out.splitlines()
+                                 if ln.startswith("take it:")]), out)
+
+
+@unittest.skipIf(os.name == "nt", "the mode bit: git core.fileMode and os.chmod "
+                                  "semantics the refusal is written against")
+class ModeFlipOptOutTests(unittest.TestCase):
+    """SB-B review 2 (MODEFLIP, item 3): the refusal needs a door, and the door
+    is opened by the CALLER before the worker runs — `run --allow-mode-only`, or
+    a spawn's `allow_mode_only=True` recorded in the runner's private record.
+    Not by anything the worker can write into the directory it owns."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    @staticmethod
+    def _flip_worker(cwd, n):
+        os.chmod(os.path.join(cwd, "tracked.txt"), 0o755)
+
+    def test_the_command_line_opt_out_offers_a_mode_only_diff(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, worker=self._flip_worker,
+            args_over={"allow_mode_only": True})
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("MODEFLIP", out + err)
+        self.assertIn("take it:", out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_the_spawn_time_record_opt_out_offers_it_without_the_flag(self):
+        # The MCP path: the field was recorded at spawn, and the verdict reads
+        # that record. One attempt, no `--allow-mode-only` on the argv the CLI
+        # itself parsed.
+        with mock.patch.object(self.agent, "read_kill_record",
+                               lambda run_id: {"allow_mode_only": True}):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, worker=self._flip_worker)
+        self.assertNotIn("MODEFLIP", out + err)
+        self.assertIn("take it:", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_job_json_claiming_the_opt_out_does_not_open_the_door(self):
+        # The verdict's only two inputs are the caller's argv and the record the
+        # runner wrote at spawn. A worker's own job file — which it writes in the
+        # task directory it owns, beside the sandbox — is not one of them: with
+        # the claim there and no record, a mode-only diff stays refused.
+        def flip_and_claim(cwd, n):
+            self._flip_worker(cwd, n)
+            with open(os.path.join(os.path.dirname(cwd), "job.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump({"allow_mode_only": True, "request": {"allow_mode_only": True}},
+                          fh)
+        with mock.patch.object(self.agent, "read_kill_record", lambda run_id: None):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, worker=flip_and_claim)
+        self.assertIn("mode-only diff (refused)", out + err)
+        self.assertNotIn("take it:", out + err)
+        self.assertEqual(rc, 5, out + err)
+
+    def test_the_refusal_names_the_door(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, worker=self._flip_worker)
+        self.assertIn("--allow-mode-only", out + err)
+        self.assertIn("allow_mode_only=True", out + err)
+
+    def test_the_mcp_field_reaches_the_cli_argv(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "tier": 2,
+                                         "allow_mode_only": True})
+        self.assertIn("--allow-mode-only", argv)
+        argv_default, _ = mcp_server.build_argv({"task": "t", "tier": 2})
+        self.assertNotIn("--allow-mode-only", argv_default)
+
+
+class ResolvedWriterTests(unittest.TestCase):
+    """RUNMODEL (D-103): every report about a run should say WHICH model wrote
+    it. A gateway combo resolves to a provider only at the gateway, so the run
+    asks the gateway's own call log for its session id — once, read-only — and
+    a native client already holds the answer in its plan. What cannot be proven
+    is written as `unresolved`; a guessed provider in a record people route on is
+    worse than an empty one."""
+
+    RUN_ID = "20260929-000000-runmodel-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    @staticmethod
+    def _rows(*rows):
+        return json.dumps(list(rows)).encode("utf-8")
+
+    def test_a_gateway_run_asks_the_log_under_its_own_session_id(self):
+        agent = self.agent
+        session = agent.session_header_value("lane-x", self.RUN_ID)
+        seen = {}
+
+        def fetch(url, headers, timeout):
+            seen["url"] = url
+            return 200, self._rows(
+                {"sessionTag": "other/run", "provider": "dead", "model": "dead-1",
+                 "status": 200, "timestamp": "2026-09-29T00:00:03Z"},
+                {"sessionTag": session, "provider": "mimo", "model": "mimo-7",
+                 "status": 200, "timestamp": "2026-09-29T00:00:01Z"},
+                # The newest row for THIS run, and an error row beside it: the
+                # refused leg names a provider that did not serve the run.
+                {"sessionTag": session, "provider": "Jetski", "model": "jetski-9",
+                 "status": 429, "error": "rate limit", "timestamp": "2026-09-29T00:00:02Z"})
+        self.assertEqual(agent.gateway_writer(session, gateway="http://gw.invalid",
+                                              key="manage-key", fetch=fetch),
+                         ("mimo", "mimo-7"))
+        self.assertIn("/api/usage/call-logs?", seen["url"])
+        self.assertNotIn("offset=2", seen["url"], "one read, never pages")
+
+    def test_a_gateway_run_that_fell_through_reports_the_leg_that_finished(self):
+        # Only error rows exist for the session (every leg refused it): the newest
+        # row is still the answer, because that is the one the run ended on.
+        agent = self.agent
+        rows = [{"sessionTag": self.RUN_ID, "provider": "a", "model": "a-1",
+                 "status": 429, "timestamp": "2026-09-29T00:00:01Z"},
+                {"sessionTag": self.RUN_ID, "provider": "b", "model": "b-2",
+                 "status": 503, "timestamp": "2026-09-29T00:00:02Z"}]
+        self.assertEqual(agent.gateway_writer(self.RUN_ID, gateway="http://gw.invalid",
+                                              key="k",
+                                              fetch=lambda *a: (200, self._rows(*rows))),
+                         ("b", "b-2"))
+
+    def test_an_unreadable_log_resolves_to_nothing_rather_than_a_guess(self):
+        agent = self.agent
+        for fetch in (lambda *a: (500, b"boom"),
+                      lambda *a: (200, b"not json"),
+                      lambda *a: (200, b'{"rows": 1}'),
+                      lambda *a: (_ for _ in ()).throw(OSError("connection refused"))):
+            with self.subTest(fetch=fetch):
+                self.assertIsNone(agent.gateway_writer(self.RUN_ID, gateway="http://gw",
+                                                       key="k", fetch=fetch))
+
+    def test_no_manage_key_means_no_request(self):
+        # The lookup is a read of the host's gateway log with the host's manage
+        # key. Without that key there is nothing to sign the GET with, and the
+        # suite (and any host with no gateway) must see exactly zero requests.
+        called = []
+        self.assertIsNone(self.agent.gateway_writer(
+            self.RUN_ID, gateway="http://gw.invalid", key="",
+            fetch=lambda *a: called.append(1)))
+        self.assertEqual(called, [])
+
+    def test_a_gateway_run_resolves_provider_model_and_family(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        registry = {"models": {"mimo-7": {"family": "mimo"}}}
+        with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
+             mock.patch.object(agent, "_call_log_rows",
+                               lambda *a, **k: [{"sessionTag": "lane-x/" + self.RUN_ID,
+                                                 "provider": "mimo", "model": "mimo-7",
+                                                 "status": 200,
+                                                 "timestamp": "2026-09-29T00:00:01Z"}]):
+            writer = agent.resolved_writer(plan, True, registry=registry)
+        self.assertEqual(writer, {"provider": "mimo", "model": "mimo-7",
+                                  "family": "mimo"})
+        self.assertEqual(agent.writer_line(writer), "writer: mimo/mimo-7 (mimo)")
+
+    def test_a_gateway_failure_is_written_as_unresolved(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        with mock.patch.object(agent, "manage_key", lambda env=None: None):
+            writer = agent.resolved_writer(plan, True, registry={"models": {}})
+        self.assertEqual(set(writer.values()), {agent.WRITER_UNRESOLVED})
+        self.assertEqual(agent.writer_line(writer),
+                         "writer: unresolved/unresolved (unresolved)")
+
+    def test_a_native_run_answers_from_its_own_plan(self):
+        # No gateway to ask: the client's model id is the answer, and the
+        # provider is the client itself — unless --free named one in the id.
+        agent = self.agent
+        registry = {"models": {"gemini-3.8-flash": {"family": "gemini"}}}
+        native = agent.resolved_writer({"client": "agy", "model": "gemini-3.8-flash"},
+                                       False, registry=registry)
+        self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
+                                  "family": "gemini"})
+        free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
+                                     False, registry={"models": {}})
+        self.assertEqual((free["provider"], free["model"]), ("jetski", "jetski-9"))
+
+    def test_the_run_end_prints_the_line_and_records_it_where_a_canceller_can_read(self):
+        agent = self.agent
+        writes = []
+        with mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record",
+                               lambda run_id: {"mode": "write"}), \
+             mock.patch.object(agent, "write_kill_record",
+                               lambda run_id, record: writes.append(
+                                   (run_id, dict(record))) or True):
+            rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("writer: mimo/mimo-7 (", out + err)
+        recorded = [r for _, r in writes if "writer" in r]
+        self.assertEqual(recorded[-1]["writer"]["provider"], "mimo")
+
+    def test_a_run_with_no_record_of_its_own_is_not_written_to(self):
+        # The direct CLI path has no canceller and no record: the line is still
+        # printed for whoever watches, and nothing is created behind it.
+        agent = self.agent
+        writes = []
+        with mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record", lambda run_id: None), \
+             mock.patch.object(agent, "write_kill_record",
+                               lambda run_id, record: writes.append(record) or True):
+            rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("writer: mimo/mimo-7", out + err)
+        self.assertEqual([w for w in writes if "writer" in w], [])
+
+    def test_the_run_state_carries_the_writer_to_whoever_reports_the_run(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "agents", self.RUN_ID)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": self.RUN_ID, "run_id": self.RUN_ID, "request": {}, "task": "t",
+            "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+            "pid": os.getpid()})
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": 0, "ended": time.time()})
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}, clear=False):
+            mcp_server.write_kill_record(self.RUN_ID, {
+                "mode": "write",
+                "writer": {"provider": "mimo", "model": "mimo-7", "family": "mimo"}})
+            st = mcp_server._state(path)
+        self.assertEqual(st["writer"], {"provider": "mimo", "model": "mimo-7",
+                                       "family": "mimo"}, st)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups; group_record() is empty on Windows")
+class AttemptGroupRecordTests(unittest.TestCase):
+    """SB-B merge, item 1: the fallthrough loop launches the client again and each
+    launch leads a NEW session, so the group `cancel` aims at has to follow it.
+    The runner-private record is the only place a kill target is read from, and
+    a launch may only update a record a server already minted."""
+
+    RUN_ID = "20260929-000000-attempt-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        patcher = mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _sleeper(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                start_new_session=True)
+        self.addCleanup(lambda: (proc.terminate(), proc.wait()))
+        return proc
+
+    def test_a_live_launch_moves_the_record_to_its_own_group(self):
+        proc = self._sleeper()
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write", "pgid": 1,
+                                                   "start": 1})
+        self.assertTrue(self.agent.record_attempt_group(self.RUN_ID, proc, 2))
+        rec = self.agent.read_kill_record(self.RUN_ID)
+        self.assertEqual(rec["pgid"], proc.pid, rec)
+        self.assertEqual(rec["attempt"], 2, rec)
+        # The decided-at-spawn fields are not re-decided by a launch, and the
+        # group the runner wrote for attempt 1 is gone: it is dead.
+        self.assertEqual(rec["mode"], "write", rec)
+
+    def test_a_run_with_no_record_creates_none(self):
+        proc = self._sleeper()
+        self.assertFalse(self.agent.record_attempt_group(self.RUN_ID, proc, 1))
+        self.assertIsNone(self.agent.read_kill_record(self.RUN_ID))
+
+    def test_the_launch_never_writes_through_the_workers_directory(self):
+        proc = self._sleeper()
+        job_dir = os.path.join(self.tmp, "agents", self.RUN_ID)
+        os.makedirs(job_dir)
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write"})
+        self.assertTrue(self.agent.record_attempt_group(self.RUN_ID, proc, 3))
+        self.assertEqual(os.listdir(job_dir), [],
+                         "job.json is where a cancelled worker could have read this")
+
+
+class TierOneWriterIsolationTests(unittest.TestCase):
+    """SB-B (from SB-C's open item): `run --tier 1` / a card that routes to tier 1
+    with a WRITE role still ran in the caller's checkout. leaf_isolation_refusal
+    keys on the leaf flag and ISOLATE_TIERS, so tier 1 was never in it; the
+    write-role half of the rule is now one helper both entry points read."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_a_write_card_at_tier_1_is_refused_in_place(self):
+        for card in ({"role": "implement"}, {"kind": "implement"}, {"kind": "debug"},
+                     {"kind": "bulk"}):
+            refusal = self.agent.writer_isolation_refusal(1, False, "opencode", card)
+            self.assertIsNotNone(refusal, card)
+            self.assertIn("--isolate", refusal)
+
+    def test_a_read_role_card_at_tier_1_still_runs_in_place(self):
+        for card in ({"role": "review"}, {"role": "orchestrate"},
+                     {"kind": "research"}, {"kind": "plan"}, {"kind": "review"},
+                     None):
+            self.assertIsNone(self.agent.writer_isolation_refusal(1, False, "opencode",
+                                                                  card), card)
+
+    def test_an_empty_card_at_tier_1_is_a_writer(self):
+        # SB-C's semantics, which the merged CLI now shares: a card that names no
+        # role takes the registry's default (`implement`), and a default is a
+        # writer — `role=implement, complexity=hard` routes UP to tier 1, so the
+        # tier-1 leg is not always the orchestrator. Only a run with NO card at all
+        # (`--tier 1`, the operator naming their own session) is exempt.
+        self.assertIsNotNone(self.agent.writer_isolation_refusal(1, False, "opencode", {}))
+        self.assertIsNotNone(self.agent.writer_isolation_refusal(
+            1, False, "opencode", "role=implement"))
+        self.assertIsNone(self.agent.writer_isolation_refusal(
+            1, False, "opencode", "role=orchestrate"))
+
+    def test_an_isolated_or_read_only_run_needs_no_refusal(self):
+        card = {"role": "implement"}
+        self.assertIsNone(self.agent.writer_isolation_refusal(1, True, "opencode", card))
+        self.assertIsNone(self.agent.writer_isolation_refusal(1, False, "opencode", card,
+                                                              read_only=True))
+
+    def test_tiers_2_and_3_stay_the_leaf_helper_s_case(self):
+        # One rule per helper: the writer helper adds the tier-1 gap only, so the
+        # two refusals never both fire for the same run.
+        self.assertIsNone(self.agent.writer_isolation_refusal(2, False, "opencode",
+                                                              {"role": "implement"}))
+        self.assertIsNotNone(self.agent.leaf_isolation_refusal(2, False, "opencode"))
+
+    def test_cmd_run_refuses_a_tier_1_write_card_without_isolate(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0,
+            args_over={"card": "role=implement", "tier": None, "isolate": False},
+            select_combo=lambda card, allow=None: ("t1-frontier", "stub"))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("--isolate", out + err)
+        self.assertEqual(calls["n"], 0, "no client started")
+
+    def test_cmd_run_isolates_the_same_tier_1_write_card(self):
+        rc, out, err, calls, sandboxes = _fallthrough_run(
+            self, ["r-free"], stops=0,
+            args_over={"card": "role=implement", "tier": None, "isolate": True},
+            select_combo=lambda card, allow=None: ("t1-frontier", "stub"))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_the_mcp_spawn_isolates_a_tier_1_writer_on_the_shared_rule(self):
+        # SB-B merge: the server holds no rule table of its own — its `is_write_role`
+        # is the spawner's — and the tier-1 leg it runs is SB-C's block, which
+        # records `default_isolate` rather than the leaf force's `forced_isolate`.
+        # Two forces for one run would be two answers about one request.
+        agent = self.agent
+        self.assertIs(agent.is_write_role({"role": "implement"}), True)
+        self.assertIs(agent.is_write_role("role=review"), False)
+        with mock.patch.object(agent.routing, "select_combo",
+                               lambda card, allow: ("t1-frontier", "stub")):
+            argv, route = mcp_server.build_argv({"task": "t", "card": "role=implement",
+                                                 "cwd": str(ROOT)})
+        self.assertEqual(route["combo"], "t1-frontier")
+        self.assertIn("--isolate", argv, route)
+        self.assertTrue(route["default_isolate"])
+        self.assertNotIn("forced_isolate", route)
+
+    def test_the_mcp_refusal_and_the_cli_refusal_agree_on_the_card(self):
+        # The drift this merge closes was two predicates: a v2 `kind` card is a
+        # reader to SB-C's old role-only check and was a writer to SB-B's. One
+        # answer now, from one function.
+        agent = self.agent
+        card = {"kind": "review", "privacy": "public"}
+        self.assertIs(agent.is_write_role(card), False)
+        self.assertIs(mcp_server.is_write_role({"card": card}), False)
+        self.assertIsNone(agent.writer_isolation_refusal(1, False, "opencode", card))
+        self.assertIs(agent.is_write_role({"kind": "implement"}), True)
+        self.assertIs(mcp_server.is_write_role({"card": {"kind": "implement"}}), True)
+
+
 class CancelChannelTests(unittest.TestCase):
     """SB-A2 (D-103) item A/B: what `cancel` reads has to be a record the worker
     can neither see nor write. SB-A recorded the client's pgid in
@@ -14275,6 +15123,23 @@ class RunnerPrivateRecordTests(unittest.TestCase):
                 self.assertIsInstance(record["pgid"], int, record)
                 self.assertEqual(0o600, os.stat(mcp_server.kill_store_path(out["id"])).st_mode & 0o777)
 
+    def test_spawn_records_the_mode_only_opt_out_and_nothing_else_does(self):
+        # MODEFLIP review 2: the opt-out is decided before the worker runs, so it
+        # lives in this record. A spawn that never asked for it leaves the field
+        # absent — the default is the refusal, not a flag that must be cleared.
+        out = mcp_server.spawn({"task": "chmod the installer %d" % 1, "cwd": str(ROOT),
+                                "tier": 2, "allow_mode_only": True, "dry_run": True})
+        self.assertNotIn("error", out, out)
+        self.wait_done(out["id"])
+        record = mcp_server.read_kill_record(out["id"])
+        self.assertTrue(record["allow_mode_only"], record)
+        plain = mcp_server.spawn({"task": "chmod the installer %d" % 2, "cwd": str(ROOT),
+                                  "tier": 2, "dry_run": True})
+        self.assertNotIn("error", plain, plain)
+        self.wait_done(plain["id"])
+        self.assertFalse(mcp_server.read_kill_record(plain["id"])
+                         .get("allow_mode_only"))
+
     def test_the_record_mode_does_not_reride_on_a_later_group_write(self):
         # The runner re-records its own group in run_job; that is not a second
         # chance to decide the mode, the scope or the created_at.
@@ -14409,7 +15274,6 @@ class RunnerPrivateRecordTests(unittest.TestCase):
                                                       "reason": "recycled"}]):
             st = mcp_server.cancel(self.RUN_ID)
         self.assertEqual(st["state"], "cancel-failed", st)
-
 
 
 if __name__ == "__main__":

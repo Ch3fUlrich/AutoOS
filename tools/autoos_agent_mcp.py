@@ -126,84 +126,30 @@ def state_root() -> str:
 
 
 def kill_store_dir() -> str:
-    """The runner-private home of each run's decided-at-spawn record (SB-A3,
-    D-103 item C; the run MODE joined it in SB-A4).
+    """The runner-private store — one implementation, in the spawner.
 
-    Deliberately NOT `AUTOOS_TASK_DIR`: the run dir is handed to the worker as an
-    environment variable, the worker is the same uid as everything in it, and a
-    kill record the cancelled process can rewrite is a channel it gives orders
-    through — which is what SB-A's `pgrp.json` and SB-A2's `job.json` group were.
-    This is a sibling of the `agents/` tree, 0700 with 0600 files, written by the
-    server and the runner and by nobody else.
-
-    RESIDUAL, stated rather than papered over: a same-uid worker that goes looking
-    can still find this directory (the state dir is in its environment) and write
-    into it, because a file cannot be hidden from the uid that owns it. What
-    closes that hole is the scope path, which is derived from the run id and
-    depends on no file at all; the private store is only the fallback for a host
-    with no user manager.
+    SB-B merge: the process that launches the client is the process that knows its
+    process group, and the fallthrough loop re-launches it, so the record has to be
+    writable from inside `run_client` too. Two copies of a store is two places a
+    killer's answer can come from, so this server reads and writes the spawner's.
+    Its rules — the directory is not `AUTOOS_TASK_DIR`, 0700 with 0600 files, the
+    decided-at-spawn fields immutable and the group replaceable, and the stated
+    residual that a same-uid worker can still find it — are in
+    `autoos-agent.kill_store_dir`.
     """
-    return os.path.join(clients.state_dir(), "kill")
+    return agent.kill_store_dir()
 
 
 def kill_store_path(run_id: str) -> str:
-    """The one record file for `run_id`, named so no run id escapes the store."""
-    name = os.path.basename(os.path.normpath(str(run_id or "")))
-    if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-        raise ValueError("bad run id %r" % (run_id,))
-    return os.path.join(kill_store_dir(), name + ".json")
+    return agent.kill_store_path(run_id)
 
 
 def write_kill_record(run_id: str, record: dict) -> bool:
-    """Write (or merge into) the runner's private record for one run.
-
-    SB-A4 (D-103, the rest of item C) grew this from a group record into the run's
-    whole decided-at-spawn identity: `run_id`, `mode` (review|write), `scope`,
-    `dry_run`, `created_at`, plus the `pgid`/`start` group record. It is the only
-    place any of that is read from, because everything a killer or a dispatcher
-    decides must come from a record the worker cannot rewrite through its own
-    `job.json`.
-
-    Merge semantics are deliberately asymmetric. The group is re-recorded by the
-    runner in `run_job`, so `pgid`/`start` are replaced whenever they are given.
-    The decided-at-spawn fields are IMMUTABLE: a later write cannot re-decide the
-    mode even by accident (the runner's own second write passes none of them), and
-    `created_at`/`run_id` are stamped on the record's first write only.
-    """
-    if os.name == "nt" or not record:
-        return False
-    try:
-        path = kill_store_path(run_id)
-        directory = kill_store_dir()
-        os.makedirs(directory, exist_ok=True)
-        os.chmod(directory, 0o700)
-        existing = read_kill_record(run_id) or {}
-        merged = dict(existing)
-        merged.setdefault("run_id", run_id)
-        merged.setdefault("created_at", _now_iso())
-        for key in ("pgid", "start"):
-            if record.get(key) is not None:
-                merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run"):
-            if record.get(key) is not None:
-                merged.setdefault(key, record[key])
-        tmp = "%s.tmp-%d" % (path, os.getpid())
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with io.open(fd, "w", encoding="utf-8") as fh:
-            json.dump(merged, fh)
-        os.replace(tmp, path)
-    except (OSError, ValueError) as exc:
-        print("autoos-agent: no kill record for %s: %s" % (run_id, exc),
-              file=sys.stderr)
-        return False
-    return True
+    return agent.write_kill_record(run_id, record)
 
 
 def read_kill_record(run_id: str):
-    try:
-        return _read_json(kill_store_path(run_id))
-    except ValueError:
-        return None
+    return agent.read_kill_record(run_id)
 
 
 def _read_json(path: str):
@@ -384,24 +330,23 @@ def context_info(transcript: str | None = None) -> dict:
     return data
 
 
-READ_ONLY_CARD_ROLES = ("review", "orchestrate")
-
-
 def is_write_role(req: dict) -> bool:
-    """Whether this request's card writes — any role outside the read-only pair.
+    """Whether this request's card writes — SB-C's rule, answered by the ONE
+    predicate in the spawner (`agent.is_write_role`).
 
-    A request with no card takes the registry's default role (`implement`), which
-    is a writer: the tier alone never says what a run touches, and `role=implement,
-    complexity=hard` routes UP to tier 1 (routing.select_combo's public-strong
-    bucket), so the tier-1 leg is not always the orchestrator.
+    Kept as a request adapter only: this server holds a spawn request (`card`
+    under a key, and it may still be the caller's text), the spawner holds the
+    rule. The two entry points used to carry their own copy of that rule and
+    drifted apart on the first card dialect that disagreed — a v2 `kind` card is a
+    reader to one and a writer to the other, and a tier-1 write run is exactly the
+    case where "which copy answered" decides whether it edits your checkout. The
+    semantics are unchanged from SB-C's: any role outside the read-only pair is a
+    writer, and a card that names nothing takes the registry's default
+    (`implement`), because `role=implement, complexity=hard` routes UP to tier 1
+    (routing.select_combo's public-strong bucket), so the tier-1 leg is not always
+    the orchestrator.
     """
-    card = req.get("card")
-    if isinstance(card, str):
-        try:
-            card = routing.parse_card(card)
-        except (ValueError, routing.CardError):
-            card = None  # normalize() reports the bad card; this is not its job
-    return (card or {}).get("role") not in READ_ONLY_CARD_ROLES
+    return agent.is_write_role(req.get("card"))
 
 
 def worktree_of(path: str) -> str:
@@ -461,6 +406,14 @@ def build_argv(req: dict, run_id: str | None = None,
     # as started and then exits 2.
     if not req.get("isolate") and agent.leaf_isolation_refusal(
             run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card)):
+        # SB-B merge: the tier-1 write-role leg is NOT passed through this call.
+        # `card=` would force isolation here and main's SB-C block below would
+        # then see an isolated request and never record its own `default_isolate`,
+        # and a request that asked to stand in the caller's worktree would never
+        # reach its refusal. The two legs cannot drift on WHO is a writer, because
+        # both read the one `agent.is_write_role`; this call keeps its own job —
+        # the spawned tiers and the leaf roles — and the write-role leg below owns
+        # the tier-1 answer, including the refusal.
         req = dict(req, isolate=True)
         route["forced_isolate"] = True
     # SB-C item 1 (SPAWNISO): KEYDENY3 keys on the spawned tiers and the leaf
@@ -509,7 +462,11 @@ def build_argv(req: dict, run_id: str | None = None,
         except (TypeError, ValueError):
             raise ValueError("max_depth must be an integer, got %r" % req["max_depth"])
     clients.child_depth(os.environ, req.get("max_depth"))  # raises DepthError past the budget
-    for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable"):
+    for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable",
+                 # MODEFLIP opt-out (SB-B review 2): a spawn that means the chmod
+                 # names it here, and the runner records the same fact in the
+                 # private record below.
+                 "allow_mode_only"):
         if req.get(flag):
             argv.append("--" + flag.replace("_", "-"))
     for opt in ("model", "title", "max_depth"):
@@ -677,7 +634,12 @@ def spawn(req: dict) -> dict:
     write_kill_record(run_id, {
         "mode": "review" if _review_requested(req, argv) else "write",
         "scope": scope_unit,
-        "dry_run": "--dry-run" in argv})
+        "dry_run": "--dry-run" in argv,
+        # MODEFLIP opt-out (SB-B review 2): decided at spawn and recorded here, in
+        # the runner-private record, because the run's MODEFLIP verdict reads it.
+        # job.json is the worker's own directory — an opt-out a worker could write
+        # into the file it is graded from is not an opt-out, it is an escape.
+        "allow_mode_only": bool(req.get("allow_mode_only")) or None})
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats
@@ -1034,6 +996,11 @@ def _state(path: str) -> dict:
            "route": job.get("route"), "started": job.get("started"), "task": (job.get("task") or "")[:120]}
     if question is not None:
         out["question"] = question
+    if record.get("writer"):
+        # RUNMODEL (D-103): who actually served the run, resolved by the run
+        # itself and handed over in the record the worker cannot rewrite. A
+        # report about a run that omits this leaves the reader to guess.
+        out["writer"] = record["writer"]
     if report is not None:
         out["report"] = report
     if recovered is not None:
@@ -1195,6 +1162,7 @@ def serve() -> None:
                joinable: bool = False, max_depth: int | None = None, title: str | None = None,
                cwd: str | None = None, dry_run: bool = False,
                allow_shared_checkout: bool = False,
+               allow_mode_only: bool = False,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
@@ -1213,7 +1181,11 @@ def serve() -> None:
         `allow_shared_checkout=True` is orchestrator-only too — a write-role
         card passing it is refused, and an accepted override is recorded as
         `shared_checkout_override` on the route). lean: no serena/playwright
-        (default on for role=review). Refused past the depth budget, and for
+        (default on for role=review). `allow_mode_only=True` accepts a sandbox
+        whose only diff is a file mode (100644 <-> 100755) — the MODEFLIP refusal
+        is what a checkout artifact looks like, so say it when the chmod IS the
+        task; it is recorded in the runner's private record at spawn, never in
+        the worker's job.json. Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
         inert there; it only waives the privacy check on an explicit --model).
@@ -1228,6 +1200,7 @@ def serve() -> None:
                       "allow_training": allow_training, "joinable": joinable,
                       "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
                       "allow_shared_checkout": allow_shared_checkout,
+                      "allow_mode_only": allow_mode_only,
                       "claude_reason": claude_reason})
 
     @app.tool(name="status")

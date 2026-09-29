@@ -333,6 +333,13 @@ ISOLATE_TIERS = (2, 3)
 # runs instead (the fence is the only control there). None today: isolation is
 # `git clone --local` plus a cwd, and every client here is a CLI started with one.
 NO_ISOLATE_CLIENTS = frozenset()
+# SB-C (SPAWNISO), read by BOTH entry points through `is_write_role`: a card that
+# is not one of these is a run that edits files, and a run that edits files gets no
+# checkout it did not clone. v2 spells the same pair in `kind` (spec 6.1) —
+# `plan`/`research` read the tree and report, which is what `read_only_run` already
+# calls a read-only run for the verdict.
+READ_ONLY_CARD_ROLES = ("review", "orchestrate")
+READ_ONLY_CARD_KINDS = ("review", "plan", "research")
 # The harness role each tier runs as, and the card role that overrides it. The
 # `leaf` flag itself is read from catalog/agent-harness.json — one home per fact.
 HARNESS_PATH = os.path.join(ROOT, "catalog", "agent-harness.json")
@@ -366,17 +373,22 @@ def role_is_leaf(tier, card) -> bool:
     return harness_role_is_leaf(role_for_run(tier, card))
 
 
-def leaf_isolation_refusal(tier, isolate: bool, client: str, leaf: bool = False) -> str | None:
+def leaf_isolation_refusal(tier, isolate: bool, client: str, leaf: bool = False,
+                           card=None, read_only: bool = False) -> str | None:
     """Why this run must not start where it stands, or None when it may.
 
     Keyed on the role's leaf flag OR the tier being in ISOLATE_TIERS, never on
     the tier number alone: a leaf role that somehow routed to tier 1 is still a
-    leaf.
+    leaf. Everything outside that — the tier-1 write-role leg — is delegated to
+    `writer_isolation_refusal`, so one function answers the whole question for
+    both entry points and a caller that deliberately allows an in-place run has
+    one gate to allow, not two that can drift apart.
     """
     if isolate or client in NO_ISOLATE_CLIENTS:
         return None
     if not (leaf or tier in ISOLATE_TIERS):
-        return None
+        return writer_isolation_refusal(tier, isolate, client, card=card,
+                                        read_only=read_only)
     who = "is a leaf role" if leaf else "is a spawned tier"
     return ("tier %s %s and cannot run in the caller's checkout: pass --isolate "
             "so it gets its own isolated clone. It greps and globs the whole "
@@ -386,6 +398,93 @@ def leaf_isolation_refusal(tier, isolate: bool, client: str, leaf: bool = False)
             "searched file. An --isolate clone holds committed files only, so "
             "no ignored secret is present, and a child it spawns inherits the "
             "clone, not your checkout." % (tier, who))
+
+
+def is_write_role(card) -> bool:
+    """Does this card ask for the work that edits files?
+
+    ONE rule for both entry points (SB-B merge, D-103): this is SB-C's predicate,
+    kept with the semantics the fleet server was tested against — a card is a
+    writer unless it names one of the read-only roles, and a card that names
+    nothing takes the registry's default role (`implement`), which is a writer.
+    `routing.CARD_DEFAULTS` is what makes an absent card a writer rather than an
+    unknown: an empty card routes as `role=implement`, so the run that never said
+    what it touches is the run that touches files.
+
+    Both card dialects answer it: v1 spells the role in `role`, v2 in `kind`
+    (spec 6.1), and `plan`/`research` are v2 spellings of a read-only run — the
+    same fact `read_only_run` reads for the verdict. A string card is parsed first
+    so a caller that holds `--card role=review` text and one that holds the dict
+    get one answer.
+    """
+    if isinstance(card, str):
+        try:
+            card = routing.parse_card(card)
+        except (ValueError, routing.CardError):
+            card = None  # normalize() reports the bad card; this is not its job
+    card = card or {}
+    if _is_v2_card(card):
+        return card.get("kind") not in READ_ONLY_CARD_KINDS
+    role = card.get("role")
+    if role is None:
+        return True
+    return role not in READ_ONLY_CARD_ROLES
+
+
+def writer_isolation_refusal(tier, isolate: bool, client: str, card=None,
+                             read_only: bool = False) -> str | None:
+    """The tier-1 half of the isolate rule: a WRITE run gets no checkout of yours.
+
+    SB-B's CLI leg, now running on SB-C's `is_write_role` — the same predicate the
+    fleet server's spawn refusal uses, so a card cannot be a writer to one entry
+    point and read-only to the other. `leaf_isolation_refusal` keys on the harness
+    role's leaf flag and on ISOLATE_TIERS, so tier 1 was never in it: a card routed
+    to t1 with a write role, or an MCP tier-1 spawn, still ran in place and could
+    edit the caller's tree. The tier-1 exemption is for the operator's own session,
+    not for a worker whose brief is an edit.
+
+    Reached through `leaf_isolation_refusal` (which delegates here for everything
+    it does not refuse itself). Call it directly only when you want this leg alone
+    — the unit tests do; `cmd_run` and the MCP server use the one gate.
+
+    A run with NO card is not refused: `--tier 1` with nothing else on the card
+    side is the operator naming their own session, which is the exemption
+    ISOLATE_TIERS itself states ("Only tier 1 ... the operator's own session, in a
+    lane the operator is watching, may still run in place"). The fleet server does
+    not get to make that call for its callers — a spawn with no card is a WORKER
+    and its own rule (SB-C's block in `build_argv`) refuses and isolates it — and
+    it is not a second definition of a writer either, because it never asks the
+    predicate: no card, no claim, no leg. A `--card role=implement` at tier 1, or
+    a card the resolver routed up to tier 1, IS a claim and is refused here.
+
+    Tiers 2 and 3 return None: the leaf helper already refuses those, and two
+    refusals firing for one run is two messages about one defect."""
+    if isolate or read_only or client in NO_ISOLATE_CLIENTS or card is None:
+        return None
+    if (tier or 2) in ISOLATE_TIERS or not is_write_role(card):
+        return None
+    return ("tier %s runs a write-role card (%s) in the caller's checkout: pass "
+            "--isolate so it edits its own clone. The tier-1 exemption is the "
+            "orchestrator's own session; a worker that writes files needs a clone "
+            "or it writes what you are standing in. (A run that only reads — "
+            "--read-only, or a review/research/plan card — is unaffected.)"
+            % (tier, card_claim(card)))
+
+
+def card_claim(card) -> str:
+    """The word the card used to name its role, for a refusal that quotes it back.
+
+    `card` is text as often as it is a dict — `--card role=implement` arrives from
+    argparse unparsed — so read it through the same parse `is_write_role` uses.
+    Two dialects, two key names, and a message that must not guess which.
+    """
+    if isinstance(card, str):
+        try:
+            card = routing.parse_card(card)
+        except (ValueError, routing.CardError):
+            card = None
+    card = card or {}
+    return str(card.get("role") or card.get("kind") or "no role")
 
 
 def isolate_source(cwd: str | None = None) -> str:
@@ -452,6 +551,26 @@ WORKER_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
                     "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
                     "PROGRAMDATA")
 WORKER_ENV_ALLOW_PREFIXES = ("LC_", "XDG_")
+
+# WSLSHELL (SB-B, D-103 item 2): the shell a worker runs its commands in. On
+# Linux/WSL an opencode worker picked up PowerShell whenever pwsh was installed,
+# because opencode takes its shell from $SHELL (and from its own `shell` config
+# default) and the caller's $SHELL is the operator's — a bash brief then dies on
+# PowerShell syntax two tools in. SHELL stays on the allowlist below (a client
+# that reads it for something else still gets a sane value) but its CONTENT is
+# pinned here, and stated again in the rendered config, so neither of the two
+# paths a worker can take finds the operator's shell.
+WORKER_SHELL = "/bin/bash"
+
+
+def worker_shell():
+    """The pinned shell, or None where there is nothing to pin.
+
+    Windows has no /bin/bash, and PowerShell *is* the shell the Windows tree is
+    written in (AGENTS.md §6): pinning bash there would break every worker."""
+    return None if os.name == "nt" else WORKER_SHELL
+
+
 # AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
 # here: the child gets the minted key, never the path to the file it came from.
 WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
@@ -608,6 +727,11 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
             continue
         env[n] = v
     env["PWD"] = plan["cwd"]
+    # WSLSHELL: after the plan merge, so this is a forced value rather than a
+    # default that a caller's env or a plan entry can win.
+    pin = worker_shell()
+    if pin:
+        env["SHELL"] = pin
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
     _drop_extra_git_config(env)
@@ -971,7 +1095,7 @@ def free_model_chain(policy: dict | None, client: str, first: str) -> list:
 
 
 def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
-                           tried: set) -> tuple:
+                           tried: set, benched: set | None = None) -> tuple:
     """The next --free attempt: the SAME task in the SAME sandbox on the next
     untried model of `chain`. Returns (plan, from, to), or (None, None, None)
     when the chain is spent or the re-plan is refused (privacy, depth, no
@@ -979,14 +1103,21 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
 
     `tried` holds every free model this run has already burned; the model the
     stop just landed on joins it here, so no later attempt can return to it.
+
+    `benched` (RATELIMITRETRY, SB-B) is the set of providers rate-limited during
+    THIS run; a model on one of them is tried last, not first — one free account
+    per provider, so its next model is the same 429 fifteen seconds later. It is
+    preferred, not required: opencode's whole free list sits on one provider, and
+    a run that gave up at the first same-provider model would strand work that
+    two healthy models could still finish.
     """
     chain = list(chain or [plan["model"]])
     current = plan["model"]
     tried.add(current)
     at = chain.index(current) if current in chain else -1
-    for model in chain[at + 1:]:
-        if model in tried:
-            continue
+    rest = [m for m in chain[at + 1:] if m and m not in tried]
+    others = [m for m in rest if free_provider(m) not in (benched or set())]
+    for model in others + [m for m in rest if m not in others]:
         given = args.free_model
         args.free_model = model
         try:
@@ -2794,7 +2925,8 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
 
 
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
-                      exclude_routes: set | None = None) -> dict:
+                      exclude_routes: set | None = None,
+                      provider_cooldown: dict | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
     "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
     `route` subcommand and the MCP `route` tool, so `run` and `route` can never
@@ -2805,6 +2937,13 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     the run falls through to the next route. The registry is copied, never
     mutated; the returned route is marked ``resolver: True`` so cmd_run knows
     the run was resolver-routed (the v1/--tier paths are not).
+
+    ``provider_cooldown`` (RATELIMITRETRY, SB-B) is this process's own bench of
+    providers that just rate-limited it, in the provider-state file's shape
+    (``{provider_id: {"unavailable_until": ...}}``). It is applied to the same
+    COPY the resolver reads, so the fallthrough picks a leg elsewhere — and
+    nothing is written: a 429 that outlives the run is a routing decision for the
+    operator, not a fact this spawner gets to record for everyone.
 
     `state` "input_required" (no route survived the filters) raises
     RouteInputRequired with the plan's own reason; "deferred" raises
@@ -2820,6 +2959,10 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     registry = load_live_registry()
+    if provider_cooldown:
+        # A copy again: apply_provider_state returns one, and the shared
+        # load_registry() object must not carry this run's bench into the next.
+        registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
     if exclude_routes:
         # A copy, so the shared load_registry() cache (and the caller's own
         # reference) never loses the routes a previous attempt needs recorded.
@@ -2924,13 +3067,14 @@ def sensitive_combo_refusal(combo: str, registry: dict):
     return None
 
 
-def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
+def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
+                  provider_cooldown: dict | None = None) -> dict:
     """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
     explicit --model replaced the card's combo must still land on private-safe
     legs only (--allow-training keeps its compatibility escape, which now only
     waives that explicit-override check - it no longer unlocks a trainable leg,
     since 2026-09-27)."""
-    route = resolve_route_unchecked(args, cfg, client, exclude_routes)
+    route = resolve_route_unchecked(args, cfg, client, exclude_routes, provider_cooldown)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
         # model, which may train on prompts - never for a sensitive task.
@@ -2945,12 +3089,14 @@ def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None) ->
     return route
 
 
-def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None = None) -> dict:
+def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None = None,
+                            provider_cooldown: dict | None = None) -> dict:
     """Tier/model/combo for this run: an explicit --tier, a v2 card through the
     resolver (RUNV2), or a v1 card through select_combo.
 
-    ``exclude_routes`` is forwarded to _resolve_route_v2 only (SPAWNCAP, S2):
-    the v1/--tier paths have a single combo and never fall through."""
+    ``exclude_routes`` and ``provider_cooldown`` are forwarded to
+    _resolve_route_v2 only (SPAWNCAP, S2 / RATELIMITRETRY, SB-B): the v1/--tier
+    paths have a single combo and never fall through."""
     # --model names a gateway combo for opencode and the gateway clients; for
     # agy/claude/qoder it is the client's own model id and is not checked here.
     override = args.model if client.gateway else None
@@ -2963,7 +3109,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
                 "review_plan": None}
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
-        return _resolve_route_v2(args, parsed, cfg, override, exclude_routes)
+        return _resolve_route_v2(args, parsed, cfg, override, exclude_routes,
+                                 provider_cooldown)
     card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
@@ -2984,17 +3131,20 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
-               sandbox: dict | None = None) -> dict:
+               sandbox: dict | None = None,
+               provider_cooldown: dict | None = None) -> dict:
     """The full run plan for `args`.
 
     ``exclude_routes`` (SPAWNCAP, S2) is passed through to the resolver so a
-    fallthrough re-run does not pick a route that already stopped. ``sandbox``
-    reuses an existing clone (same path/branch) instead of naming a new one -
-    a fallthrough re-runs in the same checkout, so its WIP commit and its work
-    stay on one branch.
+    fallthrough re-run does not pick a route that already stopped.
+    ``provider_cooldown`` (RATELIMITRETRY, SB-B) is this process's own bench of
+    the providers that just rate-limited it, forwarded to the resolver the same
+    way. ``sandbox`` reuses an existing clone (same path/branch) instead of
+    naming a new one - a fallthrough re-runs in the same checkout, so its WIP
+    commit and its work stay on one branch.
     """
     client = clients.CLIENTS[args.client]
-    route = resolve_route(args, cfg, client, exclude_routes)
+    route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown)
     depth, max_depth = clients.child_depth(os.environ, args.max_depth)
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
@@ -3120,6 +3270,13 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
                                      read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
     if client.name == "opencode":
+        # WSLSHELL (SB-B): opencode's own config schema carries a top-level
+        # `shell` ("Default shell to use for terminal"), which its resolver
+        # reads with priority "config" — ahead of the pinned $SHELL for a worker
+        # whose checkout or user config states one. Say it in the config too.
+        shell = worker_shell()
+        if shell:
+            overlay["shell"] = shell
         # KEYDENY3b item 1: the spawn gate is re-asserted in the overlay, which
         # opencode merges after the checkout's own rules — a leaf cannot spawn an
         # unfenced child even in a checkout whose opencode.jsonc drifted. The
@@ -3151,6 +3308,141 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             "run_id": run_id, "sandbox": sandbox,
             "cwd": sandbox["path"] if sandbox else os.getcwd(),
             "session_tag": tag}
+
+
+# --- RUNMODEL (D-103, SB-B item 4): who ACTUALLY served this run -------------
+#
+# A lane record has always said which route the spawner asked for and never which
+# provider and model answered. After a fallthrough that distinction is the whole
+# story — the leg a run started on is not the leg that wrote the diff — and a
+# review that wants to hold a family to account needs the writer, not the plan.
+#
+# The gateway is the only witness: it stamps every call with the run's
+# `x-omniroute-session-id` (D-063), so ONE read-only GET of the call log, matched
+# to this run's session, is the evidence. A log it refuses to read is recorded as
+# `unresolved`: a plan says what was asked for, this field is about what happened,
+# and the two are not interchangeable when they disagree.
+
+WRITER_UNRESOLVED = "unresolved"
+# The endpoint's own default page size (callLogs.ts:1014), newest-first, so one
+# GET reaches the calls this run made last — which is the attempt that survived.
+CALL_LOG_PAGE = 200
+
+
+def manage_key(env=None) -> str | None:
+    """The host's manage-scoped OmniRoute key, or None when there is none.
+
+    Read exactly as `autoos-agent.py usage` reads it (the ai-stack config the
+    installer left on the host), because the call log answers the manage scope
+    only. A `--free` run has no gateway to ask, so it never gets this far.
+    """
+    env = os.environ if env is None else env
+    try:
+        return usage_mod.read_manage_key(usage_mod.key_file_path(env))
+    except (OSError, ValueError):
+        return None
+
+
+def _call_log_rows(fetch, gateway, key, limit):
+    """The rows of ONE read-only call-log GET, or None on any failure.
+
+    Never pages: one read is the contract, and a second page of a busy gateway
+    is not worth a longer tail on every finished run.
+    """
+    url = "%s/api/usage/call-logs?limit=%d&offset=0&excludeTests=1" % (gateway, limit)
+    try:
+        status, body = fetch(url, usage_mod.auth_headers(key), usage_mod.TIMEOUT_S)
+    except Exception:  # noqa: BLE001 - transport shapes vary (URLError, OSError, http.client)
+        return None
+    if status != 200:
+        return None
+    try:
+        rows = json.loads(body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def gateway_writer(session_id, gateway=None, key=None, fetch=None, limit=CALL_LOG_PAGE):
+    """(provider, model) of the newest call the gateway logged for `session_id`.
+
+    A run that fell through leaves one row per dead attempt under the SAME
+    session id, so the newest row is the attempt that finished the work; a
+    successful row is preferred over an error row because an error row names a
+    provider that refused rather than one that served. None when the log cannot
+    be read or names nothing for this run — the caller records `unresolved`
+    rather than guessing from the plan.
+    """
+    if not session_id:
+        return None
+    gateway = gateway or GATEWAY
+    key = manage_key() if key is None else key
+    if not key:
+        return None
+    rows = _call_log_rows(fetch or usage_mod.urllib_fetch, gateway, key, limit)
+    if not rows:
+        return None
+    mine = [r for r in rows if isinstance(r, dict)
+            and r.get("sessionTag") == session_id
+            and (r.get("provider") or r.get("model"))]
+    if not mine:
+        return None
+    ok = [r for r in mine if not (int(r.get("status") or 0) >= 400 or r.get("error"))]
+
+    def newest(candidates):
+        def stamp(row):
+            ts = usage_mod.row_timestamp(row)
+            return ts if ts is not None else 0
+        return max(candidates, key=stamp)
+
+    row = newest(ok or mine)
+    return (row.get("provider") or WRITER_UNRESOLVED, row.get("model") or WRITER_UNRESOLVED)
+
+
+def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
+                    gateway=None) -> dict:
+    """The writer of this run: `{provider, model, family}`.
+
+    A gateway run asks the gateway (one GET, by the run's own session id); a
+    native run already holds the answer in its plan — the model the client
+    answers with is the model that served it, and `--free` names the provider in
+    that same `provider/model` id. The family is the registry's own declaration
+    for that model spelling, never a guess from the name.
+
+    Any field this cannot prove is `unresolved`, which is the point of the
+    record: an empty field reads like "the run did not use a model".
+    """
+    registry = registry if registry is not None else load_live_registry()
+    provider = model = None
+    if uses_gateway:
+        session = session_header_value(plan.get("session_tag") or "", plan.get("run_id")) \
+            if plan.get("session_tag") else None
+        found = gateway_writer(session, gateway=gateway, key=key, fetch=fetch)
+        if found is None:
+            return {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
+                    "family": WRITER_UNRESOLVED}
+        provider, model = found
+    else:
+        model = plan.get("model") or None
+        if model:
+            # A native client's own id, or a `provider/model` promo id on --free.
+            provider = free_provider(model) if "/" in model else plan.get("client")
+            # The gateway leg answers with the bare model name, so this one must
+            # too: `mimo/mimo-7` in a record read beside `mimo-7` looks like two
+            # different models, and the prefix is already in `provider`.
+            if "/" in model:
+                model = model.rpartition("/")[2]
+    family = (_family_of_one_spelling(model, registry) if model else None)
+    return {"provider": provider or WRITER_UNRESOLVED,
+            "model": model or WRITER_UNRESOLVED,
+            "family": family or WRITER_UNRESOLVED}
+
+
+def writer_line(writer: dict) -> str:
+    """The one line every reader of the run sees: `writer: <provider>/<model> (<family>)`."""
+    return "writer: %s/%s (%s)" % (writer.get("provider") or WRITER_UNRESOLVED,
+                                   writer.get("model") or WRITER_UNRESOLVED,
+                                   writer.get("family") or WRITER_UNRESOLVED)
 
 
 def cmd_list(cfg: dict) -> int:
@@ -3537,7 +3829,12 @@ def refusal_exit(rc: int, tail: str) -> tuple:
 # run); the leading space on " 429"/" 402" keeps those digits from matching
 # mid-word. ONE tuple, so the list is the whole contract.
 PROVIDER_STOP_MARKERS = (
-    "rate limit exceeded",
+    # RATELIMITRETRY (SB-B, D-103 item 1): 'rate limit exceeded' is ONE client's
+    # wording, and the run that died in the field said 'Rate limit' — so the
+    # family is matched, not the phrase. The error-prefix rule below is what
+    # keeps the task's own words out of it, not a narrow marker list.
+    "rate limit",
+    "too many requests",
     "capacity is temporarily unavailable",
     "resource_exhausted",
     " 429",
@@ -3568,7 +3865,19 @@ PROVIDER_STOP_MARKERS = (
 
 # SPAWNCAP (S2): how many times a provider-stopped resolver-routed --isolate
 # run re-runs the same task on the next route before it gives up with exit 8.
-MAX_FALLTHROUGH = 2
+# SB-B (D-103) item 1 raised this from 2 to 3 for the rate-limit case, and the
+# bound is one number rather than two: a run that falls through a 429 and a run
+# that falls through a 503 are the same act — try the next leg — and a second
+# counter would only be a second thing to keep in sync.
+MAX_FALLTHROUGH = 3
+
+# RATELIMITRETRY: how long the provider that just rate-limited stays benched
+# INSIDE this process. A stated reset ("resets in ~83h") is recorded for every
+# later routing read by record_reset_stop; an unstated 429 is the common case
+# and would otherwise leave the next attempt on the same shared account. One
+# bench window per fallthrough, so a 3-fallthrough run walks off the rate limit
+# of at most three providers.
+RATELIMIT_COOLDOWN_SECONDS = 300
 
 
 def fallthrough_line(combo: str, stop: str, next_combo: str) -> str:
@@ -3603,7 +3912,7 @@ PROVIDER_STOP_PREFIXES = ("error", "agy_error", "fatal")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|^\r")
 
 
-def provider_stop(tail: str) -> str | None:
+def provider_stop(tail: str, stderr_tail: str | None = None) -> str | None:
     """The provider-stop line among the client's last lines, or None.
 
     Only the last PROVIDER_STOP_WINDOW non-empty lines of `tail` are scanned:
@@ -3611,17 +3920,71 @@ def provider_stop(tail: str) -> str | None:
     marker quoted earlier in the run must not match. Inside the window a line
     only when, after lstrip() and removing ANSI colour codes, it STARTS with
     an error prefix (PROVIDER_STOP_PREFIXES, case-insensitive) AND contains a
-    PROVIDER_STOP_MARKERS entry (WIPfix3). Returns the matching line nearest
-    the end when several are in the window.
+    PROVIDER_STOP_MARKERS entry (WIPfix3) or a bare 429 status
+    (_STATUS_429_RE, RATELIMITRETRY). Returns the matching line nearest the end
+    when several are in the window.
+
+    `stderr_tail` (ERRCHANNEL, SB-B review 1) is the same window of the client's
+    OWN stderr channel. Given, a rate-limit line is accepted only when that
+    channel says it too: a worker quoting `Error: 429` out of a log it cat'ed, a
+    fixture it wrote or the brief it was handed, is the task talking about an
+    outage, not a provider refusing one - and the widened rate-limit family the
+    field needed is exactly the wording such a line carries. The other markers
+    keep the merged window, so a 503 or a billing wall is still caught wherever
+    the client printed it. Absent (a caller with no channel split: every unit
+    test, every non-capture client) nothing is re-required, which is how this
+    classified before the review.
     """
     lines = [line for line in (tail or "").splitlines() if line.strip()]
+    err = None
+    if stderr_tail is not None:
+        err = {_ANSI_RE.sub("", ln.lstrip())
+               for ln in stderr_tail.splitlines() if ln.strip()}
     for line in reversed(lines[-PROVIDER_STOP_WINDOW:]):
         clean = _ANSI_RE.sub("", line.lstrip())
         low = clean.lower()
-        if low.startswith(PROVIDER_STOP_PREFIXES) and any(
-                marker in low for marker in PROVIDER_STOP_MARKERS):
+        if not low.startswith(PROVIDER_STOP_PREFIXES):
+            continue
+        if err is not None and _is_rate_limit_line(low) and clean not in err:
+            continue
+        if (any(marker in low for marker in PROVIDER_STOP_MARKERS)
+                or _is_rate_limit_line(low)):
             return clean
     return None
+
+
+# RATELIMITRETRY (SB-B, D-103 item 1). '429' as a status of its own, not a
+# fragment: a digit or a dot on either side disqualifies it, so a model id or a
+# version that merely contains the three digits is not an outage. Whether the line
+# is a provider error at all stays `provider_stop`'s prefix rule to decide — this
+# only says which digits count as the status.
+_STATUS_429_RE = re.compile(r"(?<![\d.])429(?![\d.])")
+_RATE_LIMIT_MARKERS = ("rate limit", "too many requests")
+
+
+def _is_rate_limit_line(low: str) -> bool:
+    """Does this already-lowercased, already-cleaned line say a RATE limit?
+
+    One spelling of the family for both checks: `provider_stop` uses it to decide
+    which lines need the stderr channel (ERRCHANNEL) and `rate_limit_stop` uses it
+    to decide which stop benches a provider."""
+    return (any(marker in low for marker in _RATE_LIMIT_MARKERS)
+            or _STATUS_429_RE.search(low) is not None)
+
+
+def rate_limit_stop(line: str) -> bool:
+    """True when a stop line is a rate limit (429) rather than another outage.
+
+    A rate limit says WHO is out of capacity, so the next attempt is picked for a
+    DIFFERENT provider; a 503-all-targets or an exhausted-credit line says
+    something else, and re-trying the same account on it is not a plan.
+
+    Call it on a line `provider_stop` returned, never on raw output: the channel
+    rule that keeps a worker's own quoted `Error: 429` out of the bench lives in
+    that call, and re-deriving it here from text alone is how the same line would
+    get a second, unfenced chance.
+    """
+    return _is_rate_limit_line(_ANSI_RE.sub("", (line or "").lstrip()).lower())
 
 
 # --- REVROUTE (S2) item 3: a stop that states its own reset time -------------
@@ -3774,6 +4137,54 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
         if isinstance(provider, dict) and not unavailable_now(provider, now):
             return pid
     return None
+
+
+def combo_legs(combo, registry) -> list:
+    """The route's own `provider/model` legs, as the registry spells them."""
+    return ((registry.get("routes") or {}).get(combo) or {}).get("legs") or []
+
+
+def combo_providers(combo, registry) -> list:
+    """The provider ids a route's legs name, in leg order and de-duplicated.
+
+    Empty for a route with no legs, an unknown route, or legs that do not resolve
+    — a caller that cannot tell who serves a combo must not guess and bench the
+    wrong provider (the same rule `stop_provider_id` states for a stop line)."""
+    out = []
+    for leg in combo_legs(combo, registry):
+        pid = (_leg_provider_model(leg, registry) or (None, None))[0]
+        if pid and pid not in out:
+            out.append(pid)
+    return out
+
+
+def combo_is_benched(combo, cooldown, registry) -> bool:
+    """True when every leg of `combo` sits on a provider this process benched.
+
+    A combo with an unresolvable leg is not benched: "we do not know who serves
+    this" is a reason to try it, not a reason to give up on it."""
+    if not cooldown:
+        return False
+    pids = combo_providers(combo, registry)
+    return bool(pids) and all(pid in cooldown for pid in pids)
+
+
+def rate_limit_bench(stop_line: str, plan: dict, registry: dict) -> str | None:
+    """The provider this process benches after a rate limit, or None.
+
+    A --free run's combo is a `provider/model` promo id rather than a registry
+    route, so the route read finds nothing and the model's own prefix is the
+    answer (the free-leg queue already reads a provider that way).
+
+    `stop_provider_id` is handed the route's LEGS, not its provider ids: it
+    resolves each leg through the registry itself, and a `provider` id with no
+    `/model` after it is not a leg."""
+    combo = (plan.get("route") or {}).get("combo")
+    pid = stop_provider_id(stop_line or "", registry, combo_legs(combo, registry))
+    if pid is not None:
+        return pid
+    model = plan.get("model") or ""
+    return free_provider(model) if "/" in model else None
 
 
 def load_provider_state(path: str) -> dict:
@@ -4243,6 +4654,57 @@ def parent_leak(snapshot, root=None, sandbox=None):
     if changed:
         leaks.append("changed tracked paths in the parent checkout: %s" % ", ".join(changed))
     return leaks
+
+
+# MODEFLIP (SB-B, D-103 item 3). `git diff --raw` line, read with --no-renames:
+# :<old mode> <new mode> <old blob> <new blob> <status>\t<path>
+_MODE_ONLY_RAW_RE = re.compile(r"^:(\d{6}) (\d{6}) ([0-9a-f]{4,40}) ([0-9a-f]{4,40}) ([A-Z]+)\t(.*)$")
+
+
+def _git_stdout(proc) -> str:
+    """A read's stdout when git answered, "" when it could not."""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def sandbox_mode_only(path: str, base: str, rev: str) -> str | None:
+    """A description of the sandbox's diff when it is ONLY file-mode changes, else None.
+
+    100644 <-> 100755 with the same blob on both sides is a mode flip: no byte of
+    content moved (a checkout on a filesystem without the exec bit, or a worker
+    that reached for chmod instead of editing). Both reads count — `base..rev`
+    for the commits the run made and the worktree for what it left uncommitted —
+    and any untracked or added file disqualifies the diff, because that is the
+    work the run came for. An EMPTY diff returns None too: that is the NO-OP
+    verdict's own case, and this is about a diff that looks like work and is not.
+    A git that cannot answer reads as an empty diff: the run keeps the verdict
+    it claimed rather than a refusal built on no evidence.
+    """
+    rows = [
+        _git_stdout(subprocess.run(
+            ["git", "-C", path, "diff", "--raw", "--no-renames", base + ".." + rev],
+            capture_output=True, text=True)),
+        _git_stdout(subprocess.run(
+            ["git", "-C", path, "diff", "--raw", "--no-renames", "HEAD"],
+            capture_output=True, text=True)),
+    ]
+    status = _git_stdout(subprocess.run(
+        ["git", "-C", path, "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True))
+    if any(ln.startswith("??") or ln.startswith("A ") for ln in status.splitlines()):
+        return None
+    entries = [ln for block in rows for ln in block.splitlines() if ln.strip()]
+    if not entries:
+        return None
+    seen = []
+    for line in entries:
+        m = _MODE_ONLY_RAW_RE.match(line)
+        if m is None:
+            return None
+        old_mode, new_mode, old_blob, new_blob = m.group(1), m.group(2), m.group(3), m.group(4)
+        if old_blob != new_blob or old_mode == new_mode or set(old_blob) == {"0"}:
+            return None
+        seen.append("%s -> %s %s" % (old_mode, new_mode, m.group(6)))
+    return "; ".join(seen)
 
 
 def sandbox_diffstat(path: str, base: str) -> str:
@@ -4866,11 +5328,133 @@ def proc_start_time(pid) -> int | None:
         return None
 
 
+def kill_store_dir() -> str:
+    """The runner-private home of each run's decided-at-spawn record (SB-A3,
+    D-103 item C; the run MODE joined it in SB-A4).
+
+    Deliberately NOT `AUTOOS_TASK_DIR`: the run dir is handed to the worker as an
+    environment variable, the worker is the same uid as everything in it, and a
+    kill record the cancelled process can rewrite is a channel it gives orders
+    through — which is what SB-A's `pgrp.json` and SB-A2's `job.json` group were.
+    This is a sibling of the `agents/` tree, 0700 with 0600 files, written by the
+    server and the runner and by nobody else.
+
+    RESIDUAL, stated rather than papered over: a same-uid worker that goes looking
+    can still find this directory (the state dir is in its environment) and write
+    into it, because a file cannot be hidden from the uid that owns it. What
+    closes that hole is the scope path, which is derived from the run id and
+    depends on no file at all; the private store is only the fallback for a host
+    with no user manager.
+
+    SB-B merge: this moved here from the fleet server, because the CLI is the
+    process that starts and re-starts the client — an attempt's group has to reach
+    the same record from inside `run_client`, and a second copy of a store is a
+    second place a killer's answer can come from. The server reads and writes it
+    through this one implementation.
+    """
+    return os.path.join(clients.state_dir(), "kill")
+
+
+def kill_store_path(run_id: str) -> str:
+    """The one record file for `run_id`, named so no run id escapes the store."""
+    name = os.path.basename(os.path.normpath(str(run_id or "")))
+    if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("bad run id %r" % (run_id,))
+    return os.path.join(kill_store_dir(), name + ".json")
+
+
+def write_kill_record(run_id: str, record: dict) -> bool:
+    """Write (or merge into) the runner's private record for one run.
+
+    SB-A4 (D-103, the rest of item C) grew this from a group record into the run's
+    whole decided-at-spawn identity: `run_id`, `mode` (review|write), `scope`,
+    `dry_run`, `allow_mode_only`, `created_at`, plus the `pgid`/`start` group
+    record and the RUNMODEL `writer` the run resolves at its end. It is the only
+    place any of that is read from, because everything a killer or a dispatcher
+    decides must come from a record the worker cannot rewrite through its own
+    `job.json`.
+
+    Merge semantics are deliberately asymmetric. The group is re-recorded by the
+    runner in `run_job` and by the spawner for every client attempt it launches
+    (`record_attempt_group`), so `pgid`/`start` are replaced whenever they are
+    given. The decided-at-spawn fields are IMMUTABLE: a later write cannot
+    re-decide the mode even by accident, and `created_at`/`run_id` are stamped on
+    the record's first write only.
+    """
+    if os.name == "nt" or not record:
+        return False
+    try:
+        path = kill_store_path(run_id)
+        directory = kill_store_dir()
+        os.makedirs(directory, exist_ok=True)
+        os.chmod(directory, 0o700)
+        existing = read_kill_record(run_id) or {}
+        merged = dict(existing)
+        merged.setdefault("run_id", run_id)
+        merged.setdefault("created_at", _iso_zulu(datetime.datetime.now(
+            datetime.timezone.utc)))
+        for key in ("pgid", "start", "writer", "attempt"):
+            if record.get(key) is not None:
+                merged[key] = record[key]
+        for key in ("mode", "scope", "dry_run", "allow_mode_only"):
+            if record.get(key) is not None:
+                merged.setdefault(key, record[key])
+        tmp = "%s.tmp-%d" % (path, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with io.open(fd, "w", encoding="utf-8") as fh:
+            json.dump(merged, fh)
+        os.replace(tmp, path)
+    except (OSError, ValueError) as exc:
+        print("autoos-agent: no kill record for %s: %s" % (run_id, exc),
+              file=sys.stderr)
+        return False
+    return True
+
+
+def read_kill_record(run_id: str):
+    """The private record, or None. A run with no record is a run whose group and
+    mode were never decided by a server — the direct CLI path — and a killer must
+    say so rather than kill what it cannot identify."""
+    try:
+        path = kill_store_path(run_id)
+        with io.open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def record_attempt_group(run_id, proc=None, attempt=None) -> bool:
+    """Re-record the live process group of one run, after each client launch.
+
+    SB-B merge: the fallthrough loop re-starts the SAME task on another leg, and
+    every attempt leads a NEW session (`run_client` starts it with
+    `start_new_session=True`), so the `pgid`/`start` the runner wrote for its own
+    group is not the group the current attempt lives in. Where there is no user
+    manager the group kill IS the cancel, and a stale group is a cancel that
+    reports success while the worker keeps writing.
+
+    It updates only an EXISTING record, because a record is minted by the fleet
+    server at spawn: a `run` started straight from a shell has no run dir, no
+    `mode`, and no canceller, and creating a record here would hand the store a
+    file nothing else describes. Never job.json — the worker owns that file's
+    directory and SB-A4 is explicit that a kill target read out of it is a channel
+    the cancelled process writes through.
+    """
+    if os.name == "nt" or not run_id or read_kill_record(run_id) is None:
+        return False
+    group = group_record(getattr(proc, "pid", None))
+    if not group:
+        return False
+    if attempt is not None:
+        group["attempt"] = attempt
+    return write_kill_record(run_id, group)
+
+
 def group_record(pid=None) -> dict:
     """`{"pgid", "start"}` for the group `pid` leads — the runner's own record.
 
-    Written into job.json by the runner (never inside the sandbox, never through
-    an env var), which is what `cancel` verifies a kill against.
+    Written to the runner-private kill store (SB-A4: never job.json, which the
+    worker's directory holds), which is what `cancel` verifies a kill against.
     """
     if os.name == "nt":
         return {}
@@ -5207,21 +5791,35 @@ class ClientExit(int):
     refusal and provider-stop checks look for, so they classify on this copy and
     nothing else ever reads it - it is never printed, never recorded, never
     committed (REDACTFIX item 2).
+
+    `.raw_err` is the narrower window of the two: the child's OWN text from its
+    OWN stderr channel only (ERRCHANNEL, SB-B review 1). A task that quotes
+    `Error: 429` at itself — in a log it cat'ed, in a fixture it wrote, in the
+    brief it was handed — puts that line on stdout, and a rate limit read out of
+    the task's own words benches a provider that never refused anyone and re-runs
+    the whole run on another leg. The channel is the only thing that tells a
+    client's failure from a worker quoting one, so the rate-limit family is
+    classified on this copy alone. It is None (no split was made, so nothing may
+    be demanded of a channel that was never read) and "" (the channel was read
+    and said nothing) are different answers, and that difference is the rule.
     """
     tail = ""
     refusal = None
     raw_tail = ""
+    raw_err = None
 
     def __new__(cls, rc: int, tail: str = "", refusal: str | None = None,
-                raw_tail: str = ""):
+                raw_tail: str = "", raw_err: str | None = None):
         obj = super().__new__(cls, rc)
         obj.tail = tail
         obj.refusal = refusal
         obj.raw_tail = raw_tail
+        obj.raw_err = raw_err
         return obj
 
 
-def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False) -> int:
+def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
+               run_id=None, attempt=None) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
     The client leads a session of its own on purpose — but that is exactly the
@@ -5230,10 +5828,21 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     holds a setsid() child anyway. Nothing here writes a file for `cancel` to
     read: the worker shares the uid of every path it could be given.
 
-    capture=True (CAPTURE_CLIENTS only): the child's stdout+stderr are merged,
-    streamed to our stdout line by line (unbuffered), the last TAIL_LIMIT bytes
-    are kept on ClientExit.tail, and the first headless-refusal line seen
-    anywhere in the stream on ClientExit.refusal. capture=False: the child
+    `run_id`/`attempt` (SB-B merge): the client's NEW group is re-recorded in the
+    runner-private kill store on every launch, so a `cancel` that falls back to the
+    group kill where there is no user manager is aimed at the attempt that is
+    running now, not at the one that rate-limited and died — the fallthrough loop
+    re-starts this task, and each re-start is a new session with a new pgid. The
+    store is updated, never job.json (the worker owns that file's directory), and
+    nothing is written at all for a run with no record: a `run` started straight
+    from a shell has no canceller.
+
+    capture=True (CAPTURE_CLIENTS only): on POSIX the child's stdout and stderr are
+    two pipes, both streamed to our stdout line by line (unbuffered) and both kept
+    in one merged window; on Windows they are one merged pipe. The last TAIL_LIMIT
+    bytes are kept on ClientExit.tail, the first headless-refusal line seen
+    anywhere in the stream on ClientExit.refusal, and the stderr window alone on
+    ClientExit.raw_err (None where no split was made). capture=False: the child
     inherits our stdout/stderr, as before. Returns the client's exit code; KeyboardInterrupt is
     re-raised after cleanup. reap=False (a --joinable `claude --bg` session)
     leaves the group alone after exit code 0: that session is meant to outlive
@@ -5254,6 +5863,14 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
     register_secret_env(env)
     pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
+    # ERRCHANNEL: on POSIX the two channels stay two pipes, so the rate-limit
+    # family can be classified on stderr alone. Their bytes still land in one
+    # merged window and one terminal stream, exactly as the single merged pipe
+    # produced, so nothing that reads `.tail`/`.raw_tail` today sees a different
+    # shape. Windows keeps the merged pipe: no kill store exists there, and a
+    # second pipe-reader is not worth the platform risk for a classification that
+    # only the POSIX fallthrough acts on.
+    separate_err = capture and os.name != "nt"
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
@@ -5261,16 +5878,19 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
         pgid = None  # Windows reaps with `taskkill /T`, which walks the tree
     else:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=pipe, stderr=merge,
+                                stdout=pipe, stderr=pipe if separate_err else merge,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
+    record_attempt_group(run_id, proc, attempt)
     tail = bytearray()
     raw_tail = bytearray()
+    raw_err = bytearray()
     found = []
+    write_lock = threading.Lock()
 
-    def pump():
+    def pump(stream, is_err):
         try:
-            for raw in proc.stdout:
+            for raw in getattr(proc, stream):
                 text = raw.decode("utf-8", "replace")
                 if not found:
                     hit = headless_refusal(text)  # classified on the child's own text
@@ -5280,42 +5900,58 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
                 # the raw one for the checks below and the redacted one for
                 # every copy that leaves this process.
                 _trim_tail(raw_tail, text.encode("utf-8", "surrogateescape"))
+                if is_err:
+                    _trim_tail(raw_err, text.encode("utf-8", "surrogateescape"))
                 text = redact_output(text)
-                try:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                except (OSError, ValueError):  # a closed/odd stdout must not kill the run
-                    pass
+                # Whole lines under one lock, so the merged terminal stream keeps
+                # its line granularity now that two channels feed it.
+                with write_lock:
+                    try:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+                    except (OSError, ValueError):  # a closed/odd stdout must not kill the run
+                        pass
                 _trim_tail(tail, text.encode("utf-8", "surrogateescape"))
         except (OSError, ValueError):
             pass
 
-    reader = threading.Thread(target=pump, daemon=True)
+    readers = [threading.Thread(target=pump, args=("stdout", False), daemon=True)]
+    if separate_err:
+        readers.append(threading.Thread(target=pump, args=("stderr", True), daemon=True))
+
+    def join_readers(timeout):
+        for reader in readers:
+            reader.join(timeout=timeout)
+
     if capture:
-        reader.start()
+        for reader in readers:
+            reader.start()
     try:
         rc = proc.wait()
     except BaseException:  # KeyboardInterrupt included: clean up, then re-raise
         _terminate_group(proc, pgid)
         if capture:
-            reader.join(timeout=5)
+            join_readers(5)
         raise
     if reap or rc != 0:
         _terminate_group(proc, pgid)
         if capture:
-            reader.join(timeout=5)
+            join_readers(5)
     elif capture:
         # A joinable session's background child may hold the pipe open; do not
         # block the spawner waiting on output that is not this run's anyway.
-        reader.join(timeout=0.5)
-    if capture and not reader.is_alive():  # a joinable session's background child owns the pipe
-        try:
-            proc.stdout.close()
-        except (OSError, ValueError):
-            pass
+        join_readers(0.5)
+    if capture and not any(reader.is_alive() for reader in readers):
+        # a joinable session's background child owns the pipe
+        for name in (["stdout", "stderr"] if separate_err else ["stdout"]):
+            try:
+                getattr(proc, name).close()
+            except (OSError, ValueError):
+                pass
     return ClientExit(rc, tail.decode("utf-8", "replace"),
                       found[0] if found else None,
-                      raw_tail.decode("utf-8", "replace"))
+                      raw_tail.decode("utf-8", "replace"),
+                      raw_err.decode("utf-8", "replace") if separate_err else None)
 
 
 # --- the host-wide worker registry (`ps`) ---------------------------------
@@ -5839,11 +6475,15 @@ def cmd_run(args, cfg: dict) -> int:
     # that always isolates (qoder writes) forces it on — the force is what keeps
     # that run legal. The verdict is computed here and returns before any client
     # starts; a --dry-run only announces it, because planning touches nothing and
-    # an operator previews a route before deciding to run it.
+    # an operator previews a route before deciding to run it. One call is the whole
+    # rule: `leaf_isolation_refusal` carries the tier-1 write-role leg too (SB-B),
+    # so there is a single gate to consult and a single gate to allow.
     leaf_refusal = leaf_isolation_refusal(route.get("tier"), bool(args.isolate),
                                           client.name,
                                           leaf=role_is_leaf(route.get("tier"),
-                                                             route.get("card")))
+                                                             route.get("card")),
+                                          card=route.get("card"),
+                                          read_only=bool(route.get("read_only")))
     # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
     # before anything is started -- a review by the author's own model family is
     # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
@@ -5974,6 +6614,13 @@ def cmd_run(args, cfg: dict) -> int:
     # the first 'Rate limit exceeded' ended the run (inbox 2026-09-27T17:08:22Z
     # and 17:19:45Z, work/L1-routing/T1FREE.r2.out).
     excluded_free_models = set()
+    # RATELIMITRETRY (SB-B, D-103 item 1): the providers that answered THIS run
+    # with a 429, in the provider-state file's shape. In-process only — an outage
+    # a run survived is not this spawner's authority to bench a provider for every
+    # later routing read (that is record_reset_stop, and only for a window the
+    # provider itself stated).
+    provider_cooldown = {}
+    live_registry = None
     # How many re-runs this run has already started (route or free model): the
     # one bound MAX_FALLTHROUGH is about.
     fallthroughs = 0
@@ -6087,7 +6734,12 @@ def cmd_run(args, cfg: dict) -> int:
         run_rc = None
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
-                                capture=capture)
+                                capture=capture,
+                                # SB-B merge: every attempt — the first and each
+                                # fallthrough re-run — leads a new session, so every
+                                # attempt re-records its group in the runner-private
+                                # store `cancel` kills from.
+                                run_id=plan.get("run_id"), attempt=fallthroughs + 1)
         finally:
             if worker_id is not None:
                 try:
@@ -6125,16 +6777,47 @@ def cmd_run(args, cfg: dict) -> int:
         # jetski refusal + AGY_ERROR 429, R-gateway-12).
         # FUP (2026-09-27): record_probe runs AFTER the provider stop upgrade so
         # a promo client whose tail is a provider stop does not get a false probe.
-        stop = provider_stop(check_tail)
+        # ERRCHANNEL (SB-B review 1): the client's own stderr window rides along,
+        # so a rate limit has to come from the channel a client fails on rather
+        # than from anywhere in the merged output — a worker that prints
+        # `Error: 429` while cat'ing a log, quoting a fixture or reading its own
+        # brief used to bench a provider that never refused it and re-run the task
+        # elsewhere. A client with no split channel (a non-capture client, or a
+        # test's own exit object) passes None and keeps the old merged scan.
+        stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
+        rate_limited = stop is not None and rate_limit_stop(stop)
         if stop is not None:
             # REVROUTE (S2) item 3: when the stop line states its own reset,
             # that window becomes the provider's unavailable_until for every
             # later routing read - the next task goes elsewhere until then.
+            live_registry = load_live_registry()
             recorded = record_reset_stop(stop, plan["route"].get("combo"),
-                                         load_live_registry())
+                                         live_registry)
             if recorded:
                 print("provider %s unavailable until %s" % recorded)
-        if stop is not None and rc in (0, 3, 6):
+            if rate_limited:
+                # RATELIMITRETRY (SB-B): an unstated 429 is the common case, and
+                # the run is about to choose its own next leg, so bench the
+                # provider that just refused it for the rest of THIS process.
+                benched = rate_limit_bench(stop, plan, live_registry)
+                if benched:
+                    until = datetime.datetime.now(
+                        datetime.timezone.utc) + datetime.timedelta(
+                            seconds=RATELIMIT_COOLDOWN_SECONDS)
+                    provider_cooldown[benched] = {
+                        "unavailable_until": _iso_zulu(until),
+                        "combo": plan["route"].get("combo"),
+                        "reason": redact_output(stop),
+                        "recorded_at": _iso_zulu(datetime.datetime.now(
+                            datetime.timezone.utc))}
+                    print("rate limit: provider %s benched for this run's next "
+                          "leg (%s)" % (benched, _iso_zulu(until)))
+        if stop is not None and (rc in (0, 3, 6) or (rate_limited and rc == 1)):
+            # SB-B (RATELIMITRETRY): rc 1 joins the upgrade only for a rate limit,
+            # which is the shape the field actually failed in (the client printed
+            # its 429 and exited 1). Other rc-1 exits stay the client's own failure
+            # class: a provider that refused service is exit 8, a client that
+            # crashed is not.
             print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
         if rc == 0 and client.promo:
@@ -6154,19 +6837,35 @@ def cmd_run(args, cfg: dict) -> int:
             fell_from = fell_to = None
             if args.free:
                 next_plan, fell_from, fell_to = _free_fallthrough_plan(
-                    args, cfg, plan, free_chain, excluded_free_models)
+                    args, cfg, plan, free_chain, excluded_free_models,
+                    benched=set(provider_cooldown))
             elif plan["route"].get("resolver") and plan["sandbox"]:
-                try:
-                    next_plan = build_plan(args, cfg,
-                                           exclude_routes=excluded_routes | {plan["route"]["combo"]},
-                                           sandbox=plan["sandbox"])
-                except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
-                        ValueError):
-                    next_plan = None  # no route left (or unplannable): exit 8 below
-                next_combo = ((next_plan or {}).get("route") or {}).get("combo")
-                if not next_combo or next_combo == plan["route"]["combo"]:
-                    next_plan = None
-                else:
+                # RATELIMITRETRY: after a 429 the next leg is picked for a
+                # DIFFERENT provider, so walk past a candidate that every one of
+                # its legs benches. A candidate whose provider is not in the
+                # cooldown set is taken as it stands — preferring another provider
+                # is not the same as requiring one, and a route that resolves to no
+                # provider at all is a route we cannot blame for the 429.
+                excluded = excluded_routes | {plan["route"]["combo"]}
+                while True:
+                    try:
+                        next_plan = build_plan(args, cfg, exclude_routes=excluded,
+                                               sandbox=plan["sandbox"],
+                                               provider_cooldown=provider_cooldown)
+                    except (clients.DepthError, RouteInputRequired, RouteDeferred,
+                            PrivacyRefused, ValueError):
+                        next_plan = None  # no route left (or unplannable): exit 8 below
+                    next_combo = ((next_plan or {}).get("route") or {}).get("combo")
+                    if not next_combo or next_combo == plan["route"]["combo"]:
+                        next_plan = None
+                        break
+                    if not combo_is_benched(next_combo, provider_cooldown, live_registry):
+                        break
+                    if next_combo in excluded:
+                        next_plan = None  # every candidate benches: no way round it
+                        break
+                    excluded = excluded | {next_combo}
+                if next_plan is not None:
                     fell_from, fell_to = plan["route"]["combo"], next_combo
                     excluded_routes.add(plan["route"]["combo"])
             if next_plan is not None:
@@ -6219,7 +6918,38 @@ def cmd_run(args, cfg: dict) -> int:
                     break
                 register_secret_env(env)
         if not fell_through:
+            if stop is not None and fallthroughs >= MAX_FALLTHROUGH:
+                # RATELIMITRETRY (SB-B): the cap is the only thing that ends the
+                # run, so say what ran out — a silent exit 8 reads as "the task
+                # failed", not as "every leg we could reach refused to serve it".
+                why = "rate limit (429)" if rate_limited else "provider stop"
+                benched = ", ".join(sorted(provider_cooldown)) or "no provider named"
+                print("autoos-agent: %s on every leg after %d fallthroughs "
+                      "(benched this run: %s) - giving up" % (why, fallthroughs, benched),
+                      file=sys.stderr)
             break
+    # RUNMODEL (D-103 item 4, SB-B): WHO served this run, once the attempts are
+    # over — after a fallthrough the route the run started on is not the route
+    # that wrote the diff. Recorded three places that a reader of the run looks
+    # at: the private record `cancel` already reads, this run's own log line (and
+    # so the output.log the fleet runner merges), and the header of the sandbox
+    # report block below. A gateway run that cannot be resolved says `unresolved`
+    # rather than repeating what the plan asked for.
+    writer = None
+    if not args.dry_run:
+        try:
+            writer = resolved_writer(plan, uses_key, registry=live_registry)
+        except Exception as exc:  # noqa: BLE001 - a record never replaces a verdict
+            print("autoos-agent: writer unresolved (%s)" % type(exc).__name__,
+                  file=sys.stderr)
+            writer = {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
+                      "family": WRITER_UNRESOLVED}
+        if writer is not None:
+            print(writer_line(writer))
+            # The record belongs to a spawn; a `run` started straight from a
+            # shell has no record and mints one here for nothing to read.
+            if read_kill_record(plan.get("run_id")) is not None:
+                write_kill_record(plan.get("run_id"), {"writer": writer})
     # Nothing that runs after here occupies the free leg: whatever is left of the
     # summary is bookkeeping, and a placeholder with no run behind it would make
     # the next spawner wait for nothing.
@@ -6255,17 +6985,38 @@ def cmd_run(args, cfg: dict) -> int:
         if off_ref:
             print("sandbox commits off the run branch:\n"
                   + redact_output("\n".join("  " + ln for ln in off_ref)))
+        # MODEFLIP (SB-B, D-103 item 3): a diff that only flips 100644 <-> 100755
+        # is not work — it is a filesystem artifact of the checkout. Read after the
+        # WIP commit above, so what it judges is everything the run produced
+        # (committed and uncommitted). A review run is exempt: its diff is the
+        # deliverable someone asked for, not a claim of implementation. Two ways
+        # out of the refusal (SB-B review 2), because a real task can BE a chmod:
+        # `--allow-mode-only` says so on the command line, and a spawn says it with
+        # the `allow_mode_only` field — which the runner recorded in the private
+        # record at spawn, so what releases the verdict is a decision made before
+        # the worker ran, not something the worker can put in its own job.json.
+        allow_mode_only = bool(getattr(args, "allow_mode_only", False) or
+                               (read_kill_record(plan.get("run_id")) or {})
+                               .get("allow_mode_only"))
+        mode_flip = (None if plan["route"].get("review") or allow_mode_only else
+                     sandbox_mode_only(sb["path"], sb["base"], "HEAD"))
         q = shlex.quote(sb["path"])
-        print("review:  git -C %s diff" % q)
-        print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
-        for ln in off_ref:
-            ref, _, rest = ln.partition(" ")
-            if ref.startswith("refs/heads/"):
-                print("take it: git fetch %s %s   (the worker's own branch)"
-                      % (q, ref[len("refs/heads/"):]))
-            else:
-                print("take it: git -C %s branch <name> %s   (detached HEAD)"
-                      % (q, rest.split()[0]))
+        if mode_flip:
+            print("MODEFLIP: the sandbox diff is file-mode changes only (%s) - "
+                  "mode-only diff (refused), so there is no take-it line to fetch. "
+                  "If the mode IS the task, re-run with --allow-mode-only (a spawn: "
+                  "allow_mode_only=True)." % redact_output(mode_flip))
+        else:
+            print("review:  git -C %s diff" % q)
+            print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
+            for ln in off_ref:
+                ref, _, rest = ln.partition(" ")
+                if ref.startswith("refs/heads/"):
+                    print("take it: git fetch %s %s   (the worker's own branch)"
+                          % (q, ref[len("refs/heads/"):]))
+                else:
+                    print("take it: git -C %s branch <name> %s   (detached HEAD)"
+                          % (q, rest.split()[0]))
         extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
@@ -6303,6 +7054,11 @@ def cmd_run(args, cfg: dict) -> int:
         elif override is not None and rc == 0:
             print(message)
             rc = override
+        elif mode_flip and rc == 0:
+            # The run changed a mode and nothing else: the same verdict as having
+            # changed nothing (5), because a merge candidate with no content in it
+            # is not work someone could review.
+            rc = 5
         # Every finished --isolate run is a track-record observation (spec §5.6).
         # REVFIX review 2: the survivor's latency is its OWN attempt, not the
         # cumulative `start` that also spans the dead attempts (each of which
@@ -6541,6 +7297,15 @@ def _parser_run(sub):
                      help="a research run: an unchanged sandbox plus a REPORT is success (exit 0), an "
                           "edit in it is the failure (exit 11). A v2 card kind=research marks the same "
                           "run without this flag")
+    # MODEFLIP opt-out (SB-B review 2): the refusal is the default because a diff
+    # that only flips 100644<->100755 is nearly always a filesystem artifact, but
+    # `chmod +x scripts/deploy.sh` is a real task somebody can ask for, and the
+    # run that does it has nothing else in its diff to show for it.
+    run.add_argument("--allow-mode-only", dest="allow_mode_only", action="store_true",
+                     help="accept a sandbox whose only change is a file mode "
+                          "(100644 <-> 100755): the MODEFLIP refusal is what an "
+                          "artifact of the checkout looks like, and this says the "
+                          "diff is the task")
     run.add_argument("--title")
     run.add_argument("--run-id", dest="run_id", metavar="ID",
                      help="use this id (a canonical one, as minted by the MCP server's spawn) "
