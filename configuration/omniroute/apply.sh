@@ -17,9 +17,12 @@
 # the run. "Already registered" is decided from the gateway's own connection
 # list wherever a manage key makes it readable — the CLI's `providers list`
 # answers from its local store, which on a dockerised host is not the gateway
-# (see provider_already_registered). A combo whose re-create fails after the
-# retry's delete is restored from the version read before it, never reported as
-# untouched (see the Combos loop).
+# (see provider_already_registered). Only a connection the gateway would route
+# to counts: a disabled one is reported for what the operator has to enable, and
+# gets no second one. A combo whose re-create fails after the retry's delete is
+# restored from the version read before it — or, when that version was not read
+# whole, reported lost rather than restored short — never reported as untouched
+# (see the Combos loop).
 #
 #   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift]
 #
@@ -288,15 +291,18 @@ omni_json() {
 # (Cited by function name, not line number: the test file grows at the bottom.)
 # $1 is on fd 3 because a herestring and the program heredoc cannot share stdin
 # (the heredoc wins, and python would then parse its own text as JSON).
-# Prints one line per live combo: "<name>\x1f<strategy>\x1f<ref,ref,...>", in
-# the store's order. The field separator is the unit-separator byte, not a tab:
-# bash's `read` treats tab as an IFS *whitespace* character, so a line with an
-# empty middle field has its two separators collapsed into one delimiter and the
-# refs land in the strategy variable - measured with the strategy-less live shape
-# this change had to support. A non-whitespace separator keeps an empty field
-# empty. Exit 0 on a readable document (possibly zero combos), 3 with a
-# one-line reason on stdout when the store is unreadable — the caller adds its
-# own prefix and chooses its own fallback.
+# Prints one line per live combo:
+# "<name>\x1f<strategy>\x1f<ref,ref,...>\x1f<dropped-steps>", in the store's
+# order. The fourth column is how many of the store's own steps could not be
+# turned into a ref, so a caller that means to write the tier back can tell a
+# faithful copy from a short one. The field separator is the unit-separator
+# byte, not a tab: bash's `read` treats tab as an IFS *whitespace* character, so
+# a line with an empty middle field has its two separators collapsed into one
+# delimiter and the refs land in the strategy variable - measured with the
+# strategy-less live shape this change had to support. A non-whitespace
+# separator keeps an empty field empty. Exit 0 on a readable document (possibly
+# zero combos), 3 with a one-line reason on stdout when the store is unreadable —
+# the caller adds its own prefix and chooses its own fallback.
 live_combo_norm() {
     python3 - "${2:-0}" 3<<<"$1" <<'PY'
 import json, sys
@@ -328,7 +334,16 @@ for c in live_doc.get("combos") or []:
         continue
     name = c["name"]
     refs = []
-    for step in c.get("models") or []:
+    dropped = 0
+    steps = c.get("models") or []
+    if not isinstance(steps, list):
+        # A "models" field that is not a list cannot be read leg by leg. Report
+        # the combo with no refs and one unreadable step, so a caller sees "I do
+        # not know what this tier held" rather than "this tier was empty" — the
+        # second reading would let a restore write an empty combo back.
+        print("%s\x1f%s\x1f%s\x1f1" % (name, c.get("strategy") or "", ""))
+        continue
+    for step in steps:
         if isinstance(step, str):
             refs.append(step)
         elif isinstance(step, dict) and step.get("kind", "model") == "model":
@@ -339,7 +354,14 @@ for c in live_doc.get("combos") or []:
             if provider and not model.startswith(provider + "/"):
                 model = "%s/%s" % (provider, model)
             refs.append(model)
-    print("%s\x1f%s\x1f%s" % (name, c.get("strategy") or "", ",".join(refs)))
+        else:
+            # A step this script has no shape for (another "kind"). It is NOT
+            # silently a leg that does not exist: the fourth column counts the
+            # legs a caller must not treat as the whole tier — see the Combos
+            # loop's restore, which refuses to write back a short combo.
+            dropped += 1
+    print("%s\x1f%s\x1f%s\x1f%d" % (name, c.get("strategy") or "",
+                                    ",".join(refs), dropped))
 PY
 }
 
@@ -377,16 +399,18 @@ retired = set(data.get("retired", []))
 omitted = set(data.get("omitted", []))
 file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
 
-# The normalised live store, one "<name>\x1f<strategy>\x1f<refs>" line per combo
-# (unit-separated - see live_combo_norm). The strategy column is not compared
-# here: --drift reports the leg order, which is what a re-run of apply can
-# silently change.
+# The normalised live store, one "<name>\x1f<strategy>\x1f<refs>\x1f<dropped>"
+# line per combo (unit-separated - see live_combo_norm). Neither the strategy nor
+# the dropped-step count is compared here: --drift reports the leg order, which
+# is what a re-run of apply can silently change, and a combo with an unreadable
+# step has refs that already differ from the file's, so it is reported. Extra
+# columns are tolerated - the shape the normaliser prints is its own business.
 live_combos = {}
 for line in open("/dev/fd/3", encoding="utf-8").read().splitlines():
     cols = line.split("\x1f")
-    if len(cols) != 3:
+    if len(cols) < 3:
         continue
-    name, _strategy, refs = cols
+    name, _strategy, refs = cols[0], cols[1], cols[2]
     if not name or name in retired:
         continue
     live_combos[name] = [ref for ref in refs.split(",") if ref]
@@ -515,10 +539,13 @@ provider_needs_node() {
     return 0
 }
 
-# omni_rest <METHOD> <path> [json-body] - one gateway REST call with the manage
-# key. The key goes in a private curl config file and the request body on
-# stdin, never in argv. The response lands in REST_BODY (empty on a failure),
-# the reason in REST_ERROR, redacted by the caller before it reaches the log.
+# omni_rest <METHOD> <path> [json-body] [bearer-key] - one gateway call with a
+# bearer token. The key defaults to the manage key (REST_KEY); the catalog read
+# passes the omniroute *client* key, which authorises /v1/models. Either way the
+# token goes in a private curl config file and the request body on stdin, never
+# in argv - `ps` shows argv to every user on the machine for the lifetime of the
+# call. The response lands in REST_BODY (empty on a failure), the reason in
+# REST_ERROR, redacted by the caller before it reaches the log.
 # Both are globals, not stdout, on purpose: a caller that read the body with
 # $( ) would run this function in a subshell, and the two temp files would then
 # belong to a shell that an interrupted run cannot reach - which is exactly how
@@ -527,13 +554,13 @@ provider_needs_node() {
 REST_ERROR=""
 REST_BODY=""
 omni_rest() {
-    local method="$1" path="$2" body="${3:-}"
+    local method="$1" path="$2" body="${3:-}" key="${4:-$REST_KEY}"
     local cfg out code escaped
     REST_BODY=""
     cfg="$(mktemp)" || { REST_ERROR="no curl config file could be created"; return 1; }
     out="$(mktemp)" || { rm -f -- "$cfg"; REST_ERROR="no response file could be created"; return 1; }
     chmod 600 "$cfg" "$out"
-    escaped="${REST_KEY//\\/\\\\}"
+    escaped="${key//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
     printf 'header = "Authorization: Bearer %s"\n' "$escaped" >"$cfg"
     # The config file holds the manage key and the response file holds whatever
@@ -597,59 +624,134 @@ for n in rows or []:
 ' "$1" <<<"$doc" || true)"
 }
 
-# provider_connection_exists <node-id> <name> - is a key already bound to this
-# node? `omniroute providers list` cannot answer it: its second column is the
-# provider, and a node-bound connection's provider is the node's
-# "<type>-<uuid>" id, which apply's hex-id scan never matches (omniroute
-# src/lib/db/providers/nodes.ts:61-71 says a new connection carries exactly
-# that concrete id). GET /api/providers answers {"connections":[…],"total":N}
-# (measured live 2026-09-28) and also carries every stored apiKey, so only these
-# two fields are read and the body is never printed.
-provider_connection_exists() {
+# omni_connections - read the gateway's connection list once and put it in
+# CONNECTION_ROWS as "<usable>\x1f<provider>\x1f<name>" lines, one per
+# connection, where usable is 1 for a connection the gateway would route to and
+# 0 for one the dashboard has disabled (isActive: false). Both readers of the
+# list — the "already registered" set and the node-bound connection check — are
+# then one parse and cannot disagree about what a row means.
+# Exit 1 with the reason in REST_LIST_REASON when the gateway refused, answered
+# something that is not the documented document, or served a PARTIAL page:
+# {"connections":[…],"total":N} with N beyond the rows it sent means the list is
+# a slice, and deciding "not registered" from a slice would add a duplicate
+# connection on the operator's machine. Exit 0 for a readable list, including an
+# empty one — a gateway with no connections holds none, that is an answer.
+# The body carries every stored apiKey, so REST_BODY is cleared the moment the
+# parse has consumed it: a later failure path that prints a captured body must
+# not find this one still set.
+CONNECTION_ROWS=""
+REST_LIST_REASON=""
+omni_connections() {
+    CONNECTION_ROWS=""
+    REST_LIST_REASON=""
     if ! omni_rest GET '/api/providers?limit=5000'; then
+        REST_LIST_REASON="the gateway's connection list is unreadable"
         return 1
     fi
-    [[ -n "$REST_BODY" ]] || return 1
-    python3 -c 'import json,sys
+    local rc=0
+    CONNECTION_ROWS="$(python3 -c 'import json,sys
 try:
     doc = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-rows = doc.get("connections") if isinstance(doc, dict) else doc
-for c in rows or []:
-    if isinstance(c, dict) and (c.get("provider") == sys.argv[1]
-                                or c.get("name") == sys.argv[2]):
-        sys.exit(0)
-sys.exit(1)
-' "$1" "$2" <<<"$REST_BODY"
+if isinstance(doc, dict):
+    rows = doc.get("connections")
+    total = doc.get("total")
+else:
+    rows = doc
+    total = None
+if not isinstance(rows, list):
+    sys.exit(1)
+if isinstance(total, bool) or not isinstance(total, int):
+    total = len(rows)
+if total > len(rows):
+    # A slice, not the list.
+    sys.exit(2)
+for c in rows:
+    if not isinstance(c, dict):
+        continue
+    provider = c.get("provider")
+    if not isinstance(provider, str) or not provider:
+        continue
+    name = c.get("name") if isinstance(c.get("name"), str) else ""
+    # Only an explicit false is disabled — a document that omits the field
+    # says nothing about it. This is the flag the dashboard toggle writes.
+    print("%s\x1f%s\x1f%s" % (0 if c.get("isActive") is False else 1,
+                              provider, name))
+' <<<"$REST_BODY")" || rc=$?
+    REST_BODY=""
+    if [[ $rc -eq 0 ]]; then
+        return 0
+    fi
+    CONNECTION_ROWS=""
+    if [[ $rc -eq 2 ]]; then
+        REST_LIST_REASON="the gateway's connection list is partial"
+    else
+        REST_LIST_REASON="the gateway's connection list is unreadable"
+    fi
+    return 1
+}
+
+# provider_connection_exists <node-id> <provider-id> - is a usable key already
+# bound to this node? `omniroute providers list` cannot answer it: its second
+# column is the provider, and a node-bound connection's provider is the node's
+# "<type>-<uuid>" id, which apply's hex-id scan never matches (omniroute
+# src/lib/db/providers/nodes.ts:61-71 says a new connection carries exactly
+# that concrete id).
+# WHAT MAY BE ADOPTED: a connection counts only when its provider IS this node.
+# A name match on its own cannot be trusted — the name apply gives a connection
+# is the registry id, and the gateway can hold a connection of that name bound
+# to some OTHER node (a renamed or re-created provider node leaves one behind),
+# which would let apply report the provider as registered while its key sits on
+# an endpoint the registry does not name. So the name is only decisive for a
+# connection that carries this node's id, or the registry id itself as its
+# provider.
+# A row that matches but is disabled sets CONNECTION_INACTIVE and still returns
+# 1: an inactive connection routes nothing, so it is not "already registered",
+# and the caller has to be able to say why it is adding no second one either.
+CONNECTION_INACTIVE=0
+provider_connection_exists() {
+    local node_id="$1" provider_id="$2" usable provider name matched
+    CONNECTION_INACTIVE=0
+    omni_connections || return 1
+    while IFS=$'\x1f' read -r usable provider name; do
+        [[ -z "$provider$usable" ]] && continue
+        matched=0
+        [[ "$provider" == "$node_id" ]] && matched=1
+        if [[ $matched -eq 0 && "$name" == "$provider_id" &&
+             "$provider" == "$provider_id" ]]; then
+            matched=1
+        fi
+        [[ $matched -eq 1 ]] || continue
+        if [[ "$usable" == 1 ]]; then
+            return 0
+        fi
+        CONNECTION_INACTIVE=1
+    done <<<"$CONNECTION_ROWS"
+    return 1
 }
 
 # rest_provider_ids - the gateway's own answer to "which connections exist".
-# Sets REST_CONNECTION_IDS to the `provider` field of every connection, one per
-# line, and exits 0 when the read answered a JSON document — an empty list is
-# still an answer (a gateway with no connections holds none). Exit 1 when the
-# gateway refused or the body was not the documented document, so the caller
-# falls back to the CLI's list.
-# Only the provider field is kept and the body is never printed: GET
-# /api/providers returns every stored apiKey.
+# Sets REST_CONNECTION_IDS to the provider field of every USABLE connection and
+# REST_INACTIVE_IDS to the provider field of every disabled one, one per line.
+# Exit 1 on anything omni_connections refuses (a refused read, a malformed
+# document, a partial page) so the caller falls back to the CLI's list and says
+# which of the three it is dealing with through REST_LIST_REASON.
 REST_CONNECTION_IDS=""
+REST_INACTIVE_IDS=""
 rest_provider_ids() {
     REST_CONNECTION_IDS=""
-    omni_rest GET '/api/providers?limit=5000' || return 1
-    REST_CONNECTION_IDS="$(python3 -c 'import json,sys
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-rows = doc.get("connections") if isinstance(doc, dict) else doc
-if not isinstance(rows, list):
-    sys.exit(1)
-for c in rows:
-    if isinstance(c, dict):
-        v = c.get("provider")
-        if isinstance(v, str) and v:
-            print(v)
-' <<<"$REST_BODY")" || return 1
+    REST_INACTIVE_IDS=""
+    omni_connections || return 1
+    local usable provider name
+    while IFS=$'\x1f' read -r usable provider name; do
+        [[ -z "$provider$usable" ]] && continue
+        if [[ "$usable" == 1 ]]; then
+            REST_CONNECTION_IDS+="${provider}"$'\n'
+        else
+            REST_INACTIVE_IDS+="${provider}"$'\n'
+        fi
+    done <<<"$CONNECTION_ROWS"
     return 0
 }
 
@@ -699,7 +801,7 @@ print(json.dumps({"name": sys.argv[1], "prefix": sys.argv[1],
 }
 
 register_provider() {
-    local key_name="$1" provider_id="$2" value="${KEYS[$1]:-}"
+    local key_name="$1" provider_id="$2" value="${KEYS[$1]:-}" node_exists=0
     if [[ -z "$value" ]]; then
         echo "  - $provider_id: no key in api-keys.yml, skipped"
         return 0
@@ -711,7 +813,6 @@ register_provider() {
         # node and adds no key. A node the gateway already holds is not "would
         # create" — the plan must not promise to create what exists (APPLYADOPT).
         if gateway_up && provider_needs_node "$provider_id"; then
-            node_exists=0
             if [[ -n "$REST_KEY" ]]; then
                 provider_node_id "$provider_id"
                 [[ -n "$NODE_ID" ]] && node_exists=1
@@ -758,6 +859,13 @@ register_provider() {
             echo "  = $provider_id already registered"
             return 0
         fi
+        # Reached when the loop's check could not ask the gateway (no REST list
+        # this run) and this fresh read could: the key is bound to the node, but
+        # disabled. Adding a second connection is not the fix.
+        if [[ $CONNECTION_INACTIVE -eq 1 ]]; then
+            report_inactive_connection "$provider_id"
+            return 0
+        fi
         # The key binds to the node, and the connection keeps the registry's
         # name so the gateway UI and --drift both read "meta-api".
         add_id="$node_id"
@@ -777,8 +885,8 @@ register_provider() {
     fi
 }
 
-# provider_already_registered <provider-id> - does the gateway hold a connection
-# for this id already, so re-adding it would only duplicate it?
+# provider_already_registered <provider-id> - does the gateway hold a USABLE
+# connection for this id already, so re-adding it would only duplicate it?
 # WHERE the answer comes from is the whole point. `omniroute providers list`
 # reads the CLI's own ~/.omniroute store, which on the dockerised host is not the
 # gateway: measured 2026-09-29, the CLI listed 14 connections while the gateway's
@@ -792,20 +900,39 @@ register_provider() {
 # id, never the registry id, so an id match cannot see it — is decided by its
 # node plus the connection bound to it. The CLI's list stays the fallback for a
 # run that cannot ask the gateway: no manage key (a local gateway, where the
-# CLI's store is the gateway's own), or a connection read the gateway refused.
+# CLI's store is the gateway's own), or a connection read the gateway refused or
+# only served part of (rest_provider_ids). A connection the dashboard has
+# disabled answers "not registered" and sets CONNECTION_INACTIVE, which is how
+# the caller tells "add it" from "enable the one you have".
 provider_already_registered() {
     local provider_id="$1"
+    CONNECTION_INACTIVE=0
     if [[ $EXISTING_FROM_REST -eq 1 ]]; then
         if provider_needs_node "$provider_id"; then
             provider_node_id "$provider_id"
             [[ -n "$NODE_ID" ]] || return 1
             provider_connection_exists "$NODE_ID" "$provider_id"
         else
-            grep -qxF "$provider_id" <<<"$REST_CONNECTION_IDS"
+            if grep -qxF "$provider_id" <<<"$REST_CONNECTION_IDS"; then
+                return 0
+            fi
+            # Not usable, but present: say so through the same flag the
+            # node-bound path sets, so the caller reports one problem, not two.
+            grep -qxF "$provider_id" <<<"$REST_INACTIVE_IDS" && CONNECTION_INACTIVE=1
+            return 1
         fi
         return
     fi
     grep -qxF "$provider_id" <<<"$existing_ids"
+}
+
+# report_inactive_connection <provider-id> - the one place that says what an
+# unusable connection is and what fixes it. Called instead of "already
+# registered" (it is not: nothing routes) and instead of registering (a second
+# connection would not enable the first, it would only leave the gateway with a
+# row to delete).
+report_inactive_connection() {
+    echo "  ! $1 has an inactive connection - enable it in the dashboard"
 }
 
 echo "Providers:"
@@ -827,12 +954,20 @@ if gateway_up; then
         EXISTING_FROM_REST=1
     else
         if [[ -n "$REST_KEY" ]]; then
-            # Say which source decided: the CLI's store can disagree with the
-            # gateway, and an operator reading a duplicate connection afterwards
-            # needs to know this run could not ask the gateway itself. The
-            # gateway's own words are not printed — the refusal body of this
+            # Say which source decided, and why this one was not the gateway's:
+            # the CLI's store can disagree with the gateway, and an operator
+            # reading a duplicate connection afterwards needs to know this run
+            # could not ask the gateway itself — or got only half an answer
+            # (rest_provider_ids: a partial page is refused for that reason).
+            # The gateway's own words are not printed — the refusal body of this
             # endpoint is not guaranteed to be key-free.
-            echo "  ! the gateway's connection list is unreadable - deciding from the CLI's local store instead" >&2
+            # The reason goes through a variable rather than `${VAR:-default}`:
+            # bash's parser reads the apostrophe in the default as an unclosed
+            # quote inside a double-quoted string and the whole script fails to
+            # parse. (A quoted default in an assignment is fine, hence below.)
+            fallback_reason="$REST_LIST_REASON"
+            [[ -n "$fallback_reason" ]] || fallback_reason="the gateway's connection list is unreadable"
+            echo "  ! $fallback_reason - deciding from the CLI's local store instead" >&2
         fi
         existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9_-]+' | grep -oE '[a-z0-9_-]+$' || true)"
     fi
@@ -840,6 +975,10 @@ fi
 for entry in "${PROVIDER_MAP[@]}"; do
     if provider_already_registered "${entry#*:}"; then
         echo "  = ${entry#*:} already registered"
+        continue
+    fi
+    if [[ $CONNECTION_INACTIVE -eq 1 ]]; then
+        report_inactive_connection "${entry#*:}"
         continue
     fi
     register_provider "${entry%%:*}" "${entry#*:}"
@@ -871,19 +1010,25 @@ else
 fi
 
 # ─── (Re)create combos ──────────────────────────────────────────────────────
+# The gateway's model catalog, read once. The omniroute *client* key authorises
+# /v1/models, and it goes to omni_rest — which writes a 0600 curl --config file
+# and removes it on every path, interrupted included — because `curl -H
+# "Authorization: Bearer <key>"` puts the key in argv, where every user on the
+# machine can read it out of `ps` for the lifetime of the call.
 live_ids=""
 # Resolve the client key using the new gateway-named field logic
 _client_key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
 if command -v python3 >/dev/null; then
-    live_ids="$(curl -sf -m 10 -H "Authorization: Bearer $_client_key" \
-        "$GATEWAY/v1/models" 2>/dev/null |
-        python3 -c 'import json,sys
+    if omni_rest GET /v1/models "" "$_client_key"; then
+        live_ids="$(python3 -c 'import json,sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 for m in d.get("data", []):
-    print(m.get("id", ""))' || true)"
+    print(m.get("id", ""))' <<<"$REST_BODY" || true)"
+    fi
+    REST_BODY=""
 fi
 if [[ -z "$live_ids" ]]; then
     echo "  ! could not read /v1/models (check the omniroute client key in api-keys.yml)"
@@ -943,6 +1088,10 @@ fi
 # one of them — which is the lie this section exists to stop. Nothing here writes.
 declare -A LIVE_COMBO_REFS=()
 declare -A LIVE_COMBO_STRATEGY=()
+# How many of the store's own steps the normaliser could not read, per combo.
+# A combo with a non-zero count is a tier this script cannot copy back faithfully
+# — the retry path refuses to restore it rather than write a short one.
+declare -A LIVE_COMBO_DROPPED=()
 # Held is the set of names the store reports, kept in its own map so the test is
 # a plain string compare rather than `[[ -v arr[key] ]]`, which needs bash 4.3
 # while this repository's stated floor is bash 4+ — a 4.0 host would otherwise
@@ -961,10 +1110,11 @@ if command -v omniroute >/dev/null; then
         fi
         if live_combo_rows="$(live_combo_norm "$live_combo_raw" "$live_combo_failed")"; then
             live_combo_readable=1
-            while IFS=$'\x1f' read -r live_name live_strategy live_refs; do
+            while IFS=$'\x1f' read -r live_name live_strategy live_refs live_dropped; do
                 [[ -z "$live_name" ]] && continue
                 LIVE_COMBO_REFS["$live_name"]="$live_refs"
                 LIVE_COMBO_STRATEGY["$live_name"]="$live_strategy"
+                LIVE_COMBO_DROPPED["$live_name"]="${live_dropped:-0}"
                 LIVE_COMBO_HELD["$live_name"]=1
             done <<<"$live_combo_rows"
         else
@@ -1060,9 +1210,12 @@ while IFS=$'\t' read -r name strategy models; do
         had_previous=0
         prev_refs=""
         prev_strategy="$strategy"
+        prev_dropped=0
         if [[ "${LIVE_COMBO_HELD[$name]-}" == 1 ]]; then
             had_previous=1
             prev_refs="${LIVE_COMBO_REFS[$name]}"
+            prev_dropped="${LIVE_COMBO_DROPPED[$name]-0}"
+            [[ "$prev_dropped" =~ ^[0-9]+$ ]] || prev_dropped=1
             # An empty strategy column means the live document reported none
             # (the shape measured on 3.8.51), so the file's strategy is the best
             # description of what was there.
@@ -1074,6 +1227,17 @@ while IFS=$'\t' read -r name strategy models; do
             echo "  + $name replaced ($strategy)"
             combo_replaced=$((combo_replaced + 1))
             PROBE_COMBOS+=("$name")
+        elif [[ $had_previous -eq 1 ]] && [[ "$prev_dropped" != 0 ]]; then
+            # The refs above are a SHORT copy of what was deleted: the store
+            # reported steps this script cannot read (a kind it does not know).
+            # Writing them back would put a thinner tier in place of the real one
+            # and print "restored" over the loss — the same false assurance this
+            # whole path exists to remove. Name the state and what fixes it.
+            echo "  ! $name creation failed - previous version LOST, restore refused:" \
+                "the live combo reported $prev_dropped leg(s) apply cannot read," \
+                "so a restore would be short - recreate $name from your own record:" \
+                "omniroute combo create $name --strategy <strategy> --models <every leg>"
+            combo_failed=$((combo_failed + 1))
         elif [[ $had_previous -eq 1 ]] && [[ -n "$prev_refs" ]] &&
             omni combo create "$name" --strategy "$prev_strategy" --models "$prev_refs" >/dev/null 2>&1; then
             echo "  ! $name creation failed - previous version restored"
@@ -1088,8 +1252,15 @@ while IFS=$'\t' read -r name strategy models; do
             echo "  ! $name creation failed - previous version LOST, restore failed:" \
                 "omniroute combo create $name --strategy $prev_strategy --models $prev_refs"
             combo_failed=$((combo_failed + 1))
-        else
+        elif [[ $live_combo_readable -eq 1 ]]; then
+            # The store was read for this run and did not hold the name, so
+            # nothing was deleted and "no previous version" is a fact.
             echo "  ! $name creation failed (no previous version)"
+            combo_failed=$((combo_failed + 1))
+        else
+            # The delete ran against a store apply never saw. Whether it removed
+            # a tier is unknown, and "no previous version" would be a guess.
+            echo "  ! $name creation failed - previous version unknown (live list unreadable)"
             combo_failed=$((combo_failed + 1))
         fi
     fi
