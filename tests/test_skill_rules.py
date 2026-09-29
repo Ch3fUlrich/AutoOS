@@ -301,5 +301,64 @@ class CompactionRuleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
 
+class FoldedLessonRuleTests(unittest.TestCase):
+    """SKILLFOLD-1: four measured lessons folded into the skill as rules.
+
+    Each lesson was measured in a lane (SB-A2..A3, FREEKEYS-2c, SCOPEBUS) and only
+    becomes a rule once a test binds it, per R-orch-15. These assertions are that
+    binding: the id exists in `SKILL.md`, still carries its (why: …; source: …)
+    tail, still names the fact it is about, and the evidence it cites is still
+    there — a rule whose proof test was deleted is a rule that silently stops
+    meaning anything."""
+
+    REPO = Path(__file__).resolve().parent.parent
+    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
+    SPAWNER = REPO / 'tests' / 'test_autoos_spawner.py'
+
+    # id -> (fragment the imperative must still name, fragment the source must still cite)
+    FOLDED = {
+        'R-orch-17': ('runner-private', 'SB-A'),
+        'R-orch-18': ('test_registry_render.py', 'FREEKEYS-2'),
+        'R-orch-19': ('unmocked', 'test_a_real_spawn_runs_in_its_scope'),
+        'R-coord-11': ('cwd checkout', 'SCOPEBUS'),
+    }
+
+    def _rules(self):
+        rules = {}
+        for line in self.SKILL.read_text(encoding='utf-8').splitlines():
+            parsed = parse_rule(line)
+            if parsed:
+                rules[parsed[0]] = parsed
+        return rules
+
+    def test_each_folded_lesson_is_a_rule_with_why_and_source(self):
+        rules = self._rules()
+        for rule_id in self.FOLDED:
+            self.assertIn(rule_id, rules, f"{rule_id} is not a rule in SKILL.md")
+            _id, imperative, why, source = rules[rule_id]
+            self.assertTrue(imperative.strip(), f"{rule_id} has an empty imperative")
+            self.assertTrue(why and source, f"{rule_id} lost its (why: …; source: …) tail")
+
+    def test_each_rule_still_names_its_fact_and_its_measurement(self):
+        rules = self._rules()
+        for rule_id, (fact, measurement) in self.FOLDED.items():
+            _id, imperative, why, source = rules[rule_id]
+            self.assertIn(fact, imperative, f"{rule_id} no longer names {fact!r}")
+            self.assertIn(measurement, source, f"{rule_id} no longer cites {measurement!r}")
+
+    def test_rule_19_evidence_test_still_exists(self):
+        """R-orch-19 cites `test_a_real_spawn_runs_in_its_scope` as its measurement;
+        if that test is renamed or deleted the rule's proof is gone."""
+        self.assertTrue(self.SPAWNER.is_file(), "tests/test_autoos_spawner.py is missing")
+        text = self.SPAWNER.read_text(encoding='utf-8')
+        self.assertIn('def test_a_real_spawn_runs_in_its_scope', text,
+                      "R-orch-19's evidence test no longer exists in test_autoos_spawner.py")
+
+    def test_the_skill_file_passes_the_checker(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), 'check', str(self.SKILL)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

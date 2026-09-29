@@ -93,6 +93,60 @@ unscoped, so its client led nothing but a new session — no cgroup at all, and
   `test_on_posix_a_resolvable_client_still_runs` asserted `argv[0] == <shim>`, which is only
   true on a host that cannot scope. It now asserts the resolved file is in the argv and the
   bare name is not — the WINSHIM fact — so it holds in both launch shapes.
+### Fixed — apply adopts the live gateway's connections, and a failed combo re-create restores (APPLYADOPT, 2026-09-29)
+
+Two false statements in `configuration/omniroute/apply.sh`, both measured on the dockerised
+gateway on 2026-09-29:
+
+- **It lied about what was registered.** The Providers step decided "already registered" from
+  `omniroute providers list`, which reads the CLI's own `~/.omniroute` store — on the container
+  host that store is *not* the gateway: the CLI listed 14 connections while
+  `GET /api/providers?limit=5000` answered 32 (most rows named `main`). A real run therefore
+  re-added scaleway, nebius, free-ai, bazaarlink, navy, arcee-ai, bluesminds, agentrouter,
+  novita and together — a duplicate connection each, on someone's real machine (AGENTS.md hard
+  rule 3) — while `--dry-run` printed "would create its provider node" for meta-api even though
+  node `meta-api` and its connection (whose `provider` is the node's `openai-compatible-chat-<uuid>`
+  id, not the registry id) already existed. New `rest_provider_ids` reads the gateway's
+  connection list once per run (only the `provider` field; the body carries every stored
+  `apiKey` and is never printed), and `provider_already_registered` answers from it whenever a
+  manage key made the read succeed — a node provider by its node *plus* the connection bound to
+  it, through the existing `provider_node_id` / `provider_connection_exists`, so there is one
+  rule and not two. `EXISTING_FROM_REST` is a read-succeeded flag, not "the list was non-empty":
+  a gateway with no connections is an answer. The CLI list stays the fallback for a run that
+  cannot ask (no manage key — the local gateway, where the CLI store *is* the gateway's — or a
+  refused read), and a run that had a key and was refused says which source decided, without
+  echoing the gateway's body. `--dry-run` now prints the idempotence line it owed the operator:
+  `= <id> already registered`, and for a node that exists but holds no key, "would add the key
+  to its existing provider node" instead of promising to create it.
+- **It claimed a deleted combo was untouched.** The combo retry path (`create` → on failure
+  `delete` → `create`) printed "previous version, if any, is untouched" after it had already
+  deleted. `LIVE_COMBO_REFS` / `LIVE_COMBO_STRATEGY` are read for exactly this reason and are
+  now remembered *before* the delete: if the re-create fails too, the tier is re-created from
+  them and the run says `! <name> creation failed - previous version restored`; if even that
+  fails it names the command the operator has to run (`... previous version LOST, restore
+  failed: omniroute combo create <name> --strategy <s> --models <refs>`), and when the store
+  never held the name it says `(no previous version)`. Counted as failed either way — the tally
+  no longer hides a hole in a live tier.
+- **`tests/linux/34-ai-services.sh`**: seven new cases on the existing stand-ins, each with one
+  new switch on the fake side. `$d/local_stale` in `_node_sandbox` reproduces the live
+  divergence (the fake CLI's `providers list` answers nothing while the fake REST surface still
+  serves `connections.json`): a gateway-held connection reports `already registered` with no
+  `providers add` in `calls.log` and no `POST /api/provider-nodes`, a node provider's existing
+  node + connection the same, `--dry-run` included, and the REST branch is proven by the `GET`
+  in `curl.log` rather than inferred. `$d/no_rest` refuses the connection read (503 on a health
+  that still answers) and asserts the CLI fallback, and a keyless run makes no management call
+  at all. `$d/fail_create` in `_prune_sandbox` fails `combo create` for the legs listed in it,
+  which is the only way to reach the retry path's *second* failure: restore-then-`restored`
+  line, restore-then-`LOST` line with the store empty and three create calls, and
+  `(no previous version)` for a name the store never held, with no invented restore. The
+  `untouched` wording is asserted absent in all three. Red before: `--filter adopt` 1 / 3
+  failed, `--filter 'apply combos: a create'` 0 / 2 failed. Green after: `--filter apply` 62 /
+  0, `--filter 'node,prune,drift,combo'` 44 / 0, shellcheck clean on `apply.sh`, pytest 176
+  passed (registry render + sync-router-tiers).
+- **Out of scope:** `configuration/omniroute/apply.ps1:418` still prints the `untouched` line
+  and still decides from the local CLI list. The Windows entry point has no container-host
+  divergence to adopt, but the restore wording is the same defect and its pwsh twin should
+  follow in its own lane.
 
 ### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
 
