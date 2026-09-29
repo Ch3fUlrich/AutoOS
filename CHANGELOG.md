@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a real launch carries the session id and the pin, proven unmocked (FAMILYFENCE-3 N3, 2026-09-29)
+
+Skill R-orch-19: "a mocked-Popen suite can be green while a live spawn drops a flag."
+`NativeSessionIdTests` asserts on the dry-run's *printed* argv, so a launch change (the
+scope wrapper, the env rebuild, the executable resolution) can break the real
+`Popen` and leave the printed plan unchanged. This adds a POSIX stub for `qodercli`
+and `claude` that writes its OWN received argv to a file and exits 0; the CLI runs
+itself through `run_agent` (no mock).
+
+- **Tests** (`tests/test_autoos_spawner.py`, `RealLaunchArgvTests`): the recorded
+  qoder and claude launch must both match `--session-id <uuid>` and the caller's
+  `--model`. The qoder stub writes one file into its own clone — the INCOMPLETE
+  verdict that penalises an isolated worker that changed nothing would otherwise
+  refuse the launch, masking the flag check.
+
 ### Fixed — a `not_family` handed over as one bare string fences one family, not its letters (FAMILYFENCE-3 N2, 2026-09-29)
 
 `fence_family_names` iterated its argument directly, which is right for the CLI's

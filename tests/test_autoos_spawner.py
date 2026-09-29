@@ -15416,6 +15416,92 @@ class NativeSessionIdTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--model") + 1], "Qwen3.8-Flash")
 
 
+@unittest.skipIf(os.name == "nt", "sh stubs; POSIX only")
+class RealLaunchArgvTests(unittest.TestCase):
+    """R-orch-19 / FAMILYFENCE-3 N3: a launch change (the scope wrapper, the env
+    rebuild, the executable resolution) breaks the real Popen while the printed
+    dry-run plan stays green — mocked-Popen suites were green while live spawns
+    broke. These put a fake `qodercli`/`claude` on PATH that RECORDS the argv it
+    was launched with, and run the real CLI to rc 0, so the assertion is about
+    what the client process received: the minted `--session-id` and the pinned
+    `--model` survive the whole launch path, not just `build_command`."""
+
+    UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    CLAUDE_HELP = """Usage: claude [options] [prompt]
+Options:
+  -p, --print                        Print the response and exit
+  --model <model>                    Model for the current session
+  --session-id <uuid>                Use a specific session ID
+  --permission-mode <mode>           Set the permission mode (choices:
+                                     plan, acceptEdits, bypassPermissions)
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.calls = os.path.join(self.tmp, "calls")
+
+    def _stub(self, name, help_text, change=False):
+        help_path = os.path.join(self.tmp, name + ".help")
+        with io.open(help_path, "w", encoding="utf-8") as fh:
+            fh.write(help_text)
+        path = os.path.join(self.tmp, name)
+        # `change` writes one file into the cwd: a qoder writer runs in its own
+        # clone, and an isolated run that changed nothing AND printed no REPORT
+        # is INCOMPLETE (10) — the fake has to be a worker that did its job. The
+        # in-place claude launch writes nothing: its cwd is the caller's checkout.
+        script = ("#!/bin/sh\n"
+                  "case \"$1\" in\n"
+                  "  --version) printf '0.0.0-fake\\n'; exit 0 ;;\n"
+                  "  --help) cat '%s'; exit 0 ;;\n"
+                  "esac\n"
+                  "echo \"$*\" >> '%s'\n" % (help_path, self.calls))
+        if change:
+            script += "echo work > launch-proof.txt\n"
+        script += "echo done\\n"
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        os.chmod(path, 0o755)
+
+    def _recorded(self):
+        try:
+            with io.open(self.calls, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    def _env(self, **extra):
+        env = clean_env(PATH=self.tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                        AUTOOS_STATE_DIR=self.tmp, **extra)
+        env.pop("AUTOOS_TASK_DIR", None)
+        return env
+
+    def test_a_real_qoder_launch_carries_the_session_id_and_the_pin(self):
+        self._stub("qodercli", QODERCLI_1_1_63_HELP, change=True)
+        # --isolate because a qoder WRITER forces its own clone: the fake answers
+        # from inside it, and the recorded argv is the one the real Popen got.
+        r = run_agent("run", "--client", "qoder", "--tier", "1", "--isolate",
+                      "--model", "Efficient", "Reply with exactly: ack",
+                      env=self._env(AUTOOS_CLAUDE_CRITICAL="test: real launch argv"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launched = [line for line in self._recorded() if line.startswith("-p ")]
+        self.assertEqual(len(launched), 1, self._recorded())
+        self.assertRegex(launched[0], r"--session-id " + self.UUID)
+        self.assertIn("--model Efficient", launched[0])
+
+    def test_a_real_claude_launch_carries_the_session_id_and_the_pin(self):
+        self._stub("claude", self.CLAUDE_HELP)
+        r = run_agent("run", "--client", "claude", "--tier", "1",
+                      "--model", "claude-sonnet-4-5",
+                      "Reply with exactly: ack",
+                      env=self._env(AUTOOS_CLAUDE_CRITICAL="test: real launch argv"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launched = [line for line in self._recorded() if line.startswith("-p ")]
+        self.assertEqual(len(launched), 1, self._recorded())
+        self.assertRegex(launched[0], r"--session-id " + self.UUID)
+        self.assertIn("--model claude-sonnet-4-5", launched[0])
+
+
 class QoderFenceTests(unittest.TestCase):
     """FAMILYFENCE-b requirement 2, the gate half: a pinned model is a model
     choice, so the fence rules it for an own-account client exactly as it rules
