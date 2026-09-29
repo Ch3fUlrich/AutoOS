@@ -414,8 +414,10 @@ GRANT_SETS = {
 # profiles are the only fence against a push to main. Glob characters `*`,
 # `?`, `[` cannot be fenced in rule syntax (`*`/`?` are pattern characters
 # there) and only expand when a matching file exists in the cwd; these
-# profiles deny them explicitly. `<src>:HEAD` updates the remote's HEAD
-# target (main), so it is denied.
+# profiles deny them explicitly. `<src>:HEAD` creates a remote branch
+# literally named `HEAD` (refs/heads/HEAD; main is unchanged, verified
+# with real git), which breaks every tool that resolves HEAD - so it is
+# denied.
 MAIN_FENCE = (
     "Bash(*git push * main)",
     "Bash(*git push * main *)",
