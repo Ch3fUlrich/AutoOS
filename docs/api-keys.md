@@ -270,9 +270,9 @@ release its launch profiles were not written for.
 What replaces the pin is a read-only lag check ([tools/claude-cli-lag.py](../tools/claude-cli-lag.py),
 stdlib, Linux and Windows/WSL):
 
-    python3 tools/claude-cli-lag.py    # exit 0 up to date / unknown, 1 this host lags
+    python3 tools/claude-cli-lag.py    # exit 0 up to date / ahead / unknown, 1 this host lags
 
-Per host it prints `claude --version`, the newest published release (the npm
+On the host it runs on, it prints `claude --version`, the newest published release (the npm
 registry, cached an hour in the git-ignored `logs/`, and `unknown` when offline
 — an unreachable registry is never an error), whether the host lags
 (`lags - restart picks it up`), and the autoupdater state with the variable or

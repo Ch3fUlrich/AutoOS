@@ -37,6 +37,7 @@ in the repository's git-ignored ``logs/`` (override with ``AUTOOS_STATE_DIR``).
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -221,7 +222,7 @@ def newest_release(cache_path=None, url: str = REGISTRY_URL, now=None,
                                 else "unknown (offline; registry call skipped)")
     try:
         payload = fetch(url, timeout)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
         reason = type(exc).__name__
         if cached:
             return cached, "cache (npm registry, refreshed failed: %s)" % reason

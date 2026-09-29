@@ -10,6 +10,7 @@ Run from the repo root:
 
     python3 tests/test_claude_cli_lag.py
 """
+import http.client
 import importlib.util
 import io
 import re
@@ -351,6 +352,19 @@ class TestReportAndExitCodes(unittest.TestCase):
             rc = lag.main(["--state-dir", self.state_dir], env={}, out=out)
         self.assertEqual(rc, 0)
         self.assertIn("unknown", out.getvalue())
+
+    def test_an_http_protocol_error_reports_unknown_and_exits_zero(self):
+        # http.client's HTTPExceptions (BadStatusLine, IncompleteRead) are not
+        # OSError subclasses; the offline-never-errors contract needs them read
+        # as "no answer" too, not as a traceback.
+        out = io.StringIO()
+        with mock.patch.object(lag, "installed_version", return_value="2.1.284"), \
+             mock.patch.object(lag, "urlopen_json",
+                               side_effect=http.client.IncompleteRead(b"")), \
+             mock.patch.object(lag, "read_cache", return_value=None):
+            rc = lag.main(["--state-dir", self.state_dir], env={}, out=out)
+        self.assertEqual(rc, 0)
+        self.assertIn("status:      unknown", out.getvalue())
 
 
 class TestStateLocation(unittest.TestCase):
