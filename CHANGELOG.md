@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- CAO removal (2026-09-29, operator): CAO is deprecated — the batch runner is the only lane. Deleted the `cao/` package (18 modules), `tests/cao/` (21 files), `infra/mcp-servers/cao-setup/` (12 files) and `references/cao-runbook.md`; cut the `## CAO quickstart` section from the skill; dropped the `cao` block from `handoff.config.example.json`; de-CAOed the skill description, Files table, R-coord-09, `l3-routing.md`, `main-orchestrator.md`, `rule-map.md`, `trust_worktree.py`, `pytest.ini`, `repository-index/SKILL.md` and `AGENTS.md`. Gate: `tests/test_no_cao.py` (red-first, 4 passed).
 - WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
 ### Fixed — the round-1 unclosed-fence rescan forged verdicts; VERDICTFENCE-R2 replaces it (2026-09-29)

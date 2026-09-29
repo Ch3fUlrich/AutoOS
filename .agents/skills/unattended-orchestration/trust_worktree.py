@@ -326,15 +326,14 @@ def trust_agy(worktree: Path, repo: Path, check: bool = False) -> str:
 
     The name is kept for symmetry with trust_claude/trust_grok, but the honest
     description is "copy config". A headless agy worker's trust prompt is
-    handled reactively instead, by cao/watchdog.py, which recognises that exact
-    wording and answers it. If a future agy version grows a persistable trust
+    answered at runtime by the runner's watchdog, not here. If a future agy version grows a persistable trust
     store, pre-approving here is strictly better than answering later.
     """
     src = repo / ".gemini"
     dst = worktree / ".gemini"
     if not src.is_dir():
         return ("AGY: no .gemini directory in repo to copy (note: agy's trust "
-                "dialog is answered at runtime by cao/watchdog.py, not here)")
+                "dialog is answered at runtime by the runner watchdog, not here)")
     if check:
         return f"AGY: WOULD copy {src} to {dst}"
     if not dst.exists():

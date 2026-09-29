@@ -1,14 +1,13 @@
 ---
 name: unattended-orchestration
-description: "Portable runner and CLI orchestrator for work that runs with nobody watching: worktree-isolated lanes, usage-limit and outage recovery, guard-gated auto-merge, or CAO's interactive 3-layer hierarchy. Load when spawning unattended sessions or subagents, briefing or reviewing their work, or acting as the L1 main orchestrator (read references/main-orchestrator.md first)."
+description: "Portable runner and CLI orchestrator for work that runs with nobody watching: worktree-isolated lanes, usage-limit and outage recovery, guard-gated auto-merge. Load when spawning unattended sessions or subagents, briefing or reviewing their work, or acting as the L1 main orchestrator (read references/main-orchestrator.md first)."
 ---
 
 # Unattended Orchestration
 
 Long-horizon agent work with **no human present**: an overnight batch, a weekend migration, a
 queue of handoffs too large for one sitting. The runner starts each session, watches it, and
-recovers it through a usage limit, a 529, and a session that stops early. CAO (bottom of this
-file) is the interactive sibling: a live, steerable hierarchy for work you want to watch instead.
+recovers it through a usage limit, a 529, and a session that stops early.
 
 **Use something else** when a human is present for the whole run and it finishes in one sitting
 (Agent/Workflow tools — see `swarm-orchestration`), or when a human can glance at a pane
@@ -32,10 +31,9 @@ every L1 session needs before touching a brief.
 | [`references/layers.md`](references/layers.md) | Orchestrator → session → subagent layers, the controller's inbox channel, successor briefs |
 | [`references/runner-setup.md`](references/runner-setup.md) | Adopting the runner in a new repo, its config fields, its CLI flags (`-Validate`, `-DryRun`) |
 | [`references/changing-the-runner.md`](references/changing-the-runner.md) | The test suites, the PowerShell array trap, where the incident backlog lives |
-| [`references/cao-runbook.md`](references/cao-runbook.md) | CAO: layers, safety mechanisms, providers, setup traps |
 | [`references/rule-map.md`](references/rule-map.md) | Old rule ids → new ids or code pointers (tested by `tests/test_skill_rules.py`) |
 | [`unattended-orchestration.md`](unattended-orchestration.md) | The opencode 3-tier routing protocol (task card, clients, depth budget) this repo runs on |
-| `HandoffCore.psm1`, `run_handoff_sessions.ps1`, `trust_worktree.py`, `l1_handoff.py`, `provider_windows.py`, `cao/` | The tested code — behaviour lives there, not restated here |
+| `HandoffCore.psm1`, `run_handoff_sessions.ps1`, `trust_worktree.py`, `l1_handoff.py`, `provider_windows.py` | The tested code — behaviour lives there, not restated here |
 
 ## Levels (L0-L3)
 
@@ -106,7 +104,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
-- R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner; CAO separate. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
+- R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
 - R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)
 - R-coord-11: MCP code loads from its cwd checkout: ff it to main, restart the MCP, probe isolated. (why: ff under a running server mixes old and new code; source: SCOPEBUS probes 1-4, 2026-09-29)
 
@@ -141,32 +139,3 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 - R-worker-10: Accept a detector or redactor on the real output corpus; give each new raw-data consumer its own redaction test. (why: fixtures passed; a secret leaked; source: SPAWNFIX3d, REDACTFIX3)
 - R-worker-11: A 'summarise, no tools' ask is harness compaction unless a leading <cross-session-message from=> wrapper marks a peer. (why: transcript export; source: D-146, SB-C2, CompactionRuleTests)
-
-## CAO quickstart
-
-CAO (CLI Agent Orchestrator) is the interactive sibling: a live, inspectable hierarchy of agent
-terminals with a web dashboard on `:9889`, for work you want to watch and steer across providers.
-The commands below are kept here (not in `references/cao-runbook.md`) because
-`tests/cao/test_cli.py` scans this file for every `python -m cao ...` string it advertises and
-checks each one against the real parser — moving them would silently stop testing what this file
-tells you to run. Everything else about CAO (layers, safety mechanisms, providers, setup traps,
-proven incidents) is in [`references/cao-runbook.md`](references/cao-runbook.md).
-
-```bash
-export PYTHONPATH=<repo>/skills/unattended-orchestration
-export CAO_HOME_DIR="$HOME/.cao"                    # or the CLI and the server use different homes
-
-cao-server &                                        # once per host; nothing below works without it
-python -m cao check                                 # config, credentials, server, warnings
-python -m cao probe                                 # do the pools ANSWER? closes proven-dead ones
-python -m cao profiles --out ./profiles             # then run the `cao install` lines it prints
-python -m cao plan                                  # scaffold the plan WITH THE USER; ships invalid
-python -m cao launch --phase p1                     # refuses without a valid plan
-python -m cao sweep --answer                        # unblock waiting agents; run this every few minutes
-python -m cao verify --phase p1 --terminal <id>     # YOU run the guard, not the agent
-python -m cao verify --phase p1 --rework            # on failure: fresh agent, same phase
-python -m cao resume --apply                        # after a crash or a usage limit
-```
-
-Exit codes: **0** done, **1** action needed, **2** crash/unreachable, **3** refused, **4** needs a
-human.

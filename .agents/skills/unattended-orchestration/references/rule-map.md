@@ -10,7 +10,7 @@ and every new id target exists in `SKILL.md`.
 | `R-spawn-02` | code: MCP `spawn` uses `start_new_session=True` + `_reap()` | process-group isolation |
 | `R-spawn-03` | code: `autoos_clients.py build_command` argv-order check | --mcp-config variadic before prompt |
 | `R-spawn-04` | code: `trust_worktree.py --lane-mcp` strict per-worktree config | lane MCP isolation |
-| `R-spawn-05` | R-orch-12 | not enforced in code (cao/worktree.py only prints the trust_worktree.py line) |
+| `R-spawn-05` | R-orch-12 | not enforced in code (the worktree provisioner only prints the trust_worktree.py line) |
 | `R-spawn-06` | R-orch-04 | not enforced in code (no brief validator exists) |
 | `R-spawn-07` | code: `run`/`spawn` refuses shell tasks under isolation:worktree | isolation enforcement |
 | `R-spawn-08` | code: `client_key`/`key_files` fall back to main checkout | api-keys.yml fallback |
@@ -158,7 +158,7 @@ before, so the rows below record what each one absorbed and where the lesson cam
 
 | id | from | what it absorbed or changed |
 |---|---|---|
-| `R-coord-09` | new | L3-level orchestration (spawn/route/status) goes through autoos-agent only; L2 launches use the runner and CAO is separate (A68 + A57 + A11) |
+| `R-coord-09` | new | L3-level orchestration (spawn/route/status) goes through autoos-agent only; L2 launches use the runner (A68 + A57 + A11) |
 | `R-orch-15` | new | the `lesson: … evidence=…` line to the skill owner; a lesson becomes a rule only after a test (A30 + A35) |
 | `R-orch-16` | new | report-driven gates are re-audited cross-family and match names exactly (L33b, REVGATE2) |
 | `R-router-01` | merged | parent's inbox on a refused write, and the batched `Q:` line to a live L0; the literal format lives in `references/layers.md` (A38 + A59 + A65) |

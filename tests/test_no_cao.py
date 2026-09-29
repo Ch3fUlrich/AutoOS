@@ -65,10 +65,17 @@ RUNNER_CORE = [
 
 
 def tracked_paths():
+    # Staged deletions are removals: `git ls-files` still lists a path until
+    # it is committed, so subtract entries staged as deleted (changed 2026-09-29:
+    # the red gate uses the index, the green gate the commit — same command).
     out = subprocess.run(['git', 'ls-files'],
                          capture_output=True, text=True, cwd=REPO)
     assert out.returncode == 0, 'git ls-files failed: %s' % out.stderr
-    return set(out.stdout.split())
+    staged = subprocess.run(['git', 'diff', '--cached', '--name-only',
+                             '--diff-filter=D'],
+                            capture_output=True, text=True, cwd=REPO)
+    assert staged.returncode == 0, 'git diff failed: %s' % staged.stderr
+    return set(out.stdout.split()) - set(staged.stdout.split())
 
 
 class NoCaoTests(unittest.TestCase):
