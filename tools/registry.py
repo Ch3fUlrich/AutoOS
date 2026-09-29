@@ -447,6 +447,36 @@ def gateway_ref(leg, registry) -> str:
     return "%s/%s" % (prefix, model_id)
 
 
+def registry_ref(ref, registry) -> str:
+    """The registry leg spelling of a rendered gateway ref - ``gateway_ref()``'s inverse.
+
+    ``combos.json`` carries ``gateway_ref()``'s output, so a consumer that reads
+    that file and resolves a leg's provider out of it (sync-router-tiers.py's
+    explicit ``--combos`` override onto config.yaml) sees the *gateway* namespace
+    ``scw/...``, which is no provider in ``providers`` at all: the leg loses its
+    LiteLLM transport and its env key and lands in the mirror as an addressable-
+    looking but unsettable ``SCW_API_KEY`` entry (FREEKEYS-2e CI, sync-router-tiers
+    unit test). Rewriting the declared ``model_prefix`` back to the provider id
+    restores exactly the spelling ``routes.<id>.legs`` uses, so both render paths
+    agree.
+
+    Only a namespace that is *not* itself a provider id is rewritten, and only
+    when exactly one provider declares it - an ambiguous or unknown namespace is
+    returned unchanged, the same fail-loudly-no-invention rule ``gateway_ref()``
+    follows (a malformed registry is rule 1's business, not a render's). Pure."""
+    if not isinstance(ref, str) or "/" not in ref:
+        return ref
+    namespace, model_id = ref.split("/", 1)
+    providers = _section(registry, "providers")
+    if namespace in providers:
+        return ref
+    owners = [pid for pid, provider in providers.items()
+              if isinstance(provider, dict) and provider.get("model_prefix") == namespace]
+    if len(owners) != 1:
+        return ref
+    return "%s/%s" % (owners[0], model_id)
+
+
 def _check_legs(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():

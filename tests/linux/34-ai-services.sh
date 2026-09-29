@@ -1102,13 +1102,25 @@ with open(os.path.join(d, "provider_models.tsv"), "w", encoding="utf-8") as fh:
     fh.write("".join("free-ai\t%s\n" % r for r in fresh))
 with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
     json.dump({"data": [{"id": r} for r in base]}, fh)
+# The whole combo the first run must write, read from the file apply reads
+# rather than hardcoded: FREEKEYS-2 put scaleway's and nebius' free grants in
+# front of free-ai's stopgap, so the old single-leg expectation pinned one
+# tier's pre-FREEKEYS leg list. Pinning the file's own ordered list is the
+# stronger check - it fails if ANY leg goes missing, not only if free-ai does.
+want = next(c for c in combos["combos"] if c["name"] == "t3-driver-free-only")
+with open(os.path.join(d, "expected.combo"), "w", encoding="utf-8") as fh:
+    fh.write("combo create t3-driver-free-only --strategy %s --models %s\n"
+             % (want["strategy"], ",".join(want["models"])))
 PY
     out="$(_prune_apply "$d")"
     ok=1
     # The leg is in the combo the FIRST run writes.
-    grep -qx 'combo create t3-driver-free-only --strategy priority --models free-ai/qwen7b' \
-        "$d/calls.log" \
+    grep -qxF "$(cat "$d/expected.combo")" "$d/calls.log" \
         || { ok=0; echo "created: [$(grep '^combo create t3-driver-free-only' "$d/calls.log")]" >&2; }
+    # ... and specifically the freshly registered provider's leg is in it.
+    grep -q '^combo create t3-driver-free-only .*--models .*free-ai/qwen7b' \
+        "$d/calls.log" \
+        || { ok=0; echo "the new leg is not in the first combo write" >&2; }
     [[ "$out" != *"catalog does not know free-ai"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
     # The refresh is what put it there, and it happened before any combo write.
     [[ "$out" == *"  + free-ai registered"* ]] || { ok=0; echo "register: $out" >&2; }

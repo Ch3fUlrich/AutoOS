@@ -4898,6 +4898,16 @@ Test-Case 'autoos_inbox: records, positions, late flags, the inbox verb, dispatc
     Assert-Equal $rc 0 "inbox unit tests failed: $out"
 }
 
+Test-Case 'claude_cli_lag: host Claude Code version vs the newest release, the autoupdater state, no pin (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_claude_cli_lag.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "claude-cli-lag unit tests failed: $out"
+}
+
 Test-Case 'autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -6774,14 +6784,16 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
             Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
             Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
         }
-        # PROVFIX3 finding 1 re-pins the window: t1 falls through to its gemini
-        # leg (131,072), so that is what every surface may promise — and the
-        # effort still rides along, because the leg that answers FIRST is the
-        # 1M/xhigh contributor (finding 8: the ladder follows the served head).
+        # PROVFIX3 finding 1 re-pins the window: a route promises what its
+        # smallest SERVED leg takes. FREEKEYS-2/2c (D-141) put the free band
+        # (scaleway/nebius, 128k advertised) ahead of gemini in t1-orchestrator,
+        # so 128,000 is the honest promise now. Finding 8 still holds and now
+        # bites for real: the head is gemini, whose ladder tops out at "high",
+        # so the surface default "xhigh" is DROPPED, never forwarded.
         $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
         Assert-Equal $t1.Count 1
-        Assert-Equal $t1[0].max_tokens 131072
-        Assert-Equal $t1[0].reasoning_effort 'xhigh'
+        Assert-Equal $t1[0].max_tokens 128000
+        Assert-Equal $t1[0].reasoning_effort $null
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
@@ -9146,8 +9158,9 @@ Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and w
         # without it every combo is written unvalidated and this proves nothing.
         [IO.File]::WriteAllText((Join-Path $d 'keys.yml'),
             "free_ai: not-a-real-key-123`nomniroute: not-a-real-client-key`n")
-        $refs = @((Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
-            ConvertFrom-Json).combos.models) | Sort-Object -Unique
+        $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
+            ConvertFrom-Json
+        $refs = @($doc.combos.models) | Sort-Object -Unique
         $fresh = @($refs | Where-Object { $_ -like 'free-ai/*' })
         $base = @($refs | Where-Object { $fresh -notcontains $_ })
         $null = New-Item -ItemType Directory -Path (Join-Path $d 'gw\v1')
@@ -9164,9 +9177,19 @@ Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and w
         Assert-True ($out -like '*  + free-ai enumerated*') "refresh step: $out"
         Assert-True ($out -notlike '*catalog does not know free-ai*') "leg dropped: $out"
         Assert-True ($out -notlike '*could not read /v1/models*') "catalog never read: $out"
-        Assert-Equal (@($calls | Where-Object {
-            $_ -eq 'combo create t3-driver-free-only --strategy priority --models free-ai/qwen7b' }).Count) 1 `
+        # The whole combo read from the file apply reads, not a hardcoded leg
+        # list: FREEKEYS-2 put scaleway's and nebius' free grants in front of
+        # free-ai's stopgap, so the old single-leg expectation pinned one tier's
+        # pre-FREEKEYS legs. Fails if ANY leg goes missing, not only if free-ai does.
+        $want = @($doc.combos | Where-Object { $_.name -eq 't3-driver-free-only' })[0]
+        $expect = 'combo create t3-driver-free-only --strategy {0} --models {1}' -f `
+            $want.strategy, ($want.models -join ',')
+        Assert-Equal (@($calls | Where-Object { $_ -eq $expect }).Count) 1 `
             "first-run combos: $($calls -join ' | ')"
+        Assert-Equal (@($calls | Where-Object {
+            $_ -like 'combo create t3-driver-free-only *' -and
+            $_ -like '*--models *free-ai/qwen7b*' }).Count) 1 `
+            "the new leg in the first combo write: $($calls -join ' | ')"
         $enumAt = -1; $comboAt = -1
         for ($i = 0; $i -lt $calls.Count; $i++) {
             if ($enumAt -lt 0 -and $calls[$i] -eq 'models free-ai') { $enumAt = $i }

@@ -43,6 +43,22 @@ def _load_tool():
 registry = _load_tool()
 
 
+def _load_resolver():
+    """Import tools/autoos_resolver.py the same way: the usable-legs invariant
+    asks the resolver's own context check rather than restating it. The resolver
+    does `from registry import ...` itself, so tools/ has to be on sys.path."""
+    if str(ROOT / "tools") not in sys.path:
+        sys.path.insert(0, str(ROOT / "tools"))
+    path = ROOT / "tools" / "autoos_resolver.py"
+    spec = importlib.util.spec_from_file_location("autoos_resolver_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+resolver = _load_resolver()
+
+
 def load_registry() -> dict:
     with REGISTRY_PATH.open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -127,6 +143,50 @@ class ResolveLegTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             registry.resolve_leg("mistral/not-a-model", self.reg)
         self.assertIn("mistral/not-a-model", str(ctx.exception))
+
+
+class RegistryRefTests(unittest.TestCase):
+    """registry_ref() is gateway_ref()'s inverse (FREEKEYS-2e). combos.json
+    carries the RENDERED refs, so a consumer that reads that file and resolves a
+    provider out of it (`sync-router-tiers.py --combos`, which writes config.yaml)
+    sees `scw/*` - scaleway's declared model_prefix - and resolves nothing: the
+    leg silently loses its LiteLLM transport and its env key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_a_gateway_namespace_comes_back_to_its_provider(self):
+        self.assertEqual(
+            registry.registry_ref("scw/mistral-small-3.2-24b-instruct-2506", self.reg),
+            "scaleway/mistral-small-3.2-24b-instruct-2506")
+
+    def test_a_provider_id_namespace_is_left_alone(self):
+        self.assertEqual(
+            registry.registry_ref("nebius/zai-org/GLM-5.2", self.reg),
+            "nebius/zai-org/GLM-5.2")
+
+    def test_an_unknown_namespace_is_left_alone(self):
+        # Inventing a provider for a ref the registry does not know would hide a
+        # malformed render; rule 1 reports it instead.
+        self.assertEqual(registry.registry_ref("ghost/x", self.reg), "ghost/x")
+
+    def test_every_rendered_combo_ref_lands_on_a_real_provider(self):
+        """The property over the shipped files: after the inverse rewrite, every
+        namespace in combos.json is a provider id or a provider's omniroute_id
+        (`gemini/*`, google_ai_studio's gateway id, which resolve_leg accepts as
+        is), so both render paths resolve the same transport for the same leg."""
+        combos = json.loads((ROOT / "configuration" / "omniroute" / "combos.json")
+                            .read_text(encoding="utf-8"))
+        known = set(registry._section(self.reg, "providers"))
+        known |= {p.get("omniroute_id") for p in
+                  registry._section(self.reg, "providers").values()
+                  if isinstance(p, dict) and p.get("omniroute_id")}
+        unresolved = sorted({ref.split("/", 1)[0]
+                             for c in combos["combos"] for ref in c["models"]
+                             if registry.registry_ref(ref, self.reg).split("/", 1)[0]
+                             not in known})
+        self.assertEqual(unresolved, [])
 
 
 class GatewayRefTests(unittest.TestCase):
@@ -1565,9 +1625,19 @@ class FreeAiProviderTests(unittest.TestCase):
         run got 503 ALL_TARGETS_SKIPPED from t2-worker — every leg ahead of
         this one was down at the time (gemini 429 cooldown, agy out of quota,
         meta-api not registered) — so the leg measured answering 200 is the
-        route's last resort. The free-only routes already carried it last."""
+        route's last resort. The free-only routes already carried it last.
+
+        FREEKEYS-2 (D-141 item 3) appended the gated `credit` tail fallbacks
+        behind it, so "last" is now read over the legs that can answer: a gated
+        leg renders nothing to the gateway (combo_free_legs drops it) and cannot
+        be reached at all until a price lands, so the stopgap is still the last
+        leg a real request can fall through to."""
         route = self.reg["routes"]["t2-worker"]
-        self.assertEqual(route["legs"][-1], "free_ai/qwen7b")
+        self.assertEqual(live_legs(self.reg, "t2-worker")[-1], "free_ai/qwen7b")
+        trailing = route["legs"][route["legs"].index("free_ai/qwen7b") + 1:]
+        gated = route.get("unavailable_legs") or {}
+        self.assertTrue(all(gated.get(leg, {}).get("available") is False
+                            for leg in trailing), trailing)
         comment = route.get("$comment")
         self.assertIsInstance(comment, str, "$comment provenance is missing")
         self.assertIn("stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)",
@@ -1605,8 +1675,10 @@ class FreeAiProviderTests(unittest.TestCase):
 class MetaApiProviderTests(unittest.TestCase):
     """BRIEF MUSEAPI (2026-09-27): the Meta Model API joins as the paid provider
     `meta_api` (OpenAI-compatible at api.meta.ai/v1, key 'meta'), its
-    `muse-spark-1.3-contributor` model heading t1-orchestrator,
-    t1-orchestrator-paid and spark-1.3-contributor. It trains on prompts by
+    `muse-spark-1.3-contributor` model heading t1-orchestrator-paid and
+    spark-1.3-contributor; on the tier route t1-orchestrator it follows the free
+    band (FREEKEYS-2 spend order, see test_on_t1_it_follows_the_free_band).
+    It trains on prompts by
     contributor contract, so it is never private-safe and never enters a
     -clean route; on t2-worker/t3-driver it is a paid escalation placed AFTER
     that route's free legs (the trailing T2FREE stopgap free leg on t2-worker
@@ -1682,12 +1754,24 @@ class MetaApiProviderTests(unittest.TestCase):
         self.assertEqual(self.reg["models"]["muse-spark-1.3-contributor"]["tool_calls"],
                          "unproven")
 
-    def test_the_leg_heads_the_three_routes(self):
-        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
-                         "spark-1.3-contributor"):
+    def test_the_leg_heads_the_paid_routes(self):
+        for route_id in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             self.assertEqual(self.reg["routes"][route_id]["legs"][0], self.LEG,
                              route_id)
 
+    def test_on_t1_it_follows_the_free_band(self):
+        # FREEKEYS-2 (D-141 item 3) put the spend order on the tier route: a card
+        # reaches the paid contributor leg only after the free band 429s, because
+        # a combo that leads with the paid leg spends operator money before it
+        # spends a grant. MUSEAPI's "it heads t1-orchestrator" is superseded here.
+        legs = self.reg["routes"]["t1-orchestrator"]["legs"]
+        providers = self.reg["providers"]
+        self.assertIn(self.LEG, legs)
+        ahead = legs[:legs.index(self.LEG)]
+        self.assertTrue(ahead, "the paid leg is first again")
+        for leg in ahead:
+            self.assertEqual(providers[registry.resolve_leg(leg, self.reg)[0]]["tier"],
+                             "free", leg)
     def test_the_leg_follows_the_free_legs_on_t2_and_t3(self):
         providers = self.reg["providers"]
 
@@ -2140,8 +2224,18 @@ class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
         provider's id written with a separator instead of a slash — the shape
         docs/models.md uses in its tables and prose ('openrouter
         `deepseek/deepseek-v4.1-flash`'). A structured config always spells the
-        prefix with the slash, which match.group(1) already covers."""
-        return bool(re.search(r"openrouter[\s`'\"|>~=-]*$", text[:at]))
+        prefix with the slash, which match.group(1) already covers.
+
+        The exempted names come from the registry's own provider keys rather
+        than a hardcoded list: any provider but `deepseek` may legitimately
+        expose a DeepSeek-weight model under a slash-bearing id of its own
+        (FREEKEYS-2: a bazaarlink id of the shape
+        deepseek/deepseek-v4-flash-0731free:free,
+        gateway ref `bzl/…`). `deepseek` itself is never in the set, so a bare
+        native spelling still fails."""
+        others = [p for p in self.reg["providers"] if p != "deepseek"]
+        return bool(re.search(r"(?:%s)[\s`'\"|>~=-]*$" % "|".join(map(re.escape, others)),
+                              text[:at]))
 
     def _surfaces(self) -> dict:
         """Every machine-readable render and config that can put a DeepSeek id
@@ -2472,11 +2566,23 @@ class MistralPlanLimitsTests(unittest.TestCase):
                 registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
                 [], route_id)
 
-    def test_t3_driver_keeps_the_codestral_mistral_leg(self):
-        # Only the dead model left the route: codestral measures 200/125 rpm on
-        # this plan and is still t3-driver's head.
-        self.assertEqual(self.reg["routes"]["t3-driver"]["legs"][0],
-                         "mistral/mistral-code-latest")
+    def test_t3_driver_heads_with_the_free_band(self):
+        # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
+        # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
+        # agentic combo, and a 429 on the head falls through the combo, so the
+        # head must be a grant, not the operator's money. MISTRALFIX's measurement
+        # still stands and still decides WHICH paid leg is first:
+        # mistral/mistral-code-latest answers 200 at 125 rpm (625k tpm) while
+        # mistral-small-latest is dead at 0 rpm, so it stays the first PAID leg -
+        # now behind the free band instead of ahead of it.
+        legs = self.reg["routes"]["t3-driver"]["legs"]
+        self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
+        self.assertEqual(legs[0], "scaleway/mistral-small-3.2-24b-instruct-2506")
+        self.assertEqual(legs[:3], ["scaleway/mistral-small-3.2-24b-instruct-2506",
+                                    "nebius/zai-org/GLM-5.2",
+                                    "scaleway/qwen3-235b-a22b-instruct-2507"])
+        paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
+        self.assertEqual(paid[0], "mistral/mistral-code-latest")
 
     # -- the invariant ------------------------------------------------------
 
@@ -3062,6 +3168,219 @@ class ModelPrefixTests(unittest.TestCase):
 
     def test_the_check_ships_the_rule(self):
         self.assertTrue(hasattr(registry, "_check_model_prefix"))
+
+
+# ---------------------------------------------------------------------------
+# FREEKEYS-2 (brief D-141 item 3): combos with cross-provider fallbacks.
+# ---------------------------------------------------------------------------
+
+# The agentic tier routes that carry worker traffic. `*-clean` twins are out:
+# rule 3 admits only private-safe (paid, trains_on_prompts false) legs, and
+# every FREEKEYS-1 grant is a `free`/`credit` provider whose training policy is
+# unverified (null), so none of them may enter one. `*-paid` are the
+# deliberately legless LiteLLM hand groups.
+AGENTIC_TIER_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
+                       "t2-worker", "t2-worker-free-only",
+                       "t3-driver", "t3-driver-free-only")
+
+# The probe-passing legs FREEKEYS-1 registered and FREEKEYS-2 wires in. NOT
+# `bazaarlink/deepseek/deepseek-v4-flash-0731free:free`: the L1-routing decision
+# on FREEKEYS-2's open question is the operator rule 'DeepSeek only V4.1 Flash',
+# and that row is V4 weights, so it stays registered and routes nowhere — see
+# DeepseekV41OnlyDecisionTests.
+NEW_FREE_LEGS = {
+    "scaleway/qwen3-235b-a22b-instruct-2507",
+    "scaleway/mistral-small-3.2-24b-instruct-2506",
+    "nebius/zai-org/GLM-5.2",
+    "nebius/zai-org/GLM-5.3-Flash",
+}
+
+
+def leg_tier(reg: dict, leg: str) -> str:
+    """`free` / `credit` / `paid` for a leg, from its provider's own `tier`."""
+    provider_id, _ = registry.resolve_leg(leg, reg)
+    return (reg["providers"][provider_id] or {}).get("tier") or "paid"
+
+
+def usable_legs(reg: dict, route_id: str) -> list:
+    """`live_legs` plus the three filters an agentic card also hits, so "usable"
+    means what the resolver would actually plan: `tool_calls: proven` in the
+    tracked registry, a priced model where the provider's tier is `credit`
+    (an unpriced grant bills $0, so the resolver refuses the leg fail-closed),
+    and a context that fits the route's declared need (FREEKEYS-2c,
+    rev-freekeys2 finding 2 -- asked of `autoos_resolver.route_leg_context_fits`,
+    the resolver's own promise check, never restated here: a 32k leg was counted
+    as one of t1's three fallbacks for a 1M card, and three "usable" legs that
+    cannot carry the request are one usable leg and two 413s)."""
+    route = reg["routes"][route_id]
+    out = []
+    for leg in live_legs(reg, route_id):
+        provider_id, model_id = registry.resolve_leg(leg, reg)
+        model = reg["models"][model_id]
+        if model.get("tool_calls") != "proven":
+            continue
+        if leg_tier(reg, leg) == "credit":
+            try:
+                priced = float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
+            except (TypeError, ValueError):
+                priced = False
+            if not priced:
+                continue
+        if not resolver.route_leg_context_fits(leg, route, reg):
+            continue
+        out.append(leg)
+    return out
+
+
+class ComboCrossProviderTests(unittest.TestCase):
+    """Each agentic tier route must keep two or three fallback legs on DIFFERENT
+    providers that a card can actually use, and the new free legs must sit in the
+    route's free band — ahead of the paid legs — so a run spends a free grant
+    before the operator's money."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_every_agentic_route_has_two_distinct_usable_providers(self):
+        for route_id in AGENTIC_TIER_ROUTES:
+            providers = {registry.resolve_leg(leg, self.reg)[0]
+                         for leg in usable_legs(self.reg, route_id)}
+            self.assertGreaterEqual(
+                len(providers), 2,
+                "%s has %d usable free/priced provider(s) (%s): a card routed "
+                "here has no cross-provider fallback"
+                % (route_id, len(providers), sorted(providers)))
+
+    def test_every_agentic_route_has_three_usable_legs(self):
+        for route_id in AGENTIC_TIER_ROUTES:
+            self.assertGreaterEqual(
+                len(usable_legs(self.reg, route_id)), 3, route_id)
+
+    def test_a_new_free_leg_never_trails_a_paid_leg(self):
+        # The band order the brief asks for: free -> credit -> paid. A new free
+        # leg added below an already-serving paid leg would be a leg nothing
+        # reaches while the paid one answers.
+        for route_id in AGENTIC_TIER_ROUTES:
+            legs = self.reg["routes"][route_id]["legs"]
+            serving = [leg for leg in legs if leg in live_legs(self.reg, route_id)]
+            tiers = [leg_tier(self.reg, leg) for leg in serving]
+            free_idx = [i for i, t in enumerate(tiers) if t == "free"]
+            paid_idx = [i for i, t in enumerate(tiers) if t == "paid"]
+            if not free_idx or not paid_idx:
+                continue
+            for leg in NEW_FREE_LEGS:
+                if leg in serving:
+                    self.assertLess(
+                        serving.index(leg), max(paid_idx),
+                        "%s: the new free leg %s trails a paid leg" % (route_id, leg))
+
+    def test_a_credit_leg_is_last_and_gated_until_priced(self):
+        """An unpriced `credit` leg is a documented tail fallback and nothing
+        more: it sits after every other leg and carries `available: false`, so
+        neither the resolver (which refuses an unpriced credit leg) nor the
+        rendered combo (which drops a gated leg) can spend the grant before the
+        operator has recorded a real price."""
+        for route_id, route in self.reg["routes"].items():
+            legs = route.get("legs") or []
+            credit = [leg for leg in legs if leg_tier(self.reg, leg) == "credit"]
+            if not credit:
+                continue
+            gated = route.get("unavailable_legs") or {}
+            last = len(legs) - len(credit)
+            for leg in credit:
+                self.assertGreaterEqual(legs.index(leg), last,
+                                        "%s: credit leg %s is not at the end"
+                                        % (route_id, leg))
+                entry = gated.get(leg)
+                self.assertIsInstance(entry, dict,
+                                      "%s: unpriced credit leg %s is not gated"
+                                      % (route_id, leg))
+                self.assertIs(entry.get("available"), False, route_id)
+                self.assertIn("price", (entry.get("$comment") or "").lower(), leg)
+
+    def test_no_new_free_leg_enters_a_clean_route(self):
+        # Rule 3: these providers' trains_on_prompts is null (unverified), which
+        # private_safe() fails closed on. A -clean route is where a
+        # privacy=sensitive card lands, so none of them may ever be a leg of one.
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            for leg in NEW_FREE_LEGS:
+                self.assertNotIn(leg, route.get("legs") or [], route_id)
+
+    def test_the_three_usable_legs_carry_the_route_promise(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 2): the >=3-usable-legs bar is only
+        worth having if those legs answer the requests this route's cards make.
+        Measured 128k of `context_advertised` behind a 128k route, they do; drop
+        one leg's window to 32k -- the shape the finding named, a small free
+        model counted as a fallback for full-size cards -- and the filter stops
+        counting it, while the two legs that do carry the promise stay counted.
+        The small leg is the weak link, not the band."""
+        reg = copy.deepcopy(self.reg)
+        small = "scaleway/mistral-small-3.2-24b-instruct-2506"
+        before = usable_legs(self.reg, "t3-driver")
+        self.assertIn(small, before)
+        reg["models"]["mistral-small-3.2-24b-instruct-2506"]["context_advertised"] = 32000
+        after = usable_legs(reg, "t3-driver")
+        self.assertNotIn(small, after,
+                         "a 32k leg was still counted usable for a 128k route")
+        self.assertIn("nebius/zai-org/GLM-5.2", after)
+        self.assertIn("scaleway/qwen3-235b-a22b-instruct-2507", after)
+        # and the promise it is measured against is the route's own declaration,
+        # not an invention of the filter: t3-driver sells 128k (combos.json
+        # `context`), so 128k is what a counted fallback must carry.
+        self.assertEqual(registry.context_label_to_tokens(
+            self.reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"]),
+            128000)
+
+    def test_the_real_registry_still_passes_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepseekV41OnlyDecisionTests(unittest.TestCase):
+    """L1-routing DECISION on the question FREEKEYS-2 left open (brief D-141 item
+    3): the operator rule is 'DeepSeek only V4.1 Flash', and the free bazaarlink
+    grant is `deepseek-v4-flash-0731` — V4 weights, not V4.1. So it is in no
+    combo and policy carries no per-leg allow for it: the blanket `deny-deepseek`
+    refuses any attempt to pin it. The measured rows stay, because the probe
+    result is a fact worth keeping and a later operator decision may lift the
+    rule — nothing routes there until then.
+    """
+
+    LEG = "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_the_leg_is_still_registered_and_measured(self):
+        model_id = registry.resolve_leg(self.LEG, self.reg)[1]
+        self.assertEqual(self.reg["models"][model_id]["tool_calls"], "proven")
+        self.assertEqual(self.reg["providers"]["bazaarlink"]["tier"], "free")
+
+    def test_no_combo_carries_the_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn(self.LEG, route.get("legs") or [], route_id)
+        rendered = registry.render_omniroute(self.reg)
+        for combo in rendered["combos"]:
+            self.assertFalse([m for m in combo["models"]
+                              if "v4-flash-0731free" in m], combo["name"])
+
+    def test_the_blanket_deepseek_deny_governs_it(self):
+        self.assertTrue(registry.leg_denied(self.LEG, self.reg))
+        rules = self.reg["policy"]["leg_rules"]
+        self.assertFalse([r for r in rules if r["id"] == "allow-bazaarlink-deepseek-flash-free"])
+
+    def test_the_pinned_group_stays_a_single_model_group(self):
+        # deepseek-v4.1-flash is pinned per model on purpose (mapping doc Open
+        # choice 11): its job is weights fidelity, not redundancy, so it renders
+        # the native V4.1 leg alone and every leg of it is V4.1.
+        rendered = registry.render_omniroute(self.reg)
+        combo = next(c for c in rendered["combos"] if c["name"] == "deepseek-v4.1-flash")
+        self.assertEqual(len(combo["models"]), 1, combo["models"])
+        # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
+        # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
 
 
 if __name__ == "__main__":

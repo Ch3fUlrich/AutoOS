@@ -23,7 +23,9 @@ from datetime import datetime, timedelta, timezone
 import autoos_track as track  # tools/ is on sys.path for every caller
 from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
                       _parse_until, leg_denied, leg_rule_for,
-                      plan_dead_reasons, claude_budget as claude_budget_of)
+                      plan_dead_reasons, claude_budget as claude_budget_of,
+                      context_label_to_tokens, gateway_legs,
+                      leg_advertised_context)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -317,6 +319,74 @@ def usable_context(model_id, registry, overlay):
     if "tokens" in measured:
         return int(measured["tokens"])
     return int(registry["models"][model_id]["context_usable"]["tokens"])
+
+
+# Brief R4FIX / FREEKEYS-2c: the reserve a card estimate is multiplied by before
+# it is compared with a leg's window. One name, because a leg that is 5 % short
+# on one caller and 30 % short on another is the same bug twice.
+CONTEXT_HEADROOM = 1.3
+
+
+def context_fits(model_id, need_tokens, registry, overlay=None):
+    """The resolver's per-card context check: ``need * CONTEXT_HEADROOM`` must fit
+    the leg's usable window. ``usable_legs`` gates a leg on this, and a caller
+    that wants the same answer asks instead of writing the multiply again.
+    """
+    return need_tokens * CONTEXT_HEADROOM <= usable_context(model_id, registry,
+                                                            overlay)
+
+
+def route_leg_context_fits(leg, route, registry):
+    """Does `leg` carry the context `route` is asked to hand a card?
+
+    The registry invariant this serves (FREEKEYS-2c, rev-freekeys2 finding 2) is
+    not the per-card check above -- that one is `context_fits`, gated on a
+    *card estimate* with the headroom reserve, and no leg can ever hold 1.3x its
+    own window, so feeding a route's promise through it refuses every leg of
+    every route. This is the promise half, in the registry's promise currency
+    (`context_advertised`, the same number `route_context_cap` clamps a promise
+    to): a leg counts toward a route's fallback band only when it advertises at
+    least as much as the route is contracted to give, measured as the smaller of
+
+    - what the route declares it sells (`surfaces.omniroute.context_declared`,
+      the combos.json label, through `context_label_to_tokens`), and
+    - the smallest advertised window among the route's OTHER gateway-servable
+      legs -- the band the leg is being counted a member of.
+
+    Leave-the-leg-out is the point: it asks whether THIS leg is the weak link, so
+    a 128k leg in a 128k band is a real fallback, while a 32k leg added to the
+    same band is not -- it answers only a smaller request than the cards the rest
+    of the route serves, which is exactly the leg the invariant used to count as
+    usable. A leg or a route with no recorded window is not a deny (no evidence
+    never clamps, the rule `leg_advertised_context` already states), and the
+    estimate reserve is deliberately not applied here: this compares two declared
+    capacities, not a request against a window.
+    """
+    declared = context_label_to_tokens_route(route)
+    others = []
+    for other in gateway_legs(route, registry):
+        if other == leg:
+            continue
+        window = leg_advertised_context(other, registry)
+        if window is not None:
+            others.append(window)
+    need = min([w for w in (declared, min(others) if others else None)
+                if w is not None], default=None)
+    if need is None:
+        return True
+    window = leg_advertised_context(leg, registry)
+    return window is None or window >= need
+
+
+def context_label_to_tokens_route(route):
+    """`routes.<id>.surfaces.omniroute.context_declared` as tokens, or None when
+    the route declares no label (an unknown spelling is left alone, never
+    guessed)."""
+    surfaces = route.get("surfaces")
+    omniroute = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+    if not isinstance(omniroute, dict):
+        return None
+    return context_label_to_tokens(omniroute.get("context_declared"))
 
 
 def provider_tpm(provider_id, model_id, registry):
@@ -831,7 +901,9 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       `registry.plan_dead_reasons`. A small-but-real quota is *not* dead, and a
       model with no limits row is not gated at all: no measurement is never a
       deny.
-    - context: ``need_tokens * 1.3 <= usable_context``.
+    - context: ``context_fits`` -- ``need_tokens * CONTEXT_HEADROOM <=
+      usable_context`` -- the one place that math lives, so an invariant test
+      can ask the same question instead of restating it (FREEKEYS-2c).
     - tpm (brief R4, 2026-09-27): a leg whose provider limits for that model
       carry ``tpm`` is skipped when ``need_tokens * 1.3 > tpm`` -- a
       request-size cap Groq's free tier enforces (a request above ~8K tokens
@@ -937,10 +1009,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # invariant test.
         reasons.extend(plan_dead_reasons(provider_id, model_id, registry))
 
-        usable = usable_context(model_id, registry, overlay)
-        if need * 1.3 > usable:
-            reasons.append("context: need %sx1.3 > usable %s on %s/%s"
-                           % (need, usable, provider_id, model_id))
+        if not context_fits(model_id, need, registry, overlay):
+            reasons.append("context: need %sx%s > usable %s on %s/%s"
+                           % (need, CONTEXT_HEADROOM,
+                              usable_context(model_id, registry, overlay),
+                              provider_id, model_id))
 
         # Brief R4 (2026-09-27): a request-size cap from the provider's own
         # limits table -- need * 1.3 > tpm skips the leg, same shape as the
