@@ -310,6 +310,7 @@
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
+      "price_source": "per-token price carried from the retired llm-models.json row at the 2026-09-25 registry migration (same number as models.deepseek-flash; SB-C2 re-verified 2026-09-28)",
       "reasoning": false,
       "tool_calls": "unproven"
     },
@@ -332,6 +333,7 @@
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
+      "price_source": "approximate: reused from models.deepseek-v4-flash (retired llm-models.json entry), closest priced sibling - no published price found for this snapshot at the 2026-09-25 registry migration",
       "reasoning": true,
       "tier": "paid",
       "tool_calls": "unproven"
@@ -355,6 +357,7 @@
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
+      "price_source": "approximate: reused from models.deepseek-v4-flash (retired llm-models.json entry), closest priced sibling - no published price found for this snapshot at the 2026-09-25 registry migration",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -544,6 +547,7 @@
       "price_cache_read": 2e-09,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "price_source": "OpenRouter contributor leg: $0.10 in / $0.20 out per 1M (https://dev.meta.ai/docs/pricing-rate-limits), reused from models.muse-spark (retired llm-models.json entry) at the 2026-09-25 registry migration",
       "reasoning": true,
       "tool_calls": "unproven",
       "trains_on_prompts": true
@@ -644,6 +648,7 @@
       "price_cache_read": 2e-09,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "price_source": "$0.10 in / $0.20 out per 1M, Meta pricing docs https://dev.meta.ai/docs/pricing-rate-limits, on file since the retired llm-models.json row (docs/models.md Proven effort ladders and costs); 2026-09-25 registry migration",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -691,6 +696,7 @@
       "output_max": 131072,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "price_source": "contributor pricing $0.10 in / $0.20 out per 1M (https://dev.meta.ai/docs/pricing-rate-limits); row re-verified by L0 measured call 2026-09-27",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -2165,8 +2171,8 @@
         "id": "deny-deepseek-pro",
         "match": "*deepseek*pro*",
         "allow": false,
-        "reason": "never route or fall back to DeepSeek V4 Pro: the native catalog answers ['deepseek-flash', 'deepseek-v4-pro'] and only flash is affordable for agents. First in the list on purpose - a leg_rule is only as strong as its position, so no later (or future) DeepSeek allow, wildcard allow or client-bound allow can re-open the pro model. Denies every spelling of it: native, openrouter/, cheaperinference/, opencode-zen/",
-        "source": "operator via routing-00 2026-09-28T10:0xZ; Server 719cee9"
+        "reason": "never route or fall back to DeepSeek V4 Pro: the native catalog answers ['deepseek-flash', 'deepseek-v4-pro'] and only flash is affordable for agents. First in the list on purpose - a leg_rule is only as strong as its position, so no later (or future) DeepSeek allow, wildcard allow or client-bound allow can re-open the pro model. Denies every spelling of it: native, openrouter/, cheaperinference/, opencode-zen/, and the deepinfra vendor-namespaced id deepseek-ai/DeepSeek-V4-Pro under any provider prefix (D-050 restated by brief FREEKEYS-1c: every vendor's DeepSeek-V4-Pro never routes)",
+        "source": "operator via routing-00 2026-09-28T10:0xZ; Server 719cee9; D-050 via L1-routing FREEKEYS-1c 2026-09-29"
       },
       {
         "id": "deny-groq",

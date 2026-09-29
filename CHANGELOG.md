@@ -4,6 +4,16 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- FREEKEYS1c (2026-09-29, operator D-153): registry validate gained **rule 14 —
+  price provenance**: a model with a positive `price_in`/`price_out` must carry a
+  dated `price_source` (where the number came from, when it was seen), and every
+  price field is checked as a non-negative number. The six rows that already
+  carried untraced prices got honest in-repo provenance lines (retired
+  llm-models.json migration, SB-C2 re-verification, Meta pricing docs); a
+  `price_cache_read`-only row asks for none, because no biller reads it. The
+  `deny-deepseek-pro` leg rule (D-050) now names the deepinfra vendor-namespaced
+  id `deepseek-ai/DeepSeek-V4-Pro` under any provider prefix, with the matcher
+  verdicts pinned by `tests/test_registry.py`.
 - WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)

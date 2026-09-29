@@ -2365,6 +2365,32 @@ class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
                     (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
                     "deny-deepseek-pro", leg)
 
+    def test_leg_rules_deny_the_deepinfra_vendor_namespaced_pro_id(self):
+        """D-050 restated for the FREEKEYS-1c grants (brief, operator 2026-09-29):
+        DeepInfra spells the model with its vendor namespace,
+        `deepseek-ai/DeepSeek-V4-Pro`. Every vendor prefix must keep hitting the
+        first deny — the casefolded matcher makes the wildcard cover every
+        casing, and the bare vendor id (no provider prefix at all) must not
+        sneak past it either."""
+        for leg in ("deepseek-ai/DeepSeek-V4-Pro",
+                    "deepinfra/deepseek-ai/DeepSeek-V4-Pro",
+                    "morph/deepseek-ai/DeepSeek-V4-Pro",
+                    "deepinfra/deepseek-ai/deepseek-v4-pro"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    "deny-deepseek-pro", leg)
+
+    def test_deny_deepseek_pro_reason_names_the_deepinfra_id(self):
+        # The deny is the operator rule's whole record: a reader auditing
+        # D-050 must see from the rule alone that the deepinfra spelling is
+        # covered, not only the four spellings DSAMEND measured.
+        rules = self.reg["policy"]["leg_rules"]
+        entry = next(r for r in rules if r.get("id") == "deny-deepseek-pro")
+        self.assertIn("D-050", entry["reason"])
+        self.assertIn("deepseek-ai/DeepSeek-V4-Pro", entry["reason"])
+
     def _pro_surfaces(self) -> dict:
         """The machine surfaces the operator rule is about: docs/models.md is
         prose about the ids, not a config that sends one, so it is scanned for
@@ -3381,6 +3407,98 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
         self.assertEqual(len(combo["models"]), 1, combo["models"])
         # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
         # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
+
+
+class RuleFourteenPriceProvenanceTests(unittest.TestCase):
+    """Rule 14 (brief FREEKEYS-1c, operator D-153): a model that carries a
+    positive price must also carry dated provenance for it.
+
+    The spend guard (`autoos_usage.prices_from_registry`) and the resolver's
+    credit filter (`credit_leg_priced`) both price legs straight from
+    `price_in`/`price_out`, so a number with no record of where and when it
+    came from is an untraceable dollar figure gating real spend. `0` is not a
+    price (FREEKEYS-1b: every grant row ships with 0), so a zero row demands
+    no source, and a `price_cache_read`-only row (the openrouter free-cap rows)
+    demands none either -- no biller reads it. The rule also owns the field
+    shapes the schema declares — price_in/price_out/price_cache_read/
+    paid_price_in/paid_price_out must be non-negative numbers (not bool, not
+    string) when present.
+    """
+
+    def price_problems(self, problems):
+        return [p for p in problems if p.startswith("models.") and "price" in p]
+
+    def test_committed_registry_carries_no_untraced_price(self):
+        problems = self.price_problems(registry.check_registry(load_registry()))
+        self.assertEqual(problems, [])
+
+    def test_positive_price_without_source_is_flagged(self):
+        reg = mutated()
+        model = reg["models"]["morph-dsv4flash"]
+        model["price_in"] = 1.4e-07
+        model["price_out"] = 4e-07
+        model.pop("price_source", None)
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertTrue(any("morph-dsv4flash" in p and "price_source" in p
+                            for p in problems), problems)
+
+    def test_undated_source_is_flagged(self):
+        reg = mutated()
+        model = reg["models"]["morph-dsv4flash"]
+        model["price_in"] = 1.4e-07
+        model["price_out"] = 4e-07
+        model["price_source"] = ("vendor pricing page "
+                                 "https://morphllm.com/glm-5.2-api")
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertTrue(any("morph-dsv4flash" in p and "price_source" in p
+                            and "date" in p for p in problems), problems)
+
+    def test_month_granularity_date_is_accepted(self):
+        # D-153 records "seen 2026-09" — month granularity is a date; the rule
+        # must not force anyone to invent a day nobody was present for.
+        reg = mutated()
+        model = reg["models"]["morph-dsv4flash"]
+        model["price_in"] = 1.4e-07
+        model["price_out"] = 4e-07
+        model["price_cache_read"] = 4e-08
+        model["price_source"] = ("morph vendor pricing page "
+                                 "https://morphllm.com/glm-5.2-api, seen 2026-09")
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertEqual([p for p in problems if "morph-dsv4flash" in p], [])
+
+    def test_zero_price_needs_no_source(self):
+        # The five google/* and Ling deepinfra rows stay 0 with no price_source
+        # (D-153: no vendor price on file -> UNPRICED, fail-closed). A rule that
+        # demanded provenance for a zero would flag every grant row at birth.
+        reg = mutated()
+        model = reg["models"]["google/gemini-3.5-flash"]
+        model["price_in"] = 0
+        model["price_out"] = 0
+        model.pop("price_source", None)
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertEqual([p for p in problems if "gemini-3.5-flash" in p], [])
+
+    def test_negative_price_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["price_in"] = -1e-07
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertTrue(any("muse-spark" in p and "price_in" in p
+                            and "negative" in p for p in problems), problems)
+
+    def test_non_numeric_price_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["price_out"] = "0.0000002"
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertTrue(any("muse-spark" in p and "price_out" in p
+                            for p in problems), problems)
+
+    def test_boolean_price_is_flagged(self):
+        # True is an int in Python; a bool in a money field is always a defect.
+        reg = mutated()
+        reg["models"]["muse-spark"]["price_in"] = True
+        problems = self.price_problems(registry.check_registry(reg))
+        self.assertTrue(any("muse-spark" in p and "price_in" in p
+                            for p in problems), problems)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,13 @@ Three subcommands:
         A *missing* policy.handoff_caps stays rule 6's (the schema marks it
         required); this rule owns what the schema cannot see - the relation
         between the fields and the existence of the default row.
+    14. every model carrying a positive price_in or price_out also carries a
+        dated ``price_source`` -- where the number came from and when it was
+        seen (brief FREEKEYS-1c, operator D-153: the spend guard prices credit
+        legs straight from these fields, so an untraced price must not gate
+        spend; `0` is not a price, so the unpriced grant rows ship without
+        provenance and stay fail-closed). The same rule owns the schema's field
+        shapes: every price field is a non-negative number when present.
 
 `validate` runs `check` (kept as a separate subcommand so existing callers
 keep working; the migration drift gate against the one-shot converter
@@ -2996,6 +3003,69 @@ def _check_model_prefix(registry) -> list:
     return problems
 
 
+#: A price record is dated at day or month granularity ("seen 2026-09"); the
+#: rule must not force anyone to invent a day nobody was present for.
+PRICE_DATE_RE = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
+#: The fields that hold a per-token USD price (schema: number, minimum 0).
+PRICE_FIELDS = ("price_in", "price_out", "price_cache_read",
+                "paid_price_in", "paid_price_out")
+
+
+def _check_price_provenance(registry) -> list:
+    """Rule 14 (brief FREEKEYS-1c, operator D-153): a model carrying a positive
+    price must say where it came from and when it was seen.
+
+    ``autoos_usage.prices_from_registry`` and ``autoos_resolver.credit_leg_priced``
+    price credit legs straight from ``price_in``/``price_out``, so a number with
+    no recorded origin is an untraceable dollar figure gating real spend. The
+    schema declares the shape of ``price_source`` (a dated attribution) but
+    nothing enforced it; this rule does: a positive ``price_in`` or ``price_out``
+    requires a ``price_source`` string carrying a date (YYYY-MM or YYYY-MM-DD).
+    ``0`` is not a price (FREEKEYS-1b: every grant row ships 0), so a zero row
+    asks for no provenance -- requiring it would flag every unpriced row at birth
+    instead of only the priced ones an auditor cannot trace. A positive
+    ``price_cache_read`` on a row whose in/out are 0 asks for no provenance
+    either: no biller reads that field (the guard's cost path is in/out; cache
+    is only projected to the legacy installer shape), and a rule that demanded
+    a source for numbers nothing gates spend with would only teach agents to
+    invent one. The rule also owns the field shapes the schema declares:
+    every price field must be a non-negative number when present (a bool is a
+    defect in a money field, not a number).
+    """
+    problems = []
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict):
+            continue
+        positive = False
+        for field in PRICE_FIELDS:
+            if field not in model:
+                continue
+            value = model[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                problems.append("models.%s: %s must be a number when present, got %r"
+                                % (model_id, field, value))
+            elif value < 0:
+                problems.append("models.%s: %s is negative (%r) - prices are "
+                                "non-negative numbers (schema minimum 0)"
+                                % (model_id, field, value))
+            elif field in ("price_in", "price_out") and value > 0:
+                positive = True
+        if not positive:
+            continue
+        source = model.get("price_source")
+        if not isinstance(source, str) or not source.strip():
+            problems.append("models.%s: positive price_in/price_out requires a "
+                            "dated price_source - record where the number came "
+                            "from and when it was seen (D-153: an untraced price "
+                            "must not gate spend)" % model_id)
+        elif not PRICE_DATE_RE.search(source):
+            problems.append("models.%s: price_source %r is not dated - the field "
+                            "is dated attribution by contract (schema): add the "
+                            "date the price was seen (YYYY-MM or YYYY-MM-DD)"
+                            % (model_id, source))
+    return problems
+
+
 def check_registry(registry) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -3016,6 +3086,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
     problems.extend(_check_handoff_caps(registry))
+    problems.extend(_check_price_provenance(registry))
     return problems
 
 
