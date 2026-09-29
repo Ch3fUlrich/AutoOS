@@ -49,7 +49,10 @@ and its shaping fence set, and keeps the one deny that protects a shared asset.
   hand-kept table.
 - **Residuals, recorded not fenced** (spec §3.3, owner **HOOKS H2**): MED-3 (git config,
   aliases, functions — invisible to text), MED-4 (glob refspecs), MED-5 (a ref name rewritten or
-  substituted before push). Until H2's real-argv guard lands, the guard on those is the
+  substituted before push). The handoff is written on both sides — the H2 row of
+  `docs/plans/2026-09-28-agent-hooks-spec.md` §6 now carries the same three ids and the corpus
+  rows that pin them, because an owner that was never told is a handoff that did not happen.
+  Until H2's real-argv guard lands, the guard on those is the
   classifier plus the kept main fence plus server-side protection — and `main` currently has
   neither protection nor rulesets (measured), which stays an open operator action.
 - Spec `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §3.1–§3.3, A1-D4, A1-D5,

@@ -227,9 +227,9 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
   an **OPEN residual with a named owner** — the hooks lane, because a PreToolUse guard sees argv
   where this file sees a string:
 
-  | Id | Residual | The command that a text fence cannot see | Owner |
+  | Id | Residual | The command a text fence cannot see | Owner |
   |---|---|---|---|
-  | MED-3 | git config | `git config remote.origin.push refs/heads/*:refs/heads/*`, then any refspec-less push | HOOKS H2 (`git-push-to-main`) |
+  | MED-3 | git config | `git config remote.origin.push` a refspec, then any refspec-less push | HOOKS H2 (`git-push-to-main`) |
   | MED-4 | glob refs | `git push origin 'refs/heads/*:refs/heads/*'` — proven by `RealGitPremiseTests` to advance `main`; `*` and `?` are rule-syntax characters, so no fence can name them | HOOKS H2 |
   | MED-5 | rewritten and substituted refs | `"main"`, `$REF`, `$(…)`, backticks, tab/CR/LF separators, `;` and `#` tails, the matching and valueless `--ref` forms | HOOKS H2 |
 
