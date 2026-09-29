@@ -8,6 +8,12 @@ The measured session is narrow: --permission-mode default, an explicit --allowed
 list (Read, Edit, Skill), no MCP servers, a scratch worktree, MemoryMax=2G, a wall cap.
 
     python3 tools/fallback-phase1-probe.py --leg deepseek/deepseek-flash [--wall 300]
+
+Leg spelling: use the gateway's wire model id (provider prefix per ai-registry
+providers.<name>.model_prefix) - e.g. deepseek/deepseek-flash,
+scw/qwen3-235b-a22b-instruct-2507. 'scw/' is the scaleway prefix: OS-30 (2026-09-29)
+showed 'scaleway/qwen3-...' returning 400 while FREEKEYS-1 measured the same leg
+200 (tool-call round trip included) as 'scw/...'.
 """
 import argparse, importlib.util, json, os, re, shutil, subprocess, sys, tempfile, time
 import urllib.error
@@ -47,6 +53,8 @@ def endpoint_check(leg, key):
     st, r = post("/v1/messages", {"model": leg, "max_tokens": 300, "tools": [tool], "messages": msgs}, key)
     uses = [b for b in r.get("content", []) if b.get("type") == "tool_use"] if st == 200 else []
     out["messages_status"] = st
+    if st != 200:
+        out["messages_error"] = str(r.get("error", ""))[:300]
     out["shape_ok"] = st == 200 and r.get("type") == "message" and r.get("role") == "assistant"
     out["tool_use"] = bool(uses) and uses[0].get("name") == "get_weather" and "paris" in json.dumps(uses[0].get("input", {})).lower()
     out["stop_reason"] = r.get("stop_reason")
@@ -56,6 +64,8 @@ def endpoint_check(leg, key):
                  {"role": "user", "content": [{"type": "tool_result", "tool_use_id": uses[0]["id"], "content": "18C"}]}]
         st2, r2 = post("/v1/messages", {"model": leg, "max_tokens": 300, "tools": [tool], "messages": msgs}, key)
         out["round_trip"] = st2 == 200 and "18" in json.dumps(r2.get("content", []))
+        if st2 != 200:
+            out["round_trip_error"] = str(r2.get("error", ""))[:300]
     st3, _ = post("/v1/messages/count_tokens", {"model": leg, "messages": [{"role": "user", "content": "hello"}]}, key)
     out["count_tokens_status"] = st3
     return out
@@ -81,6 +91,13 @@ def harness_run(leg, key, wall):
            "ANTHROPIC_DEFAULT_HAIKU_MODEL": leg, "ANTHROPIC_DEFAULT_SONNET_MODEL": leg,
            "ANTHROPIC_DEFAULT_OPUS_MODEL": leg, "DISABLE_TELEMETRY": "1",
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+    # OS-30 (2026-09-29): the allowlisted env above stripped the caller's systemd
+    # user-session bus vars, so `systemd-run --user --scope` died at once with
+    # "Failed to connect to bus: No medium found" and claude never launched.
+    # Pass the two path-only vars through (never a secret).
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    env["XDG_RUNTIME_DIR"] = runtime_dir
+    env["DBUS_SESSION_BUS_ADDRESS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or ("unix:path=" + runtime_dir + "/bus")
     task = ("Read target.txt, change the line to 'status: DONE' with the Edit tool, then invoke the probe-skill "
             "skill and finish with one line: the probe word and the new file content.")
     cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=2G", "timeout", str(wall), "claude", "-p", task,
