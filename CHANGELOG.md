@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the CROSS-FAMILY verdict answers the question the exit code asked (FAMILYFENCE-3 N5, 2026-09-29)
+
+A qoder review fenced off its own assumed family printed
+
+    writer: qoder/Qwen3.8-Flash (qwen) source=assumed-default
+    family: writer=unresolved reviewer=unresolved CROSS-FAMILY: unknown
+    autoos-agent: no model outside family qwen left - refusing (FAMILYFENCE)   [exit 12]
+
+The sentence said *cannot tell*; the exit code said *this one collides*. Both come from
+the post-run backstop, but they read different questions: `cross_family_line` compared
+the reviewer family with the AUTHOR's family only, and printed `unknown` for an
+unproven reviewer, while `cmd_run` flipped rc to 12 on the serving family being in
+`fence["families"]` whether or not any witness attested to it. FAMILYFENCE-b's
+requirement 3 was about not CLAIMING independence from an assumption — a weaker reason
+to print `yes` — and it was read as a reason to print `unknown` about a collision the
+run was being refused for.
+
+- **`fence_collision(family, fence)`** (`tools/autoos-agent.py`) is now the one home for
+  "is the family that served a family this fence rules out?" — the author's own family
+  or any `--not-family` name, compared in `resolver.family_key` form. The verdict line
+  and the backstop read it, so they cannot drift apart again; the refusal text is
+  unchanged.
+- **The verdict set is `yes | NO | NO (assumed) | unknown`.** A collision prints `NO`,
+  marked `(assumed)` when nothing witnessed the model that hit it — the exit code acts
+  on an assumption, so the line says so and says how strongly. `yes` stays
+  witnessed-only: an unattested reviewer that collides with nothing still prints
+  `unknown`, never a claim of independence.
+- **Docs** — the module docstring, the MCP `spawn` tool description and
+  `.agents/skills/unattended-orchestration` all listed `yes|NO|unknown` and said `NO`
+  needed a witness; both now describe the four-value set.
+- **Tests** (`tests/test_autoos_spawner.py`, `CrossFamilyProvenanceTests`):
+  `test_a_proven_review_on_a_fenced_family_costs_the_run` (renamed from
+  `test_a_proven_same_family_review_costs_the_run`, which never tested a *same-family*
+  comparison — the author was `unresolved` in it, so what it actually proved is that the
+  verdict line stayed `unknown` while the exit was 12: the defect, asserted as
+  behaviour), `test_an_unattested_review_on_a_fenced_family_says_no_assumed`, and
+  `test_an_assumed_review_outside_the_fence_still_claims_nothing` for the `yes` half.
+
 ### Added — a real launch carries the session id and the pin, proven unmocked (FAMILYFENCE-3 N3, 2026-09-29)
 
 Skill R-orch-19: "a mocked-Popen suite can be green while a live spawn drops a flag."

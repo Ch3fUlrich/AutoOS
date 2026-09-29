@@ -79,12 +79,15 @@ wrote the diff it is judging (FAMILYFENCE; the rule and its exit code 12 are in
 the CLI's own docstring, which is the source of truth). Pass it — a review with no
 known writer family only warns on stderr and runs unfenced.
 
-The `CROSS-FAMILY: yes|NO|unknown` a review prints is now a *provenance* claim, not
-a plan guess (FAMILYFENCE-b): `yes`/`NO` are only printed when the reviewer's model
-was witnessed — the gateway call log for a gateway run, the client's own transcript
-for an own-account run that reports (qoder, claude); `--model` on any client is
-`pinned`. A model that came only from the plan's assumed default prints `unknown`,
-never `yes` — an assumption may have run anything. `ps`/`status`/`result` surface the
+The `CROSS-FAMILY: yes|NO|NO (assumed)|unknown` a review prints is now a
+*provenance* claim, not a plan guess (FAMILYFENCE-b): `yes` is printed only when the
+reviewer's model was witnessed — the gateway call log for a gateway run, the client's
+own transcript for an own-account run that reports (qoder, claude); `--model` on any
+client is `pinned`. A model that came only from the plan's assumed default never earns
+`yes` — an assumption may have run anything. A collision is the other direction and the
+exit code acts on it unwitnessed too, so an unattested reviewer that landed inside the
+fence prints `NO (assumed)` rather than `unknown` beside its own refusal
+(FAMILYFENCE-3 N5). `ps`/`status`/`result` surface the
 resolved writer with its `source` for every client; `--model` now pins an own-account
 client too, and its family feeds the fence like a gateway leg's.
 

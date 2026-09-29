@@ -1252,7 +1252,9 @@ def serve() -> None:
         claude model name reaches that CLI's own --model and its family feeds the
         fence like a gateway leg's. The record's writer gains a `source`
         (gateway-log/client-reported/pinned/assumed-default); a CROSS-FAMILY verdict
-        prints yes/NO only on a witnessed model, never on an assumed default."""
+        prints `yes` only on a witnessed model, never on an assumed default, while a
+        collision prints `NO`, marked `(assumed)` when nothing witnessed the model
+        that hit it (FAMILYFENCE-3 N5) — the same collision the run exits 12 on."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,

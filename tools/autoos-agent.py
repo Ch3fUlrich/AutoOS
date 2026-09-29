@@ -129,13 +129,17 @@ possible and says so on stderr, because its silence is what got measured.
 `--no-fallthrough` pins the run to the model it was planned on: a stop there is
 the run's answer, its own rc, with no re-plan onto whatever model survived. After
 the run, a review prints `family: writer=... reviewer=... CROSS-FAMILY: yes|NO|
-unknown` beside its `writer:` line, and a resolved same-family answer exits 12 —
-OmniRoute can fall through to a leg inside a combo the spawner's plan never showed.
-That verdict is a *provenance* claim (FAMILYFENCE-b): `yes`/`NO` print only for a
+NO (assumed)|unknown` beside its `writer:` line, and a family that collides — the
+author's, or any `--not-family` name — exits 12, because OmniRoute can fall through
+to a leg inside a combo the spawner's plan never showed.
+That verdict is a *provenance* claim (FAMILYFENCE-b): `yes` prints only for a
 witnessed model — the gateway call log, or an own-account client's own transcript
 (qoder, claude report theirs through a per-attempt `--session-id`); `--model` is
 `pinned`; a model known only from the plan's assumed default is never proof, so an
-unproven reviewer prints `unknown`, never `yes`. The resolved writer carries a
+unproven reviewer prints `unknown`, never `yes`. A collision is the conservative
+direction and the exit code acts on it either way, so an unattested one prints
+`NO (assumed)` rather than `unknown` next to a refusal (FAMILYFENCE-3 N5). The
+resolved writer carries a
 `source` field (`gateway-log`/`client-reported`/`pinned`/`assumed-default`) that
 `writer:` prints and `ps`/`status`/`result` surface for every client, read only from
 the runner-private kill record. `--model` pins an own-account client too, and its
@@ -3900,29 +3904,57 @@ def fence_free_head(chain, registry, fence):
     return None
 
 
+def fence_collision(family, fence):
+    """True when the family that served a run is a family that fence rules out: the
+    author's own family, or any name `--not-family` gave.
+
+    One home for the question, because two callers answer it together — `cmd_run`
+    refuses the run after it exits 0, and `cross_family_line` prints the verdict
+    beside that refusal. They drifted apart once (FAMILYFENCE-3 N5): the line said
+    `unknown` about the very collision the exit code acted on. Compared in
+    `resolver.family_key` form, as both sides of a fence are stored."""
+    key = resolver.family_key(family)
+    if not key:
+        return False
+    author = resolver.family_key((fence or {}).get("writer_family"))
+    return key == author or key in fence_family_names((fence or {}).get("families"))
+
+
 def cross_family_line(writer, fence):
     """The review run's own verdict on its independence, beside the writer line.
 
     `writer` is the family of the model that wrote the diff being read
     (`--review-of`'s record), `reviewer` the family that ACTUALLY served this run.
-    `NO` is printed only when both are known and equal — and `cmd_run` refuses the
-    run on that answer, because a same-family verdict that exits 0 is the lie this
-    whole fence exists to stop.
+    `NO` is printed when the family that served is a family this run was told to
+    stay off — either the author's own family or any family of `--not-family` — and
+    `cmd_run` refuses the run on exactly that answer, because a same-family verdict
+    that exits 0 is the lie this whole fence exists to stop.
 
     FAMILYFENCE-b: `reviewer` counts only when a witness attested to it. A model
     the plan assumed is a model that may never have run — qodercli substitutes an
     unknown `--model` and exits 0 — so an unproven reviewer is reported as
-    `unresolved` and the verdict is `unknown`, never `yes`. An independence nobody
-    can show is not an independence to claim; the run still goes ahead, because
-    requirement 3 asks for the sentence, not for a second refusal."""
+    `unresolved` and the verdict is never `yes`. An independence nobody can show is
+    not an independence to claim; the run still goes ahead, because requirement 3
+    asks for the sentence, not for a second refusal.
+
+    FAMILYFENCE-3 N5: it was never a licence to print `unknown` about a collision
+    the run is being REFUSED for. `cmd_run`'s backstop reads the serving family
+    whether or not a witness attested to it, so an unattested reviewer that landed
+    inside the fence printed `CROSS-FAMILY: unknown` next to exit 12 — a log that
+    said "cannot tell" about the one thing the spawner had just acted on. `NO` is
+    now that collision too, marked `(assumed)` when nothing witnessed the model, so
+    the sentence and the exit code answer the same question at the same strength.
+    """
     family = (writer or {}).get("family") or WRITER_UNRESOLVED
     reviewer = family if writer_is_proven(writer) else WRITER_UNRESOLVED
     author = (fence or {}).get("writer_family") or WRITER_UNRESOLVED
     unknown = (WRITER_UNRESOLVED, None, "")
-    if author in unknown or reviewer in unknown:
+    # The collision the backstop refuses on, from the one predicate both read.
+    fenced = fence_collision(family, fence)
+    if fenced:
+        verdict = "NO" if reviewer not in unknown else "NO (assumed)"
+    elif reviewer in unknown or author in unknown:
         verdict = "unknown"
-    elif author == reviewer:
-        verdict = "NO"
     else:
         verdict = "yes"
     return "family: writer=%s reviewer=%s CROSS-FAMILY: %s" % (author, reviewer, verdict)
@@ -7964,9 +7996,11 @@ def cmd_run(args, cfg: dict) -> int:
             # writer line uses, and a same-family verdict does not exit 0.
             if fence["review"] or plan["route"].get("review"):
                 print(cross_family_line(writer, fence))
-                reviewer_family_name = writer.get("family")
-                if (rc == 0 and reviewer_family_name and fence["families"]
-                        and reviewer_family_name in fence["families"]):
+                # FAMILYFENCE-3 N5: this is the same question `cross_family_line`
+                # just printed, so it reads the same predicate — a verdict line and
+                # an exit code that disagree are two answers, and only one of them
+                # stops the run.
+                if rc == 0 and fence_collision(writer.get("family"), fence):
                     print("autoos-agent: %s" % fence_refusal(fence), file=sys.stderr)
                     rc = EXIT_NO_OTHER_FAMILY
             # The record belongs to a spawn; a `run` started straight from a

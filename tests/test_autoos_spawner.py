@@ -15275,7 +15275,13 @@ class WriterProvenanceTests(unittest.TestCase):
 class CrossFamilyProvenanceTests(unittest.TestCase):
     """FAMILYFENCE-b requirement 3: the review path says out loud when its
     reviewer is only assumed. A qoder review whose transcript proves the model
-    keeps its CROSS-FAMILY: yes; one with no proof loses the claim, not the run."""
+    keeps its CROSS-FAMILY: yes; one with no proof loses the claim, not the run.
+
+    FAMILYFENCE-3 N5 adds the other half of that rule: losing the CLAIM is not
+    losing the ANSWER. The backstop refuses a run whose serving family collides with
+    the fence whether or not a witness named it, so the verdict line has to state the
+    collision the exit code acted on — `NO`, or `NO (assumed)` when unattested — and
+    not sit there saying `unknown` next to exit 12."""
 
     def setUp(self):
         self.agent = load_agent()
@@ -15341,14 +15347,43 @@ class CrossFamilyProvenanceTests(unittest.TestCase):
         self.assertIn("CROSS-FAMILY: unknown", out + err)
         self.assertEqual(rc, 0, out + err)
 
-    def test_a_proven_same_family_review_costs_the_run(self):
-        # The proof makes the refusal stronger, not weaker.
+    def test_a_proven_review_on_a_fenced_family_costs_the_run(self):
+        # The author is unknown here, so the verdict cannot be a comparison with a
+        # writer - what it CAN say, and what the backstop acted on, is that the
+        # family that served is the family this run was told to stay off. Before
+        # FAMILYFENCE-3 N5 the line read `CROSS-FAMILY: unknown` and exit 12 arrived
+        # anyway: the sentence and the verdict answered different questions, and a
+        # reader could not tell from the log which one refused the run.
         rc, out, err, calls, _ = self._run(transcript="efficient",
                                            over={"review_of": None,
                                                  "not_family": ["qwen"]})
-        self.assertIn("family: writer=unresolved reviewer=qwen CROSS-FAMILY: unknown",
+        self.assertIn("family: writer=unresolved reviewer=qwen CROSS-FAMILY: NO",
                       out + err)
+        self.assertNotIn("CROSS-FAMILY: unknown", out + err)
         self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unattested_review_on_a_fenced_family_says_no_assumed(self):
+        # R-orch-3's display rule stands: an unproven reviewer prints `unresolved`,
+        # because an assumption may have run anything. But the backstop reads the
+        # assumed family and refuses on it, so the verdict has to own that: `NO`,
+        # marked `(assumed)` - the answer the exit code gave, with its strength
+        # printed beside it.
+        rc, out, err, calls, _ = self._run(
+            over={"review_of": None, "not_family": ["qwen"]})
+        self.assertIn("source=assumed-default", out + err)
+        self.assertIn("family: writer=unresolved reviewer=unresolved "
+                      "CROSS-FAMILY: NO (assumed)", out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_assumed_review_outside_the_fence_still_claims_nothing(self):
+        # The other half of the same rule: `(assumed)` is not a licence to print
+        # `yes`. Nothing was witnessed, nothing collides, so nothing is claimed -
+        # and the run is not refused either.
+        rc, out, err, calls, _ = self._run(
+            over={"review_of": None, "not_family": ["nvidia"]})
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertNotIn("CROSS-FAMILY: yes", out + err)
+        self.assertEqual(rc, 0, out + err)
 
     def test_the_record_written_for_the_run_carries_the_source(self):
         writes = []
