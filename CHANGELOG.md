@@ -67,6 +67,218 @@ request.
   (v1 `role` is orchestrate|implement|review, v2 `kind` adds plan/research/bulk/
   debug/final), so the role default fires for `review` — v1 or v2 spelling — and for
   `--tier 3`, which is the reviewer agent.
+### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
+
+L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
+no `autoos-worker-*` unit existed, and **nothing said so** — not `ps`, not the run log. A reader
+could not tell a host that has no scope mechanism from one whose scope failed to start, and the two
+need different cancellers: a scope is a cgroup and reaches a `setsid()` child, the fallback is a
+process-group kill that cannot.
+
+- **`tools/autoos-agent.py`**: `scope_decision()` frames one dict —
+  `{"path": "scoped"|"inherited"|"unscoped", "unit": <unit or null>, "reason": <why>}` — and it is
+  the only place the three paths are weighed. `run_client` launches from it (the two gates moved
+  there verbatim), `_worker_record_start()` writes it into the live worker registry record so
+  `ps`/`ps --json` say it *during* the run, `_worker_record_end()` carries it through the rewrite,
+  and `cmd_run` prints `scope:` beside the `writer:` line. `inherited` names the outer unit read
+  out of `/proc/self/cgroup` — what a canceller actually stops — not the id `run` was handed, which
+  a fallthrough re-run re-mints. Nothing is written into `job.json`: the worker shares its uid with
+  that file, so this stays in the runner-private records (R-orch-17).
+- **The fallback is loud (POSIX)**: `SCOPE_WARNING` puts one line on the spawner's stderr —
+  `autoos-agent: WARNING client runs UNSCOPED (<reason>): cancel falls back to the
+  process-group kill`. Windows is not shouted at; it has no scope to miss.
+- **Reasons, not silence**: `_probe_scope()` answers with the reason it hit (`""` = supported) —
+  `windows`, `no systemd-run`, `no systemctl`, `no user manager / XDG_RUNTIME_DIR`, `user manager
+  unreachable` — and `scope_unsupported_reason()` caches that one string while `scope_supported()`
+  became its bool projection. The gate and the record can no longer disagree, because there is only
+  one probe behind both.
+- **WSL / `0::/init.scope` (c)**: `worker_scope_unit_from_cgroup()` is the single reader of a
+  cgroup line for both `in_worker_scope()` and the inherited unit name, and it matches a *path
+  segment* shaped `autoos-worker-*….scope`. `0::/init.scope` is the session's own cgroup and
+  yields nothing, so a run there with a reachable user manager still gets a scope; the probe never
+  consulted the cgroup at all, so it rejects nothing either.
+- **Tests** (`tests/test_autoos_spawner.py`, new `ScopeRecordTests` + `CliScopeLaunchTests`): each
+  path value with its reason, each probe reason against a faked PATH/env/launch, the exact warning
+  line, Windows quiet, the registry record carrying `scope` at start and at end and `list_workers`
+  row-ing it (a pre-SCOPECLI-b record lists with `scope: null` rather than a guess), a full
+  `cmd_run` asserting `scope:` beside `writer:`, and the cgroup table with the synthetic
+  `0::/init.scope` line. `test_a_host_with_no_user_manager_is_unchanged` asserted the fallback was
+  *silent* (`err == ""`) — that silence was the defect, so it became
+  `test_a_host_with_no_user_manager_launches_the_same_argv_and_says_so` and now asserts the warning
+  while keeping the unchanged argv/env assertions.
+
+### Fixed — a `run` started from a shell launches its client in a scope too (SCOPECLI, 2026-09-29)
+
+SB-A2 item A gave a worker a cgroup so a cancel could follow a `setsid()` child, but only
+on the MCP path: `run_job` wraps the whole `autoos-agent.py run …` in
+`systemd-run --user --scope`. A `run` started straight from a shell reached `run_client`
+unscoped, so its client led nothing but a new session — no cgroup at all, and
+`systemctl --user stop` had no unit to stop, leaving only the group kill that a
+`setsid()` grandchild escapes.
+
+- **`tools/autoos-agent.py`**: `run_client`'s POSIX branch wraps the launch in
+  `worker_scope_launch()` when **both** gates hold: `scope_supported()` says a user
+  manager is reachable, and `in_worker_scope()` says no worker scope is already around
+  this process. `in_worker_scope()` reads the unit out of `/proc/self/cgroup` through
+  `self_cgroup()`, one small read so a test can hand it a synthetic cgroup. The second
+  gate is load-bearing: `systemd-run --scope` does not nest — the new scope lands as a
+  sibling under `app.slice` (measured on this host) — so an MCP-spawned run that scoped
+  its own client would move it out of the outer cgroup, and the MCP `cancel`, which stops
+  the outer scope by name, would stop reaching it. Windows and a host without a user
+  manager run exactly the code they ran before.
+- **Unit name**: `cli_scope_unit()` → `autoos-worker-cli-<run id>-a<attempt>.scope`, or
+  `…-cli-pid<pid>-a<attempt>…` where the run has no id. `cli-` keeps it out of the runner's
+  own `autoos-worker-<run id>.scope` name space, and the attempt number matters because the
+  fallthrough loop re-starts the client: a reused unit name is a `systemd-run` failure, not
+  a no-op. One line on the spawner's own stderr names the unit and the command that stops it,
+  since a shell user is the only canceller such a run has.
+- **Unchanged by construction** (measured, not assumed): `--scope` keeps the child's pid,
+  its process group and both pipes, so `start_new_session`, the group reap, the capture
+  pump and `record_attempt_group()` see the shape they saw unscoped, and the client's exit
+  code propagates through the wrapper (7 in, 7 out).
+- **Tests** (`tests/test_autoos_spawner.py`, `CliScopeLaunchTests`): the scoped argv
+  (`systemd-run --user --scope --unit autoos-worker-cli-<id>-a2 --collect`), the inner
+  `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS` with the bus address given to
+  systemd-run only (SCOPEBUS), no nesting when a worker scope already holds us, unchanged
+  argv/env with no user manager, `in_worker_scope()` against cgroup v1 and v2 lines, a
+  delegated sub-cgroup and near-miss names, and an end-to-end case that mocks no launcher:
+  a real client reads its OWN `/proc/self/cgroup` and names the unit (it skips where the
+  host has no reachable user manager; it passes against the real one here).
+- **Residual, stated**: where the probe says yes and the launch still fails (a user
+  manager that dies mid-run), the run exits with `systemd-run`'s code and the client never
+  starts — there is no silent fall back to an unscoped launch. The alternative is worse: a
+  run cannot tell `systemd-run`'s rc 1 from the client's own, so any fallback would be
+  guesswork, and the thing it guessed past is exactly the uncancellable run this closes. The
+  failure is loud: the stderr line names the unit the run tried to use. One cached probe
+  (`python -c pass` in a scope) runs per process, as it already does on the MCP path.
+- **Coupled test fixed in the same act** (`WinshimClientResolutionTests`):
+  `test_on_posix_a_resolvable_client_still_runs` asserted `argv[0] == <shim>`, which is only
+  true on a host that cannot scope. It now asserts the resolved file is in the argv and the
+  bare name is not — the WINSHIM fact — so it holds in both launch shapes.
+### Fixed — the REST adoption c7ca607 added is hardened (APPLYADOPT-2, 2026-09-29)
+
+Eight non-blocking findings from review of c7ca607, all in `configuration/omniroute/apply.sh`.
+Each was a sentence the run could print that was not true, or a credential in the wrong place:
+
+- **"(no previous version)" could be a guess.** The retry path printed it whenever
+  `LIVE_COMBO_HELD` did not name the combo — including a run whose live combo list was never
+  read (`! live combo list unreadable - replacing every combo`), where the delete had just
+  removed a tier nobody had looked at. It now says
+  `! <name> creation failed - previous version unknown (live list unreadable)` in that case, and
+  keeps "(no previous version)" only when the store *was* readable and did not hold the name.
+- **A restore could put back a shorter tier.** `live_combo_norm` skipped a step whose shape it
+  did not understand and printed the refs it did read, so the restore wrote a combo with the
+  unknown leg silently missing and announced "previous version restored". The normaliser now
+  prints a fourth column — the number of steps it could not read — and the retry path refuses to
+  restore a combo whose count is non-zero: `! <name> creation failed - previous version LOST,
+  restore refused: … recreate <name> from your own record …`. `--drift` tolerates the extra
+  column (it compares legs, and a short leg list is already drift).
+- **An inactive connection counted as registered.** `isActive: false` is the dashboard's
+  disabled toggle: the row exists and routes nothing, so the old code promised the operator a
+  working provider and never added the one connection that would work. A disabled connection is
+  now *not* registered — and apply adds no second one either, because that is not the fix; it
+  prints `! <id> has an inactive connection - enable it in the dashboard` and moves on. Same rule
+  on the node-bound path (`register_provider` re-reads the binding after the node check).
+- **Another node's connection could be adopted by name.** `provider_connection_exists` matched
+  `provider == <node-id>` **or** `name == <provider-id>`, and the name is only ever the registry
+  id apply itself passes — so a connection left behind on a *different* provider node (a renamed
+  or re-created node) satisfied the check, and the provider read as registered with its key bound
+  to an endpoint the registry does not name. The name now decides only for a connection carrying
+  this node's id or the registry id as its provider; the node id alone is sufficient.
+- **A truncated page was read as the whole list.** `{"connections":[…],"total":N}` with `N`
+  beyond the rows served is a slice, and deciding "not registered" from a slice adds a duplicate
+  connection. `omni_connections` refuses it (exit 2 from the parser), the Providers step falls
+  back to the CLI's list, and the one line it prints names the actual condition —
+  `! the gateway's connection list is partial - deciding from the CLI's local store instead` —
+  instead of the generic "unreadable".
+- **The key-carrying body outlived the parse.** `GET /api/providers` returns every stored
+  `apiKey`; `REST_BODY` was left set after the rows were read, so anything later in the run that
+  prints a captured body could find that one. Cleared the moment the parse has consumed it.
+- **`register_provider` leaked a global.** `node_exists` was assigned bare inside the dry-run
+  branch. Declared in the function's `local` block with the rest of its state.
+- **The omniroute client key was in argv.** The catalog read was
+  `curl -sf -H "Authorization: Bearer <client key>" $GATEWAY/v1/models` — readable by every user
+  on the machine out of `ps` for the lifetime of the call, the exact thing `omni_rest` exists to
+  avoid. The read now goes through `omni_rest`, which gained a bearer argument (the manage key
+  stays the default) and writes the token into its 0600 `curl --config` file that the interrupt
+  trap removes on every path. No second copy of that code.
+
+`omni_rest`'s doc comment records the bash trap the fallback line had to route around: an
+apostrophe inside a `${VAR:-default}` expansion *within a double-quoted string* makes bash fail
+to parse the whole script (`unexpected EOF while looking for matching '`), so the default is
+assigned in a variable first.
+
+Tests: eight new cases in `tests/linux/34-ai-services.sh`, each with one new switch on the
+stand-in side. `$d/require_bearer` makes the fake curl answer `/v1/models` only from a bearer it
+reads out of apply's own config file (recording what it found in `bearer.log`), so a key sent as
+`-H` argv fails the case twice over; `$d/partial_total` reports a `total` beyond the rows served;
+`isActive: false` rows and a connection bound to a second node need no switch beyond
+`connections.json`/`nodes.json`. The two restore cases drive `$d/live.fail` (store unreadable,
+combo present in `live.json`) and `_drift_json … broken` (a `{"kind":"combo"}` step in the same
+tier `swap` reverses) — the broken-leg case is the one that matters: without the guard the third
+create *succeeds* against the stand-in, because the legs a partial restore drops are not the ones
+listed in `fail_create`. Red before: all eight. Green after: `--filter apply` 70 / 0,
+`--filter 'node,prune,drift,combo'` 48 / 0, shellcheck clean on `apply.sh`, pytest 176 passed.
+No run touched a live gateway.
+
+**Out of scope:** `configuration/omniroute/apply.ps1:418` still prints the "untouched" line and
+still decides from the local CLI list (recorded under APPLYADOPT above); the Windows twin takes
+these eight in its own lane.
+
+### Fixed — apply adopts the live gateway's connections, and a failed combo re-create restores (APPLYADOPT, 2026-09-29)
+
+Two false statements in `configuration/omniroute/apply.sh`, both measured on the dockerised
+gateway on 2026-09-29:
+
+- **It lied about what was registered.** The Providers step decided "already registered" from
+  `omniroute providers list`, which reads the CLI's own `~/.omniroute` store — on the container
+  host that store is *not* the gateway: the CLI listed 14 connections while
+  `GET /api/providers?limit=5000` answered 32 (most rows named `main`). A real run therefore
+  re-added scaleway, nebius, free-ai, bazaarlink, navy, arcee-ai, bluesminds, agentrouter,
+  novita and together — a duplicate connection each, on someone's real machine (AGENTS.md hard
+  rule 3) — while `--dry-run` printed "would create its provider node" for meta-api even though
+  node `meta-api` and its connection (whose `provider` is the node's `openai-compatible-chat-<uuid>`
+  id, not the registry id) already existed. New `rest_provider_ids` reads the gateway's
+  connection list once per run (only the `provider` field; the body carries every stored
+  `apiKey` and is never printed), and `provider_already_registered` answers from it whenever a
+  manage key made the read succeed — a node provider by its node *plus* the connection bound to
+  it, through the existing `provider_node_id` / `provider_connection_exists`, so there is one
+  rule and not two. `EXISTING_FROM_REST` is a read-succeeded flag, not "the list was non-empty":
+  a gateway with no connections is an answer. The CLI list stays the fallback for a run that
+  cannot ask (no manage key — the local gateway, where the CLI store *is* the gateway's — or a
+  refused read), and a run that had a key and was refused says which source decided, without
+  echoing the gateway's body. `--dry-run` now prints the idempotence line it owed the operator:
+  `= <id> already registered`, and for a node that exists but holds no key, "would add the key
+  to its existing provider node" instead of promising to create it.
+- **It claimed a deleted combo was untouched.** The combo retry path (`create` → on failure
+  `delete` → `create`) printed "previous version, if any, is untouched" after it had already
+  deleted. `LIVE_COMBO_REFS` / `LIVE_COMBO_STRATEGY` are read for exactly this reason and are
+  now remembered *before* the delete: if the re-create fails too, the tier is re-created from
+  them and the run says `! <name> creation failed - previous version restored`; if even that
+  fails it names the command the operator has to run (`... previous version LOST, restore
+  failed: omniroute combo create <name> --strategy <s> --models <refs>`), and when the store
+  never held the name it says `(no previous version)`. Counted as failed either way — the tally
+  no longer hides a hole in a live tier.
+- **`tests/linux/34-ai-services.sh`**: seven new cases on the existing stand-ins, each with one
+  new switch on the fake side. `$d/local_stale` in `_node_sandbox` reproduces the live
+  divergence (the fake CLI's `providers list` answers nothing while the fake REST surface still
+  serves `connections.json`): a gateway-held connection reports `already registered` with no
+  `providers add` in `calls.log` and no `POST /api/provider-nodes`, a node provider's existing
+  node + connection the same, `--dry-run` included, and the REST branch is proven by the `GET`
+  in `curl.log` rather than inferred. `$d/no_rest` refuses the connection read (503 on a health
+  that still answers) and asserts the CLI fallback, and a keyless run makes no management call
+  at all. `$d/fail_create` in `_prune_sandbox` fails `combo create` for the legs listed in it,
+  which is the only way to reach the retry path's *second* failure: restore-then-`restored`
+  line, restore-then-`LOST` line with the store empty and three create calls, and
+  `(no previous version)` for a name the store never held, with no invented restore. The
+  `untouched` wording is asserted absent in all three. Red before: `--filter adopt` 1 / 3
+  failed, `--filter 'apply combos: a create'` 0 / 2 failed. Green after: `--filter apply` 62 /
+  0, `--filter 'node,prune,drift,combo'` 44 / 0, shellcheck clean on `apply.sh`, pytest 176
+  passed (registry render + sync-router-tiers).
+- **Out of scope:** `configuration/omniroute/apply.ps1:418` still prints the `untouched` line
+  and still decides from the local CLI list. The Windows entry point has no container-host
+  divergence to adopt, but the restore wording is the same defect and its pwsh twin should
+  follow in its own lane.
 
 ### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
 
