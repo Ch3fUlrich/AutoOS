@@ -14543,6 +14543,34 @@ class FamilyFenceFreeChainTests(unittest.TestCase):
         self.assertIn("opencode/ghost-1 is inside the fence", err)
         self.assertEqual(rc, 0, out + err)
 
+    def test_the_free_fallthrough_re_plan_carries_the_fence_into_build_plan(self):
+        # N1: build_plan answers the fence for whatever leg IT picks; a re-plan
+        # that rebuilds without the argument lets the fenced family back in one
+        # leg after the chain walk just refused to serve it.
+        agent = self.agent
+        fence = {"families": ["nvidia"], "review": True, "strict": True,
+                 "writer_family": "nvidia", "warn_no_writer": False}
+        registry = _fallthrough_registry(["r-free"], families=FENCE_FAMILIES)
+        seen = []
+
+        def spy_build_plan(*a, **k):
+            seen.append(k)
+            return {"model": FENCE_CHAIN[1], "route": {"combo": FENCE_CHAIN[1]}}
+
+        args = argparse.Namespace(free=True, free_model=FENCE_CHAIN[0])
+        plan = {"model": FENCE_CHAIN[0], "route": {"combo": FENCE_CHAIN[0]},
+                "sandbox": None}
+        with mock.patch.object(agent, "build_plan", spy_build_plan):
+            nxt, fell_from, fell_to = agent._free_fallthrough_plan(
+                args, {}, plan, list(FENCE_CHAIN), set(),
+                fence=fence, registry=registry)
+        self.assertIsNotNone(nxt)
+        self.assertEqual((fell_from, fell_to), (FENCE_CHAIN[0], FENCE_CHAIN[1]))
+        self.assertTrue(seen, "the re-plan ran no build_plan")
+        self.assertIs(seen[0].get("fence"), fence,
+                      "the free re-plan must hand build_plan the same fence "
+                      "the chain walk applied")
+
     def test_a_write_role_run_keeps_an_unknown_family_candidate(self):
         # The fence excludes FAMILIES. It is the review role that additionally
         # refuses what it cannot place — a writer is not graded on independence.

@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the free fallthrough re-plan carries the fence into the leg choice (FAMILYFENCE-3 N1, 2026-09-29)
+
+`_free_fallthrough_plan` filtered the fenced families out of the chain it walks, then
+rebuilt the next attempt with `build_plan(args, cfg, sandbox=...)` — without the
+`fence=` argument the gateway fallthrough's re-plan already passes. `build_plan` answers
+the fence for whatever leg IT picks, so the re-plan was one leg away from serving the
+family the chain walk had just refused. The re-build now carries the same fence object.
+
+- **Test** (`tests/test_autoos_spawner.py`,
+  `FamilyFenceFreeChainTests.test_the_free_fallthrough_re_plan_carries_the_fence_into_build_plan`):
+  the re-plan's `build_plan` call must receive the fence, not a rebuilt or empty one.
+
 ### Fixed — a `--not-family` name the registry does not carry is refused, not a silent no-op (FAMILYFENCE-3 B2, 2026-09-29)
 
 `run --client opencode --card role=review,complexity=trivial --free --isolate --lean

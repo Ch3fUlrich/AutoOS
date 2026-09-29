@@ -1187,7 +1187,10 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
         given = args.free_model
         args.free_model = model
         try:
-            next_plan = build_plan(args, cfg, sandbox=plan["sandbox"])
+            # FAMILYFENCE-3 N1: the fence is not only the chain walk's — build_plan
+            # answers it for whatever leg IT picks too, so a re-build that dropped
+            # the argument re-admits the fenced family one leg after it was refused.
+            next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
         except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
                 ValueError):
             return None, None, None  # the guard says no: exit 8 below
