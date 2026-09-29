@@ -24,7 +24,10 @@ diff and refuses the push.
   dropped) under `/usr/bin/python3`, so a test that leans on a host identity or a venv shim fails
   here instead of in CI. Green appends `<sha> <utc> green: <commands>` to
   `<git-dir>/autoos-prepush.log` (per worktree, never tracked); red exits 1 and prints the failing
-  command. `AUTOOS_PREPUSH_OVERRIDE="<reason>"` steps over it loudly, for orchestrators, and is
+  command. A bash run that examined *nothing* is red too: `run-tests.sh` exits 0 on a filter that
+  matched no case, printing `passed 0 failed 0 skipped 0`, so the gate reads the tally as well as
+  the status — R-worker-05's "'no tests ran' exited 0 and was pushed" in this tool's own shape.
+  `AUTOOS_PREPUSH_OVERRIDE="<reason>"` steps over it loudly, for orchestrators, and is
   logged as **never green**.
 - **`tools/affected-tests.py`** gained a file-based question: `--changed-files-from REV` (with
   `--format plan` for the gate). The mapping rules are the three reds — skills, `CHANGELOG.md` and

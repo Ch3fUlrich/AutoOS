@@ -105,17 +105,22 @@ class RepoFixture(unittest.TestCase):
         for rel in plan.get("pytest", []):
             self._write(rel, "def test_stub():\n    assert 0 == 0\n")
 
+    #: What the real runner prints on its last line, tally included — the gate reads
+    #: it, so the fakes have to say it too (R-worker-04).
+    SH_GREEN = ('printf "  passed 3   failed 0   skipped 0\\n"\nexit 0\n')
+    SH_RED = ('printf "  passed 2   failed 1   skipped 0\\n"\n'
+              "echo 'suite failed' >&2\nexit 1\n")
+
     def suite_is_green(self):
         for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.exit(0)\n")
-        self._write("tests/run-tests.sh", "#!/usr/bin/env bash\nexit 0\n")
+        self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_GREEN)
 
     def suite_is_red(self):
         for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.stderr.write('plan check failed\\n')\n"
                              "sys.exit(1)\n")
-        self._write("tests/run-tests.sh",
-                    "#!/usr/bin/env bash\necho 'suite failed' >&2\nexit 1\n")
+        self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_RED)
 
     def prepush(self, *args, env=None):
         full = dict(os.environ)
@@ -221,7 +226,7 @@ class RunListTests(RepoFixture):
                     "#!/usr/bin/env bash\n"
                     "printf 'ARGS=%%s|PARTS=%%s|FULL=%%s\\n' "
                     '"$*" "${AUTOOS_TEST_PARTS-}" "${AUTOOS_FULL_SUITE-}" >> "%s"\n'
-                    "exit 0\n" % (str(log),))
+                    % (str(log),) + self.SH_GREEN)
         return log
 
     def test_terms_run_through_the_filter(self):
@@ -262,6 +267,31 @@ class RunListTests(RepoFixture):
         self.set_plan({"terms": "usb"})
         out = self.assert_rc(1)
         self.assertIn("run-tests.sh", out)
+
+    def test_a_green_run_that_examined_no_case_is_refused(self):
+        # R-worker-05, in the gate's own shape: run-tests.sh prints
+        # `passed 0 failed 0 skipped 0` and exits 0 when its --filter matches no
+        # case — so the exit code cannot tell "the change is fine" from "nothing
+        # was looked at". A derived filter that selects nothing is a free pass.
+        self.suite_is_green()
+        self._write("tests/run-tests.sh",
+                    '#!/usr/bin/env bash\n'
+                    'printf "  passed 0   failed 0   skipped 0\\n"\nexit 0\n')
+        self.set_plan({"terms": "no-such-case-name"})
+        out = self.assert_rc(1)
+        self.assertIn("run-tests.sh", out)
+        self.assertIn("no test", out.lower(), out)
+
+    def test_a_part_selection_that_skips_every_case_still_ran_something(self):
+        # A run whose cases were all skipped did at least examine a selection: on a
+        # host where a part's cases are platform-skipped, refusing this would tell
+        # the lane to fix a thing that is not broken.
+        self.suite_is_green()
+        self._write("tests/run-tests.sh",
+                    '#!/usr/bin/env bash\n'
+                    'printf "  passed 0   failed 0   skipped 7\\n"\nexit 0\n')
+        self.set_plan({"parts": ["41"]})
+        self.assert_rc(0)
 
     def test_a_red_pytest_file_refuses_the_push(self):
         self.suite_is_green()

@@ -33,6 +33,10 @@ WHAT IT DOES, IN ORDER
      often a uv venv with no pytest) and the bash suite only ever narrowed by a
      filter or a part selection (an unfiltered whole-suite run is the host-OOM
      shape, R-host-08).
+  e. A bash run that examined nothing is red, not green: ``run-tests.sh`` exits 0
+     and prints ``passed 0 failed 0 skipped 0`` when its filter matches no case, so
+     the tally is read as well as the status (R-worker-05 — "no tests ran" exited 0
+     and was pushed once already).
 
 GREEN LEAVES A RECORD: ``<git-dir>/autoos-prepush.log``, one line per push —
 ``<sha> <utc> green: <commands>``. The log lives in the git dir, so it is never
@@ -67,6 +71,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -85,6 +90,10 @@ GIT_IDENTITY_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
 #: How much of a failing command's output is printed; the tail holds the assertion,
 #: the head holds only the banner the runner prints first.
 TAIL_LINES = 60
+#: The bash suite's tally, and the colour escapes that may wrap its numbers when
+#: the runner is not writing to a terminal. See ``suite_selected_cases``.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+SH_SUMMARY = re.compile(r"passed\s+(\d+)\s+failed\s+(\d+)\s+skipped\s+(\d+)")
 
 
 def _git(repo, *args, check=False):
@@ -297,6 +306,32 @@ def oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def suite_selected_cases(output: str):
+    """How many cases ``run-tests.sh`` says it looked at, or None if it said nothing.
+
+    R-worker-05 in this tool's own shape: a filtered run whose terms match no case
+    prints ``passed 0 failed 0 skipped 0`` and exits 0. The exit code cannot tell
+    "the change is fine" from "nothing was examined", and a derived filter that
+    selected nothing would hand a free pass to exactly the lane the gate exists for.
+    Cases that all *skipped* count as examined: on a host where a part's cases are
+    platform-skipped, refusing that would send a lane off to fix a thing that is
+    not broken.
+    """
+    last = None
+    for line in output.splitlines():
+        found = SH_SUMMARY.search(ANSI.sub("", line))
+        if found:
+            last = found
+    if last is None:
+        return None
+    return sum(int(group) for group in last.groups())
+
+
+def is_suite_run(argv) -> bool:
+    """True for the bash suite, the only runner that reports a case tally."""
+    return any(str(part).endswith("run-tests.sh") for part in argv)
+
+
 def gate(repo, base: str):
     """Run the gate. Returns 0 green, 1 refused, 2 the gate could not run."""
     override = oneline(os.environ.get(OVERRIDE_ENV) or "")
@@ -323,6 +358,12 @@ def gate(repo, base: str):
         text = render(argv, extra)
         ran.append(text)
         good, out = run_command(repo, argv, extra)
+        if good and is_suite_run(argv) and suite_selected_cases(out) == 0:
+            # Exit 0 and an empty tally: the selection matched no case, so nothing
+            # was examined. Refuse it as the failure it is.
+            good = False
+            out += ("\n[the run examined no case: passed 0 failed 0 skipped 0 -- "
+                    "a selection that matches no test is not a green test]\n")
         if good:
             print("prepush: ok   %s" % text)
         else:
