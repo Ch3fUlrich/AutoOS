@@ -4653,3 +4653,55 @@ class CreditGuardLegFilterTests(unittest.TestCase):
         self.assertIn(("morph", "morph-priced"), kept)
 
 
+
+class CreditGuardCommittedRegistryTests(unittest.TestCase):
+    """FREEKEYS-1c (D-153): the unpriced fail-closed on the committed registry,
+    not the synthetic grants of CreditGuardLegFilterTests.
+
+    The google/* and inclusionAI/Ling deepinfra rows carry NO listed vendor
+    price (checked 2026-09 against deepinfra.com), so they must keep being
+    refused with the one clear line; the three rows whose per-1M prices the
+    operator's table records are priced and must carry no refusal."""
+
+    UNPRICED = ("google/gemini-2.5-flash", "google/gemini-3.5-flash",
+                "google/gemini-3.7-flash", "google/gemini-3.1-flash-lite",
+                "inclusionAI/Ling-3.0-flash")
+    PRICED = ("deepseek-ai/DeepSeek-V4-Flash-0731", "morph-dsv4flash",
+              "morph-glm52-744b")
+
+    def setUp(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        self.registry = json.loads(path.read_text(encoding="utf-8"))
+
+    def skipped(self, route_id):
+        route = self.registry["routes"][route_id]
+        _kept, skipped, _notes = r.usable_legs(
+            route, {"kind": "implement", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            self.registry, {}, credit_guards={})
+        return skipped
+
+    def test_credit_leg_priced_verdicts_on_the_committed_rows(self):
+        for model_id in self.PRICED:
+            self.assertTrue(r.credit_leg_priced(model_id, self.registry), model_id)
+        for model_id in self.UNPRICED:
+            self.assertFalse(r.credit_leg_priced(model_id, self.registry), model_id)
+
+    def test_an_unpriced_deepinfra_leg_is_refused_with_one_clear_line(self):
+        skipped = self.skipped("t3-driver")
+        self.assertIn(
+            "credit leg unpriced google/gemini-3.7-flash",
+            skipped.get("deepinfra/google/gemini-3.7-flash", []),
+            skipped)
+
+    def test_a_priced_morph_leg_gets_no_unpriced_refusal(self):
+        for route_id, leg in (("t1-orchestrator", "morph/morph-dsv4flash"),
+                              ("t2-worker", "morph/morph-dsv4flash"),
+                              ("t3-driver", "morph/morph-glm52-744b")):
+            with self.subTest(route=route_id, leg=leg):
+                reasons = self.skipped(route_id).get(leg, [])
+                self.assertEqual(
+                    [x for x in reasons if x.startswith("credit leg unpriced")],
+                    [], "%s on %s: %s" % (leg, route_id, reasons))

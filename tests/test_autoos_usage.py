@@ -542,6 +542,29 @@ class CostTests(UsageCliTests):
         prices = usage.load_registry_prices(ROOT / "catalog" / "ai-registry.json")
         self.assertEqual(prices["muse-spark-1.3-contributor"], (1e-07, 2e-07))
 
+    def test_the_shipped_registry_prices_the_freekeys1c_credit_legs(self):
+        # D-153 (brief FREEKEYS-1c): the vendor's USD-per-1M figures recorded on
+        # the deepinfra and morph rows, divided by 1e6, are what the guard
+        # multiplies tokens by. Pin the conversion through the guard's own
+        # reader, not by re-reading the JSON.
+        prices = usage.load_registry_prices(ROOT / "catalog" / "ai-registry.json")
+        self.assertEqual(prices["deepseek-ai/DeepSeek-V4-Flash-0731"],
+                         (6e-08, 1.8e-07))
+        self.assertEqual(prices["morph-dsv4flash"], (1.4e-07, 4e-07))
+        self.assertEqual(prices["morph-glm52-744b"], (1.19e-06, 3.74e-06))
+
+    def test_the_shipped_registry_keeps_the_unpriced_rows_unpriced(self):
+        # The google/* and inclusionAI/Ling deepinfra rows carry NO listed
+        # vendor price (checked 2026-09 against deepinfra.com, D-153): they stay
+        # 0, and prices_from_registry drops 0 rows, so they count as
+        # models_unpriced and the resolver refuses them as credit legs —
+        # fail-closed, never routed as priced credit.
+        prices = usage.load_registry_prices(ROOT / "catalog" / "ai-registry.json")
+        for mid in ("google/gemini-2.5-flash", "google/gemini-3.5-flash",
+                    "google/gemini-3.7-flash", "google/gemini-3.1-flash-lite",
+                    "inclusionAI/Ling-3.0-flash"):
+            self.assertNotIn(mid, prices, mid)
+
     def test_an_unreadable_registry_prices_nothing_and_still_reports(self):
         fetch = FakeFetch({0: (200, self.rows(self.PRICED))})
         rep = self.json_report(["--since", "1h", "--by", "provider", "--cost",
