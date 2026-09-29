@@ -3621,9 +3621,40 @@ function Set-AutoOSOmniRouteCliKey {
       (OMNIROUTE_API_KEY); without it they 401. Persistent User scope so
       every new terminal inherits it. Localhost-only bearer key, same
       sensitivity as the git-ignored api-keys.yml it is read from.
+      The key is the gateway client key: Get-AutoOSClientKey's one rule
+      (gateway-named field, then legacy with a deprecation line).
     #>
     param([string]$KeysFile, [string]$Scope = 'User')
-    Set-AutoOSApiKeyEnv -EnvName 'OMNIROUTE_API_KEY' -KeysName 'omniroute' -KeysFile $KeysFile -Scope $Scope
+    if (-not $KeysFile) {
+        $KeysFile = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+    }
+    # File-only: a transient process override must never be persisted to User
+    # scope - the old reader took the file value unconditionally, and so does
+    # this one (the helper's env-wins rule is for callers, not for persisting).
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    try {
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $key = Get-AutoOSClientKey -KeysFile $KeysFile
+    } finally {
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+    }
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        # Get-AutoOSClientKey already named the expected field and why.
+        return
+    }
+    $existing = [Environment]::GetEnvironmentVariable('OMNIROUTE_API_KEY', $Scope)
+    if (-not [string]::IsNullOrWhiteSpace($existing)) {
+        Write-AutoOSLine "OMNIROUTE_API_KEY already set ($Scope scope) - skipped, user-managed" -Level ok
+        return
+    }
+    if ($script:DryRun) {
+        Write-AutoOSLine "would export OMNIROUTE_API_KEY to $Scope scope (value from $KeysFile, never shown)" -Level muted
+        return
+    }
+    [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY', $key, $Scope)
+    Send-AutoOSEnvironmentChange
+    Write-AutoOSLine "OMNIROUTE_API_KEY exported to $Scope scope - new terminals inherit it (remove with [Environment]::SetEnvironmentVariable('OMNIROUTE_API_KEY',\$null,'$Scope'))" -Level ok
 }
 
 function Install-AutoOSOmniRouteRouting {
@@ -3644,11 +3675,9 @@ function Install-AutoOSOmniRouteRouting {
     $hadCli = -not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_API_KEY)
     if (-not $hadShort -or -not $hadCli) {
         $kf = if ($KeysFile) { $KeysFile } else { Join-Path $script:RepoRoot 'configuration\api-keys.yml' }
-        $kv = $null
-        if (Test-Path -LiteralPath $kf) {
-            $kl = Select-String -Path $kf -Pattern '^omniroute\s*:' | Select-Object -First 1
-            if ($kl) { $kv = $kl.Line.Split(':', 2)[1].Trim() }
-        }
+        # The gateway client key: the one helper (new field, then legacy with
+        # a deprecation line), never a second reader of the old field name.
+        $kv = Get-AutoOSClientKey -KeysFile $kf
         if (-not [string]::IsNullOrWhiteSpace($kv) -and -not $kv.StartsWith('REPLACE_WITH_')) {
             if (-not $hadShort) { $env:AUTOOS_OMNIROUTE_KEY = $kv }
             if (-not $hadCli) { $env:OMNIROUTE_API_KEY = $kv }
@@ -4142,6 +4171,8 @@ function Invoke-AutoOSPostInstall {
 
 Export-ModuleMember -Function `
     Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
+    Test-AutoOSLocalGateway, Get-AutoOSHostConfigPath, Normalize-AutoOSHostName,
+    Get-AutoOSHostName, Get-AutoOSClientKeyField, Get-AutoOSClientKey,
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
     Get-AutoOSMcpPackage, Get-AutoOSSerenaExcludedTools, Get-AutoOSIdeModel,
     Register-AutoOSMcpServer, Enable-AutoOSProjectMcpServer, Get-AutoOSMcpServerNames,

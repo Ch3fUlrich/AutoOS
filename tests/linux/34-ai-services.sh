@@ -5467,3 +5467,181 @@ if it "aistack rotate: invalid header name -> rc1 not a header name"; then
     if (( ok )); then pass; else fail "rotate rejects invalid header name"; fi
 fi
 
+# ─── WS-OMNIREMOTE gateway keys (gwkey) ───────────────────────────────────────
+# The client key field is named by gateway: omniroute_server for a non-local
+# gateway, omniroute_<host> for the local one. Fixtures only (sk-test-*):
+# the resolved VALUE is asserted, while notices/deprecations/errors must name
+# the FIELD and never a value or the URL.
+
+if it "gwkey: new local field omniroute_<host> resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_testhost: sk-test-local\n' >"$d/keys.yml"
+    field="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        unset AUTOOS_OMNIROUTE_URL AUTOOS_OMNIROUTE_KEY
+        autoos_client_key_field ) 2>"$d/err" )"; rc=$?
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        unset AUTOOS_OMNIROUTE_URL AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>>"$d/err" )" || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$field" == "omniroute_testhost" ]] || { ok=0; echo "field=$field" >&2; }
+    [[ "$key" == "sk-test-local" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ -s "$d/err" ]] && { ok=0; echo "stderr not empty: $(cat "$d/err")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "local gateway does not resolve omniroute_<host>"; fi
+fi
+
+if it "gwkey: new server field omniroute_server resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_server: sk-test-server\n' >"$d/keys.yml"
+    field="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_client_key_field ) 2>"$d/err" )"; rc=$?
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>>"$d/err" )" || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$field" == "omniroute_server" ]] || { ok=0; echo "field=$field" >&2; }
+    [[ "$key" == "sk-test-server" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ -s "$d/err" ]] && { ok=0; echo "stderr not empty: $(cat "$d/err")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "non-local gateway does not resolve omniroute_server"; fi
+fi
+
+if it "gwkey: legacy local omniroute warns once and resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-legacy" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ "$(grep -c . "$d/err")" == 1 ]] || { ok=0; echo "not one line: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"'omniroute'"*"'omniroute_testhost'"* ]] \
+        || { ok=0; echo "no old+new field: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"sk-test-legacy"* ]] && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "legacy local field does not warn once and resolve"; fi
+fi
+
+if it "gwkey: legacy server omniroute_client_<host> warns once and resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_client_testhost: sk-test-legacy\n' >"$d/keys.yml"
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-legacy" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ "$(grep -c . "$d/err")" == 1 ]] || { ok=0; echo "not one line: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"'omniroute_client_testhost'"*"'omniroute_server'"* ]] \
+        || { ok=0; echo "no old+new field: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"sk-test-legacy"* ]] && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "legacy server field does not warn once and resolve"; fi
+fi
+
+if it "gwkey: missing key names the expected field, never the value or URL"; then
+    d="$(mktemp -d)"
+    printf 'unrelated: sk-test-decoy\n' >"$d/keys.yml"
+    ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" >/dev/null 2>"$d/server-err" ) && rc=0 || rc=$?
+    ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" >/dev/null 2>"$d/local-err" ) && rc2=0 || rc2=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "server case did not fail" >&2; }
+    (( rc2 != 0 )) || { ok=0; echo "local case did not fail" >&2; }
+    [[ "$(cat "$d/server-err")" == *"'omniroute_server'"* ]] \
+        || { ok=0; echo "server message: $(cat "$d/server-err")" >&2; }
+    [[ "$(cat "$d/server-err")" == *"non-local"* ]] \
+        || { ok=0; echo "server message: $(cat "$d/server-err")" >&2; }
+    [[ "$(cat "$d/local-err")" == *"'omniroute_testhost'"* ]] \
+        || { ok=0; echo "local message: $(cat "$d/local-err")" >&2; }
+    [[ "$(cat "$d/local-err")" == *"a local gateway"* ]] \
+        || { ok=0; echo "local message: $(cat "$d/local-err")" >&2; }
+    [[ "$(cat "$d/server-err")" == *"gw.example.com"* ]] && { ok=0; echo "URL leaked (server)" >&2; }
+    [[ "$(cat "$d/local-err")" == *"127.0.0.1"* ]] && { ok=0; echo "URL leaked (local)" >&2; }
+    grep -q "sk-test-decoy" "$d/server-err" "$d/local-err" && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "missing key does not name the expected field"; fi
+fi
+
+if it "gwkey: loopback spellings are local, bare names are not"; then
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        for u in "" "http://127.0.0.1:20128" "http://localhost:20128" "https://localhost" "http://[::1]:20128"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done
+        for u in "not-a-url" "https://gw.example.com" "http://server:20128" "http://[::2]:20128"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done ) 2>/dev/null )"
+    if [[ "$out" == "$(printf 'local\nlocal\nlocal\nlocal\nlocal\nremote\nremote\nremote\nremote')" ]]; then
+        pass
+    else
+        fail "loopback classification wrong: [$out]"
+    fi
+fi
+
+if it "gwkey: setup --host-name writes host.yml when missing"; then
+    d="$(mktemp -d)"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] || { ok=0; echo "not written: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] \
+        || { ok=0; echo "content: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"$d/host.yml"* ]] || { ok=0; echo "path not announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name does not write a missing host.yml"; fi
+fi
+
+if it "gwkey: setup --host-name never overwrites an existing host.yml"; then
+    d="$(mktemp -d)"
+    printf 'host_name: original\n' >"$d/host.yml"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name other 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml")" == "host_name: original" ]] || { ok=0; echo "overwritten: $(cat "$d/host.yml")" >&2; }
+    [[ "$out" == *"skipped"* ]] || { ok=0; echo "no skipped line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name overwrote host.yml"; fi
+fi
+
+if it "gwkey: setup --host-name defaults to the short hostname"; then
+    d="$(mktemp -d)"
+    expected="$( ( . "$ROOT/lib/linux/install.sh"
+        _normalize_hostname "$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)" ) 2>/dev/null )"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: $expected" ]] \
+        || { ok=0; echo "content: $(cat "$d/host.yml" 2>/dev/null) expected host_name: $expected" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name has no hostname default"; fi
+fi
+
+if it "gwkey: python gateway-key suite passes"; then
+    out="$(cd "$ROOT" && python3 -m unittest discover -s tests -p "test_autoos_gateway_key.py" 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"OK"* ]] || { ok=0; echo "no OK: $out" >&2; }
+    if (( ok )); then pass; else fail "test_autoos_gateway_key.py fails"; fi
+fi
+

@@ -5,6 +5,8 @@ import os
 import sys
 import tempfile
 import unittest
+from io import StringIO
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,7 +36,7 @@ class TestIsLocalGateway(unittest.TestCase):
 
     def test_non_local(self):
         self.assertFalse(is_local_gateway("https://gw.example.com"))
-        self.assertFalse(is_local_gateway("http://192.168.1.100:20128"))
+        self.assertFalse(is_local_gateway("http://[::2]:20128"))
         self.assertFalse(is_local_gateway("https://server:20128"))
         self.assertFalse(is_local_gateway("http://remote.example.com:20128"))
 
@@ -82,14 +84,14 @@ class TestHostConfigPath(unittest.TestCase):
             with patch("sys.platform", "linux"):
                 with patch.dict(os.environ, {"HOME": "/home/test"}):
                     path = _host_config_path()
-                    self.assertEqual(str(path), "/home/test/.config/autoos/host.yml")
+                    self.assertEqual(path, Path("/home/test") / ".config" / "autoos" / "host.yml")
 
     def test_xdg_config_home(self):
         with patch.dict(os.environ, {}, clear=True):
             with patch("sys.platform", "linux"):
                 with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/config", "HOME": "/home/test"}):
                     path = _host_config_path()
-                    self.assertEqual(str(path), "/custom/config/autoos/host.yml")
+                    self.assertEqual(path, Path("/custom/config") / "autoos" / "host.yml")
 
 
 class TestHostName(unittest.TestCase):
@@ -102,6 +104,8 @@ class TestHostName(unittest.TestCase):
             host_file = Path(tmpdir) / "host.yml"
             host_file.write_text("host_name: my-workstation\n")
             with patch.dict(os.environ, {"AUTOOS_HOST_CONFIG": str(host_file)}):
+                # An ambient AUTOOS_HOST_NAME would win over the file; drop it.
+                os.environ.pop("AUTOOS_HOST_NAME", None)
                 self.assertEqual(host_name(), "my_workstation")
 
     def test_hostname_fallback(self):
@@ -109,8 +113,14 @@ class TestHostName(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 # Mock _host_config_path to return non-existent file
                 with patch("autoos_gateway_key._host_config_path", return_value=Path("/nonexistent/host.yml")):
-                    result = host_name()
+                    buf = StringIO()
+                    with redirect_stderr(buf):
+                        result = host_name()
                     self.assertEqual(result, "laptop")
+                    # ONE notice line naming the field it will look up.
+                    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn("laptop", lines[0])
 
     def test_server_hostname(self):
         with patch("socket.gethostname", return_value="server"):
@@ -137,12 +147,22 @@ class TestClientKeyField(unittest.TestCase):
 
 
 class TestResolveClientKey(unittest.TestCase):
+    # Ambient operator env (a real AUTOOS_OMNIROUTE_KEY / AUTOOS_HOST_NAME on a
+    # dev box) must never leak into fixture resolution - scrub it per test.
+    _SCRUB = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_HOST_NAME", "AUTOOS_HOST_CONFIG")
+
     def setUp(self):
         self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
         self.keys_file.close()
+        self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
 
     def tearDown(self):
         os.unlink(self.keys_file.name)
+        for v, val in self._saved_env.items():
+            if val is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = val
 
     def write_keys(self, content: str):
         with open(self.keys_file.name, "w") as f:
@@ -168,37 +188,61 @@ class TestResolveClientKey(unittest.TestCase):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
             self.write_keys("omniroute: legacy-local-key\n")
             with patch("autoos_gateway_key.host_name", return_value="workstation"):
-                with patch("sys.stderr") as mock_stderr:
+                buf = StringIO()
+                with redirect_stderr(buf):
                     result = resolve_client_key(os.environ, Path(self.keys_file.name))
-                    self.assertEqual(result, "legacy-local-key")
-                    # Check deprecation message was printed
-                    output = mock_stderr.getvalue() if hasattr(mock_stderr, 'getvalue') else ""
-                    # The actual print goes to stderr, we can't easily capture in this test
-                    # but we verify the key was returned
+                self.assertEqual(result, "legacy-local-key")
+                # ONE deprecation line naming old + new FIELD, never a value.
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute'", lines[0])
+                self.assertIn("'omniroute_workstation'", lines[0])
+                self.assertNotIn("legacy-local-key", lines[0])
 
     def test_legacy_server_fallback(self):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
             self.write_keys("omniroute_client_laptop: legacy-server-key\n")
             with patch("autoos_gateway_key.host_name", return_value="laptop"):
-                result = resolve_client_key(os.environ, Path(self.keys_file.name))
+                buf = StringIO()
+                with redirect_stderr(buf):
+                    result = resolve_client_key(os.environ, Path(self.keys_file.name))
                 self.assertEqual(result, "legacy-server-key")
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute_client_laptop'", lines[0])
+                self.assertIn("'omniroute_server'", lines[0])
+                self.assertNotIn("legacy-server-key", lines[0])
 
     def test_missing_key_local(self):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
-            self.write_keys("")  # empty file
+            self.write_keys("unrelated: sk-test-decoy-value\n")  # empty of the wanted field
             with patch("autoos_gateway_key.host_name", return_value="workstation"):
                 with self.assertRaises(KeyError) as cm:
                     resolve_client_key(os.environ, Path(self.keys_file.name))
-                self.assertIn("omniroute_workstation", str(cm.exception))
-                self.assertIn("local gateway", str(cm.exception))
+                msg = str(cm.exception)
+                self.assertIn("omniroute_workstation", msg)
+                self.assertIn("local gateway", msg)
+                # Never a value, never the URL.
+                self.assertNotIn("sk-test-decoy-value", msg)
+                self.assertNotIn("127.0.0.1", msg)
 
     def test_missing_key_server(self):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
-            self.write_keys("")  # empty file
+            self.write_keys("unrelated: sk-test-decoy-value\n")
             with self.assertRaises(KeyError) as cm:
                 resolve_client_key(os.environ, Path(self.keys_file.name))
-            self.assertIn("omniroute_server", str(cm.exception))
-            self.assertIn("non-local gateway", str(cm.exception))
+            msg = str(cm.exception)
+            self.assertIn("omniroute_server", msg)
+            self.assertIn("non-local gateway", msg)
+            self.assertNotIn("sk-test-decoy-value", msg)
+            self.assertNotIn("gw.example.com", msg)
+
+    def test_server_host_local_url_is_omniroute_server(self):
+        # On the server machine itself host_name is "server", so its local
+        # lookup is omniroute_server - no special case in code.
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128",
+                                     "AUTOOS_HOST_NAME": "server"}):
+            self.assertEqual(client_key_field(os.environ), "omniroute_server")
 
     def test_placeholder_ignored(self):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):

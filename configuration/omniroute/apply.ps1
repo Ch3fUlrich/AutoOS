@@ -38,6 +38,11 @@ $ErrorActionPreference = 'Continue'
 
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root      = Split-Path -Parent (Split-Path -Parent $Here)
+# The gateway client key comes from the one PowerShell helper
+# (Get-AutoOSClientKey in lib/windows/AutoOS.Install.psm1): the
+# gateway-named field, then the legacy field with a deprecation line.
+# Never a second copy of that rule here.
+Import-Module (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -DisableNameChecking
 # AUTOOS_OMNIROUTE_URL points the run (and the CLI) at another gateway; the
 # tests aim it at a closed port so a dry run never reads the live one.
 $Gateway   = if ($env:AUTOOS_OMNIROUTE_URL) { $env:AUTOOS_OMNIROUTE_URL } else { 'http://127.0.0.1:20128' }
@@ -306,11 +311,14 @@ if ($DryRun) {
 }
 
 # --- Live catalog for validation ---
+# The client key for these reads is the gateway-named field (or the legacy
+# one with a deprecation line) via Get-AutoOSClientKey - never $Keys['omniroute'].
+$clientKey = Get-AutoOSClientKey -KeysFile $KeysFile
 $LiveIds = @()
-if ($Keys.ContainsKey('omniroute')) {
+if ($clientKey) {
     try {
         $resp = Invoke-RestMethod -Uri "$Gateway/v1/models" -TimeoutSec 15 `
-            -Headers @{ Authorization = "Bearer $($Keys['omniroute'])" }
+            -Headers @{ Authorization = "Bearer $clientKey" }
         $LiveIds = @($resp.data | ForEach-Object { $_.id })
     } catch { $LiveIds = @() }
 }
@@ -488,7 +496,7 @@ if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
 
 # --- Probe: prove the combos answer, end to end ---
 if ($Probe) {
-    $probeKey = if ($Keys.ContainsKey('omniroute')) { $Keys['omniroute'] } else { '' }
+    $probeKey = if ($clientKey) { $clientKey } else { '' }
     if (-not $probeKey -or $DryRun) {
         Write-Host 'Probe skipped (dry run, or no omniroute client key in api-keys.yml).'
     } elseif ($created.Count -eq 0) {

@@ -11,7 +11,8 @@ failed, 2 usage/key/registry error, 3 refused by the monthly cap.
 Operator rules:
 - Keys come from AutoOS ``configuration/api-keys.yml`` (``name: value`` lines), read here in
   the process — never from argv, never printed. ``AUTOOS_OMNIROUTE_KEY`` overrides the file's
-  ``omniroute:`` value (2026-09-25).
+  gateway-named client-key field (``omniroute_server`` / ``omniroute_<host>``,
+  tools/autoos_gateway_key.py).
 - Which DeepSeek models count comes from catalog/ai-registry.json, never from this file: a
   served model passes only when it is exactly one of route ``deepseek-v4.1-flash``'s legs that
   ``policy.leg_rules`` allows, checked as served (so V4 Pro never passes, whatever the spelling).

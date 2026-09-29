@@ -182,15 +182,23 @@ Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
 
 # ─── -HostName: set machine host_name in host.yml ───────────────────────────────
-# If -HostName was given, write host.yml (creates if missing, never overwrites).
-if ($HostName) {
+# If -HostName was bound, write host.yml (creates if missing, never overwrites).
+# An explicit name is written exactly; -HostName '' defaults to the normalised
+# short hostname. $PSBoundParameters (not $HostName truthiness) is the test so
+# an empty value still means "default", never "skip and run the whole setup".
+if ($PSBoundParameters.ContainsKey('HostName')) {
     $hostFile = Get-AutoOSHostConfigPath
     if (Test-Path -LiteralPath $hostFile) {
         Write-AutoOSLine "host.yml exists at $hostFile - skipped (use AUTOOS_HOST_NAME to override at runtime)"
     } else {
+        $hostNameValue = $HostName
+        if (-not $hostNameValue) {
+            try { $defaultHost = [System.Net.Dns]::GetHostName() } catch { $defaultHost = 'localhost' }
+            $hostNameValue = Normalize-AutoOSHostName $defaultHost
+        }
         $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
-        "host_name: $HostName" | Set-Content -LiteralPath $hostFile -Encoding utf8
-        Write-AutoOSLine "Created $hostFile with host_name: $HostName" -Level ok
+        "host_name: $hostNameValue" | Set-Content -LiteralPath $hostFile -Encoding utf8
+        Write-AutoOSLine "Created $hostFile with host_name: $hostNameValue" -Level ok
     }
     exit 0
 }

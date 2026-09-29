@@ -2759,15 +2759,16 @@ route_detected_clis_to_gateway() {
     # install, so without this step they would never point at the gateway).
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
-    # (same resolution as the openhands and opencode writers — one chain, one
-    # parser, tools/keys_file.py; never printed). Without keys the claude
+    # (autoos_resolve_client_key below - the one gateway-named rule, shared
+    # with the openhands writer; never printed). Without keys the claude
     # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
         _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
         _file_key=""
         if [[ -n "$_keys_file" ]]; then
-            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/keys_file.py" \
-                "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
+            # The gateway client key: the one gateway-named rule (new field,
+            # then legacy with a deprecation line), never a second reader.
+            _file_key="$(autoos_resolve_client_key "$_keys_file" 2>/dev/null)" || _file_key=""
         fi
         unset _keys_file
         if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
@@ -4971,12 +4972,19 @@ autoos_api_keys_conf() {
 is_local_gateway() {
     local url="${1:-}"
     [[ -z "$url" ]] && return 0
+    # Without a scheme there is no gateway host to match: non-local.
+    [[ "$url" != *"://"* ]] && return 1
     local host
-    # Strip scheme and port, get hostname
+    # Strip scheme and path, then the port - except a bracketed IPv6
+    # literal, whose colons are not a port separator ([::1]:20128 must
+    # stay ::1, not be cut to an empty string).
     host="${url#*://}"
     host="${host%%/*}"
-    host="${host%%:*}"
-    host="${host#\[}"; host="${host%\]}"
+    if [[ "$host" == \[*\]* ]]; then
+        host="${host#\[}"; host="${host%%\]*}"
+    else
+        host="${host%%:*}"
+    fi
     case "${host,,}" in
         127.0.0.1|localhost|::1) return 0 ;;
         *) return 1 ;;
@@ -6118,11 +6126,16 @@ llm = agent_settings.setdefault("llm", {})
 # with thinking params Ollama rejects outright.
 _default_reasoning = False
 # OmniRoute client key resolved via tools/autoos_gateway_key.py (gateway-named fields)
-# Precedence: AUTOOS_OMNIROUTE_KEY env > new field (omniroute_server/omniroute_<host>) > legacy field
+# Precedence: AUTOOS_OMNIROUTE_KEY env > new field (omniroute_server/omniroute_<host>) > legacy field.
+# A missing key is None (the keyless local fallback below), never an exception.
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(config_path))), 'tools'))
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
 from autoos_gateway_key import resolve_client_key
-_gw_key = resolve_client_key(os.environ)
+try:
+    _gw_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else None)
+except KeyError:
+    _gw_key = None
 if _gw_key:
     # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
@@ -6279,11 +6292,16 @@ profiles = dict([
 ])
 for name, p_data in profiles.items():
     _put_json(os.path.join(profiles_dir, name), p_data)
-# OmniRoute client key resolved via tools/autoos_gateway_key.py (gateway-named fields)
+# OmniRoute client key resolved via tools/autoos_gateway_key.py (gateway-named fields).
+# A missing key is None (tiers without a key are skipped below), never an exception.
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(config_path))), 'tools'))
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
 from autoos_gateway_key import resolve_client_key
-omni_key = resolve_client_key(os.environ)
+try:
+    omni_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else None)
+except KeyError:
+    omni_key = None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
 _lit_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("AUTOOS_LITELLM_API_KEY")

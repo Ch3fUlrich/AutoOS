@@ -101,7 +101,9 @@ on the next model of policy.free_client_models in catalog/ai-registry.json
 provider's live workers already reach policy.free_concurrency (item 2).
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
-or the `omniroute:` line of configuration/api-keys.yml and is handed to the
+or the gateway-named field of configuration/api-keys.yml (`omniroute_server`
+for a non-local gateway, `omniroute_<host>` for the local one - see
+docs/api-keys.md) and is handed to the
 child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
@@ -165,6 +167,7 @@ import io
 import json
 import os
 import re
+from pathlib import Path
 import shlex
 import shutil
 import signal
@@ -1696,17 +1699,27 @@ def key_files(root: str) -> list:
 
 
 def client_key(root: str) -> str | None:
-    key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-    if key:
-        return key
+    """The gateway client key, or None when no source has one.
+
+    Resolution is tools/autoos_gateway_key.py's (the one rule): env
+    AUTOOS_OMNIROUTE_KEY wins, then the gateway-named api-keys.yml field
+    (`omniroute_server` / `omniroute_<host>`), then the legacy field with a
+    deprecation line. Each checkout's file is tried in key_files() order;
+    a missing key raises inside the helper and means "try the next file".
+    """
+    if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
+        return os.environ["AUTOOS_OMNIROUTE_KEY"]
+    try:
+        from autoos_gateway_key import resolve_client_key
+    except ImportError:
+        return None
     for path in key_files(root):
         if not os.path.isfile(path):
             continue
-        for line in io.open(path, encoding="utf-8"):
-            m = re.match(r"^omniroute\s*:\s*(.+?)\s*$", line)
-            if m:
-                val = m.group(1).strip("\"'")
-                return None if val.startswith("REPLACE_WITH_") else val
+        try:
+            return resolve_client_key(os.environ, Path(path))
+        except KeyError:
+            continue
     return None
 
 
@@ -5303,8 +5316,10 @@ def cmd_run(args, cfg: dict) -> int:
     if uses_key:
         key = client_key(ROOT)
         if not key:
-            print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add 'omniroute:' to "
-                  "configuration/api-keys.yml (or use --free for a keyless run).", file=sys.stderr)
+            print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add the gateway key to "
+                  "configuration/api-keys.yml (`omniroute_server` for a non-local gateway, "
+                  "`omniroute_<host>` for the local one - docs/api-keys.md) "
+                  "(or use --free for a keyless run).", file=sys.stderr)
             return 3
         if not gateway_up():
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "
