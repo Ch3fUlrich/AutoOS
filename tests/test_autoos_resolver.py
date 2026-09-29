@@ -2656,6 +2656,14 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "google_ai_studio": "2026-09-28T12:00:37Z",
         "antigravity": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
+        # FREEKEYS-2 (D-141 item 3) put the two probe-passed free grants in the
+        # free band of every tier route, so the premise these two tests state —
+        # "every leg of the t2-worker routes is cooling" — now has to cool them
+        # too, or the route really is servable and the test would be asserting a
+        # falsehood. Both return later than google_ai_studio, so the "earliest
+        # return is the retry" limb still has teeth.
+        "scaleway": "2026-09-28T15:00:00Z",
+        "nebius": "2026-09-28T16:00:00Z",
     }
 
     def real_registry(self):
@@ -2752,7 +2760,21 @@ class MetaApiResolverTests(unittest.TestCase):
         legs, _skipped, _notes = r.usable_legs(
             self.registry["routes"]["t1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
-        self.assertEqual(legs[0], ("meta_api", "muse-spark-1.3-contributor"))
+        # FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid, so the
+        # paid contributor leg is no longer the first leg a public card sees — it is
+        # still the leg the route *serves* the writer on, and everything ahead of it
+        # must be free, which is the whole point of the reorder.
+        self.assertIn(("meta_api", "muse-spark-1.3-contributor"), legs)
+        head = [leg for leg in legs if leg[0] == "meta_api"][0]
+        self.assertGreater(legs.index(head), 0, legs)
+        for leg in legs[:legs.index(head)]:
+            self.assertEqual(self.registry["providers"][leg[0]]["tier"], "free", leg)
+        for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
+            paid, _s, _n = r.usable_legs(
+                self.registry["routes"][paid_route], card,
+                {"need_tokens": 1000}, self.state(), self.registry, {})
+            self.assertEqual(paid[0], ("meta_api", "muse-spark-1.3-contributor"),
+                             paid_route)
 
     def test_no_clean_route_serves_the_contributor_leg(self):
         card = {"kind": "review", "privacy": "sensitive"}
@@ -4086,6 +4108,107 @@ class ZenClaudeLegRulesTests(unittest.TestCase):
                 self.assertIn(rule["id"], seats,
                               "%s re-opens Claude before deny-claude-paid-api"
                               % rule["id"])
+
+class ComboFallthroughTests(unittest.TestCase):
+    """FREEKEYS-2 (brief item 4): a forced 429 on a combo's head leg must land
+    the request on a DIFFERENT provider, and it must land on a leg an agentic
+    card can actually use.
+
+    The fall-through itself is OmniRoute's `priority` combo strategy — the
+    gateway walks the combo's model list and retries the next entry on a 429, so
+    the spawner never reacts to one (tools/autoos_routing.py). That makes the
+    *rendered combo list* the thing under test: an ordered leg list whose
+    neighbours share one provider is a combo that 429s into the same 429. No
+    gateway is called here — `fake_priority_walk` mirrors the documented strategy
+    against a status table this test supplies.
+    """
+
+    ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker",
+              "t2-worker-free-only", "t3-driver", "t3-driver-free-only")
+
+    @classmethod
+    def setUpClass(cls):
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            cls.reg = json.load(fh)
+        cls.combos = {c["name"]: c
+                      for c in registry_tool.render_omniroute(cls.reg)["combos"]}
+
+    def leg_for_ref(self, route_id, ref):
+        """The registry leg that rendered to this combo ref (a gateway ref is the
+        leg's model_prefix rewritten, so map back through the route's own legs)."""
+        for leg in self.reg["routes"][route_id]["legs"]:
+            if registry_tool.gateway_ref(leg, self.reg) == ref:
+                return leg
+        raise AssertionError("%s renders %s from no leg" % (route_id, ref))
+
+    @staticmethod
+    def fake_priority_walk(models, statuses):
+        """OmniRoute's priority strategy: try each model in order and take the
+        first that does not answer 429. None when every leg failed."""
+        for ref in models:
+            if statuses.get(ref.split("/", 1)[0], 200) != 429:
+                return ref
+        return None
+
+    def test_a_429_on_the_head_falls_through_to_another_provider(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            head = combo["models"][0]
+            chosen = self.fake_priority_walk(
+                combo["models"], {head.split("/", 1)[0]: 429})
+            self.assertIsNotNone(chosen, "%s: every leg 429s" % route_id)
+            self.assertNotEqual(chosen.split("/", 1)[0], head.split("/", 1)[0],
+                                "%s: the fall-through stayed on %s"
+                                % (route_id, head.split("/", 1)[0]))
+
+    def test_two_consecutive_provider_failures_still_leave_a_third(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            prefixes = []
+            for ref in combo["models"]:
+                prefix = ref.split("/", 1)[0]
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
+            self.assertGreaterEqual(len(prefixes), 3,
+                                    "%s: %s has no third provider to fall to"
+                                    % (route_id, combo["models"]))
+            statuses = {prefix: 429 for prefix in prefixes[:2]}
+            chosen = self.fake_priority_walk(combo["models"], statuses)
+            self.assertIsNotNone(chosen, route_id)
+            self.assertNotIn(chosen.split("/", 1)[0], statuses, route_id)
+
+    def test_the_fall_through_lands_on_a_leg_an_agentic_card_can_use(self):
+        # A combo that falls through to a leg whose tool_calls is unproven (or to
+        # an unpriced credit leg, or to one whose window is smaller than the
+        # context the route declares) falls to a leg the resolver refuses to plan
+        # or cannot carry the card at all, so an agentic run landing there has no
+        # answer behind the fallback. The context half is the resolver's own
+        # promise check, `route_leg_context_fits` -- named, not restated here
+        # (FREEKEYS-2c, rev-freekeys2 finding 2).
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            route = self.reg["routes"][route_id]
+            usable = []
+            for ref in combo["models"]:
+                leg = self.leg_for_ref(route_id, ref)
+                provider_id, model_id = registry_tool.resolve_leg(leg, self.reg)
+                model = self.reg["models"][model_id]
+                if model.get("tool_calls") != "proven":
+                    continue
+                if (self.reg["providers"][provider_id] or {}).get("tier") == "credit":
+                    try:
+                        if not (float(model.get("price_in")) > 0.0
+                                and float(model.get("price_out")) > 0.0):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                if not r.route_leg_context_fits(leg, route, self.reg):
+                    continue
+                usable.append(ref)
+            self.assertGreaterEqual(
+                len(usable), 2, "%s: only %s of %s is usable by an agentic card"
+                % (route_id, usable, combo["models"]))
 
 if __name__ == "__main__":
     unittest.main()

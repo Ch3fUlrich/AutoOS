@@ -6401,7 +6401,7 @@ def _fallthrough_registry(route_ids, policy=None, legs=None):
 
 def _fallthrough_plan(card, brief, repo, orchestrator_model, now, registry, overlay,
                       track_record, client_state, client="opencode", env=None,
-                      overlay_missing_at=None):
+                      overlay_missing_at=None, credit_guards=None):
     """route_plan_for stand-in: the first route id still in `registry`.
 
     `_resolve_route_v2` drops the excluded ids before calling, so the second
@@ -13311,6 +13311,248 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         self.assertNotIn("would run:", r.stdout)
 
 
+
+
+class CreditGuardWiringTests(unittest.TestCase):
+    """FREEKEYS-2 (brief item 2): the refuse-at-100 % half of the credit guard
+    lived only in unit tests -- `autoos_resolver.usable_legs` reads a
+    `credit_guards` map, but no live caller ever built one, so a plan could not
+    see that a grant was already spent.
+
+    `plan_credit_guards` is now the one reader: one gateway usage read per
+    process, and a read that fails produces `refuse` for every `credit` provider
+    (a leg nobody can cost is dropped, the plan is not). These tests pin both
+    halves of that sentence and that all three call sites -- `run`
+    (`_resolve_route_v2`), `route` (`cmd_route`) and the MCP `route`/`spawn`
+    path -- hand the map to `route_plan_for`.
+    """
+
+    CAP = 10.0
+    NOW = datetime.datetime(2026, 9, 28, 12, 0, tzinfo=datetime.timezone.utc)
+    SINCE = datetime.datetime(2026, 9, 1, 0, 0, tzinfo=datetime.timezone.utc)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+        # A throwaway key file: a test never reads the host's real manage.key.
+        cls.keydir = tempfile.mkdtemp(prefix="autoos-guard-")
+        with open(os.path.join(cls.keydir, "manage.key"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+    def setUp(self):
+        self.agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(self.agent.CREDIT_GUARD_CACHE.clear)
+
+    def registry(self):
+        return {
+            "providers": {
+                "morph": {"id": "morph", "tier": "credit", "model_prefix": "morph",
+                          "credit_usd": self.CAP, "monthly_cap_usd": self.CAP,
+                          "monthly_warn_fraction": 0.8, "trains_on_prompts": False},
+                "groq": {"id": "groq", "tier": "free", "trains_on_prompts": False},
+            },
+            "models": {
+                "morph-priced": {"id": "morph-priced", "tool_calls": "proven",
+                                 "context_usable": {"tokens": 100000,
+                                                    "source": "default"},
+                                 "price_in": 1e-06, "price_out": 1e-06},
+                "groq-free": {"id": "groq-free", "tool_calls": "proven",
+                              "context_usable": {"tokens": 100000,
+                                                 "source": "default"}},
+            },
+            "routes": {"r-mixed": {"id": "r-mixed", "class": "mid", "legs": [
+                "morph/morph-priced", "groq/groq-free"]}},
+            "policy": {"leg_rules": []},
+        }
+
+    @staticmethod
+    def rows(tokens_in, tokens_out):
+        """One call-log row for the priced credit leg (the gateway's shape)."""
+        return [{"timestamp": CreditGuardWiringTests.NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "morph", "model": "morph-priced",
+                 "tokens": {"in": tokens_in, "out": tokens_out}}]
+
+    def fetch_ok(self, rows, box=None):
+        def _fetch(url, headers, timeout):
+            if box is not None:
+                box.append(url)
+            return 200, json.dumps(rows).encode("utf-8")
+        return _fetch
+
+    def fetch_down(self, box=None):
+        def _fetch(url, headers, timeout):
+            if box is not None:
+                box.append(url)
+            raise OSError("connection refused")
+        return _fetch
+
+    def env(self):
+        # A throwaway key file and a dead port: a test never reads the host's real
+        # manage.key, and the read that fails is the gateway's, not the file's.
+        return {"AUTOOS_AI_STACK_CONFIG": self.keydir,
+                "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1"}
+
+    # --- the builder ---------------------------------------------------------
+
+    def test_a_drained_grant_refuses_its_credit_leg(self):
+        # 5M in + 5M out at 1e-06/token is exactly the $10 cap.
+        guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                               fetch=self.fetch_ok(self.rows(5_000_000,
+                                                                             5_000_000)),
+                                               env=self.env())
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        self.assertAlmostEqual(guards["morph"]["spend_usd"], self.CAP)
+        self.assertNotIn("groq", guards, "a free provider is not a grant")
+
+    def test_an_intact_grant_keeps_its_credit_leg(self):
+        guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                               fetch=self.fetch_ok(self.rows(10, 10)),
+                                               env=self.env())
+        self.assertEqual(guards["morph"]["state"], "ok")
+
+    def test_a_usage_read_that_fails_refuses_every_credit_leg(self):
+        """Fail closed: with no spend data the resolver cannot cost a credit leg,
+        so every grant reads as `refuse` -- and the free leg of the same route
+        still plans, because the guard drops legs, never the whole plan."""
+        guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                               fetch=self.fetch_down(), env=self.env())
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        self.assertIn("unreadable", guards["morph"]["note"])
+        kept, skipped = _usable(self.agent, self.registry(), guards)
+        self.assertIn(("groq", "groq-free"), kept)
+        self.assertIn("morph/morph-priced", skipped)
+        self.assertTrue(any("credit exhausted" in r for r in skipped["morph/morph-priced"]),
+                        skipped["morph/morph-priced"])
+
+    def test_the_gateway_usage_is_read_once_per_process(self):
+        box = []
+        reg = self.registry()
+        first = self.agent.plan_credit_guards(reg, now=self.NOW,
+                                              fetch=self.fetch_ok([], box), env=self.env())
+        second = self.agent.plan_credit_guards(reg, now=self.NOW,
+                                               fetch=self.fetch_ok([], box), env=self.env())
+        self.assertEqual(len(box), 1, box)
+        self.assertEqual(first, second)
+
+    def test_an_unexpected_error_from_the_read_refuses_and_never_crashes_a_plan(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 4): the guard is built inside the
+        plan, so anything the usage read raises has to land in `refuse`, not on
+        the caller's stack.
+
+        `fetch_window` already wraps every transport failure into `UsageError`
+        and the ledger math tolerates odd row shapes, so nothing in today's data
+        walks off the three named types -- the gap was that the catch LISTED
+        them. The next helper in that chain that raises something unforeseen
+        (a `TypeError` out of a new arithmetic step) must refuse the credit legs
+        exactly like a gateway outage does, not raise through `route_plan_for`
+        and take the whole plan down with it. So the unforeseen raise is
+        injected, and the assertion is about the contract, not about a shape the
+        gateway answers with today."""
+        def explode(registry, rows, since=None):
+            raise TypeError("unsupported operand type(s) for *: 'NoneType' and 'float'")
+        with mock.patch.object(self.agent.usage_mod, "credit_guards", explode):
+            guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                                   fetch=self.fetch_ok(self.rows(10, 10)),
+                                                   env=self.env())
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        self.assertIn("TypeError", guards["morph"]["note"])
+        kept, skipped = _usable(self.agent, self.registry(), guards)
+        self.assertIn(("groq", "groq-free"), kept, "the free leg still plans")
+        self.assertIn("morph/morph-priced", skipped)
+
+    def test_a_different_registry_is_not_served_the_first_registry_guards(self):
+        """The process cache is keyed by the registry it was built from: two
+        registries in one process (a test, an MCP server that reloads, a lane
+        comparing a candidate registry) must each get guards read out of their
+        own caps, not the first one's map."""
+        box = []
+        rows = self.rows(5_000_000, 5_000_000)
+        first = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                              fetch=self.fetch_ok(rows, box),
+                                              env=self.env())
+        self.assertEqual(first["morph"]["state"], "refuse", "$10 of $10 spent")
+        roomier = self.registry()
+        roomier["providers"]["morph"]["monthly_cap_usd"] = 1000.0
+        second = self.agent.plan_credit_guards(roomier, now=self.NOW,
+                                               fetch=self.fetch_ok(rows, box),
+                                               env=self.env())
+        self.assertEqual(len(box), 2, "a second registry reused the cached map")
+        self.assertEqual(second["morph"]["state"], "ok", "$10 of $1000 left")
+        third = self.agent.plan_credit_guards(roomier, now=self.NOW,
+                                              fetch=self.fetch_ok(rows, box),
+                                              env=self.env())
+        self.assertEqual(len(box), 2, "the same registry must still be cached")
+        self.assertEqual(third, second)
+
+    # --- the call sites ------------------------------------------------------
+
+    def _spy_sites(self, marker, target=None):
+        """Patch route_plan_for to record the `credit_guards` each caller passed,
+        and plan_credit_guards to answer with `marker` (no gateway, no key)."""
+        seen = []
+
+        def spy(card, brief, repo, orchestrator_model, now, registry, overlay,
+                track_record, client_state, client="opencode", env=None,
+                overlay_missing_at=None, credit_guards=None):
+            seen.append(credit_guards)
+            return {"route": "t2-worker", "state": "ready", "reason": "stub",
+                    "bucket": "S1", "defer_until": None, "explain": [],
+                    "effort": None, "review": None}
+
+        target = target or self.agent
+        patches = [mock.patch.object(target, "route_plan_for", spy),
+                   mock.patch.object(target, "plan_credit_guards",
+                                     lambda reg, **kw: marker)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return seen
+
+    def test_route_passes_the_guards_into_the_plan(self):
+        marker = {"morph": {"state": "refuse"}}
+        seen = self._spy_sites(marker)
+        args = argparse.Namespace(card="kind=implement,complexity=trivial",
+                                 brief="t", repo=str(ROOT), now=None,
+                                 orchestrator_model=self.agent.DEFAULT_ORCHESTRATOR_MODEL,
+                                 explain=False, client="opencode")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.agent.cmd_route(args)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(seen, [marker])
+
+    def test_run_passes_the_guards_into_the_plan(self):
+        marker = {"morph": {"state": "refuse"}}
+        seen = self._spy_sites(marker)
+        args = argparse.Namespace(
+            client="opencode", tier=None, card="kind=implement,complexity=trivial",
+            task="do the thing", free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            model=None, clean=False, allow_training=False, lean=False, no_defer=True)
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        plan = self.agent._resolve_route_v2(args, {"kind": "implement"}, cfg, None)
+        self.assertEqual(seen, [marker], plan)
+        self.assertEqual(plan["combo"], "t2-worker")
+
+    def test_the_mcp_route_tool_passes_the_guards_into_the_plan(self):
+        marker = {"morph": {"state": "refuse"}}
+        # The MCP server holds the agent module it imported, which is not the
+        # fresh instance load_agent() returns, so the spy goes on that one.
+        seen = self._spy_sites(marker, target=mcp_server.agent)
+        result = mcp_server.route_plan({"kind": "implement", "paths": ["tools"]})
+        self.assertEqual(result["route"], "t2-worker", result)
+        self.assertEqual(seen, [marker])
+
+
+def _usable(agent, registry, guards):
+    """(kept legs, skipped map) for the synthetic route, through the real
+    resolver leg filter -- the guard is only wired if it changes a plan."""
+    import autoos_resolver as resolver_mod
+    return resolver_mod.usable_legs(
+        registry["routes"]["r-mixed"], {"kind": "implement", "privacy": "public"},
+        {"need_tokens": 10}, {"opencode": {"installed": True, "signed_in": True,
+                                           "reason": ""}},
+        registry, {}, credit_guards=guards,
+        now=CreditGuardWiringTests.NOW)[:2]
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; Windows reaps with taskkill /T")

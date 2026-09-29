@@ -227,7 +227,8 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
                                       registry, overlay, track_record, client_state,
-                                      overlay_missing_at=overlay_missing_at)
+                                      overlay_missing_at=overlay_missing_at,
+                                      credit_guards=agent.plan_credit_guards(registry))
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:

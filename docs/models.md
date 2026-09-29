@@ -49,23 +49,23 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `cheaperinference/glm-5.2` | cheap | 128k | ~~cheaperinference `glm-5.2`~~ (unavailable) |
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
 | `deepseek-v4.1-flash` | cheap | 128k | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
-| `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) |
+| `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.5-flash`~~ (unavailable) |
 | `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
-| `t1-orchestrator` | cheap | 128k | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → gemini `gemini-3.8-flash` |
+| `t1-orchestrator` | cheap | 128k | gemini `gemini-3.8-flash` → scaleway `qwen3-235b-a22b-instruct-2507` → nebius `zai-org/GLM-5.3-Flash` → scaleway `mistral-small-3.2-24b-instruct-2506` → meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.5-flash`~~ (unavailable) |
 | `t1-orchestrator-clean` | cheap | 1M | ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
-| `t1-orchestrator-free-only` | free | 128k | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` |
+| `t1-orchestrator-free-only` | free | 128k | ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) → gemini `gemini-3.8-flash` → scaleway `qwen3-235b-a22b-instruct-2507` → nebius `zai-org/GLM-5.3-Flash` → scaleway `mistral-small-3.2-24b-instruct-2506` |
 | `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` |
 | `t2-orchestrator` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` |
+| `t2-worker` | mid | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-high` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → nebius `zai-org/GLM-5.2` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~openrouter `openai/gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → free_ai `qwen7b` → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.1-flash-lite`~~ (unavailable) |
 | `t2-worker-clean` | mid | 128k | deepseek `deepseek-flash` → ~~openrouter `deepseek/deepseek-v4.1-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
-| `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
+| `t2-worker-free-only` | free | 128k | gemini `gemini-3.8-flash` → antigravity `gemini-3.7-flash-medium` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → nebius `zai-org/GLM-5.2` → ~~groq `openai/gpt-oss-120b`~~ (unavailable) → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → free_ai `qwen7b` |
 | `t2-worker-paid` | mid | 131,072 | (none) |
-| `t3-driver` | cheap | 128k | mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → deepseek `deepseek-flash` → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` |
+| `t3-driver` | cheap | 128k | scaleway `mistral-small-3.2-24b-instruct-2506` → nebius `zai-org/GLM-5.2` → scaleway `qwen3-235b-a22b-instruct-2507` → mistral `mistral-code-latest` → ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → deepseek `deepseek-flash` → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → meta_api `muse-spark-1.3-contributor` → ~~morph `morph-glm52-744b`~~ (unavailable) → ~~deepinfra `google/gemini-3.7-flash`~~ (unavailable) |
 | `t3-driver-clean` | cheap | 128k | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
-| `t3-driver-free-only` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → free_ai `qwen7b` |
+| `t3-driver-free-only` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → scaleway `mistral-small-3.2-24b-instruct-2506` → nebius `zai-org/GLM-5.3-Flash` → scaleway `qwen3-235b-a22b-instruct-2507` → free_ai `qwen7b` |
 | `t3-driver-paid` | cheap | 131,072 | (none) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
 <!-- AUTOOS-MANAGED-END models-doc -->
@@ -304,7 +304,7 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 | Tier id | Role label | Capability requirement |
 |---|---|---|
-| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` head answers big requests, but T1FREE added a 131072 free `gemini` fallback, and a route may only promise what its fallback keeps — so the declared window is 128k. When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
+| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` leg answers big requests, but D-141 (FREEKEYS-2/2c) heads the route with the free band — scaleway/nebius grants at 128k, then a 131072 free `gemini` fallback — and a route may only promise what its smallest served leg keeps, so the declared window is 128k. When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
 | `t2-worker` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `t1-orchestrator`. |
 | `t3-driver` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
 | `t4-rag` | **rag-grounded-128k** | Retrieval-grounded QA over supplied documents (quotes/citations, not reasoning or codegen). |
@@ -369,8 +369,9 @@ itself is the requirement. `t2-worker` has **no
 context gate**: 128k is a conservative display/compaction default, not a
 curation rule, so cost and quality decide which models sit there and
 `gemini-3.8-flash`-class models are welcome regardless of window.
-`catalog/ide-models.json` declares the clamped window (`131072` for `t1-orchestrator`,
-`131072` for t2-worker/t3-driver as the conservative minimum across each chain) and
+`catalog/ide-models.json` declares the clamped window (`128000` for `t1-orchestrator`,
+`128000` for t2-worker/t3-driver as the conservative minimum across each chain — since
+D-141 the free band is part of what those routes can fall to, and it advertises 128k) and
 every client surface projects it — `opencode.jsonc` `limit.context`, Zed
 `max_tokens`, OpenHands `max_input_tokens` — so compaction and the picker's context
 display agree with what actually answers, in every client alike.

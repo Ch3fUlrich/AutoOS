@@ -5,6 +5,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
+
+CI 36506339556's bash suite went red on three cases the lane's filtered pytest runs never
+touched. One root shape behind all of them: FREEKEYS-1 registered scaleway with
+`model_prefix: scw`, so `combos.json` — rendered through `gateway_ref()` — spells those legs
+`scw/*` while `routes.<id>.legs` and `config.yaml` spell them `scaleway/*`.
+
+- **Code** (`tools/registry.py`, `tools/sync-router-tiers.py`): `sync-router-tiers.py --combos`
+  is the documented escape hatch onto the rendered file's own leg order, and it read those
+  `scw/*` refs as if they were provider ids — resolving no transport and no env key, so the
+  mirror came out `model: scw/... , api_key: os.environ/SCW_API_KEY`: a LiteLLM provider that
+  does not exist and an env var nothing sets. New `registry_ref()`, the inverse of
+  `gateway_ref()`, rewrites a declared `model_prefix` back onto its provider id (only when
+  exactly one provider declares it and it is not itself a provider id; an unknown or ambiguous
+  namespace is returned unchanged rather than invented). `combos_refs()` runs every ref
+  through it. `test_explicit_combos_override_still_works` was the failing test; a focused
+  `RegistryRefTests` and a `combos_refs` case pin the rewrite.
+- **Test pinned the old spelling** (`tests/linux/17-ai-routing.sh`, "free-only litellm groups
+  mirror combos minus gateway-only legs"): its hardcoded LiteLLM string builder knew no
+  gateway namespace, so every `scw/*` leg read as drift against the correct `scaleway/*`
+  mirror. The mapping is pinned in the test as an independent second opinion — deliberately
+  not read from the registry, same rule as `known_drops`.
+- **Test pinned the old legs** (`tests/linux/34-ai-services.sh` + its `run-tests.ps1` twin,
+  "apply: one run registers a provider…"): it asserted the first run writes
+  `--models free-ai/qwen7b` — t3-driver-free-only's single leg before FREEKEYS-2 put the
+  scaleway and nebius free grants ahead of the stopgap. The apply order itself (register →
+  refresh catalog → write combos) was and is correct in one pass. The check is now the whole
+  ordered model list read from `combos.json`, so it fails if ANY leg goes missing, and keeps a
+  separate assertion that the freshly registered provider's leg is in the first write.
+
+No check was weakened: the mirror test gained its namespace translation, and the apply test
+went from one hardcoded ref to the file's full ordered list plus the new-leg assertion.
+
+### Added — combos ordered free → credit → paid, spend guard on every plan (FREEKEYS-2 / 2b, 2026-09-28)
+
+- **Band order** (`catalog/ai-registry.json`): every agentic tier route now lists
+  its legs by what they cost — the probe-passed free grants first, the `credit`
+  grants last and gated, the paid legs between the free band and the credit tail.
+  A combo that leads with a paid leg spends operator money before it spends a
+  grant, and an OmniRoute `priority` fall-through on a 429 lands on the *next
+  provider*, so the leg order is the redundancy. The reset-aware cooldown handling
+  the route `$comment`s cite (§18) is untouched.
+- **DeepSeek stays V4.1 only** (the L1-routing DECISION on FREEKEYS-2's open
+  question): the free bazaarlink `deepseek-v4-flash-0731` grant is V4 weights, so
+  it enters no combo and the per-leg allow drafted for it is withdrawn — the
+  blanket `deny-deepseek` governs. Its measured model/provider rows stay, and the
+  rows' `$comment` says they route nowhere until the operator lifts the rule.
+  `DeepseekV41OnlyDecisionTests` pins all of that.
+- **Unpriced credit legs are documented fallbacks only**: `morph` ($10) and
+  `deepinfra` ($5) grants carry no per-token price, so the resolver refuses them
+  fail-closed and each combo marks them `available: false` with the gate that
+  lifts it (a real price on the model row). An unpriced grant renders as a free
+  leg and would drain with nothing in the ledger to show it.
+- **Spend guard wired in** (`tools/autoos-agent.py`, `tools/autoos_agent_mcp.py`):
+  `plan_credit_guards()` reads this month's spend per `credit` provider through
+  `autoos_usage.credit_guards` — the same reader the `usage` report prints — and
+  passes it to `autoos_resolver.plan` from `run`, `route` and the MCP `route`
+  tool (MCP `spawn` inherits it: it builds a `run` argv and preflights it). One
+  gateway read per process; a read that fails refuses every credit leg rather
+  than assuming $0 spent, and the note carries only the exception *type*, never
+  its message (no host or path can reach the plan text).
+- **New tests**: `ComboCrossProviderTests` (≥2 distinct usable providers and ≥3
+  usable legs per agentic route; credit legs last and gated; no new free leg in a
+  `-clean` route) and `ComboFallthroughTests` (a fake gateway `priority` walk: a
+  429 on the head lands on another provider, two provider failures still leave a
+  third, and the fall-through lands on a leg an agentic card can use).
+- **Red → green**: seven tests the reorder broke were resolved by decision, not
+  by deletion — the T2FREE stopgap is now asserted over the *live* legs (a gated
+  leg renders nothing), MUSEAPI's "meta heads t1-orchestrator" became "the paid
+  leg follows the free band" with the two paid routes still pinned to it, the two
+  reviewer grants moved inside the free band so `policy.reviewers` keeps Haiku
+  last, and the Gemini-cooldown tests now cool the two new free providers too,
+  because their premise is "every leg of the route is cooling".
+
 ### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
 
 SB-A2 took the group out of `pgrp.json` and wrote it into `job.json` — but
