@@ -29,6 +29,7 @@ Run directly:
     python3 tests/test_prepush.py
 """
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -950,6 +951,24 @@ class HookInstallTests(RepoFixture):
         self.assertNotEqual(rc, 0, out)
         self.assertFalse(marker.exists(), "the shim exec'd the chained hook with no "
                          "gate in front of it")
+
+    def test_the_git_helper_has_one_home_and_lives_in_the_gate(self):
+        # NB6: two copies of "run git, hand back stdout or None" is two places a
+        # fix lands in. It matters exactly here: the hooks dir is *where git says*
+        # its hooks are, and a skill-side copy that drifts reinstalls the gate into
+        # a directory git never reads (NB1) — the failure the installer exists to
+        # prevent. The gate's own helper is the one home; the import is lazy, so a
+        # repository without `tools/prepush.py` still gets the rest of the skill.
+        trust = _load("trust_worktree_for_git_helper", self.TRUST)
+        self.assertFalse(hasattr(trust, "_git"),
+                         "the skill kept its own copy of the gate's git helper")
+        self.assertIn("gate_git()", inspect.getsource(trust.hooks_dir),
+                      "hooks_dir no longer asks the gate's helper for the answer")
+        self.assertIn("from prepush import _git", inspect.getsource(trust.gate_git),
+                      "the helper the skill uses is not the gate's own")
+        # That it still resolves the *right* directory is not proved here: the
+        # hooksPath tests below install through this helper and a real `git push`
+        # is what refuses.
 
     def test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it(self):
         # NB1: `installed` into `.git/hooks` is a lie when the operator set

@@ -335,12 +335,29 @@ HOOK_MARKER = "autoos-prepush-gate"
 CHAINED_NAME = "pre-push.autoos-chained"
 GATE_TOOL = Path("tools") / "prepush.py"
 
+#: The checkout's ``tools/`` — where the gate this skill installs lives, and where
+#: the one copy of the git helper is. ``.agents/skills/<skill>/`` is three levels
+#: deep, so the file's own path is the only portable way to find it.
+REPO_TOOLS = Path(__file__).resolve().parents[3] / "tools"
 
-def _git(repo: Path, *args) -> str | None:
-    """git's stdout for one read-only command, or None when it failed."""
-    proc = subprocess.run(["git", "-C", str(repo)] + list(args),
-                          capture_output=True, text=True)
-    return proc.stdout.strip() if proc.returncode == 0 else None
+
+def gate_git():
+    """The gate's ``run git, hand back stdout or None`` — imported lazily.
+
+    NB6: this helper had a second copy here, and the two drift exactly where it
+    costs something. The one caller is ``hooks_dir``, which asks git *where its
+    hooks are*; a stale copy of the answer installs the gate into a directory no
+    push ever reads, and the lane believes it is gated (NB1).
+
+    Lazily, and only from the step that needs it, because the skill file is
+    portable: a repository without ``tools/prepush.py`` must still get its
+    worktree trusted, and must still hear "nothing installed" rather than an
+    ImportError.
+    """
+    if str(REPO_TOOLS) not in sys.path:
+        sys.path.insert(0, str(REPO_TOOLS))
+    from prepush import _git
+    return _git
 
 
 def hooks_dir(worktree: Path) -> Path | None:
@@ -349,8 +366,10 @@ def hooks_dir(worktree: Path) -> Path | None:
     ``--git-path hooks`` resolves through the *common* dir, which is what git uses
     for hooks too — so a linked worktree shares the parent's hooks, and asking for
     a path git itself would look at is the only way to install something it runs.
+    It also honours ``core.hooksPath``, which is why the answer comes from git and
+    not from ``<git-dir>/hooks``.
     """
-    raw = _git(worktree, "rev-parse", "--git-path", "hooks")
+    raw = gate_git()(worktree, "rev-parse", "--git-path", "hooks")
     if not raw:
         return None
     path = Path(raw)
@@ -412,15 +431,18 @@ def install_prepush_hook(worktree: Path, check: bool = False) -> str:
       repository with no Claude trust entry still gets its gate.
 
     A repository without ``tools/prepush.py`` gets no hook and a line saying so: an
-    installer that quietly installs nothing is how a gate goes missing.
+    installer that quietly installs nothing is how a gate goes missing. That check
+    comes *first* because the git helper is the gate's own (NB6) — asking where the
+    hooks are before there is anything to install would import a module the
+    repository may not have.
     """
-    hooks = hooks_dir(worktree)
-    if hooks is None:
-        return f"pre-push gate: {worktree} is not a git checkout -- nothing installed"
     gate = worktree / GATE_TOOL
     if not gate.is_file():
         return (f"pre-push gate: no {GATE_TOOL.as_posix()} in {worktree} -- "
                 f"nothing installed (the repository has no gate to install)")
+    hooks = hooks_dir(worktree)
+    if hooks is None:
+        return f"pre-push gate: {worktree} is not a git checkout -- nothing installed"
     hook = hooks / HOOK_NAME
     chained = hooks / CHAINED_NAME
     text = hook_text()
