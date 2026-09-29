@@ -740,6 +740,32 @@ ROUND8_L1_FALLS_TO_PROMPT_COMMANDS = (
     "gh workflow run ci.yml",
 )
 
+# Round 11: heads/main in every position and :HEAD destinations (ORCH-A1
+# phase 1 round 11). These deny on EVERY profile. Exact-anchored so
+# lane names merely containing "main" (L1-x:heads/main-fix,
+# L1-x:L1-main-fix, L1-routing/maintenance) stay allowed on L1.
+ROUND11_HEADS_MAIN_DENY_COMMANDS = (
+    "git push origin heads/main",
+    "git push origin heads/main --force",
+    "git push -u origin heads/main",
+    "git push -q origin heads/main",
+    "git push origin FETCH_HEAD:heads/main",
+    "git push -q origin FETCH_HEAD:heads/main",
+    "git push origin heads/main:L1-x",
+    "git push origin L1-x:HEAD",
+    "git push origin L1-x:HEAD --dry-run",
+)
+
+# Round 11: allow-stays - lane names merely containing "main" stay allowed
+# on L1 (they are not main, the fences match main as a whole ref name).
+ROUND11_ALLOW_STAYS_COMMANDS = (
+    "git push origin L1-x:heads/main-fix",
+    "git push origin L1-x:L1-main-fix",
+    "git push origin L1-routing/maintenance",
+    "git push -q origin FETCH_HEAD:refs/heads/L1-routing/x",
+    "git push origin WS-OMNIREMOTE",
+)
+
 # Workstation L1 lane (WS-*) pushes and dispatches (ORCH-A1 phase 1
 # round 10): the WS-* prefix is a workstation L1 lane branch prefix,
 # equivalent to the L1-* / agent/* lanes for fleet coordinators.
@@ -1585,6 +1611,36 @@ class Round8ExplicitRefTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# round 11: heads/main in every position and :HEAD destinations
+# (ORCH-A1 phase 1 round 11) - exact-anchored so lane names merely
+# containing "main" stay allowed on L1
+
+
+class Round11HeadsMainTests(unittest.TestCase):
+    def test_heads_main_in_every_position_is_denied_by_every_profile(self):
+        for role in ROLES:
+            profile = load_profile(role)
+            for command in ROUND11_HEADS_MAIN_DENY_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(
+                        decide_deny(profile, "Bash", command),
+                        "%s is not denied by %s" % (command, role),
+                    )
+
+    def test_allow_stays_lane_names_containing_main(self):
+        # The fences match main as a whole ref name, not as a substring.
+        # L1-x:heads/main-fix, L1-x:L1-main-fix, L1-routing/maintenance
+        # are not main and must allow on L1; WS-OMNIREMOTE allows on L1.
+        # Per task: allow-stays rows on l1-coordinator and l1-routing ONLY.
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            for command in ROUND11_ALLOW_STAYS_COMMANDS:
+                with self.subTest(role=role, command=command):
+                    self.assertFalse(decide_deny(profile, "Bash", command))
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+
+
+# ---------------------------------------------------------------------------
 # wrapper/option forms and compound commands (H3), prefix divergences (M1)
 
 
@@ -2035,6 +2091,20 @@ CONTRADICTION_TARGETS = {
     # test proves the shape fence beats the allow.
     "Bash(gh workflow run * --ref L2-* *)": "gh workflow run ci.yml --ref L2-x --job build",
     "Bash(gh workflow run * --ref=L2-* *)": "gh workflow run ci.yml --ref=L2-x --job build",
+    # Round-11 heads/main in every position and :HEAD destinations (ORCH-A1
+    # phase 1 round 11): each target matches its deny entry; the allow-stays
+    # rows (lane names merely containing "main") are NOT in this table - they
+    # prove the fences do NOT match them.
+    "Bash(*git push * heads/main)": "git push origin heads/main",
+    "Bash(*git push * heads/main *)": "git push origin heads/main --force",
+    "Bash(*git push * heads/main:*)": "git push origin heads/main:L1-x",
+    "Bash(*git push *:heads/main)": "git push origin FETCH_HEAD:heads/main",
+    "Bash(*git push *:heads/main *)": "git push origin FETCH_HEAD:heads/main --dry-run",
+    "Bash(*git push *:HEAD)": "git push origin L1-x:HEAD",
+    "Bash(*git push *:HEAD *)": "git push origin L1-x:HEAD --dry-run",
+    # The :heads/main patterns also match the -q variant
+    "Bash(*git push *:heads/main)": "git push -q origin FETCH_HEAD:heads/main",
+    "Bash(*git push *:heads/main *)": "git push -q origin FETCH_HEAD:heads/main --dry-run",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that
@@ -2202,6 +2272,241 @@ class RenderTests(unittest.TestCase):
                 self.assertNotIn("bypassPermissions", text)
                 for rule in perms_of(profile)["allow"] + perms_of(profile)["deny"]:
                     split_rule(rule)  # every entry is Tool(matcher) shaped
+
+
+# ---------------------------------------------------------------------------
+# REAL-GIT PREMISE TEST (ORCH-A1 phase 1 round 11, L1-backlog ask):
+# builds a scratch bare repo plus a clone in a tempfile.TemporaryDirectory,
+# with git config forced local (GIT_CONFIG_GLOBAL=/dev/null,
+# GIT_CONFIG_NOSYSTEM=1, user.name/email set per repo, no network),
+# and proves the premise: `git push origin L1-x:heads/main`,
+# `git push origin heads/main` (after committing on local main) and
+# `git push origin FETCH_HEAD:heads/main` each ADVANCE refs/heads/main in
+# the bare repo (assert the bare repo's main sha changes to the pushed
+# commit each time). Keep it hermetic and fast (< 5 s); never touch the
+# real checkout's remotes. Skipped only if `git` is missing.
+
+
+class RealGitPremiseTests(unittest.TestCase):
+    """Prove the git push behaviors that the fences are designed to catch.
+
+    These tests use a real git binary in a hermetic temporary directory.
+    They are skipped if git is not available or on Windows where the
+    subprocess environment differs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        if sys.platform == "win32":
+            raise unittest.SkipTest("Real-git premise test skipped on Windows")
+        cls.git = cls._find_git()
+        if cls.git is None:
+            raise unittest.SkipTest("git binary not found")
+
+    @staticmethod
+    def _find_git():
+        import shutil
+        return shutil.which("git")
+
+    def _run_git(self, args, cwd, env=None):
+        import subprocess
+        result = subprocess.run(
+            [self.git] + args,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.fail("git %s failed in %s: %s" % (args, cwd, result.stderr))
+        return result.stdout.strip()
+
+    def _git_env(self):
+        import os
+        import tempfile
+        env = os.environ.copy()
+        # Force git to use only local config, no global/system config.
+        # Create a temporary empty file for GIT_CONFIG_GLOBAL (works on Windows too).
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.gitconfig') as f:
+            f.write('# empty global config\n')
+            global_config = f.name
+        env["GIT_CONFIG_GLOBAL"] = global_config
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        # Store the temp file path for cleanup
+        self._global_config_file = global_config
+        return env
+
+    def _cleanup_git_env(self):
+        import os
+        if hasattr(self, '_global_config_file'):
+            try:
+                os.unlink(self._global_config_file)
+            except OSError:
+                pass
+
+    def _init_bare_repo(self, path, env):
+        # git init --bare creates the directory, so run from parent
+        import os
+        parent = os.path.dirname(path)
+        repo_name = os.path.basename(path)
+        self._run_git(["init", "--bare", repo_name], parent, env)
+
+    def _clone_repo(self, src, dst, env):
+        # git clone creates a directory named after the repo (without .git)
+        import os
+        repo_name = os.path.basename(src)
+        if repo_name.endswith('.git'):
+            repo_name = repo_name[:-4]
+        self._run_git(["clone", src], dst, env)
+        # Configure user for commits
+        repo_dir = os.path.join(dst, repo_name)
+        self._run_git(["config", "user.name", "Test User"], repo_dir, env)
+        self._run_git(["config", "user.email", "test@example.com"], repo_dir, env)
+        return repo_dir
+
+    def _get_main_sha(self, bare_path, env):
+        """Get the current SHA of refs/heads/main in the bare repo."""
+        return self._run_git(["rev-parse", "refs/heads/main"], bare_path, env)
+
+    def test_push_L1_x_heads_main_advances_main(self):
+        """git push origin L1-x:heads/main advances refs/heads/main in bare repo."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "bare.git"
+            env = self._git_env()
+
+            # Create bare repo
+            self._init_bare_repo(str(bare_path), env)
+
+            # Clone it
+            clone_path = self._clone_repo(str(bare_path), tmpdir, env)
+
+            # Create initial commit on main in the clone
+            test_file = Path(clone_path) / "test.txt"
+            test_file.write_text("initial\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "initial commit"], clone_path, env)
+            # Ensure the branch is named 'main' (git default may be 'master')
+            self._run_git(["branch", "-m", "main"], clone_path, env)
+            # Push initial main to bare
+            self._run_git(["push", "origin", "main"], clone_path, env)
+
+            # Get initial main SHA in bare
+            initial_sha = self._get_main_sha(str(bare_path), env)
+
+            # Create a branch L1-x with a new commit
+            self._run_git(["checkout", "-b", "L1-x"], clone_path, env)
+            test_file.write_text("L1-x commit\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "L1-x commit"], clone_path, env)
+            l1_x_sha = self._run_git(["rev-parse", "HEAD"], clone_path, env)
+
+            # Push L1-x:heads/main to bare
+            self._run_git(["push", "origin", "L1-x:heads/main"], clone_path, env)
+
+            # Assert main in bare advanced to L1-x commit
+            new_sha = self._get_main_sha(str(bare_path), env)
+            self.assertEqual(new_sha, l1_x_sha)
+            self.assertNotEqual(new_sha, initial_sha)
+
+    def test_push_heads_main_advances_main(self):
+        """git push origin heads/main advances refs/heads/main in bare repo."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "bare.git"
+            env = self._git_env()
+
+            # Create bare repo
+            self._init_bare_repo(str(bare_path), env)
+
+            # Clone it
+            clone_path = self._clone_repo(str(bare_path), tmpdir, env)
+
+            # Create initial commit on main in the clone
+            test_file = Path(clone_path) / "test.txt"
+            test_file.write_text("initial\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "initial commit"], clone_path, env)
+            # Ensure the branch is named 'main' (git default may be 'master')
+            self._run_git(["branch", "-m", "main"], clone_path, env)
+            # Push initial main to bare
+            self._run_git(["push", "origin", "main"], clone_path, env)
+
+            # Get initial main SHA in bare
+            initial_sha = self._get_main_sha(str(bare_path), env)
+
+            # Make a new commit on local main
+            test_file.write_text("heads/main commit\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "heads/main commit"], clone_path, env)
+            new_main_sha = self._run_git(["rev-parse", "HEAD"], clone_path, env)
+
+            # Push heads/main to bare
+            self._run_git(["push", "origin", "heads/main"], clone_path, env)
+
+            # Assert main in bare advanced to new commit
+            new_sha = self._get_main_sha(str(bare_path), env)
+            self.assertEqual(new_sha, new_main_sha)
+            self.assertNotEqual(new_sha, initial_sha)
+
+    def test_push_FETCH_HEAD_heads_main_advances_main(self):
+        """git push origin FETCH_HEAD:heads/main advances refs/heads/main in bare repo."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "bare.git"
+            env = self._git_env()
+
+            # Create bare repo
+            self._init_bare_repo(str(bare_path), env)
+
+            # Clone it
+            clone_path = self._clone_repo(str(bare_path), tmpdir, env)
+
+            # Create initial commit on main in the clone
+            test_file = Path(clone_path) / "test.txt"
+            test_file.write_text("initial\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "initial commit"], clone_path, env)
+            # Ensure the branch is named 'main' (git default may be 'master')
+            self._run_git(["branch", "-m", "main"], clone_path, env)
+            # Push initial main to bare
+            self._run_git(["push", "origin", "main"], clone_path, env)
+
+            # Get initial main SHA in bare
+            initial_sha = self._get_main_sha(str(bare_path), env)
+
+            # Create a new commit on a branch and push it
+            self._run_git(["checkout", "-b", "feature"], clone_path, env)
+            test_file.write_text("feature commit\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "feature commit"], clone_path, env)
+            feature_sha = self._run_git(["rev-parse", "HEAD"], clone_path, env)
+            # Push feature to origin so we can fetch it
+            self._run_git(["push", "origin", "feature"], clone_path, env)
+
+            # Fetch the feature branch - FETCH_HEAD will point to it
+            self._run_git(["fetch", "origin", "feature"], clone_path, env)
+
+            # Push FETCH_HEAD:heads/main to bare (FETCH_HEAD points to fetched feature)
+            self._run_git(["push", "origin", "FETCH_HEAD:heads/main"], clone_path, env)
+
+            # Assert main in bare advanced to feature commit
+            new_sha = self._get_main_sha(str(bare_path), env)
+            self.assertEqual(new_sha, feature_sha)
+            self.assertNotEqual(new_sha, initial_sha)
+
+    def tearDown(self):
+        self._cleanup_git_env()
 
 
 if __name__ == "__main__":

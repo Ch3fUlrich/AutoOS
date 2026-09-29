@@ -313,6 +313,14 @@ GRANT_SETS = {
 # keeps a lane merely containing "main" (`main2`) outside the fence.
 # Round 6: any git push containing a tab, CR or LF is denied on every
 # role (bash splits on them; the fences match spaces only).
+# Round 11: `heads/main` in every position (bare, as src, as dst) and
+# `:HEAD` destinations on every role. Fences match `main` as a whole ref
+# name (`main`, `heads/main`, `refs/heads/main`, `:main`), NOT as a
+# substring - `L1-x:heads/main-fix`, `L1-x:L1-main-fix`,
+# `L1-routing/maintenance` stay allowed (they are not main); git's ref-name
+# rules give exactly three spellings that resolve to refs/heads/main
+# (main, heads/main, refs/heads/main), and all three are now fenced in
+# every position (bare, as src, as dst).
 MAIN_FENCE = (
     "Bash(*git push * main)",
     "Bash(*git push * main *)",
@@ -321,6 +329,17 @@ MAIN_FENCE = (
     "Bash(*git push *HEAD:*main*)",
     "Bash(*git push *+*main*)",
     "Bash(*git push *refs/heads/main*)",
+    # heads/main spellings (round 11): bare destination, trailing-space,
+    # as refspec source, as refspec destination - exact-anchored so lane
+    # names merely containing "heads/main" stay allowed.
+    "Bash(*git push * heads/main)",
+    "Bash(*git push * heads/main *)",
+    "Bash(*git push * heads/main:*)",
+    "Bash(*git push *:heads/main)",
+    "Bash(*git push *:heads/main *)",
+    # :HEAD destinations (round 11)
+    "Bash(*git push *:HEAD)",
+    "Bash(*git push *:HEAD *)",
     "Bash(*git push *--force*)",
     "Bash(*git push *-f *)",
     "Bash(*git push *-f)",
