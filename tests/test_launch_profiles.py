@@ -2701,8 +2701,135 @@ class RealGitPremiseTests(unittest.TestCase):
             self.assertEqual(new_sha, feature_sha)
             self.assertNotEqual(new_sha, initial_sha)
 
+    def test_push_L1_x_HEAD_creates_stray_HEAD_branch(self):
+        """git push origin L1-x:HEAD does NOT advance refs/heads/main; it creates a stray 'HEAD' branch on the remote.
+        
+        This demonstrates why the :HEAD form is denied: it does not update main as one might
+        expect, but instead creates a branch literally named 'HEAD' on the remote, leaving
+        main unchanged. The fence denies this because the outcome is not what a user intends.
+        """
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "bare.git"
+            env = self._git_env()
+
+            # Create bare repo with HEAD pointing to main
+            self._init_bare_repo(str(bare_path), env)
+            self._run_git(["symbolic-ref", "HEAD", "refs/heads/main"], str(bare_path), env)
+
+            # Clone it
+            clone_path = self._clone_repo(str(bare_path), tmpdir, env)
+
+            # Create initial commit on main in the clone
+            test_file = Path(clone_path) / "test.txt"
+            test_file.write_text("initial\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "initial commit"], clone_path, env)
+            # Ensure the branch is named 'main' (git default may be 'master')
+            self._run_git(["branch", "-m", "main"], clone_path, env)
+            # Push initial main to bare
+            self._run_git(["push", "origin", "main"], clone_path, env)
+
+            # Get initial main SHA in bare
+            initial_main_sha = self._get_main_sha(str(bare_path), env)
+
+            # Create a branch L1-x with a new commit
+            self._run_git(["checkout", "-b", "L1-x"], clone_path, env)
+            test_file.write_text("L1-x commit\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "L1-x commit"], clone_path, env)
+            l1_x_sha = self._run_git(["rev-parse", "HEAD"], clone_path, env)
+
+            # Push L1-x:HEAD to bare
+            self._run_git(["push", "origin", "L1-x:HEAD"], clone_path, env)
+
+            # Assert main in bare did NOT advance (it stays at initial commit)
+            main_sha_after = self._get_main_sha(str(bare_path), env)
+            self.assertEqual(main_sha_after, initial_main_sha,
+                "refs/heads/main should NOT change after git push origin L1-x:HEAD")
+
+            # Verify a stray 'HEAD' branch was created on the remote
+            head_branch_sha = self._run_git(["rev-parse", "refs/heads/HEAD"], str(bare_path), env)
+            self.assertEqual(head_branch_sha, l1_x_sha,
+                "A stray refs/heads/HEAD branch should be created pointing to L1-x commit")
+
+            # Verify remote HEAD still points to main (not to the new HEAD branch)
+            remote_head_target = self._run_git(["symbolic-ref", "HEAD"], str(bare_path), env)
+            self.assertEqual(remote_head_target, "refs/heads/main",
+                "Remote HEAD should still point to main, not to the stray HEAD branch")
+
+    def test_push_refspec_glob_advances_main(self):
+        """git push origin 'refs/heads/*:refs/heads/*' advances refs/heads/main when local main is ahead (argv list, no shell)."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bare_path = Path(tmpdir) / "bare.git"
+            env = self._git_env()
+
+            # Create bare repo
+            self._init_bare_repo(str(bare_path), env)
+
+            # Clone it
+            clone_path = self._clone_repo(str(bare_path), tmpdir, env)
+
+            # Create initial commit on main in the clone
+            test_file = Path(clone_path) / "test.txt"
+            test_file.write_text("initial\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "initial commit"], clone_path, env)
+            # Ensure the branch is named 'main' (git default may be 'master')
+            self._run_git(["branch", "-m", "main"], clone_path, env)
+            # Push initial main to bare
+            self._run_git(["push", "origin", "main"], clone_path, env)
+
+            # Get initial main SHA in bare
+            initial_sha = self._get_main_sha(str(bare_path), env)
+
+            # Make a new commit on local main (local main is ahead of remote)
+            test_file.write_text("main ahead commit\n")
+            self._run_git(["add", "test.txt"], clone_path, env)
+            self._run_git(["commit", "-m", "main ahead commit"], clone_path, env)
+            new_main_sha = self._run_git(["rev-parse", "HEAD"], clone_path, env)
+
+            # Push with refspec glob (argv list, no shell): refs/heads/*:refs/heads/*
+            self._run_git(["push", "origin", "refs/heads/*:refs/heads/*"], clone_path, env)
+
+            # Assert main in bare advanced to new commit
+            new_sha = self._get_main_sha(str(bare_path), env)
+            self.assertEqual(new_sha, new_main_sha)
+            self.assertNotEqual(new_sha, initial_sha)
+
     def tearDown(self):
         self._cleanup_git_env()
+
+
+class RealGitPremiseDenyTests(unittest.TestCase):
+    """Assert decide() denies the premise pushes on l1-coordinator and l1-routing."""
+
+    def test_decide_denies_push_L1_x_HEAD(self):
+        """decide() denies 'git push origin L1-x:HEAD' on l1-coordinator and l1-routing."""
+        for role in ("l1-coordinator", "l1-routing"):
+            profile = load_profile(role)
+            with self.subTest(role=role):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", "git push origin L1-x:HEAD"),
+                    "git push origin L1-x:HEAD not denied by %s" % role,
+                )
+
+    def test_decide_denies_push_refspec_glob(self):
+        """decide() denies 'git push origin refs/heads/*:refs/heads/*' on l1-coordinator and l1-routing."""
+        for role in ("l1-coordinator", "l1-routing"):
+            profile = load_profile(role)
+            with self.subTest(role=role):
+                self.assertTrue(
+                    decide_deny(profile, "Bash", "git push origin refs/heads/*:refs/heads/*"),
+                    "git push origin refs/heads/*:refs/heads/* not denied by %s" % role,
+                )
 
 
 if __name__ == "__main__":
