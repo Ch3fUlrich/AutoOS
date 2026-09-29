@@ -125,6 +125,16 @@ the run's answer, its own rc, with no re-plan onto whatever model survived. Afte
 the run, a review prints `family: writer=... reviewer=... CROSS-FAMILY: yes|NO|
 unknown` beside its `writer:` line, and a resolved same-family answer exits 12 —
 OmniRoute can fall through to a leg inside a combo the spawner's plan never showed.
+That verdict is a *provenance* claim (FAMILYFENCE-b): `yes`/`NO` print only for a
+witnessed model — the gateway call log, or an own-account client's own transcript
+(qoder, claude report theirs through a per-attempt `--session-id`); `--model` is
+`pinned`; a model known only from the plan's assumed default is never proof, so an
+unproven reviewer prints `unknown`, never `yes`. The resolved writer carries a
+`source` field (`gateway-log`/`client-reported`/`pinned`/`assumed-default`) that
+`writer:` prints and `ps`/`status`/`result` surface for every client, read only from
+the runner-private kill record. `--model` pins an own-account client too, and its
+family feeds the fence like a gateway leg's — qoder appears in no route, so a fence
+that only read routes was blind to that choice.
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -223,6 +233,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 if os.name != "nt":
     import fcntl  # the free-leg provider lock (SPAWNFIX item 2); msvcrt on Windows
 
@@ -3176,15 +3187,19 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     because a fallback past the excluded family is the defect, not a fallback.
     """
     # --model names a gateway combo for opencode and the gateway clients; for
-    # agy/claude/qoder it is the client's own model id and is not checked here.
+    # agy/claude/qoder it is the client's own model id and never a route.
+    # FAMILYFENCE-b: it is still a MODEL CHOICE, and the one the fence exists for —
+    # a qoder review pinned onto the writer's family would otherwise reach the CLI
+    # unheard, because no route leg names it and `override` was gateway-only. The
+    # route half stays gateway-only: an own-account model id is not a route id, and
+    # `_fence_check_route` would be reading a table that has no row for it.
     override = args.model if client.gateway else None
-    if fence and fence.get("families") and override and client.gateway:
-        # The caller's --model is a leg choice, so the fence rules it too — both the
-        # model spelling and whatever route it names.
+    if fence and fence.get("families") and args.model:
         registry = load_live_registry()
-        if fence_blocks_model(override, registry, fence):
+        if fence_blocks_model(args.model, registry, fence):
             raise FamilyFenceRefused(fence_refusal(fence))
-        _fence_check_route(model_route_id(override) or "", fence, registry)
+        if client.gateway:
+            _fence_check_route(model_route_id(args.model) or "", fence, registry)
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
         combo = model_route_id(model) or None
@@ -3263,6 +3278,12 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             run_id = inherited
     env["AUTOOS_AGENT_RUN_ID"] = run_id
     tag = None
+    # FAMILYFENCE-b: the two provenance fields every writer record reads. Both are
+    # only ever set on the native branch below; opencode's model is named by the
+    # gateway's own call log, and a client that keeps no transcript leaves the
+    # second one None — which `resolved_writer` reads as "no witness, no report".
+    client_session_id = None
+    model_source = WRITER_SOURCE_PIN if args.model else WRITER_SOURCE_ASSUMED
     if client.name == "opencode":
         agent = TIERS[route["tier"]]
         if args.free:
@@ -3318,16 +3339,29 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             headers = gateway_headers(tag, run_id)
             if client.name == "gemini":
                 env[clients.GEMINI_CUSTOM_HEADERS_ENV] = clients.gemini_custom_headers(headers)
+        # FAMILYFENCE-b: a client that keeps a session transcript names its rows by
+        # a session id, and `--session-id` lets the CALLER pick it. Minting one here
+        # is what turns "the newest file in ~/.qoder/projects" into an exact join on
+        # this run. A --bg/--remote-control claude session owns its own id, so it
+        # gets none (clients.build_command puts the flag only where it is honoured).
+        if client.name in clients.MODEL_REPORT and not joinable:
+            client_session_id = mint_client_session_id()
         cmd = clients.build_command(client, args.task, route["combo"], level, model, joinable,
                                     deny_spawn=role_is_leaf(route.get("tier"),
                                                             route.get("card")),
-                                    headers=headers)
+                                    headers=headers, session_id=client_session_id)
         if args.lean and client.name in MCP_STRICT_CLIENTS \
                 and "--strict-mcp-config" not in cmd:  # claude/qoder only: no MCP servers
             cmd[1:1] = ["--strict-mcp-config"]
         if client.name == "qoder":
             model = model or clients.QODER_DEFAULT_MODEL
-        model = model or (route["combo"] if client.gateway else "(client default)")
+        # FAMILYFENCE-b: `source` says where this model came from, because the two
+        # answers a run can give are not equally strong — a caller's `--model` is an
+        # instruction, an adapter default is this file's own guess, and neither is
+        # evidence that the model served. A gateway client's model is the combo it
+        # was routed to, which is the same kind of claim.
+        model_source = WRITER_SOURCE_PIN if args.model else WRITER_SOURCE_ASSUMED
+        model = model or (route["combo"] if client.gateway else PLAN_MODEL_UNNAMED)
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
@@ -3389,6 +3423,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # for the same reason as the runtime dir — a dry run writes nothing.
     env["XDG_CONFIG_HOME"] = os.path.join(clients.state_dir(), "configs", run_id)
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            # FAMILYFENCE-b: the ask and its witness, kept beside the ask so a
+            # reader never has to re-derive one from the other. `client_session_id`
+            # is the join key into the client's own transcript; `model_source` is
+            # where `model` came from before any transcript was read.
+            "model_source": model_source, "client_session_id": client_session_id,
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
             # brief echoed back at it (SPAWNFIX3c).
@@ -3416,6 +3455,56 @@ WRITER_UNRESOLVED = "unresolved"
 # The endpoint's own default page size (callLogs.ts:1014), newest-first, so one
 # GET reaches the calls this run made last — which is the attempt that survived.
 CALL_LOG_PAGE = 200
+
+# --- FAMILYFENCE-b: `source`, or how the record knows what it is saying --------
+#
+# `unresolved` answered "the run named no model". It never answered "this model is
+# what we asked for, not what served", and the two read identically in a record —
+# which is the gap a qoder review fell through: qodercli 1.1.63 takes an unknown
+# `--model`, prints `falling back to default model "efficient"` and exits 0, so the
+# plan's model was never evidence of anything. A gateway row IS evidence, and a
+# client's own session transcript is evidence of a different shape. `source` names
+# the witness, and only the two witnesses below count as proof: a pin is what a
+# caller typed and an assumed default is what this spawner would have typed.
+WRITER_SOURCE_GATEWAY = "gateway-log"
+WRITER_SOURCE_REPORT = "client-reported"
+WRITER_SOURCE_PIN = "pinned"
+WRITER_SOURCE_ASSUMED = "assumed-default"
+WRITER_PROVEN_SOURCES = frozenset({WRITER_SOURCE_GATEWAY, WRITER_SOURCE_REPORT})
+# The import-time home, the fallback under `client_home()` for a process whose
+# environment names none. A client's transcript is read relative to the home the
+# CHILD ran with, so a test repoints $HOME — this constant only exists so that
+# fallback has one documented shape instead of an inline expanduser at each site.
+HOME_DIR = os.path.expanduser("~")
+# build_plan's placeholder for "this client picks its own model": a string that
+# reads like a model name but names none.
+PLAN_MODEL_UNNAMED = "(client default)"
+
+
+def mint_client_session_id() -> str:
+    """A fresh session id to hand a client that keeps a transcript (MODEL_REPORT).
+
+    Minted per attempt, not per spawn: qodercli refuses a `--session-id` that is
+    already a session on disk, and a fallthrough re-launch is a second session.
+    A uuid4 is what both documented shapes accept (`claude --help`: "must be a
+    valid UUID"; `qodercli --help`: "--session-id <id>")."""
+    return str(uuid.uuid4())
+
+
+def client_home() -> str:
+    """The home the CLIENT writes its own records into, resolved at call time.
+
+    The child inherits this process's `$HOME` — `worker_env` allowlists HOME and
+    only makes the XDG directories private (FF1b/FF1c) — so a transcript the run
+    wrote is found under the environment it ran with, never under the home this
+    module happened to be imported in. That distinction is the difference between
+    reading the operator's other sessions and reading this run."""
+    return os.environ.get("HOME") or os.environ.get("USERPROFILE") or HOME_DIR
+
+
+def writer_is_proven(writer) -> bool:
+    """Whether `writer` names a model a witness attested to, not one we assumed."""
+    return bool(writer) and writer.get("source") in WRITER_PROVEN_SOURCES
 
 
 def manage_key(env=None) -> str | None:
@@ -3489,14 +3578,19 @@ def gateway_writer(session_id, gateway=None, key=None, fetch=None, limit=CALL_LO
 
 
 def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
-                    gateway=None) -> dict:
-    """The writer of this run: `{provider, model, family}`.
+                    gateway=None, home=None) -> dict:
+    """The writer of this run: `{provider, model, family, source}`.
 
     A gateway run asks the gateway (one GET, by the run's own session id); a
-    native run already holds the answer in its plan — the model the client
-    answers with is the model that served it, and `--free` names the provider in
-    that same `provider/model` id. The family is the registry's own declaration
-    for that model spelling, never a guess from the name.
+    native run asks the client first — its own session transcript, joined by the
+    session id this spawner minted into the argv — and only falls back on the plan
+    when the client said nothing. `--free` names the provider in that same
+    `provider/model` id. The family is the registry's own declaration for that
+    model spelling, never a guess from the name.
+
+    `source` is the witness behind the answer (`WRITER_SOURCE_*`), because a model
+    the plan assumed and a model the client attested are not the same claim — a
+    review is only independent of an author it can PROVE it ran elsewhere.
 
     Any field this cannot prove is `unresolved`, which is the point of the
     record: an empty field reads like "the run did not use a model".
@@ -3509,10 +3603,22 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
         found = gateway_writer(session, gateway=gateway, key=key, fetch=fetch)
         if found is None:
             return {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
-                    "family": WRITER_UNRESOLVED}
+                    "family": WRITER_UNRESOLVED, "source": WRITER_UNRESOLVED}
         provider, model = found
+        source = WRITER_SOURCE_GATEWAY
     else:
-        model = plan.get("model") or None
+        asked = plan.get("model") or None
+        if asked == PLAN_MODEL_UNNAMED:
+            asked = None
+        source = plan.get("model_source") or WRITER_SOURCE_ASSUMED
+        reported = clients.reported_model(plan.get("client") or "",
+                                          plan.get("client_session_id"),
+                                          home=client_home() if home is None else home)
+        if reported:
+            model = reported
+            source = WRITER_SOURCE_REPORT
+        else:
+            model = asked
         if model:
             # A native client's own id, or a `provider/model` promo id on --free.
             provider = free_provider(model) if "/" in model else plan.get("client")
@@ -3524,14 +3630,18 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
     family = (_family_of_one_spelling(model, registry) if model else None)
     return {"provider": provider or WRITER_UNRESOLVED,
             "model": model or WRITER_UNRESOLVED,
-            "family": family or WRITER_UNRESOLVED}
+            "family": family or WRITER_UNRESOLVED,
+            "source": source or WRITER_UNRESOLVED}
 
 
 def writer_line(writer: dict) -> str:
-    """The one line every reader of the run sees: `writer: <provider>/<model> (<family>)`."""
-    return "writer: %s/%s (%s)" % (writer.get("provider") or WRITER_UNRESOLVED,
-                                   writer.get("model") or WRITER_UNRESOLVED,
-                                   writer.get("family") or WRITER_UNRESOLVED)
+    """The one line every reader of the run sees: `writer: <provider>/<model> (<family>) source=<witness>`."""
+    return "writer: %s/%s (%s) source=%s" % (
+        writer.get("provider") or WRITER_UNRESOLVED,
+        writer.get("model") or WRITER_UNRESOLVED,
+        writer.get("family") or WRITER_UNRESOLVED,
+        writer.get("source") or WRITER_UNRESOLVED)
+
 
 
 # --- FAMILYFENCE: a review never silently runs on the writer's own family ------
@@ -3716,8 +3826,16 @@ def cross_family_line(writer, fence):
     (`--review-of`'s record), `reviewer` the family that ACTUALLY served this run.
     `NO` is printed only when both are known and equal — and `cmd_run` refuses the
     run on that answer, because a same-family verdict that exits 0 is the lie this
-    whole fence exists to stop."""
-    reviewer = (writer or {}).get("family") or WRITER_UNRESOLVED
+    whole fence exists to stop.
+
+    FAMILYFENCE-b: `reviewer` counts only when a witness attested to it. A model
+    the plan assumed is a model that may never have run — qodercli substitutes an
+    unknown `--model` and exits 0 — so an unproven reviewer is reported as
+    `unresolved` and the verdict is `unknown`, never `yes`. An independence nobody
+    can show is not an independence to claim; the run still goes ahead, because
+    requirement 3 asks for the sentence, not for a second refusal."""
+    family = (writer or {}).get("family") or WRITER_UNRESOLVED
+    reviewer = family if writer_is_proven(writer) else WRITER_UNRESOLVED
     author = (fence or {}).get("writer_family") or WRITER_UNRESOLVED
     unknown = (WRITER_UNRESOLVED, None, "")
     if author in unknown or reviewer in unknown:
@@ -6785,6 +6903,11 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
+        # FAMILYFENCE-b: the row names the model the run was ASKED to use and where
+        # that ask came from, so a default never reads as a pin. What actually
+        # answered is not here — it lives in the runner-private record, which is
+        # the only writer store a worker cannot edit (R-orch-17).
+        "model_source": plan.get("model_source"),
         "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
@@ -6851,6 +6974,21 @@ def _fmt_elapsed(seconds) -> str:
     return "%dd%02dh" % (days, hours)
 
 
+def worker_writer(run_id):
+    """The writer the RUNNER recorded for `run_id`, or None when nothing was.
+
+    The runner-private kill store and nothing else (R-orch-17): a `ps` row is read
+    by whoever is deciding whether a review is independent, and both the worker
+    record and job.json live in directories the worker itself can write. A run with
+    no record — one started by hand, one older than the store — answers None rather
+    than falling back to the ask.
+    """
+    if not run_id:
+        return None
+    writer = (read_kill_record(run_id) or {}).get("writer")
+    return writer if isinstance(writer, dict) else None
+
+
 def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
     """Every spawned worker in ``directory`` as rows, newest last.
 
@@ -6861,6 +6999,11 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
     owned by another user), which still counts as running. A record whose ended
     time (or, for a died worker, whose started time) is older than 7 days is
     deleted. A corrupt record is skipped, never raised on.
+
+    Each row carries both halves of the model story: `model`/`model_source` — what
+    the run was ASKED to use and where that ask came from — and `writer`/`family`/
+    `model_proven`, what the runner recorded as having ANSWERED (see
+    `worker_writer`).
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -6900,10 +7043,25 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
             continue
         ref_end = ended if ended is not None else now
         secs = (ref_end - started).total_seconds() if started is not None else None
+        writer = worker_writer(record.get("id"))
+        family = (writer or {}).get("family") or ""
+        if family == WRITER_UNRESOLVED:
+            family = ""
         rows.append({"id": record.get("id"), "state": state,
                      "elapsed": _fmt_elapsed(secs), "elapsed_seconds": secs,
                      "client": record.get("client") or "", "model": record.get("model") or "",
+                     "model_source": record.get("model_source") or "",
                      "lane": record.get("session_tag") or "", "pid": record.get("pid"),
+                     # FAMILYFENCE-b: WHO ANSWERED, from the runner-private kill
+                     # store — never from job.json or the worker record, both of
+                     # which live where the worker could write (R-orch-17). `model`
+                     # above stays the ask; a reader sees the ask and the answer
+                     # side by side, and `model_proven` is the difference between
+                     # the two claims: a gateway log row or the client's own
+                     # transcript attested to this one, nothing attested to that.
+                     "writer": writer,
+                     "family": family,
+                     "model_proven": writer_is_proven(writer),
                      "title": record.get("title") or "", "task": record.get("task_head") or "",
                      "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
                      "parent_run_id": record.get("parent_run_id") or None,
@@ -6942,9 +7100,24 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
 
 
 def _print_worker_table(rows: list) -> None:
-    head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "LANE", "PID", "TITLE/TASK"]
-    cells = [[r["id"], r["state"], r["elapsed"] or "-", r["client"], r["model"],
-              r["lane"], str(r["pid"] or ""), r["title"] or r["task"] or ""] for r in rows]
+    head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "FAMILY", "LANE", "PID", "TITLE/TASK"]
+    cells = []
+    for r in rows:
+        # FAMILYFENCE-b: MODEL is what ANSWERED when the run has a witness for it
+        # and what was ASKED when it has none — the trailing "?" is the difference,
+        # because "Efficient" from the plan and "Efficient" from a gateway log row
+        # are not the same claim, and a reader of `ps` decides who to trust with
+        # which. Same for FAMILY: a family nobody attested to gets a "?".
+        proven = r.get("model_proven")
+        writer = r.get("writer") or {}
+        answered = writer.get("model") or ""
+        model = answered if (proven and answered) else (r["model"] or "-")
+        family = r.get("family") or "-"
+        if not proven and (model != "-" or family != "-"):
+            model = model + "?" if model != "-" else model
+            family = family + "?" if family != "-" else family
+        cells.append([r["id"], r["state"], r["elapsed"] or "-", r["client"], model,
+                      family, r["lane"], str(r["pid"] or ""), r["title"] or r["task"] or ""])
     widths = [max(len(head[i]), max(len(c[i]) for c in cells)) for i in range(len(head))]
     width = shutil.get_terminal_size((120, 24)).columns
     avail = max(15, width - sum(widths[:-1]) - 2 * (len(head) - 1))
@@ -7670,7 +7843,9 @@ def cmd_run(args, cfg: dict) -> int:
     # at: the private record `cancel` already reads, this run's own log line (and
     # so the output.log the fleet runner merges), and the header of the sandbox
     # report block below. A gateway run that cannot be resolved says `unresolved`
-    # rather than repeating what the plan asked for.
+    # rather than repeating what the plan asked for. FAMILYFENCE-b: what it CAN
+    # name carries `source` — the witness that named it — because after a fallthrough
+    # on an own-account client, "the plan said Efficient" is not "Efficient answered".
     writer = None
     if not args.dry_run:
         try:
@@ -7679,7 +7854,7 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: writer unresolved (%s)" % type(exc).__name__,
                   file=sys.stderr)
             writer = {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
-                      "family": WRITER_UNRESOLVED}
+                      "family": WRITER_UNRESOLVED, "source": WRITER_UNRESOLVED}
         if writer is not None:
             print(writer_line(writer))
             # FAMILYFENCE item 4: a review's independence is a claim about the
@@ -8035,7 +8210,10 @@ def _parser_run(sub):
                      help="claude only: a background session you can join through Remote Control")
     run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")
     run.add_argument("--clean", action="store_true", help="use the -clean (paid, no free legs) twin")
-    run.add_argument("--model", help="a model declared in opencode.jsonc, e.g. omniroute/t2-orchestrator")
+    run.add_argument("--model", help="pin the model: a combo declared in opencode.jsonc "
+                                     "(e.g. omniroute/t2-orchestrator) for a gateway client, "
+                                     "or the client's own model name for an own-account one "
+                                     "(qodercli/claude --model; its family feeds the fence)")
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")
     run.add_argument("--free-model", default=DEFAULT_FREE_MODEL)
     run.add_argument("--not-family", dest="not_family", action="append",

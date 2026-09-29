@@ -20,6 +20,7 @@ have. opencode's in-process nesting is still experimental.subagent_depth.
 """
 from __future__ import annotations
 
+import glob
 import io
 import json
 import os
@@ -86,6 +87,171 @@ AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
 # Qwen3.8-Max, Qwen3.8-Flash; Max needs credit). Measured 2026-09-27: writes a file
 # and runs a shell command unattended in 25 s with bypass_permissions.
 QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
+
+# --- FAMILYFENCE-b: what the client itself recorded about the model it used ----
+#
+# An own-account client has no gateway to ask, and its argv is only what was
+# ASKED for. Measured 2026-09-29 on qodercli 1.1.63: `--model NoSuchModel99`
+# prints
+#   [config] Model "NoSuchModel99" is not in the loaded catalog; falling back to
+#   default model "efficient" for this session.
+#   feedback.emitted Model "NoSuchModel99" is not available right now; using
+#   "efficient" instead.
+# and exits 0. So argv proves the request and nothing else. The client does keep
+# the answer, in files the spawner had never read:
+#
+#   ~/.qoder/projects/<project>/<session-id>.jsonl   one row per event: the
+#       assistant rows carry message.model, and a `runtime-config` row states the
+#       session's resolved model — as the account's internal key ("qfmodel"), not
+#       the name a registry can place ("Qwen3.8-Flash").
+#   ~/.qoder/logs/runs/<run>/manifest.json           the argv, which is how a run
+#       directory is joined to the session id this spawner minted for it.
+#   ~/.qoder/logs/runs/<run>/qodercli.log            the account's own
+#       [QoderInferRequest details] model_config={"key":..,"display_name":..}
+#       lines, which turn a key back into a name.
+#   ~/.claude/projects/<project>/<session-id>.jsonl  the same transcript shape;
+#       message.model is already a full model id ("claude-sonnet-5-5"), so it
+#       needs no map.
+#
+# Both clients take the id from the caller (`qodercli --help`:
+# `--session-id <id>`; `claude --help`: `--session-id <uuid>  Use a specific
+# session ID for the conversation (must be a valid UUID)`), which is what makes
+# the join exact instead of "the newest file in there". A client with no row here
+# has no evidence read for it, and the writer record says so in `source`.
+MODEL_REPORT = {
+    "qoder": {"projects": (".qoder", "projects"), "aliases": (".qoder", "logs", "runs")},
+    "claude": {"projects": (".claude", "projects")},
+}
+# Run directories are scanned newest-first and joined through their manifest, so
+# the bound is "how far back a finished run could plausibly be", not a guess at
+# the host's clock.
+RUN_SCAN_LIMIT = 24
+RUN_LOG_SCAN_BYTES = 1 << 20
+# A session id is a uuid, and it is about to be part of a glob: a value with a
+# metacharacter in it would reach outside the client's own tree.
+SESSION_ID_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{6,63}$")
+
+
+def transcript_path(client_name: str, session_id: str | None, home: str) -> str | None:
+    """The client's own transcript file for `session_id`, or None.
+
+    The project directory's name is a mangled cwd, so the id is looked up across
+    the client's project roots rather than recomputed here — a rule about a
+    vendor's path encoding is not this file's to own.
+    """
+    row = MODEL_REPORT.get(client_name)
+    if not row or not session_id or not SESSION_ID_RE.match(str(session_id)):
+        return None
+    pattern = os.path.join(home, *row["projects"], "*", str(session_id) + ".jsonl")
+    matches = sorted(glob.glob(pattern))
+    return matches[0] if matches else None
+
+
+def transcript_models(path: str) -> tuple:
+    """(last assistant model, last runtime-config model) of one transcript.
+
+    The assistant row is the stronger witness — a reply came back from that model
+    — and `runtime-config` is what a session states before its first reply, which
+    covers a run that died before answering. The LAST of each, for the reason
+    `gateway_writer` takes the newest call-log row: a session that was continued
+    or re-routed is asked what served it in the end.
+    """
+    assistant = runtime = None
+    try:
+        with io.open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                kind = row.get("type")
+                if kind == "assistant":
+                    message = row.get("message")
+                    value = message.get("model") if isinstance(message, dict) else None
+                elif kind == "runtime-config":
+                    value = row.get("model")
+                else:
+                    continue
+                if isinstance(value, str) and value.strip():
+                    if kind == "assistant":
+                        assistant = value.strip()
+                    else:
+                        runtime = value.strip()
+    except OSError:
+        return None, None
+    return assistant, runtime
+
+
+def model_aliases(client_name: str, session_id: str | None, home: str) -> dict:
+    """{internal key: the name the account gives it} from this session's run log.
+
+    Joined through the manifest, never by timestamp: a busy host starts one run
+    directory per client launch and the newest is not necessarily this one's. A
+    client with no `aliases` row has no map to read — claude reports a full model
+    id already.
+    """
+    row = MODEL_REPORT.get(client_name) or {}
+    if not row.get("aliases") or not session_id:
+        return {}
+    directory = os.path.join(home, *row["aliases"])
+    try:
+        names = sorted(os.listdir(directory), reverse=True)[:RUN_SCAN_LIMIT]
+    except OSError:
+        return {}
+    for name in names:
+        run_dir = os.path.join(directory, name)
+        try:
+            with io.open(os.path.join(run_dir, "manifest.json"), encoding="utf-8",
+                         errors="replace") as fh:
+                argv = json.load(fh).get("argv") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not any(session_id in str(part) for part in argv):
+            continue
+        for log_name in ("qodercli.log", "claude.log"):
+            try:
+                with io.open(os.path.join(run_dir, log_name), encoding="utf-8",
+                             errors="replace") as fh:
+                    text = fh.read(RUN_LOG_SCAN_BYTES)
+            except OSError:
+                continue
+            if "session=%s" % session_id not in text:
+                continue
+            pairs = {}
+            for match in re.finditer(r'"key":"([^"]+)","display_name":"([^"]*)"', text):
+                pairs.setdefault(match.group(1), match.group(2).strip() or match.group(1))
+            if pairs:
+                return pairs
+    return {}
+
+
+def reported_model(client_name: str, session_id: str | None,
+                   home: str | None = None) -> str | None:
+    """The model `client_name` recorded for its own session, or None.
+
+    None is the honest answer as often as not: no transcript, no model row, or a
+    client that keeps no record anyone outside it can read. The caller then
+    records its own assumption as an assumption instead of as an answer.
+    """
+    home = os.path.expanduser("~") if home is None else home
+    path = transcript_path(client_name, session_id, home)
+    if path is None:
+        return None
+    assistant, runtime = transcript_models(path)
+    model = assistant or runtime
+    if not model:
+        return None
+    return model_aliases(client_name, session_id, home).get(model) or model
+
+
+def session_args(client_name: str, session_id: str | None) -> list:
+    """The argv that tells this client which session id the spawner will read."""
+    if not session_id or client_name not in MODEL_REPORT:
+        return []
+    return ["--session-id", session_id]
+
 
 # KEYDENY3g item 3: a leaf that can spawn hands its work to a child carrying none
 # of the leaf's fences, so every client gets an answer — either the spawner
@@ -177,7 +343,8 @@ def gemini_custom_headers(headers: dict | None) -> str:
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
                   model: str | None = None, joinable: str | None = None,
-                  headers: dict | None = None, deny_spawn: bool = False) -> list:
+                  headers: dict | None = None, deny_spawn: bool = False,
+                  session_id: str | None = None) -> list:
     """The argv for one headless task. opencode is built by autoos-agent.py itself.
 
     `deny_spawn` is the leaf gate: it only ever applies to a run that wears a leaf
@@ -185,22 +352,33 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
 
     `headers` are the run's gateway request headers; only a client that can put
     them on a request uses them (gateway_header_args, gemini_custom_headers).
+
+    `session_id` is the id this spawner minted so it can find the client's own
+    transcript afterwards (MODEL_REPORT); only a client that takes one from the
+    caller gets it (session_args). It goes before `deny` and the task, which must
+    stay last.
     """
     mode = client.modes.get(level, [])
     deny = leaf_deny_argv(client) if deny_spawn else []
+    session = session_args(client.name, session_id)
     if client.name == "claude":
         if joinable:
             # No user-scope MCP servers: user-scope graphify started one docker
             # container per lane worktree (measured 2026-09-25). --mcp-config is
             # variadic - --name after it keeps the prompt from being read as a path.
+            # A --bg session is attached to by `claude attach`, which mints and
+            # owns the id, so no session-id is forced on it; its writer stays an
+            # assumption and says so.
             return (["claude", "--bg", "--remote-control", joinable, "--strict-mcp-config",
                      "--mcp-config", '{"mcpServers":{}}', "--name", joinable] + mode +
                     ([] if not model else ["--model", model]) + deny + [task])
-        return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + deny + [task]
+        return (["claude", "-p"] + mode + ([] if not model else ["--model", model]) +
+                session + deny + [task])
     if client.name == "codex":
         inner = ["exec"] + mode + ["--skip-git-repo-check"] + deny + [task]
     elif client.name == "qoder":
-        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + deny + [task]
+        return (["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] +
+                session + deny + [task])
     elif client.name == "agy":
         # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
         # "--model" as the -p prompt when -p comes first, so the model goes

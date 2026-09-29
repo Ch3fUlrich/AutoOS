@@ -1247,7 +1247,12 @@ def serve() -> None:
         is read from that run's runner-private kill record, never from its
         job.json, so a worker cannot pick who reviews it by editing its own file.
         no_fallthrough: a stop on the pinned model ends the run with that rc; no
-        re-plan onto another model. Off by default."""
+        re-plan onto another model. Off by default.
+        `model` is a pin for an own-account client too (FAMILYFENCE-b): a qoder or
+        claude model name reaches that CLI's own --model and its family feeds the
+        fence like a gateway leg's. The record's writer gains a `source`
+        (gateway-log/client-reported/pinned/assumed-default); a CROSS-FAMILY verdict
+        prints yes/NO only on a witnessed model, never on an assumed default."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,

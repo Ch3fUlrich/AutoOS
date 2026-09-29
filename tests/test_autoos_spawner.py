@@ -459,7 +459,10 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_claude_is_headless_print_on_its_own_login(self):
         r = plan_of("--client", "claude", "t", env=claude_env())
-        self.assertIn("would run: claude -p --permission-mode acceptEdits t", r.stdout)
+        # FAMILYFENCE-b: the run is handed the session id whose transcript the
+        # spawner will read afterwards, so the line is no longer a fixed string.
+        self.assertRegex(r.stdout, r"would run: claude -p --permission-mode acceptEdits "
+                         r"--session-id [0-9a-f]{8}-[0-9a-f-]+ t")
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", r.stdout)
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
@@ -14375,9 +14378,11 @@ class ResolvedWriterTests(unittest.TestCase):
                                                  "status": 200,
                                                  "timestamp": "2026-09-29T00:00:01Z"}]):
             writer = agent.resolved_writer(plan, True, registry=registry)
+        # FAMILYFENCE-b: the gateway is a witness, so the record says which one.
         self.assertEqual(writer, {"provider": "mimo", "model": "mimo-7",
-                                  "family": "mimo"})
-        self.assertEqual(agent.writer_line(writer), "writer: mimo/mimo-7 (mimo)")
+                                  "family": "mimo", "source": "gateway-log"})
+        self.assertEqual(agent.writer_line(writer),
+                         "writer: mimo/mimo-7 (mimo) source=gateway-log")
 
     def test_a_gateway_failure_is_written_as_unresolved(self):
         agent = self.agent
@@ -14387,17 +14392,21 @@ class ResolvedWriterTests(unittest.TestCase):
             writer = agent.resolved_writer(plan, True, registry={"models": {}})
         self.assertEqual(set(writer.values()), {agent.WRITER_UNRESOLVED})
         self.assertEqual(agent.writer_line(writer),
-                         "writer: unresolved/unresolved (unresolved)")
+                         "writer: unresolved/unresolved (unresolved) source=unresolved")
 
     def test_a_native_run_answers_from_its_own_plan(self):
         # No gateway to ask: the client's model id is the answer, and the
         # provider is the client itself — unless --free named one in the id.
+        # FAMILYFENCE-b says what that answer is worth: a plan model with no
+        # witness behind it is recorded, but not as a proof (agy keeps no
+        # transcript this spawner can read, so `assumed-default` is the truth).
         agent = self.agent
         registry = {"models": {"gemini-3.8-flash": {"family": "gemini"}}}
         native = agent.resolved_writer({"client": "agy", "model": "gemini-3.8-flash"},
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
-                                  "family": "gemini"})
+                                  "family": "gemini", "source": "assumed-default"})
+        self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
                                      False, registry={"models": {}})
         self.assertEqual((free["provider"], free["model"]), ("jetski", "jetski-9"))
@@ -14854,6 +14863,603 @@ class FamilyFenceRecordTests(unittest.TestCase):
             self.assertEqual(self.agent.track.load(path)[0]["failure_class"],
                              "refusal")
 
+
+
+
+# --- FAMILYFENCE-b: the writer record says HOW it knows what answered ---------
+#
+# FAMILYFENCE proved a review may not run on its writer's family, and RUNMODEL
+# proved the gateway can name the model that served a run. Neither holds for an
+# own-account client: it has no gateway to ask, and its plan model was never
+# evidence. Measured 2026-09-29 on qodercli 1.1.63, `--model NoSuchModel99`
+# prints `[config] Model "NoSuchModel99" is not in the loaded catalog; falling
+# back to default model "efficient" for this session.` and exits 0 — argv is what
+# was ASKED for. The client does record the truth out of band, in a file the
+# spawner never read: ~/.qoder/projects/*/<session-id>.jsonl holds
+# {"type":"runtime-config","model":"efficient"} and one assistant row per reply
+# with message.model, and ~/.qoder/logs/runs/*/qodercli.log maps the account's
+# internal key to the name the registry can place ("qfmodel" ->
+# "Qwen3.8-Flash"). claude keeps the same transcript shape (assistant
+# message.model = "claude-sonnet-5-5") and takes `--session-id <uuid>`.
+#
+# So the writer record gains `source` — the difference between a proof and an
+# assumption — and a review whose reviewer is only assumed says
+# `CROSS-FAMILY: unknown` instead of claiming an independence it cannot show.
+
+QODER_SESSION = "6a52a548-0e30-4bec-a74e-2ef56d19ac33"
+CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555"
+QODER_RUN = "2026-09-29T04-37-05-340Z-d1krfj-p914864"
+
+
+def _qoder_transcript(home, session_id, model, project="-tmp"):
+    """A `~/.qoder/projects/<project>/<session>.jsonl` shaped like the real one."""
+    d = os.path.join(home, ".qoder", "projects", project)
+    os.makedirs(d, exist_ok=True)
+    rows = [{"type": "workspace-directories", "sessionId": session_id,
+             "directories": ["/tmp"]},
+            {"type": "runtime-config", "sessionId": session_id, "model": model,
+             "reasoningEffort": None, "timestamp": 1790656631990},
+            {"type": "user", "sessionId": session_id,
+             "message": {"role": "user", "content": "t"}},
+            {"type": "assistant", "sessionId": session_id,
+             "message": {"role": "assistant", "model": model, "content": []}}]
+    path = os.path.join(d, session_id + ".jsonl")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    return path
+
+
+def _qoder_run_log(home, session_id, pairs, argv_model="Qwen3.8-Flash"):
+    """A `~/.qoder/logs/runs/<run>/` pair: the manifest names the argv the client
+    was started with, the log carries the key -> display_name map the account
+    resolves for that session."""
+    d = os.path.join(home, ".qoder", "logs", "runs", QODER_RUN)
+    os.makedirs(d, exist_ok=True)
+    with io.open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"run_id": QODER_RUN, "cli_version": "1.1.63", "cwd": "/tmp",
+                   "argv": ["node", "qodercli", "-p", "--permission-mode", "dont_ask",
+                            "--model", argv_model, "--session-id", session_id, "t"]}, fh)
+    with io.open(os.path.join(d, "qodercli.log"), "w", encoding="utf-8") as fh:
+        fh.write("2026-09-29T04:37:08.868Z INFO  [session=%s] session.config.loaded "
+                 'project_root="/tmp" model="%s"\n' % (session_id, argv_model))
+        for key, display in pairs.items():
+            fh.write("2026-09-29T04:37:12.306Z INFO  debug.message "
+                     '[QoderInferRequest details] model_config={"key":"%s",'
+                     '"display_name":"%s","model":"","format":"openai"}, '
+                     "custom_model=null\n" % (key, display))
+        fh.write("2026-09-29T04:37:15.059Z INFO  [session=%s turn=a] "
+                 'model.response.completed provider="qoder" model="%s"\n'
+                 % (session_id, list(pairs)[0]))
+    return d
+
+
+def _claude_transcript(home, session_id, model):
+    d = os.path.join(home, ".claude", "projects", "-tmp")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, session_id + ".jsonl")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "sessionId": session_id,
+                             "message": {"role": "assistant", "model": model,
+                                         "content": []}}) + "\n")
+    return path
+
+
+class QoderSessionEvidenceTests(unittest.TestCase):
+    """FAMILYFENCE-b: the client's own session record is the only witness for a
+    run that never touched the gateway, and it is read by the session id the
+    spawner minted for it — never by "the newest file in there"."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.clients = self.agent.clients
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def test_a_qoder_transcript_names_the_model_that_answered(self):
+        # The rows hold the account's key (`qfmodel`); the run log maps it to the
+        # display name a registry family can be read from.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        _qoder_run_log(self.home, QODER_SESSION, {"qfmodel": "Qwen3.8-Flash"})
+        self.assertEqual(self.clients.reported_model("qoder", QODER_SESSION,
+                                                     home=self.home), "Qwen3.8-Flash")
+
+    def test_a_key_the_account_log_cannot_map_is_reported_as_the_key(self):
+        # Naming the key beats inventing a name and beats silence: the family gate
+        # cannot place it, and says so, while a reader still sees what served.
+        _qoder_transcript(self.home, QODER_SESSION, "efficient")
+        self.assertEqual(self.clients.reported_model("qoder", QODER_SESSION,
+                                                     home=self.home), "efficient")
+
+    def test_a_claude_transcript_needs_no_key_map(self):
+        _claude_transcript(self.home, CLAUDE_SESSION, "claude-sonnet-5-5")
+        self.assertEqual(self.clients.reported_model("claude", CLAUDE_SESSION,
+                                                     home=self.home),
+                         "claude-sonnet-5-5")
+
+    def test_a_session_that_is_not_ours_is_not_read(self):
+        # The minted id is the join key and nothing else: another session's model
+        # in the same home is not this run's answer.
+        _qoder_transcript(self.home, "22222222-3333-4444-5555-666666666666", "qfmodel")
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+
+    def test_no_id_no_file_or_a_corrupt_row_is_no_report(self):
+        self.assertIsNone(self.clients.reported_model("qoder", None, home=self.home))
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+        path = _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json\n")
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+
+    def test_a_client_with_no_transcript_reports_nothing(self):
+        # The rest of the roster has no row in the table, so a run on one of them
+        # is an assumption out loud rather than a silent one.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        for name in ("agy", "qwen", "gemini", "codex", "opencode"):
+            with self.subTest(client=name):
+                self.assertIsNone(self.clients.reported_model(name, QODER_SESSION,
+                                                              home=self.home))
+
+    def test_the_evidence_table_holds_exactly_the_clients_measured(self):
+        # qodercli --help (`--session-id <id>`) and claude --help
+        # (`--session-id <uuid>`) are the two that accept an id from the spawner
+        # and write a transcript under it. Bump this only with a measurement.
+        self.assertEqual(set(self.clients.MODEL_REPORT), {"qoder", "claude"})
+
+
+class WriterProvenanceTests(unittest.TestCase):
+    """FAMILYFENCE-b: `unresolved` said "this run named no model"; it never said
+    "this model is only what we asked for". `source` separates the two, and the
+    difference decides whether a review may claim independence."""
+
+    RUN_ID = "20260929-000000-ff-b-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _native(self, plan, registry=None):
+        return self.agent.resolved_writer(dict(plan), False,
+                                          registry=registry or {"models": {}},
+                                          home=self.home)
+
+    def test_a_gateway_run_is_proven_by_the_gateway(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
+             mock.patch.object(agent, "_call_log_rows",
+                               lambda *a, **k: [{"sessionTag": "lane-x/" + self.RUN_ID,
+                                                 "provider": "mimo", "model": "mimo-7",
+                                                 "status": 200,
+                                                 "timestamp": "2026-09-29T00:00:01Z"}]):
+            writer = agent.resolved_writer(plan, True, registry={"models": {}})
+        self.assertEqual(writer["source"], agent.WRITER_SOURCE_GATEWAY)
+        self.assertTrue(agent.writer_is_proven(writer))
+
+    def test_a_native_run_the_client_can_name_is_proven(self):
+        # The plan asked for `Efficient`; the transcript says the run answered with
+        # Qwen3.8-Flash. The record carries the transcript's answer.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        _qoder_run_log(self.home, QODER_SESSION, {"qfmodel": "Qwen3.8-Flash"})
+        writer = self._native({"client": "qoder", "model": "Efficient",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED,
+                               "client_session_id": QODER_SESSION},
+                              registry={"models": {"qwen3.8-flash": {"family": "qwen"}}})
+        self.assertEqual(writer["model"], "Qwen3.8-Flash")
+        self.assertEqual(writer["family"], "qwen")
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_REPORT)
+        self.assertTrue(self.agent.writer_is_proven(writer))
+
+    def test_a_pin_the_client_cannot_confirm_stays_a_pin(self):
+        writer = self._native({"client": "qoder", "model": "Qwen3.8-Max",
+                               "model_source": self.agent.WRITER_SOURCE_PIN,
+                               "client_session_id": QODER_SESSION})
+        self.assertEqual(writer["model"], "Qwen3.8-Max")
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_PIN)
+        self.assertFalse(self.agent.writer_is_proven(writer))
+
+    def test_an_unnamed_native_model_is_an_assumption_and_says_so(self):
+        writer = self._native({"client": "qoder", "model": "Qwen3.8-Flash",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED})
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_ASSUMED)
+        self.assertFalse(self.agent.writer_is_proven(writer))
+
+    def test_a_plan_placeholder_is_never_recorded_as_a_model(self):
+        # claude takes no --model unless the caller names one, so what answers is
+        # the account's business — and "(client default)" is not a model name.
+        writer = self._native({"client": "claude", "model": "(client default)",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED})
+        self.assertEqual(writer["model"], self.agent.WRITER_UNRESOLVED)
+        self.assertEqual(writer["family"], self.agent.WRITER_UNRESOLVED)
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_ASSUMED)
+
+    def test_the_free_promo_id_keeps_its_provider_out_of_the_model_name(self):
+        writer = self._native({"client": "qoder", "model": "jetski/jetski-9",
+                               "model_source": self.agent.WRITER_SOURCE_PIN})
+        self.assertEqual((writer["provider"], writer["model"]), ("jetski", "jetski-9"))
+
+    def test_only_the_two_witnesses_count_as_proven(self):
+        self.assertEqual(self.agent.WRITER_PROVEN_SOURCES,
+                         {self.agent.WRITER_SOURCE_GATEWAY,
+                          self.agent.WRITER_SOURCE_REPORT})
+
+    def test_the_writer_line_carries_its_own_provenance(self):
+        agent = self.agent
+        line = agent.writer_line({"provider": "qoder", "model": "Qwen3.8-Flash",
+                                  "family": "qwen", "source": agent.WRITER_SOURCE_REPORT})
+        self.assertEqual(line,
+                         "writer: qoder/Qwen3.8-Flash (qwen) source=client-reported")
+
+
+class CrossFamilyProvenanceTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 3: the review path says out loud when its
+    reviewer is only assumed. A qoder review whose transcript proves the model
+    keeps its CROSS-FAMILY: yes; one with no proof loses the claim, not the run."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _run(self, transcript=None, over=None):
+        agent = self.agent
+
+        def read_kill_record(run_id):
+            # The author's family comes from ITS record; this run has a record of
+            # its own, so the writer line is written back where a reader can find
+            # it. Neither path ever reads a job.json.
+            if run_id == FENCE_WRITER_RUN:
+                return {"mode": "write",
+                        "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                                   "family": "nvidia",
+                                   "source": agent.WRITER_SOURCE_GATEWAY}}
+            return {"mode": "review"}
+
+        def prepare(statedir, root):
+            patch = mock.patch.object(agent, "mint_client_session_id",
+                                      lambda: QODER_SESSION)
+            patch.start()
+            self.addCleanup(patch.stop)
+            if transcript:
+                _qoder_transcript(self.home, QODER_SESSION, transcript)
+                display = "Qwen3.8-Flash" if transcript == "qfmodel" else transcript
+                _qoder_run_log(self.home, QODER_SESSION, {transcript: display})
+
+        with mock.patch.object(agent, "read_kill_record", read_kill_record):
+            return _fallthrough_run(
+                self, ["r-free"], stops=0,
+                args_over=dict({"client": "qoder", "card": "kind=review",
+                                "review_of": FENCE_WRITER_RUN, "isolate": False},
+                               **(over or {})),
+                families={"qwen3.8-flash": "qwen", "efficient": "qwen",
+                          "nemotron-3-ultra": "nvidia"},
+                env_over={"HOME": self.home}, prepare=prepare)
+
+    def test_a_review_with_no_client_report_is_unknown_not_yes(self):
+        # The plan's model sits outside the author's family, and that is exactly
+        # the claim a review may not make from an assumption.
+        rc, out, err, calls, _ = self._run()
+        self.assertIn("source=assumed-default", out + err)
+        self.assertIn("family: writer=nvidia reviewer=unresolved CROSS-FAMILY: unknown",
+                      out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_proven_review_keeps_its_verdict(self):
+        rc, out, err, calls, _ = self._run(transcript="qfmodel")
+        self.assertIn("writer: qoder/Qwen3.8-Flash (qwen) source=client-reported",
+                      out + err)
+        self.assertIn("family: writer=nvidia reviewer=qwen CROSS-FAMILY: yes", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_pinned_review_with_no_report_is_pinned_and_still_unknown(self):
+        # A caller-named model is a stronger claim than a default and a weaker one
+        # than a transcript: qoder substitutes an unknown name and exits 0.
+        rc, out, err, calls, _ = self._run(over={"model": "Efficient"})
+        self.assertIn("source=pinned", out + err)
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_proven_same_family_review_costs_the_run(self):
+        # The proof makes the refusal stronger, not weaker.
+        rc, out, err, calls, _ = self._run(transcript="efficient",
+                                           over={"review_of": None,
+                                                 "not_family": ["qwen"]})
+        self.assertIn("family: writer=unresolved reviewer=qwen CROSS-FAMILY: unknown",
+                      out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_the_record_written_for_the_run_carries_the_source(self):
+        writes = []
+        agent = self.agent
+        real = agent.write_kill_record
+
+        def spy(run_id, record):
+            if (record or {}).get("writer"):
+                writes.append(dict(record["writer"]))
+            return real(run_id, record)
+
+        with mock.patch.object(agent, "write_kill_record", spy):
+            rc, out, err, calls, _ = self._run(transcript="qfmodel")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(writes[-1]["source"], agent.WRITER_SOURCE_REPORT)
+        self.assertEqual(writes[-1]["family"], "qwen")
+
+
+class NativeSessionIdTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 2, the argv half: the transcript join needs an
+    id only the spawner can supply, so the two clients that keep a transcript get
+    the one flag they document for it — and no client gets a flag it would choke
+    on."""
+
+    UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+    def test_a_qoder_run_is_told_which_session_it_owns(self):
+        r = plan_of("--client", "qoder", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"--session-id " + self.UUID)
+
+    def test_a_qoder_pin_reaches_the_argv(self):
+        # qodercli --help: `-m, --model <model>` ("Default and New Models use
+        # model name"), and `qodercli --list-models` lists the names that work.
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model Efficient", r.stdout)
+        self.assertRegex(r.stdout, r"--session-id " + self.UUID)
+
+    def test_a_claude_headless_run_is_told_which_session_it_owns(self):
+        # claude --help: `--session-id <uuid>  Use a specific session ID for the
+        # conversation (must be a valid UUID)`.
+        r = plan_of("--client", "claude", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"claude -p.*--session-id " + self.UUID)
+
+    def test_a_joinable_claude_run_is_left_alone(self):
+        # --bg --remote-control owns its session; a second id on it is at best
+        # ignored, and the point of the id is a transcript this process can name.
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t",
+                    env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--session-id", r.stdout)
+
+    def test_a_gateway_run_mints_no_session_id(self):
+        for client in ("qwen", "gemini", "codex", "agy"):
+            r = plan_of("--client", client, "t", env=claude_env())
+            self.assertEqual(r.returncode, 0, "%s: %s" % (client, r.stderr))
+            self.assertNotIn("--session-id", r.stdout, client)
+
+    def test_the_mcp_spawn_forwards_a_qoder_pin(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "client": "qoder",
+                                         "model": "Qwen3.8-Flash",
+                                         "card": {"role": "review"}})
+        self.assertEqual(argv[argv.index("--model") + 1], "Qwen3.8-Flash")
+
+
+class QoderFenceTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 2, the gate half: a pinned model is a model
+    choice, so the fence rules it for an own-account client exactly as it rules
+    one for a gateway client — and a name the registry cannot place stays unsafe
+    for a review, which is 0dc1691's rule, not a new one."""
+
+    def test_a_pinned_model_inside_the_fence_is_refused(self):
+        # nemotron is not a qoder model and nobody would run it there: it is the
+        # family this gate has to rule. --not-family nvidia leaves the card's own
+        # route clean (no review route carries an nvidia leg), so the only thing
+        # that can refuse the run is the pin.
+        r = plan_of("--client", "qoder", "--card", "role=review", "--model",
+                    "nemotron-3-ultra", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("nvidia", r.stderr)
+
+    def test_the_pin_is_ruled_for_an_own_account_client_though_no_route_names_it(self):
+        # qoder never appears in a route: its model goes to the CLI verbatim, so a
+        # fence that only reads routes cannot see this choice at all.
+        agent = load_agent()
+        args = argparse.Namespace(client="qoder", tier=None, card="role=review",
+                                  model="Qwen3.8-Flash", free=False,
+                                  free_model=agent.DEFAULT_FREE_MODEL, clean=False,
+                                  allow_training=False, task="t", title=None,
+                                  not_family=["qwen"], review_of=None,
+                                  no_fallthrough=False, isolate=True)
+        registry = {"routes": {}, "policy": {},
+                    "models": {"qwen3.8-flash": {"family": "qwen"}}}
+        with mock.patch.object(agent, "load_live_registry", lambda: registry):
+            fence = agent.family_fence(args)
+            self.assertEqual(fence["families"], ["qwen"])
+            with self.assertRaises(agent.FamilyFenceRefused):
+                agent.resolve_route_unchecked(args, {}, agent.clients.CLIENTS["qoder"],
+                                              fence=fence)
+
+    def test_a_pin_outside_the_fence_reaches_the_client(self):
+        agent = load_agent()
+        args = argparse.Namespace(client="qoder", tier=None, card="role=review",
+                                  model="Qwen3.8-Flash", free=False,
+                                  free_model=agent.DEFAULT_FREE_MODEL, clean=False,
+                                  allow_training=False, task="t", title=None,
+                                  not_family=["nvidia"], review_of=None,
+                                  no_fallthrough=False, isolate=True)
+        registry = {"routes": {}, "policy": {},
+                    "models": {"qwen3.8-flash": {"family": "qwen"}}}
+        cfg = {"providers": {"omniroute": {"models": {n: {} for n in
+                                                     list(routing.ALL_COMBOS)}}}}
+        with mock.patch.object(agent, "load_live_registry", lambda: registry):
+            route = agent.resolve_route_unchecked(args, cfg,
+                                                  agent.clients.CLIENTS["qoder"],
+                                                  fence=agent.family_fence(args))
+        self.assertIsNotNone(route["tier"])
+
+    def test_an_unplaceable_pin_is_not_safe_for_a_review(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "--model",
+                    "NoSuchModel99", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+
+    def test_the_same_unplaceable_pin_is_allowed_for_a_writer(self):
+        # strictness is the review role, not a general ban on unknown models.
+        r = plan_of("--client", "qoder", "--card", "role=implement", "--model",
+                    "NoSuchModel99", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_writers_family_excludes_a_pinned_review_of_it(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        agent = load_agent()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}, clear=False):
+            self.assertTrue(agent.write_kill_record(FENCE_WRITER_RUN, {
+                "mode": "write",
+                "writer": {"provider": "qoder", "model": "Qwen3.8-Flash",
+                           "family": "qwen", "source": "client-reported"}}))
+        # The Claude declaration is the same one every other fence test here uses
+        # (claude_env): a qoder model name is no route the registry carries, so the
+        # budget gate prices nothing and refuses it before the fence ever speaks.
+        # This test measures the fence's answer, not the budget's.
+        env = claude_env(AUTOOS_STATE_DIR=tmp)
+        r = run_agent("run", "--dry-run", "--client", "qoder", "--card", "role=review",
+                      "--review-of", FENCE_WRITER_RUN, "--model", "Qwen3.8-Flash", "t",
+                      env=env)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("qwen", r.stderr)
+
+
+class PsWriterRowTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 1: a row of `ps` is the same record `status`
+    answers with, and the runner-private kill store is its only source — job.json
+    lives in the directory the worker owns."""
+
+    RUN_ID = "20260929-000000-ffrow-aaaaaa"
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR")}
+        os.environ["AUTOOS_STATE_DIR"] = os.path.join(self.tmp, "state")
+        os.environ["AUTOOS_WORKERS_DIR"] = self.workers
+        self.addCleanup(self._restore, old)
+
+    def _restore(self, old):
+        for name, value in old.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _row(self, wid=RUN_ID, **over):
+        rec = {"id": wid, "pid": os.getpid(),
+               "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "lane-a",
+               "client": "qoder", "model": "Efficient",
+               "model_source": "assumed-default", "route": "", "title": "",
+               "cwd": "/x", "sandbox": "", "task_head": "do a thing", "depth": 1}
+        rec.update(over)
+        with io.open(os.path.join(self.workers, wid + ".json"), "w",
+                     encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return wid
+
+    def _table(self, rows):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.agent._print_worker_table(rows)
+        return out.getvalue()
+
+    def test_a_run_the_client_answered_for_shows_the_model_that_answered(self):
+        wid = self._row()
+        self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_REPORT}}))
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual(rows[0]["model"], "Efficient", "what was asked stays")
+        self.assertEqual(rows[0]["writer"]["model"], "Qwen3.8-Flash")
+        self.assertEqual(rows[0]["family"], "qwen")
+        self.assertTrue(rows[0]["model_proven"])
+        table = self._table(rows)
+        self.assertIn("Qwen3.8-Flash", table)
+        self.assertIn("qwen", table)
+        self.assertNotIn("qwen?", table)
+
+    def test_an_assumed_writer_is_marked_unproven_in_the_table(self):
+        wid = self._row()
+        self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Efficient", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_ASSUMED}}))
+        rows = self.agent.list_workers(self.workers)
+        self.assertFalse(rows[0]["model_proven"])
+        self.assertIn("qwen?", self._table(rows))
+
+    def test_a_run_with_no_writer_row_invents_none(self):
+        self._row()
+        rows = self.agent.list_workers(self.workers)
+        self.assertIsNone(rows[0]["writer"])
+        self.assertEqual(rows[0]["family"], "")
+        self.assertFalse(rows[0]["model_proven"])
+        self.assertIn("Efficient", self._table(rows))
+
+    def test_a_record_written_for_another_run_never_answers_this_one(self):
+        # The store is keyed by the run id, so the join cannot be talked into
+        # lending another run its writer — and the other run keeps its own, or the
+        # row would read as "the store is empty" instead of "the ids disagree".
+        other = "20260929-000001-ffrow-bbbbbb"
+        self._row()
+        self._row(other)
+        self.agent.write_kill_record(other, {
+            "mode": "write", "writer": {"provider": "qoder", "model": "Qwen3.8-Max",
+                                        "family": "qwen", "source": "client-reported"}})
+        rows = self.agent.list_workers(self.workers)
+        by_id = {r["id"]: r for r in rows}
+        self.assertIsNone(by_id[self.RUN_ID]["writer"])
+        self.assertEqual(by_id[other]["writer"]["model"], "Qwen3.8-Max")
+
+    def test_the_mcp_ps_rows_carry_the_same_writer(self):
+        wid = self._row()
+        self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+            "source": "client-reported"}})
+        out = mcp_server.ps()
+        row = [w for w in out["workers"] if w["id"] == wid][0]
+        self.assertEqual(row["writer"]["model"], "Qwen3.8-Flash")
+        self.assertEqual(row["family"], "qwen")
+
+    def test_a_forged_job_json_writer_is_ignored_by_status(self):
+        path = os.path.join(mcp_server.state_root(), self.RUN_ID)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": self.RUN_ID, "run_id": self.RUN_ID, "request": {"client": "qoder"},
+            "task": "t", "argv": [], "cwd": str(ROOT), "route": {},
+            "started": time.time(), "pid": os.getpid(),
+            "model": "claude-sonnet-5",
+            "writer": {"provider": "qoder", "model": "claude-sonnet-5",
+                       "family": "anthropic", "source": "client-reported"}})
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": 0, "ended": time.time()})
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Efficient", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_ASSUMED}})
+        st = mcp_server._state(path)
+        self.assertEqual(st["writer"]["model"], "Efficient", st)
+        self.assertEqual(st["writer"]["source"], "assumed-default")
+
+    def test_a_live_run_records_the_model_it_was_asked_for_and_why(self):
+        # Before an answer exists, the row can only carry the ask — and it has to
+        # say where the ask came from, so a default never reads as a pin. A read-only
+        # qoder review is the run that needs no clone, so this stays an in-place run
+        # and only the record is under test.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0,
+            args_over={"client": "qoder", "card": "kind=review", "isolate": False},
+            env_over={"HOME": tempfile.mkdtemp()})
+        self.assertEqual(rc, 0, out + err)
+        rows = self.agent.list_workers(self.agent.workers_dir(), include_ended=True)
+        row = [r for r in rows if r["client"] == "qoder"][-1]
+        self.assertEqual(row["model"], "Qwen3.8-Flash")
+        self.assertEqual(row["model_source"], "assumed-default")
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; group_record() is empty on Windows")
 class AttemptGroupRecordTests(unittest.TestCase):

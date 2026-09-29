@@ -5,6 +5,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — every client records the model that really answered; qoder can be pinned (FAMILYFENCE-b / 2026-09-29)
+
+FAMILYFENCE fenced by family, and 0dc1691 prints a `CROSS-FAMILY` verdict — but for
+an own-account client the verdict rested on an *assumption*. Measured 2026-09-29: for
+`client=qoder` the runner-private record's `model` was the plan's `QODER_DEFAULT_MODEL`
+(`Qwen3.8-Flash`), `exit.json` held only a rc, `ps`/`status`/`result` showed no model,
+and `spawn` had no way to name one. qodercli 1.1.63 makes the assumption a lie: an
+unknown `--model` is **silently substituted** — it prints `falling back to default
+model "efficient"`, answers with the account's promo model (`qfmodel` / display name
+`Efficient`), and **exits 0**. A qoder review's family could be neither proven nor
+fenced, yet the verdict still read `yes`.
+
+- **Provenance is now in the writer record** (`tools/autoos-agent.py`): the resolved
+  writer gained a `source` field — `gateway-log` (the OmniRoute call log),
+  `client-reported` (the client's own transcript), `pinned` (an explicit `--model`),
+  `assumed-default` (only the plan guessed). `WRITER_PROVEN_SOURCES` is the first two:
+  an *asked-for* model is never evidence of what answered. `writer_is_proven()` gates
+  the post-run verdict, so an unproven reviewer prints
+  `family: writer=.. reviewer=unresolved CROSS-FAMILY: unknown` — requirement 3's
+  `assumed-default → unknown`, never `yes`. The `source=` string rides on the `writer:`
+  line so a human reading one run sees why it believes what it believes.
+- **qoder/claude report their own model** (`tools/autoos_clients.py`): a new
+  `MODEL_REPORT` table names where each client's truth lives. qoder's is
+  `~/.qoder/projects/*/<session>.jsonl` (an assistant `message.model` and a
+  `runtime-config` line) joined to `~/.qoder/logs/runs/*/manifest.json` (argv → the
+  session id) and `qodercli.log` (`model_config={"key":..,"display_name":..}`) — the
+  account stores an encrypted catalog, so the key→display translation is read from the
+  run log, not `~/.qoder/.models`. `reported_model()` returns `None` when it cannot
+  tell, and `None` is the honest answer that keeps `CROSS-FAMILY: unknown`. claude's
+  transcript already carries a full model id. The join is exact because both clients
+  accept a caller-supplied `--session-id`: `build_plan` mints one per attempt
+  (qodercli refuses a duplicate id) and `build_command` puts it on the argv.
+- **A pin reaches the record and the fence**: `resolved_writer`'s native branch prefers
+  `client-reported` over the `pinned`/`assumed-default` plan model, and
+  `resolve_route_unchecked` now fences `--model` for an **own-account** client too —
+  qoder never appears in a route, so a fence that only reads routes was blind to the
+  whole choice. `--model` (CLI) / `model` (MCP `spawn`) already reached argv; the
+  pinned family now feeds `family_fence` like a gateway leg's, and a name the registry
+  cannot place stays unsafe for a review role (0dc1691's rule, unchanged) while a write
+  run keeps it.
+- **Surfaced, never from job.json** (R-orch-17): the kill record is the only source.
+  `ps` gained `MODEL`/`FAMILY` columns that prefer the proven writer's model and print
+  `?` for an unproven one, plus `model_source`/`writer`/`model_proven` on every row;
+  `status`/`result` already return the record's `writer`, so `source` flows through the
+  MCP and CLI for every client. `worker_writer(run_id)` reads the record and nothing else.
+- **Tests** (`tests/test_autoos_spawner.py`): `QoderSessionEvidenceTests` (a synthetic
+  transcript home proves the join is machine-independent — a real `~/.qoder` session id
+  answering would be the AGENTS.md-forbidden "passes only on the box it was written
+  on"), `WriterProvenanceTests`, `CrossFamilyProvenanceTests` (assumed-default → unknown,
+  never yes; a proven same-family reviewer still costs rc 12), `NativeSessionIdTests`,
+  `QoderFenceTests`, `PsWriterRowTests` (a record written for another run never answers
+  this one — and the other row keeps *its* writer, so the test cannot pass by both
+  being `None`).
+- **Deviations worth naming**: no `--list-models` pre-flight refusal — that list is
+  account/network-bound and the brief asked the post-run verdict be honest, which the
+  provenance gate is; qoder stays on text output because `review_verdict()` anchors
+  `^\s*VERDICT:`; the *author's* family still fences even when its own source is
+  unproven (the conservative direction — refuse a possibly-cross review, never claim a
+  cross one).
+
 ### Added — a review never silently runs on the writer's model family (FAMILYFENCE / 2026-09-29)
 
 D-115 says a review is independent because it comes from another model family. The
