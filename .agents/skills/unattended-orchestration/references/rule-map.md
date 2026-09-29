@@ -169,3 +169,16 @@ before, so the rows below record what each one absorbed and where the lesson cam
 | `R-orch-10` | merged | widened from sudo/root to installer and state-mutating changes (L21) |
 | `R-orch-13` | merged | "bigger" sized as diff lines including tests, read off the bucket table (L24-25) |
 | `R-worker-08` | merged | the detached copy is `git clone --no-hardlinks` **or** `git worktree add --detach`; `cp -r` of a worktree is forbidden outright — the copy shares the original's index, so a later `git checkout` mutates it (ci7); `tar` is usable only where no test reads git — a tar export broke 37 git-fixture tests (L30) |
+
+## Fourth-generation ids (fold 2026-09-29, SKILLFOLD-1)
+
+Four measured lessons from the SCOPEBUS / SB-A / FREEKEYS lanes, each bound by
+`tests/test_skill_rules.py::FoldedLessonRuleTests`. The `SKILL.md` line is the compressed rule;
+the full lesson — the detail the 200-char rule cap dropped — lives here.
+
+| id | from | what it absorbed or changed |
+|---|---|---|
+| `R-orch-17` | new | kill targets, run identity and run mode come only from a runner-private record written at spawn, never from worker-writable state (`job.json`, `AUTOOS_TASK_DIR`) — every fix that read `job.json` re-opened the hole the previous one closed (SB-A2..A3, Muse/Sonnet cross-family reviews) |
+| `R-orch-18` | new | a lane that changes the registry, routes or combos lists in its Verify line: `tests/test_registry_render.py`, every renderer's `--check`, and the bash filters that exercise the renders and apply (`tests/linux/17-ai-routing.sh`: sync-router-tiers, apply) — a pytest-only verify let FREEKEYS-2 pass review with 3 CI reds (CI 36506339556, FREEKEYS-2c) |
+| `R-orch-19` | new | a spawner change that alters how a child is launched (wrapper, env, cwd) needs one unmocked spawn test through the real Popen chain **and**, before READY, one live MCP spawn to rc 0 with `job.json` naming the scope when `scope_supported` — mocked tests and CI were green while every live MCP spawn broke (SCOPEBUS 01:30-01:45Z; `tests/test_autoos_spawner.py::test_a_real_spawn_runs_in_its_scope`) |
+| `R-coord-11` | new | the autoos-agent MCP server loads its code from the session's cwd checkout: ff that checkout to main **first**, then restart the MCP, then verify with one isolated probe spawn (sandbox HEAD + `job.json` scope) — ff-ing under a running server mixed old server code with a new runner (SCOPEBUS probes 1-4, 2026-09-29) |
