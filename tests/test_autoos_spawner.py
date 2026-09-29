@@ -15581,7 +15581,10 @@ class WinshimMcpJobTests(unittest.TestCase):
                 self.assertEqual(mcp_server.run_job(path), 0)
         argv = box["argv"]
         self.assertEqual(argv[:1], ["systemd-run"], argv)
-        self.assertEqual(argv[argv.index("--") + 1:],
+        # SCOPEBUS: `env -u <bus names>` sits between the wrapper and the CLI
+        inner = argv[argv.index("--") + 1:]
+        inner = inner[1 + 2 * len(self.agent.SCOPE_BUS_ENV):]
+        self.assertEqual(inner,
                          [self.resolved(sys.executable), mcp_server.AGENT, "--version"],
                          argv)
 

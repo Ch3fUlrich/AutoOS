@@ -716,21 +716,9 @@ def run_job(path: str) -> int:
     job = _read_json(os.path.join(path, "job.json"))
     cmd = [sys.executable, AGENT] + job["argv"]
     env = agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path})
-    if agent.scope_supported():
-        # derived from the run id, and identical to what `cancel` will derive;
-        # job.json keeps it only so a human reading the dir sees the unit.
-        job["scope"] = agent.scope_unit_name(run_id)
-        # SCOPEBUS: systemd-run needs the user bus the scrubbed env lacks.
-        cmd, env = agent.worker_scope_launch(job["scope"], cmd, env)
-    else:
-        job.pop("scope", None)
-    job.pop("group", None)  # retired channel: SB-A3 item C
-    _write_json(os.path.join(path, "job.json"), job)
-    write_kill_record(run_id, agent.group_record())
     try:
-        # WINSHIM: the same resolution every other launch site uses, applied after
-        # the scope wrapper is chosen so `systemd-run` stays the argv[0] it is
-        # started by and the program behind its `--` is the resolved file.
+        # WINSHIM: the same resolution every other launch site uses, applied to
+        # the CLI command before any scope wrapper goes around it.
         cmd = agent.resolve_client_executable(cmd)
     except agent.ClientMissing as exc:
         # This runner is detached: no caller is left to read a raised exception, so
@@ -742,6 +730,17 @@ def run_job(path: str) -> int:
         _write_exit(path, {"rc": 3, "ended": time.time()})
         print(message, file=sys.stderr)
         return 3
+    if agent.scope_supported():
+        # derived from the run id, and identical to what `cancel` will derive;
+        # job.json keeps it only so a human reading the dir sees the unit.
+        job["scope"] = agent.scope_unit_name(run_id)
+        # SCOPEBUS: systemd-run needs the user bus the scrubbed env lacks.
+        cmd, env = agent.worker_scope_launch(job["scope"], cmd, env)
+    else:
+        job.pop("scope", None)
+    job.pop("group", None)  # retired channel: SB-A3 item C
+    _write_json(os.path.join(path, "job.json"), job)
+    write_kill_record(run_id, agent.group_record())
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
         # at this run dir; the CLI forwards its own chosen env onward, so the
