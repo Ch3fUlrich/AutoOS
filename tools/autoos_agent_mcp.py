@@ -648,7 +648,10 @@ def spawn(req: dict) -> dict:
                             # to the runner and the gate inside its CLI.
                             cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True,
-                            env=agent.spawner_child_env(extra=budget_env))
+                            # SCOPEBUS: the runner launches the worker scope,
+                            # so it alone gets the user bus back.
+                            env=agent.spawner_child_env(extra=budget_env,
+                                                        scope_bus=True))
     job["pid"] = proc.pid
     # SB-A2 (D-103) item B: the runner leads a session of its own, so its pid IS
     # its pgid, and its leader start time is only certainly THIS process the

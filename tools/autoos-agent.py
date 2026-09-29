@@ -768,7 +768,8 @@ def _child_env_passed(name: str) -> bool:
             name == resolver.CLAUDE_CRITICAL_ENV)
 
 
-def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> dict:
+def spawner_child_env(base: dict | None = None, extra: dict | None = None,
+                      scope_bus: bool = False) -> dict:
     """The environment of a child that is *our own CLI*, not a worker.
 
     The MCP server preflights a plan and runs a detached job, both by exec'ing
@@ -782,9 +783,16 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None) -> di
     ``extra`` is a caller's own dictionary, which is exactly why it has to clear
     the same checks as everything else: a bare ``env.update(extra)`` made the
     whole policy a matter of caller discipline (FF1c item 2).
+
+    ``scope_bus`` is for the MCP server's detached runner only: it launches the
+    worker scope, and `systemd-run --user` needs the user bus (SCOPEBUS). Without
+    it the runner's scope probe saw no bus and every worker ran unscoped.
     """
     env = worker_env({"cwd": os.getcwd(), "env": {}}, None, base=base)
     src = os.environ if base is None else base
+    if scope_bus:
+        for n, v in scope_bus_env(src).items():  # SCOPE_BUS_ENV names only
+            env[n] = v
     if src.get("AUTOOS_OMNIROUTE_KEY"):
         env["AUTOOS_OMNIROUTE_KEY"] = src["AUTOOS_OMNIROUTE_KEY"]
     # CLAUDEBUDGET item 1/3 (ccf6f84) meeting FF1 (D-106): the budget
@@ -5651,7 +5659,9 @@ def worker_scope_argv(unit, cmd) -> list:
     """`systemd-run --user --scope` around `cmd`: the whole subtree joins the cgroup."""
     return (["systemd-run", "--user", "--scope",
              "--unit", unit[:-len(".scope")] if unit.endswith(".scope") else unit,
-             "--collect", "--"] + list(cmd))
+             # the task text is in cmd; systemd >= 256 would expand its $VARs
+             # (older ones fail this flag, the probe sees it, workers fall back)
+             "--collect", "--expand-environment=no", "--"] + list(cmd))
 
 
 # What `systemd-run --user` needs to reach the user manager, and what the worker
@@ -5668,16 +5678,20 @@ def worker_scope_launch(unit, cmd, child_env: dict) -> tuple:
     exactly `child_env` again. Without the first half every launch fails with
     "Failed to connect to bus: No medium found" (f51fc25).
     """
-    env = dict(child_env)
+    # the bus address goes to systemd-run only; `env -u` removes it before the
+    # worker command starts
+    env = dict(child_env, **scope_bus_env())
     # absolute, from the caller's PATH: the scrubbed PATH must not pick the binary
     strip = [shutil.which("env") or "/usr/bin/env"]
     for name in SCOPE_BUS_ENV:
         strip += ["-u", name]
-        if os.environ.get(name):
-            # subprocess-audit: the bus address goes to systemd-run only; `env -u`
-            # removes it before the worker command starts.
-            env[name] = os.environ[name]
     return worker_scope_argv(unit, strip + list(cmd)), env
+
+
+def scope_bus_env(src: dict | None = None) -> dict:
+    """The set SCOPE_BUS_ENV names from `src` (default: this process's env)."""
+    src = os.environ if src is None else src
+    return {n: src[n] for n in SCOPE_BUS_ENV if src.get(n)}
 
 
 _SCOPE_SUPPORTED: bool | None = None
