@@ -3373,7 +3373,12 @@ def load_measured_overlay() -> tuple:
 # FREEKEYS-2 (brief item 2): the credit guard's per-process cache. `plan` is
 # called once per candidate route and a `run` re-plans on every fall-through, so
 # without this the refuse-at-100 % check would page the gateway's call log again
-# for every one of them. One read, one answer, for the life of the process.
+# for every one of them. One read, one answer, per registry, for the life of the
+# process — and keyed by the registry it was built from (FREEKEYS-2c): a second
+# registry in the same process has its own caps, and must not inherit the first
+# one's answer. The entry keeps a reference to that registry, both to make the
+# identity check (`is`) meaningful and to pin the object, so `id()` can never be
+# recycled out from under a live key.
 CREDIT_GUARD_CACHE: dict = {}
 
 
@@ -3412,22 +3417,36 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     leg with (brief FREEKEYS-2 item 2): this month's spend per `credit` provider
     against its own `monthly_cap_usd`, read from the gateway's call log.
 
-    Cheap by design — one usage read per process (`CREDIT_GUARD_CACHE`), and a
-    host with no `credit` provider in the registry makes no call at all. The
-    figure is built by `autoos_usage.credit_guards`, the same reader the `usage`
-    report prints, so what blocks a leg and what the ledger shows are never two
-    numbers. A read that fails (gateway down, key missing or unauthorised, an
-    unparseable page) returns `_credit_guards_unreadable`, not an empty map.
+    Cheap by design — one usage read per registry per process
+    (`CREDIT_GUARD_CACHE`), and a host with no `credit` provider in the registry
+    makes no call at all. The figure is built by `autoos_usage.credit_guards`,
+    the same reader the `usage` report prints, so what blocks a leg and what the
+    ledger shows are never two numbers. A read that fails (gateway down, key
+    missing or unauthorised, an unparseable page) returns
+    `_credit_guards_unreadable`, not an empty map.
+
+    Two things make this safe inside a plan (FREEKEYS-2c, rev-freekeys2 finding
+    4). The cache is keyed by `registry` identity, so a caller that hands this a
+    different registry — a candidate registry compared against the committed one,
+    a lane that reloads — gets guards built from that registry's own caps
+    instead of the first one's answer. And the usage read is wrapped in
+    `except Exception`, not a list of expected types: every failure mode this
+    can predict already refuses the credit legs, and one it cannot predict must
+    do the same rather than raise through `route_plan_for` and take the plan
+    down with it. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
+    `Exception`, so Ctrl-C still works.
 
     `fetch`/`env`/`now` are injectable so a test can drive this without a
     gateway, a key or the clock; the callers pass none of them.
     """
-    if "guards" in CREDIT_GUARD_CACHE:
-        return CREDIT_GUARD_CACHE["guards"]
+    cache_key = id(registry)
+    cached = CREDIT_GUARD_CACHE.get(cache_key)
+    if cached is not None and cached["registry"] is registry:
+        return cached["guards"]
     providers = usage_mod.credit_guard_providers(registry)
     if not providers:
-        CREDIT_GUARD_CACHE["guards"] = {}
-        return CREDIT_GUARD_CACHE["guards"]
+        CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": {}}
+        return CREDIT_GUARD_CACHE[cache_key]["guards"]
     env = os.environ if env is None else env
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = usage_mod.month_start(now)
@@ -3438,9 +3457,9 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
         rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
         guards = usage_mod.credit_guards(registry, rows, cutoff)
-    except (usage_mod.UsageError, OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - fail closed, never fail the plan
         guards = _credit_guards_unreadable(registry, type(exc).__name__)
-    CREDIT_GUARD_CACHE["guards"] = guards
+    CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 
 

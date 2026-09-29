@@ -13198,6 +13198,56 @@ class CreditGuardWiringTests(unittest.TestCase):
         self.assertEqual(len(box), 1, box)
         self.assertEqual(first, second)
 
+    def test_an_unexpected_error_from_the_read_refuses_and_never_crashes_a_plan(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 4): the guard is built inside the
+        plan, so anything the usage read raises has to land in `refuse`, not on
+        the caller's stack.
+
+        `fetch_window` already wraps every transport failure into `UsageError`
+        and the ledger math tolerates odd row shapes, so nothing in today's data
+        walks off the three named types -- the gap was that the catch LISTED
+        them. The next helper in that chain that raises something unforeseen
+        (a `TypeError` out of a new arithmetic step) must refuse the credit legs
+        exactly like a gateway outage does, not raise through `route_plan_for`
+        and take the whole plan down with it. So the unforeseen raise is
+        injected, and the assertion is about the contract, not about a shape the
+        gateway answers with today."""
+        def explode(registry, rows, since=None):
+            raise TypeError("unsupported operand type(s) for *: 'NoneType' and 'float'")
+        with mock.patch.object(self.agent.usage_mod, "credit_guards", explode):
+            guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                                   fetch=self.fetch_ok(self.rows(10, 10)),
+                                                   env=self.env())
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        self.assertIn("TypeError", guards["morph"]["note"])
+        kept, skipped = _usable(self.agent, self.registry(), guards)
+        self.assertIn(("groq", "groq-free"), kept, "the free leg still plans")
+        self.assertIn("morph/morph-priced", skipped)
+
+    def test_a_different_registry_is_not_served_the_first_registry_guards(self):
+        """The process cache is keyed by the registry it was built from: two
+        registries in one process (a test, an MCP server that reloads, a lane
+        comparing a candidate registry) must each get guards read out of their
+        own caps, not the first one's map."""
+        box = []
+        rows = self.rows(5_000_000, 5_000_000)
+        first = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                              fetch=self.fetch_ok(rows, box),
+                                              env=self.env())
+        self.assertEqual(first["morph"]["state"], "refuse", "$10 of $10 spent")
+        roomier = self.registry()
+        roomier["providers"]["morph"]["monthly_cap_usd"] = 1000.0
+        second = self.agent.plan_credit_guards(roomier, now=self.NOW,
+                                               fetch=self.fetch_ok(rows, box),
+                                               env=self.env())
+        self.assertEqual(len(box), 2, "a second registry reused the cached map")
+        self.assertEqual(second["morph"]["state"], "ok", "$10 of $1000 left")
+        third = self.agent.plan_credit_guards(roomier, now=self.NOW,
+                                              fetch=self.fetch_ok(rows, box),
+                                              env=self.env())
+        self.assertEqual(len(box), 2, "the same registry must still be cached")
+        self.assertEqual(third, second)
+
     # --- the call sites ------------------------------------------------------
 
     def _spy_sites(self, marker, target=None):
