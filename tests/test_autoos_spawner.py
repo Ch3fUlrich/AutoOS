@@ -1325,11 +1325,18 @@ class McpToolTests(unittest.TestCase):
                                               "XDG_RUNTIME_DIR": "/run/user/4242"}):
                 self.assertEqual(mcp_server.run_job(path), 0)
         argv = box["argv"]
+        bus_only_for_systemd_run = ()
         if argv[:1] == ["systemd-run"]:
             # SB-A2 (D-103) item A: on a host with a user manager the CLI child is
             # launched inside its scope; the wrapper is the runner's business, and
             # CancelChannelTests measures it. The env is this test's claim.
             argv = argv[argv.index("--") + 1:]
+            # SCOPEBUS: systemd-run gets the bus address, `env -u` drops it
+            # before the CLI child starts.
+            strip = ["env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS"]
+            self.assertEqual(argv[:len(strip)], strip, argv)
+            argv = argv[len(strip):]
+            bus_only_for_systemd_run = ("XDG_RUNTIME_DIR",)
         self.assertEqual(argv, [sys.executable, mcp_server.AGENT, "--version"])
         self.assertNotIn("AUTOOS_WORKER_PGRP", box["env"], box["env"])
         self.assertEqual(path, box["env"]["AUTOOS_TASK_DIR"])
@@ -1337,6 +1344,8 @@ class McpToolTests(unittest.TestCase):
             self.assertIn(name, box["env"], name)
         for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "AUTOOS_KEYS_FILE",
                      "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "XDG_RUNTIME_DIR"):
+            if name in bus_only_for_systemd_run:
+                continue
             self.assertNotIn(name, box["env"], "%s reached the CLI child" % name)
         self.assertNotEqual(dict(os.environ), box["env"],
                             "run_job handed the child the caller's whole env")
@@ -12257,7 +12266,7 @@ class SubprocessEnvAuditTests(unittest.TestCase):
 
     def test_the_mcp_launch_sites_use_the_cli_child_env(self):
         src = io.open(TOOLS / "autoos_agent_mcp.py", encoding="utf-8").read()
-        self.assertEqual(3, src.count("env=agent.spawner_child_env"),
+        self.assertEqual(3, len(re.findall(r"=\s*agent\.spawner_child_env\(", src)),
                          "preflight, the detached runner and run_job must all scrub")
 
 
@@ -14364,8 +14373,15 @@ class CancelChannelTests(unittest.TestCase):
                                  ["systemd-run", "--user", "--scope", "--unit",
                                   "autoos-worker-%s" % run_id, "--collect"], seen["cmd"])
                 self.assertEqual(seen["cmd"][6:],
-                                 ["--", sys.executable, str(mcp_server.AGENT),
+                                 ["--", "env", "-u", "XDG_RUNTIME_DIR",
+                                  "-u", "DBUS_SESSION_BUS_ADDRESS",
+                                  sys.executable, str(mcp_server.AGENT),
                                   "run", "--dry-run", "t"], seen["cmd"])
+                # SCOPEBUS: systemd-run itself needs the caller's user bus; the
+                # scrubbed child env has none ("Failed to connect to bus").
+                for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+                    if os.environ.get(name):
+                        self.assertEqual(seen["env"].get(name), os.environ[name], name)
             else:
                 self.assertNotIn("scope", job, job)
                 self.assertEqual(seen["cmd"][0], sys.executable, seen["cmd"])
@@ -14801,6 +14817,21 @@ class SystemdScopeCancelTests(unittest.TestCase):
         agent = load_agent()
         if not agent.scope_supported():
             raise unittest.SkipTest("systemd-run --user is not available on this host")
+
+    def test_a_scope_launches_from_the_scrubbed_child_env(self):
+        """SCOPEBUS: run_job launches systemd-run with spawner_child_env(), which
+        drops XDG_RUNTIME_DIR; every MCP spawn on f51fc25 died with 'Failed to
+        connect to bus'. The launcher gets the bus back, the worker does not."""
+        agent = load_agent()
+        unit = agent.scope_unit_name("bus-probe-%d" % os.getpid())
+        cmd = [sys.executable, "-c",
+               "import os; print('BUS=%s' % bool(os.environ.get('XDG_RUNTIME_DIR')"
+               " or os.environ.get('DBUS_SESSION_BUS_ADDRESS')))"]
+        argv, env = agent.worker_scope_launch(unit, cmd, agent.spawner_child_env())
+        out = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("BUS=False", out.stdout, out.stdout + out.stderr)
 
     def test_stop_scope_stops_a_setsid_grandchild(self):
         agent = load_agent()

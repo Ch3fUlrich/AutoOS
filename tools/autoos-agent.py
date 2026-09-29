@@ -5654,6 +5654,31 @@ def worker_scope_argv(unit, cmd) -> list:
              "--collect", "--"] + list(cmd))
 
 
+# What `systemd-run --user` needs to reach the user manager, and what the worker
+# must not keep: worker_env drops both, so the launcher gets them back and `env -u`
+# takes them away again inside the scope (SCOPEBUS).
+SCOPE_BUS_ENV = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+
+
+def worker_scope_launch(unit, cmd, child_env: dict) -> tuple:
+    """(argv, env) that start `cmd` in the worker scope from a scrubbed env.
+
+    `child_env` is the scrubbed env `cmd` is meant to run with. systemd-run gets
+    the caller's bus address on top of it, and the command inside the scope gets
+    exactly `child_env` again. Without the first half every launch fails with
+    "Failed to connect to bus: No medium found" (f51fc25).
+    """
+    env = dict(child_env)
+    strip = ["env"]
+    for name in SCOPE_BUS_ENV:
+        strip += ["-u", name]
+        if os.environ.get(name):
+            # subprocess-audit: the bus address goes to systemd-run only; `env -u`
+            # removes it before the worker command starts.
+            env[name] = os.environ[name]
+    return worker_scope_argv(unit, strip + list(cmd)), env
+
+
 _SCOPE_SUPPORTED: bool | None = None
 
 

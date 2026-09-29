@@ -712,11 +712,13 @@ def run_job(path: str) -> int:
     run_id = os.path.basename(os.path.normpath(path))
     job = _read_json(os.path.join(path, "job.json"))
     cmd = [sys.executable, AGENT] + job["argv"]
+    env = agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path})
     if agent.scope_supported():
         # derived from the run id, and identical to what `cancel` will derive;
         # job.json keeps it only so a human reading the dir sees the unit.
         job["scope"] = agent.scope_unit_name(run_id)
-        cmd = agent.worker_scope_argv(job["scope"], cmd)
+        # SCOPEBUS: systemd-run needs the user bus the scrubbed env lacks.
+        cmd, env = agent.worker_scope_launch(job["scope"], cmd, env)
     else:
         job.pop("scope", None)
     job.pop("group", None)  # retired channel: SB-A3 item C
@@ -731,8 +733,7 @@ def run_job(path: str) -> int:
         # a second time rather than a copy of the caller's tokens.
         # SB-A2 (D-103) item A: AUTOOS_WORKER_PGRP is gone with the file it named.
         # The runner's group and the scope unit are recorded above, by the runner.
-        rc = subprocess.call(cmd, cwd=job["cwd"],
-                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
+        rc = subprocess.call(cmd, cwd=job["cwd"], env=env,
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)
