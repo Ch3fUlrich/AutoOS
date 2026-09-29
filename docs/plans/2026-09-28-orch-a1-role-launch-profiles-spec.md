@@ -45,8 +45,8 @@ Local to this spec; operator decisions keep the global `D-nn` form.
 | A1-D1 | A launch profile is a per-role **pre-reviewed grant bundle**: a tracked `.example` template plus a git-ignored runtime file, the same shape as `configuration/mcp/<role>.json` in the restart spec §8. |
 | A1-D2 | Path `configuration/launch-profiles/<role>.settings.json`. The `.settings.json` suffix makes the existing `**/*settings*.json` rule in `policy.risk_rules` (operator Q-013) cover a profile automatically, with no new risk rule. |
 | A1-D3 | The profile's **deny set is rendered from `catalog/agent-harness.json` `fences`** — one home. The profile restates no secret pattern and no `.claude.json` pattern of its own. |
-| A1-D4 | The **pre-granted allow set is narrow and role-scoped**: lane-prefix push and dispatch per `LANE_PREFIXES` (L1-, L2-, WS-, worktree-) — same-name lane push (`Bash(git push origin P*)` + `-u`/`-q` spellings), `FETCH_HEAD:refs/heads/<lane>` push, lane delete (`Bash(git push origin :P*)`), and `gh workflow run` with explicit `--ref` on `<lane>` (both `--ref` spellings) for coordinator roles - a push/dispatch must name its ref so the fences can see it; everything else falls to the prompt; registry lane prefixes: not yet recorded - add them to LANE_PREFIXES when they are; gateway `apply.sh` only in the `l1-routing` profile; `l2-orchestrator` pushes exactly one `L2-*` ref, same-name, no options except `-u`, and runs workflows only with `--ref` on them — per role, not per session: any `l2-orchestrator` session may push/dispatch on any `L2-*` lane branch (per-session scoping is not expressible in a per-role profile) — under the same always-deny fences plus the L2-only single-ref shape fences (round 3, D-138; tightened round 4; shaped round 5) plus the L2-only dispatch trailing shape (round 8). Any `git push` containing a tab, CR or LF is denied on every role (bash splits on them; the fences match spaces only) (round 6); any `git push` containing `;` or `#` is denied on every role (round 8); any `gh workflow run` containing a tab, CR or LF, a second `--ref`, or `-r`/`-R`/`--repo` is denied on every role (round 8). Profiles follow the session's tier, not its host: an L1 coordinator session (including a workstation L1) launches with l1-coordinator, whose grant already covers its own lane prefix (e.g. WS-*); only L2-tier sessions use l2-orchestrator (L2-* only). |
-| A1-D5 | `git push` to `main` and every secret read/write are **always-deny, no override**; a later allow entry can never win (tested, §3.2). |
+| A1-D4 | The **pre-granted allow set is one entry**: the gateway `apply.sh` run grant, in the `l1-routing` profile only. Round 13 (routing-00 D-159) removed every push and workflow-dispatch grant — the lane-prefix push (`git push origin P*` with its `-u`/`-q`/`FETCH_HEAD:refs/heads/P*`/`:P*` spellings for each prefix `L1-`, `L2-`, `WS-`, `worktree-`), the lane dispatch (`gh workflow run --ref P*`, both spellings) and the `l2-orchestrator` own-prefix set (round 3, D-138) — together with every deny entry that existed only to shape them (the L1 no-ref / matching / `@` / refspec denies, the L2 single-ref shape fences, the workflow-run shape denies, the round 6-8 character classes, and `LANE_PREFIXES` itself). A push or dispatch that names no `main` ref is now **unlisted**, so the classifier reads its real argv (§3.2). Profiles still follow the session's tier, not its host: an L1 coordinator session (including a workstation L1) launches with `l1-coordinator`; only L2-tier sessions use `l2-orchestrator`. |
+| A1-D5 | `git push` to `main`, in every spelling that names it, and every secret read/write are **always-deny, no override**; a later allow entry can never win (tested, §3.3). |
 | A1-D6 | No profile sets `--dangerously-skip-permissions`, disables the classifier, or otherwise weakens Claude Code's own permission system (§6). |
 | A1-D7 | `autoos-agent run` and the MCP `spawn` load the profile through Claude Code's own `--settings` (claude/qoder only), keyed by the launch role; an unknown launching role is an error naming the role, never a silent no-profile run. |
 | A1-D8 | REVIVE (ORCH-C1) re-issues the same profile for a restored session and adds no new grant semantics; this spec describes the interface only. |
@@ -105,8 +105,9 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
 - Path: `configuration/launch-profiles/<role>.settings.json` (A1-D2), for `<role>` in §2's set.
 - The tracked template is `<role>.settings.example.json`; the runtime `<role>.settings.json` is
   git-ignored and generated from it, as with `configuration/mcp/`.
-- Shape (the real rendered shape - excerpt of one real profile;
-  exact matcher spellings are pinned in phase 1):
+- Shape (the real rendered shape - excerpt of one real profile; every exact
+  matcher spelling is pinned by `tests/fixtures/push-corpus.json`, decided
+  against the rendered templates):
 
 ```jsonc
 {
@@ -116,16 +117,13 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
   "mcpConfig": "configuration/mcp/l2-orchestrator.json",
   "permissions": {
     "allow": [
-      "Bash(git push origin *)",
-      "Bash(git push -u origin *)",
-      "Bash(git push -q origin *)",
-      "Bash(gh workflow run * --ref *)",
-      "Bash(gh workflow run * --ref=*)",
-      "Bash(bash configuration/omniroute/apply.sh:*)"
+      "Bash(bash configuration/omniroute/apply.sh:*)"  // the only grant left (round 13)
     ],
     "deny": [
-      "Bash(*git push * main)",
-      "Bash(*git push *:main*)"
+      "Bash(*git*push* main)",
+      "Bash(*git*push*+refs/heads/main)",
+      "Bash(*git*push*--force*)",
+      "Bash(*gh workflow run*--ref main)"
       // + every pattern rendered from catalog/agent-harness.json fences (A1-D3)
     ]
   }
@@ -149,42 +147,96 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
 
 ### 3.2 PRE-GRANTED allow (narrow, role-scoped)
 
+**Round 13 (routing-00 D-159) emptied this table of push and dispatch.** One entry survives:
+
 | Grant | Roles | Why pre-granted | Guard |
 |---|---|---|---|
-| Lane-prefix push: `Bash(git push origin P*)`, `Bash(git push -u origin P*)`, `Bash(git push -q origin P*)` for each `P` in `LANE_PREFIXES` (L1-, L2-, WS-, worktree-). Plus `Bash(git push origin FETCH_HEAD:refs/heads/P*)` and `Bash(git push -q origin FETCH_HEAD:refs/heads/P*)` for coordinator fetch-and-push. Plus `Bash(git push origin :P*)` for lane delete. | coordinators (`l1-*`) | the coordinator pushes lane branches and must not stop on a push prompt | the L1 grant requires an explicit origin ref - a push must name its ref so the fences can see it; forms matching no allow fall to the permission prompt (fail safe), never pre-granted; the always-deny below removes `main` and the no-ref / matching (`:`/`+:`) / `@` (HEAD) forms; a test enumerates the ways to spell "main"; any `git push` containing a tab, CR or LF, a `;`, or a `#` is denied on every role (bash splits on them or drops the comment; the fences match spaces and literal refs only). Registry lane prefixes: not yet recorded - add them to LANE_PREFIXES when they are. |
-| Lane-prefix workflow dispatch: `Bash(gh workflow run * --ref P*)` and `Bash(gh workflow run * --ref=P*)` for each `P` in `LANE_PREFIXES` (L1-, L2-, WS-, worktree-). | coordinators | CI is triggered by workflow dispatch from a branch (the repo's own pre-merge gate, AGENTS.md §7) | the L1 grant requires an explicit `--ref` - a bare run (default branch = main) falls to prompt, `-R`/`--repo` (another repo), a second `--ref` or `-r` (last-flag-wins), and any tab/CR/LF deny outright; branch-scoped by the command; `main` dispatch stays deny |
-| `Bash(git push origin L2-*)` (+ the `-u` spelling) and `Bash(gh workflow run * --ref L2-*)` (+ the `--ref=` spelling) | **`l2-orchestrator` only** (round 3, D-138; tightened round 4; shaped round 5) | the orchestrator pushes any `L2-*` lane branch and dispatches CI on it without a prompt — per-role scope: any `l2-orchestrator` session may use any `L2-*` branch, not only one it created | narrower than the coordinator grant: other prefixes, non-origin remotes and bare runs stay unlisted; the same always-deny fence set applies and deny wins (an `L2-x:main` refspec denies); the L2-only fences deny every refspec colon, `refs/` path and delete flag (round 4) and, by shape, anything after the branch token plus any option before the ref but `-u` (round 5), so only exactly one `L2-*` ref, same-name, no options except `-u` is allowed |
-| `Bash(bash configuration/omniroute/apply.sh:*)` | **`l1-routing` only** | the gateway apply is a reviewed, idempotent, site-free script (APPLYIDEM `36be9c9`) | the model may *run* apply.sh but may not *read* its key (below); apply.sh reads `manage.key` itself |
+| `Bash(bash configuration/omniroute/apply.sh:*)` | **`l1-routing` only** | the gateway apply is a reviewed, idempotent, site-free script (APPLYIDEM `36be9c9`) | the model may *run* apply.sh but may not *read* its key (§3.3); apply.sh reads `manage.key` in its own process |
 
 - The gateway-apply entry is the sharpest illustration of "narrower pre-reviewed grant": the
   session is allowed to **run** the script but stays **denied** reading
   `configuration/api-keys.yml`, `~/.config/autoos/ai-stack/client.key` and `manage.key`. The
   secret never enters the model's context; the reviewed tool reads it in its own process.
-- The `L2-` prefix (round 3, D-138) is read off the repo's own branches (`L2-<name>/...`):
-  no stated L2 branch-naming convention exists in the orchestration skill or docs text. If
-  that convention ever changes, the grant prefix moves with it in the same change.
+- **Removed in round 13 (D-159):** the lane-prefix push grant (`git push origin P*` with its `-u`
+  / `-q` / `FETCH_HEAD:refs/heads/P*` / `:P*` spellings for each lane prefix `L1-`, `L2-`, `WS-`,
+  `worktree-`), the lane dispatch grant (`gh workflow run * --ref P*`, both spellings), the
+  `l2-orchestrator` own-prefix grant (round 3, D-138) — and with them every deny entry that
+  existed only to *shape* a grant: the L1 no-ref / matching (`:` / `+:`) / `@` and refspec denies,
+  the L2 single-ref shape fences (rounds 4-5), the workflow-run shape denies (rounds 8-9) and the
+  round 6-8 character classes (tab/CR/LF, quotes, `$`, backtick, backslash, braces, `&`, `>`,
+  `<`, glob characters, `;`, `#`). `LANE_PREFIXES` is gone from the generator with them.
+- **Why removal is the safer direction.** A grant is a glob over command *text*. Each of those
+  classes was a hole in such a glob: the grant read "any ref after `origin ` is a lane", so every
+  spelling the text fence could not see had to be denied by name — an enumeration that grows one
+  review round at a time and cannot finish. With no grant, a lane push is simply **unlisted**: it
+  reaches the permission prompt, which under the non-interactive launch flags is the classifier
+  reading the real argv. The failure mode changes from "an unreviewed ref slipped through a glob"
+  to "the classifier was asked", which is the guard this spec was built to feed, not to replace.
+- The asymmetry now bounds the deny set: an unlisted command can explain itself (the classifier
+  says why), a deny cannot. So a fence that over-reaches silently removes a capability —
+  `docker push registry/app:main` is an image tag, not a branch, and `L1-x:refs/heads/main-fix` is
+  a lane, not main. What survives names `main` and the push-wide flags and nothing else (§3.3),
+  and every surviving rule is witnessed by a real command in
+  `tests/fixtures/push-corpus.json` (the KEYDENY property, `2704196`).
+- A coordinator that needs its lane push *unprompted* gets it from the hooks lane — HOOKS H2's
+  PreToolUse `git-push-to-main` guard, which reads the argv rather than its spelling — not from a
+  wider glob here (Q6).
 - Every grant is scoped by role. The set is deliberately tiny; adding an entry is a HIGH-risk
   change (§5) and needs a test that the new entry is reachable and the deny set still wins.
-- Profiles follow the session's tier, not its host: an L1 coordinator session (including a workstation L1) launches with l1-coordinator, whose grant already covers its own lane prefix (e.g. WS-*); only L2-tier sessions use l2-orchestrator (L2-* only).
+- Profiles follow the session's tier, not its host: an L1 coordinator session (including a
+  workstation L1) launches with `l1-coordinator`; only L2-tier sessions use `l2-orchestrator`.
 
 ### 3.3 PRE-DENIED always-deny (no override)
 
-- **Push to `main`.** No profile grants it and every profile denies it. The deny is a *fence set*,
-  not one string: `git push origin main`, `git push origin main:<ref>`, `git push origin HEAD:main`,
-  `git push <remote> +main`, `git push --force*`, and the `-u`/`--tags` spellings; plus the closed
-  no-ref / matching / `@` spellings (round 8 - a bare remote with no refspec, `:` / `+:` matching
-  pushes, `@` = HEAD), the trailing-`;` spellings, and the `#` comment spellings. Round 11: `main` is matched as a whole ref name, not a substring - git's ref-name rules give exactly three spellings that resolve to `refs/heads/main` (`main`, `heads/main`, `refs/heads/main`), and all three are fenced in every position (bare, as source, as destination; `tests/test_launch_profiles.py` RealGitPremiseTests proves the `heads/main` forms really advance main), so lane names that merely contain `main` (`L1-x:heads/main-fix`, `L1-main-fix`, `L1-routing/maintenance`) stay allowed; a `:HEAD` destination is denied too (`<src>:HEAD` creates a remote branch literally named `HEAD` (refs/heads/HEAD; main is unchanged, verified with real git), which breaks every tool that resolves HEAD - so it is denied). Round 12: tag push forms are denied on every role (`git push origin refs/tags/*`, `--tags`, `--follow-tags`, `tag *`). Round 12: glob characters `*`, `?`, `[` in a push command after `git push` are denied on every role (the rule syntax cannot express a literal `*`, so `refs/heads/[*?]*`, `refs/[*?]*`, `*[?*]:refs/heads/*` are denied explicitly). The L1 grant now
-  requires an explicit origin ref, so none of these is pre-granted. A test table
-  drives each spelling through the matcher and asserts `deny` — the KEYDENY lesson (`2704196`):
-  *a fence is a decision on a real command, not a list of names*, and a substring allow once
-  licensed the real key file the moment its name shared a line with the template
-  (`tests/linux/33-documentation.sh` "shell-substring-abuse"). AutoOS main has no branch protection and no rulesets (GitHub API: branch not protected; rulesets empty); these profiles are the only fence against a push to main. How `main` advances without a profile grant is **Q6** (OPEN - operator action: enable branch protection on main).
-- **Dispatch to `main` or another repo.** No profile grants it and every profile denies the fenced
-  shapes: an explicit `--ref main` (both spellings), any `-R` / `--repo` (another repo), any second
-  `--ref` or any `-r` (gh's short `--ref`, last-flag-wins), and any tab/CR/LF separator (round 8).
-  A bare `gh workflow run` with no `--ref` dispatches on the default branch (main) and is never
-  pre-granted - the L1 grant requires an explicit `--ref`, so the bare form falls to the permission
-  prompt. A test table drives each fenced spelling through the matcher and asserts `deny`.
+- **Push to `main`, in every spelling that names it.** Every profile denies it and (since round
+  13) no profile grants it. The deny is a *fence set*, not one string, anchored on `*git*push` —
+  a glob **between** the two tokens, so neither a `sudo`/`env`/`xargs` prefix nor a `git -C` /
+  `git --git-dir=` / `git -c` wrapper hides a `main` ref from it. The `git` token stays in the
+  anchor so the fence cannot swallow an unrelated push: `docker push registry/app:main` is an
+  image tag, not a branch.
+  - `main` as a **whole ref name**, never a substring (round 11): git's ref-name rules give
+    exactly three spellings that resolve to `refs/heads/main` (`main`, `heads/main`,
+    `refs/heads/main`), each fenced in every position a push argv can put a ref in — after a
+    space (bare or remote-prefixed), after a colon (refspec destination, or a delete) and after a
+    `+` (the force prefix, either side of the colon) — and each closed at end-of-text, at a space
+    (more arguments follow) or at a colon (the ref is a refspec source). So `L1-x:heads/main-fix`,
+    `L1-main-fix` and `L1-routing/maintenance` stay outside the fence while `git push origin
+    L1-x:refs/heads/main` is inside it. A refspec carries exactly one colon, so the
+    `:main:*`-shaped entries round 12 rendered match no command git accepts and round 13 deleted
+    them.
+  - the push-wide flags that reach `main` whatever the ref: `--force` / `-f`, `--all`, `--mirror`
+    (in both positions), any `HEAD` push, `:HEAD` (round 11: `<src>:HEAD` creates a remote branch
+    literally named `HEAD` — `refs/heads/HEAD`; `main` is unchanged, verified with real git, but
+    every tool that resolves HEAD breaks), and the tag forms (`--tags`, `--follow-tags`,
+    `refs/tags`, `tag <name>`, round 12).
+  - Real git proves the premises: `RealGitPremiseTests`
+    (`tests/helpers/launch_profile_model.py`, run by `tests/test_push_corpus.py`) advances
+    `refs/heads/main` in a scratch bare repo for `heads/main` in every position and for the glob
+    refspec, and shows the stray `refs/heads/HEAD` branch. The KEYDENY lesson (`2704196`) — *a
+    fence is a decision on a real command, not a list of names* — is enforced mechanically: every
+    push and dispatch deny rule the profiles render must match a `deny` row of
+    `tests/fixtures/push-corpus.json`.
+- **Dispatch naming `main`.** `--ref main` and `--ref=main` (and their `heads/main`,
+  `refs/heads/main` spellings) deny on every role, with or without a following argument. Round 13
+  removed the rest of the dispatch fences with the dispatch grant: a bare run (default branch =
+  `main`), `-R`/`--repo` (another repo), a second `--ref`, `-r` (last-flag-wins), an
+  empty/valueless `--ref`, and the quoting, metacharacter and whitespace classes. Each is an
+  unlisted command the classifier judges from the argv.
+- **What round 13 stopped fencing.** The removed classes were holes in a *grant*; with no grant
+  they are simply commands the classifier reads. That closes nothing by itself, so each hazard is
+  an **OPEN residual with a named owner** — the hooks lane, because a PreToolUse guard sees argv
+  where this file sees a string:
+
+  | Id | Residual | The command that a text fence cannot see | Owner |
+  |---|---|---|---|
+  | MED-3 | git config | `git config remote.origin.push refs/heads/*:refs/heads/*`, then any refspec-less push | HOOKS H2 (`git-push-to-main`) |
+  | MED-4 | glob refs | `git push origin 'refs/heads/*:refs/heads/*'` — proven by `RealGitPremiseTests` to advance `main`; `*` and `?` are rule-syntax characters, so no fence can name them | HOOKS H2 |
+  | MED-5 | rewritten and substituted refs | `"main"`, `$REF`, `$(…)`, backticks, tab/CR/LF separators, `;` and `#` tails, the matching and valueless `--ref` forms | HOOKS H2 |
+
+  Until H2 lands the guard on those is the classifier plus the surviving `main` fence — and
+  because nothing is pre-granted, none of them reaches a remote without a decision. Each is pinned
+  as a `prompt` row in the corpus, so a later change that re-fences (or re-grants) one shows up
+  there.
 - **Any secret access.** Reading, writing, copying or echoing `configuration/api-keys.yml`,
   `*.env` / `*.env.*`, `*client.key*`, `*manage.key*`, `*auth.json*`, `**/*.vault.yml`, `**/*.pem`
   and the token/config files named in `catalog/agent-harness.json` `fences`. The pattern list is
@@ -194,13 +246,25 @@ The fleet has four axes today and they do not share one vocabulary; A1 has to na
   against `*.claude.json*`, plus the same pattern already in `fences.read_deny_all` /
   `fences.bash_deny_all`. A profile may not edit the file that holds another session's trust and
   permission state.
-- **No override.** Claude Code evaluates its deny rules before allow rules, and the profile
++ **No override.** Claude Code evaluates its deny rules before allow rules, and the profile
   additionally renders the always-deny set through the session's disallow list so it does not
   depend on a later allow entry losing a precedence race. This is asserted, not assumed: the
   phase-1 test adds a contradictory `allow` for each always-deny entry and asserts the decision is
-  still `deny` (A1-D5). The exact CLI precedence is verified against `claude --help` in phase 0,
-  the way restart spec §8 verified its argv.
-- **Text-only fencing is blind to git config and the checked-out branch.** A bare `git push` on `main`, or a push via an alias, carries no `main` token for a command-text fence to match, so server-side branch protection on `main` is not a backstop — these profiles are the only fence. The text fences see literal refs only: a quoted, variable or substituted ref (`"main"`, `$REF`, `$(...)`, backticks) is denied outright on every role (fenced here: quoting/expansion class), and so is a quoted, variable or substituted `gh workflow run --ref` value (fenced here: quoting/expansion class); the ref must be plain literal text, so any bash metacharacter that rewrites or ends a word next to it (backslash, braces, `&`, `>`, `<`) is denied outright on every role too (round 7, fail closed; fenced here: metacharacter class) — while glob characters `?`, `[`, `*` cannot be fenced in rule syntax (`*`/`?` are pattern characters there) and only expand when a matching file exists in the cwd; these profiles deny them explicitly (fenced here: glob character class). Two further residuals: a literal `*` typed in an l2 push (`git push origin L2-*`) is expanded by bash against cwd file names, so a file named `L2-x:main` would form a refspec (OPEN - operator action: enable branch protection on main); and `git config remote.origin.push` is unfenced (it only matters for pushes without an explicit refspec, which are now denied or not pre-granted) (OPEN - operator action: enable branch protection on main).
+  still `deny` (A1-D5) — for a push or dispatch fence, the target of that contradictory allow is
+  the fence's own corpus witness, so the same test re-checks the KEYDENY property. The exact CLI
+  precedence is verified against `claude --help` in phase 0, the way restart spec §8 verified its
+  argv.
+- **Text fencing is blind; the profiles are not the last line.** A command-text fence cannot see
+  git config, a shell alias, a function, or which branch is checked out, so a bare `git push` on
+  `main` carries no `main` token to match. Round 13 makes the consequence explicit rather than
+  papering over it: that push is now *unlisted*, so it is the classifier's decision, and the
+  server-side check is the one thing that does not depend on either. AutoOS `main` has no branch
+  protection and no rulesets (measured: GitHub API reports the branch unprotected and the rulesets
+  list empty), and this lane does not change that — enabling it is an operator action, deferred.
+  (The round-13 brief cites the deferral as **D-150**; the only D-150 in this checkout's history
+  is the fleet-console phase approval at `67f875d`, so confirm the id before quoting it elsewhere.
+  The open question itself stands on the measurement, not the id.) How `main` advances without a
+  profile grant stays **Q6**.
 
 ## 4. Consumption
 
@@ -288,6 +352,11 @@ to get past them.
   2. the profile's always-deny set, evaluated first, with no override (A1-D5);
   3. the profile's narrow, pre-reviewed allow set (A1-D4);
   4. repo-level fences in `catalog/agent-harness.json`, asserted by both suites.
+  Round 13 changed what the layers *do*, not how they stack: layer 3 is one entry, so every push
+  that layer 2 does not fence is decided by layer 1 - the classifier, reading the real argv. The
+  guard that replaces the deleted text classes is a hook that reads argv too (HOOKS H2's
+  `git-push-to-main` guard, §3.3), which is why each removed hazard names an owner instead of
+  hoping a glob covers it.
 - **A narrower grant, not a wider one.** The pre-review happens *once*, before the session runs,
   on a named operation a reviewer can read. An agent that would otherwise prompt its way to an
   action — or quietly work around a guard — instead runs inside a set someone already approved.
@@ -310,26 +379,32 @@ guessed.
 - **Q3 — Runtime profile owner.** Default: generated from the tracked `.example` at install / first
   launch, git-ignored, with the same ignore-rule treatment restart spec §8 gives
   `configuration/mcp/<role>.json`.
-- **Q4 — `gh workflow run` scope.** Default: allow `gh workflow run * --ref *` (plus the
-  `--ref=` spelling) - an explicit `--ref` is required so the fences can see the target; the
-  workflow itself is
-  CI on a lane branch, and dispatching against `main` stays covered by the `main` deny. A bare run
-  (default branch = main) is never pre-granted, and `-R` / `--repo` (another repo), a second
-  `--ref` or `-r` (last-flag-wins), and tab/CR/LF separators deny outright. The text
-  fences see literal refs only, so a quoted, variable or substituted `--ref` value is denied
-  outright. Needs one measured check in phase 1 that the dispatch cannot target `main`.
+- **Q4 — `gh workflow run` scope.** **Answered by round 13 (D-159): no grant at all.** Every
+  dispatch is an unlisted command the classifier judges, and the only fence left is the one naming
+  `main` (`--ref main`, `--ref=main`, and the `heads/main` / `refs/heads/main` spellings, both
+  separators, with or without an argument after them). The bare run (default branch = main),
+  `-R` / `--repo` (another repo), a second `--ref`, `-r` (last-flag-wins), an empty `--ref` and the
+  quoting / whitespace forms are MED-5 residuals owned by HOOKS H2 (§3.3), not classes this file
+  fences. The phase-1 measured check still stands: a dispatch cannot cross the fence onto `main`
+  without naming it — crossing it some *other* way is exactly why the residual is named here and
+  closed in the hooks lane.
 - **Q5 — Gateway apply scope.** Default: `l1-routing` only (A1-D4), the MISTRALFIX precedent.
   Confirm routing-00 agrees; if not, the entry moves to the coordinator base grant.
-- **Q6 — How does `main` advance?** *Flagged for review.* Default: never through a launch
-  profile — `main` is updated by the operator (or an explicit, separate privileged path), never by
-  a profile grant. Confirm this matches the current merge/push practice before build.
+- **Q6 — How does `main` advance?** *Flagged for review; still open.* Default: never through a
+  launch profile — `main` is updated by the operator (or an explicit, separate privileged path),
+  never by a profile grant. Round 13 removed the last grant that could be read as an indirect
+  route, so what is left of the question is server-side: `main` has no branch protection and no
+  rulesets (measured, §3.3), and enabling them is a deferred operator action that is not this
+  lane's. Until then the surviving fence plus the classifier is all that stands between a session
+  and `main`.
 - **Q7 — A classifier refusal at launch.** Default: surface one line naming the role and stop;
   never retry with a wider grant.
 - **Q8 — `permissionPrompts`.** Default: `none` (fail closed). The alternative, `host`, could hang
   an unattended run on a dialog, which is the failure this repo keeps designing out.
 - **Q9 — Do workers/reviewers get pre-grants at all?** Default: **no** pre-grants beyond read-only
   work; leaves inherit the leaf fences unchanged. A leaf profile with an `allow` entry would need
-  the strongest justification in the set.
+  the strongest justification in the set. Round 13 made that answer the same for every role except
+  `l1-routing`: the only `allow` entry in any template is the reviewed gateway apply.
 - **Q10 — CI drift check.** Default: yes — the generator's `--check` runs in the Linux suite
   (`tests/linux/33`), so a profile that no longer equals its render fails the build.
 

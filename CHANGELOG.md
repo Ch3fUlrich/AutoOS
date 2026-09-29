@@ -6,7 +6,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 - WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
+### Removed — the push and dispatch grants, and the fencing that only shaped them (ORCH-A1 phase 1 round 13, routing-00 D-159)
+
+A pre-granted lane push was a capability the profiles could not scope per session, and the
+12 rounds of denies that followed it fenced only command *text* — every one of them shaped the
+grant rather than guarding anything the classifier could not decide. Round 13 deletes the grant
+and its shaping fence set, and keeps the one deny that protects a shared asset.
+
+- **Gone** (`tools/launch_profiles.py`): `COORDINATOR_ALLOW`, `L2_PUSH_ALLOW`,
+  `L2_WORKFLOW_ALLOW` and everything that existed to narrow them — `L2_PUSH_DENY`,
+  `_l1_push_deny`, `_l1_refspec_deny`, `_l1_workflow_deny`, `L1_PUSH_DENY`,
+  `L1_WORKFLOW_DENY`, `L1_REFSPEC_DENY`, the repeated-`--ref`/`-r`/`-R`/`--repo`/empty-`--ref`
+  dispatch denies, the round 6–8 character classes (tab/CR/LF, quotes, `$`, backtick,
+  backslash, `{`, `&`, `>`, `<`, `;`, `#`), the no-ref / `:` / `+:` / `@` denies, the bare
+  `git push` deny, the `git -C`/`--git-dir=`/`-c` wrapper denies as such, the dead
+  refspec-destination classes, and the now-unused `LANE_PREFIXES` (LOW-7). Only
+  `l1-routing`'s `apply.sh` run grant survives; every other profile's `allow` list is empty.
+  Those commands are **unlisted** now, so they reach the classifier — which, unlike a deny,
+  can explain itself to the session that hit it.
+- **Kept:** push-to-`main` in every spelling git accepts. The fence anchor became
+  `*git*push` — a glob between the tokens, not the contiguous literal `git push` — so dropping
+  the three wrapper blanket denies did not open a main hole: `git push origin main` and
+  `git -C x push origin main` are denied by the same entry, while `git -C x push origin L1-x`
+  is not. `main` is fenced as a whole ref name (`main`, `heads/main`, `refs/heads/main`, proven
+  equivalent with real git) in every argv position (after a space, a colon or a `+`), plus the
+  push-wide flags that reach `main` without naming it (`--force`/`-f`, `--all`, `--mirror`,
+  `--tags`/`--follow-tags`, `refs/tags/`, `tag `) and `:HEAD`, which creates a stray branch
+  instead of moving `main` but must not be free. The dispatch fence keeps only the `--ref`
+  main spellings. `docker push registry/app:main` stays outside the fence — an image tag is not
+  a branch. Secret fences, the `~/.claude.json` fence, the always-deny set and the leaf fences
+  are untouched.
+- **`tests/fixtures/push-corpus.json` + `tests/test_push_corpus.py`** (new): every push
+  spelling the 12 earlier rounds ever fenced, 213 rows, each one
+  `{cmd, expect: deny|allow-lane|prompt, why, round}`. `deny` rows are the fences' witnesses,
+  `prompt` rows name what round 13 stopped fencing and who owns it now. `RealGitPremiseTests`
+  moved here from `tests/test_launch_profiles.py` and the push tables left with it (2836 → 631
+  lines). Both wired into `tests/linux/33-documentation.sh`.
+- **A fence is a decision on a real command:** every rendered push/dispatch deny rule must match
+  a corpus `deny` row (`FenceWitnessTests`), which is what surfaced three rules nothing could
+  reach — a refspec carries exactly one colon, so `*:main:*` was dead. `A1-D5`'s contradictory
+  `allow` target for those fences is now the corpus witness too, instead of a second
+  hand-kept table.
+- **Residuals, recorded not fenced** (spec §3.3, owner **HOOKS H2**): MED-3 (git config,
+  aliases, functions — invisible to text), MED-4 (glob refspecs), MED-5 (a ref name rewritten or
+  substituted before push). Until H2's real-argv guard lands, the guard on those is the
+  classifier plus the kept main fence plus server-side protection — and `main` currently has
+  neither protection nor rulesets (measured), which stays an open operator action.
+- Spec `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §3.1–§3.3, A1-D4, A1-D5,
+  Q4/Q6/Q9 and all six `configuration/launch-profiles/*.settings.example.json` (via
+  `render --out`, never by hand) updated in the same change.
+
 ### Added — role launch-profile templates rendered from the harness fences, with scope and contradiction tests (ORCH-A1 phase 1)
+
+*Rounds 1–12. The push and dispatch grants described below, and the denies that shaped them,
+were removed by round 13 (the entry above); the render tool, the harness-fence source and the
+secret/main fences are still what ships.*
 
 - **`configuration/launch-profiles/<role>.settings.example.json`** (new, six
   roles): per-role pre-reviewed grant bundles (spec
@@ -32,13 +86,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are unchanged.
   `l0-router` and the leaves carry no pre-grant.
   Every profile denies push-to-`main` (fence set, not one string: ref
-  spellings plus `--all`/`--mirror`/`HEAD`/bare, `-C`/`--git-dir`/`-c`
-  wrappers, compound and prefixed spellings), secret access and
+  spellings plus `--all`/`--mirror`/`HEAD`/bare, compound and prefixed
+  spellings; round 13 widened the anchor to `*git*push` so a `git -C` /
+  `--git-dir` / `-c` wrapper is fenced by the same entry as the plain
+  form, and dropped the wrapper blanket denies), secret access and
   `~/.claude.json` writes. Rules live under `permissions` (the only shape
   the CLI reads); fail-closed for non-interactive sessions comes from the
   launch flags, not from this file. Runtime `<role>.settings.json` files
   are git-ignored.
-- **Branch protection is load-bearing:** text-only command fencing cannot see git config or the checked-out branch (a bare `git push` on `main`, or a push via an alias), so server-side branch protection on `main` is load-bearing, not a backstop.
+- **Text fencing is blind, so the profiles are not the last line** (rewritten by round 13 to match spec §3.3): a command-text fence cannot see git config, an alias or which branch is checked out, so a bare `git push` on `main` carries no `main` token to match — round 13 leaves that command *unlisted*, i.e. to the classifier, and the guard that reads argv is HOOKS H2's `git-push-to-main` PreToolUse hook, not a wider glob here. Server-side protection is the one check that depends on neither, and `main` has none (measured: unprotected, rulesets empty); enabling it is a deferred operator action, not this lane's.
 - **`tools/launch_profiles.py`** (new): the one home of the deny render —
   `read_deny_all` plus the secret/credential entries of `bash_deny_all`
   plus the profile-specific always-deny entries. `render --check` fails
