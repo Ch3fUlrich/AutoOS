@@ -115,7 +115,10 @@ chain onto the writer's family and labelled the result a cross-family review
 (measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
 from the WHOLE plan — the model or route picked up front and every fallthrough
 candidate — and a plan with nothing outside the fence left exits 12 instead of
-serving the run inside it. `--review-of <run-id>` names the run whose WRITER this
+serving the run inside it. It removes them from what SERVES: when `--free` (or an
+own-account `--model` pin) already decided the model, the fence is judged on that
+model, and a gateway combo whose legs no run of this shape ever resolves does not
+refuse it (FAMILYFENCE-3 B1). `--review-of <run-id>` names the run whose WRITER this
 one reviews: a review defaults to fencing that writer's family, read from that
 run's runner-private kill record and never from its job.json (skill R-orch-17 —
 job.json lives in the directory the worker owns). A review with neither is
@@ -2993,7 +2996,8 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                       exclude_routes: set | None = None,
                       provider_cooldown: dict | None = None,
-                      fence: dict | None = None) -> dict:
+                      fence: dict | None = None,
+                      model_decided: bool = False) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
     "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
     `route` subcommand and the MCP `route` tool, so `run` and `route` can never
@@ -3030,14 +3034,21 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         # A copy again: apply_provider_state returns one, and the shared
         # load_registry() object must not carry this run's bench into the next.
         registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
-    fenced = fenced_route_ids(registry, fence)
+    # FAMILYFENCE-3 B1: `model_decided` means the serving model was already
+    # picked by --free (whose chain is fenced by `fence_free_head` in cmd_run) or
+    # by an own-account --model pin (fenced by `fence_blocks_model` in
+    # resolve_route_unchecked). No combo serves such a run — OmniRoute never
+    # resolves it — so the combo-leg check neither refuses it nor strips routes
+    # from the resolver's copy (which would leave nothing and exit 2 there).
+    fenced = fenced_route_ids(registry, fence) if not model_decided else set()
     reachable = set((registry.get("routes") or {})) - set(exclude_routes or ())
-    if fence and fence.get("families") and reachable and not (reachable - fenced):
+    if fence and fence.get("families") and not model_decided \
+            and reachable and not (reachable - fenced):
         # Every route this run can still reach is inside the fence. The resolver
         # would answer that with input_required and the run would exit 2, which
         # reads as "the card was refused" — this is the fenced-family case, and it
         # has its own code and its own words.
-        raise FamilyFenceRefused(fence_refusal(fence))
+        raise FamilyFenceRefused(route_fence_refusal(fence))
     if fenced:
         # The same copy the resolver reads, never the shared registry: a fenced
         # family is out of THIS run's plan, not out of the catalog.
@@ -3194,6 +3205,13 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     # route half stays gateway-only: an own-account model id is not a route id, and
     # `_fence_check_route` would be reading a table that has no row for it.
     override = args.model if client.gateway else None
+    # FAMILYFENCE-3 B1: --free and an own-account --model pin decide the model
+    # that serves the run, and both are fenced on the MODEL (`fence_free_head`
+    # upstream, `fence_blocks_model` just below). The combo is a label on such a
+    # run — no leg of it is ever resolved — so `fence_blocks_route` must not
+    # refuse it. A gateway --model pin still is a combo run: OmniRoute resolves
+    # it to its legs, so the combo-leg check keeps its teeth there.
+    model_decided = bool(args.free) or (bool(args.model) and not client.gateway)
     if fence and fence.get("families") and args.model:
         registry = load_live_registry()
         if fence_blocks_model(args.model, registry, fence):
@@ -3203,7 +3221,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
         combo = model_route_id(model) or None
-        _fence_check_route(combo, fence)
+        if not model_decided:
+            _fence_check_route(combo, fence)
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3, "read_only": read_only_run(args, None),
@@ -3211,10 +3230,11 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes,
-                                 provider_cooldown, fence)
+                                 provider_cooldown, fence, model_decided)
     card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
-    _fence_check_route(combo, fence)
+    if not model_decided:
+        _fence_check_route(combo, fence)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
@@ -3799,12 +3819,23 @@ def _fence_check_route(combo, fence, registry=None):
     if (registry.get("routes") or {}).get(combo) is None:
         return
     if fence_blocks_route(combo, registry, fence):
-        raise FamilyFenceRefused(fence_refusal(fence))
+        raise FamilyFenceRefused(route_fence_refusal(fence))
 
 
 def fence_refusal(fence):
     """The one line that says why nothing ran."""
     return FAMILY_FENCE_REFUSAL % ", ".join((fence or {}).get("families") or ["?"])
+
+
+def route_fence_refusal(fence):
+    """A combo-based refusal, with the way out named (FAMILYFENCE-3 B1).
+
+    The run is refused because every gateway COMBO it could reach carries a leg
+    inside the fence — but the fence rules combos only while a combo serves. The
+    two ways to serve from a model instead of a combo are the sentence's tail."""
+    families = ", ".join((fence or {}).get("families") or ["?"])
+    return (FAMILY_FENCE_REFUSAL % families) + \
+        " - use --free or pin --model outside family %s" % families
 
 
 def fence_free_head(chain, registry, fence):

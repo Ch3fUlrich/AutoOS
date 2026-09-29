@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the fence judges the model that serves, not a combo that never does (FAMILYFENCE-3 B1, 2026-09-29)
+
+A live smoke from the FAMILYFENCE-b tip refused a run it must not:
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family qwen --dry-run` exited 12 — `no model outside family qwen left` — although
+the `--free` head (`opencode/muse-spark-1.3-contributor-free`, family meta) sits outside
+that fence. `--not-family meta` announced the walk onto nemotron and *then* refused the
+same way; only `--not-family nvidia` ran. The cause was the combo-leg check
+(`fence_blocks_route`: a route is fenced when ANY leg is, because OmniRoute can fall
+through to it) applied to runs no combo ever serves: every t1/t2/t3 combo carries one
+qwen leg and one meta leg, and a `--free` run resolves no combo at all — the free chain
+head is the serving model, and it was already fenced by `fence_free_head` before the
+plan. The check ran anyway, and ran even when `--free` meant no combo served the run.
+
+- **`model_decided`** (`tools/autoos-agent.py`): when `--free` or an own-account
+  `--model` pin has already picked the serving model, the fence is judged on that model
+  (`fence_free_head` / `fence_blocks_model`) and `resolve_route_unchecked` /
+  `_resolve_route_v2` skip the combo-leg refusal *and* the fenced-route exclusion —
+  the exclusion would have left the resolver an empty route table, trading the wrong
+  rc 12 for a wrong rc 2. A gateway `--model` pin is still a combo run (OmniRoute
+  resolves it to legs), so the combo check keeps its teeth there.
+- **A combo refusal now names the way out**: the route-based refusal prints
+  `... - use --free or pin --model outside family <fams>` (`route_fence_refusal`);
+  model-based refusals (free chain spent, pin inside the fence) keep the plain line,
+  because for them there is no combo to route around.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceServingModelTests`): the
+  three live dry-run cases above (qwen and meta allowed on `--free` with the right
+  head, a fence covering the whole free chain still `EXIT_NO_OTHER_FAMILY`), the
+  own-account-pin live case, and the combo-refusal way-out line.
+
 ### Added — every client records the model that really answered; qoder can be pinned (FAMILYFENCE-b / 2026-09-29)
 
 FAMILYFENCE fenced by family, and 0dc1691 prints a `CROSS-FAMILY` verdict — but for

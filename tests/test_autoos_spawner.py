@@ -14671,6 +14671,86 @@ class FamilyFenceRouteTests(unittest.TestCase):
         self.assertIn("route: r-ghost", out)
 
 
+class FamilyFenceServingModelTests(unittest.TestCase):
+    """FAMILYFENCE-3 B1: when --free (or an own-account --model pin) already
+    decided the model that serves the run, the fence is judged on THAT model —
+    the gateway combo the run never serves must not refuse it.
+
+    Measured 2026-09-29 in a live smoke from this branch: a --free review with
+    `--not-family qwen` exited 12 although the free head (muse, family meta) is
+    outside that fence, because t1/t2/t3 each carry one qwen leg and the combo
+    leg check fenced the run that no combo serves."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _dry(self, *argv, tmp=None):
+        env = clean_env(AUTOOS_STATE_DIR=tmp or tempfile.mkdtemp())
+        if not tmp:
+            self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        return run_agent("run", *argv, "PONG", env=env)
+
+    def _free_review(self, *not_families, tmp=None):
+        argv = ["--client", "opencode", "--card", "role=review,complexity=trivial",
+                "--free", "--isolate", "--lean", "--dry-run"]
+        for fam in not_families:
+            argv += ["--not-family", fam]
+        return self._dry(*argv, tmp=tmp)
+
+    def test_a_free_review_outside_the_fence_is_not_refused_by_combo_legs(self):
+        # The live smoke case: the free head muse (meta) sits outside the qwen
+        # fence while every gateway combo carries a qwen leg.
+        r = self._free_review("qwen")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("FAMILYFENCE", r.stdout + r.stderr)
+        self.assertIn("--model opencode/muse-spark-1.3-contributor-free", r.stdout)
+
+    def test_a_free_run_walked_onto_the_next_chain_model_is_not_refused_either(self):
+        # The second smoke case: the head muse is inside the meta fence, the run
+        # announces the walk onto nemotron (nvidia) — and must then RUN, not
+        # exit 12 on combos no model of this run ever comes from.
+        r = self._free_review("meta")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("this run starts on opencode/nemotron-3-ultra-free", r.stderr)
+        self.assertIn("--model opencode/nemotron-3-ultra-free", r.stdout)
+
+    def test_a_fence_covering_the_whole_free_chain_is_still_refused(self):
+        # The bypass is about the COMBO legs, not about the fence: the serving
+        # model is still judged, and a chain with nothing outside the fence left
+        # exits its own code.
+        r = self._free_review("meta", "nvidia", "xiaomi")
+        self.assertEqual(r.returncode, self.agent.EXIT_NO_OTHER_FAMILY,
+                         r.stdout + r.stderr)
+        self.assertIn("refusing (FAMILYFENCE)", r.stderr)
+
+    def test_an_own_account_pin_outside_the_fence_serves_despite_fenced_combos(self):
+        # The pin half: a qoder --model the registry can place outside the fence
+        # decides the serving model, so the combo leg list — which never serves
+        # this run — fences nothing about it.
+        r = self._dry("--client", "qoder", "--card", "role=review", "--isolate",
+                      "--model", "opencode/nemotron-3-ultra-free",
+                      "--not-family", "qwen", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("FAMILYFENCE", r.stdout + r.stderr)
+        self.assertIn("--model opencode/nemotron-3-ultra-free", r.stdout)
+
+    def test_a_fenced_combo_refusal_names_the_way_out(self):
+        # A gateway-combo run (no --free, no own-account pin) keeps its refusal —
+        # and the message now names how to get an un-fenced serving model.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["nvidia"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+        self.assertIn("use --free or pin --model outside family nvidia", err)
+
+
 class NoFallthroughTests(unittest.TestCase):
     """FAMILYFENCE item 3: `--no-fallthrough` pins the run to the model it was
     planned on. An orchestrator that wants a verdict from one named model would
