@@ -194,9 +194,13 @@ child's own spawns read that variable and store it as their `parent_run_id`, so 
 whose caller's id equals its own has no parent edge at all, and a cycle between two records still lists
 both rows). A
 record also keeps the host it ran on, the `logs/agents/<id>` run dir it was given
-(`AUTOOS_TASK_DIR`) and the resolver's whole `route_plan`, so a run stays auditable after the probes
+(`AUTOOS_TASK_DIR`), the resolver's whole `route_plan`, and the `scope` the client launch took
+(`{"path": "scoped"|"inherited"|"unscoped", "unit", "reason"}` — SCOPECLI-b, so `ps` says whether a
+canceller reaches this run through a cgroup or only through its process group), so a run stays
+auditable after the probes
 and cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
-included — dicts, lists, tuples, sets and frozensets alike.
+included — dicts, lists, tuples, sets and frozensets alike. The run prints the same fact as a
+`scope:` line beside its `writer:` line, and an unscoped POSIX launch warns on stderr first.
 
 The id may also be handed in rather than minted here (FLEETP0b, FLEETSPEC §5.1): `run --run-id <id>`
 takes a canonical id and refuses a shape that is not one with exit 2. That is how the MCP server's

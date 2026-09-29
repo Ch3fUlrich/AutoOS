@@ -5,6 +5,94 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
+
+L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
+no `autoos-worker-*` unit existed, and **nothing said so** — not `ps`, not the run log. A reader
+could not tell a host that has no scope mechanism from one whose scope failed to start, and the two
+need different cancellers: a scope is a cgroup and reaches a `setsid()` child, the fallback is a
+process-group kill that cannot.
+
+- **`tools/autoos-agent.py`**: `scope_decision()` frames one dict —
+  `{"path": "scoped"|"inherited"|"unscoped", "unit": <unit or null>, "reason": <why>}` — and it is
+  the only place the three paths are weighed. `run_client` launches from it (the two gates moved
+  there verbatim), `_worker_record_start()` writes it into the live worker registry record so
+  `ps`/`ps --json` say it *during* the run, `_worker_record_end()` carries it through the rewrite,
+  and `cmd_run` prints `scope:` beside the `writer:` line. `inherited` names the outer unit read
+  out of `/proc/self/cgroup` — what a canceller actually stops — not the id `run` was handed, which
+  a fallthrough re-run re-mints. Nothing is written into `job.json`: the worker shares its uid with
+  that file, so this stays in the runner-private records (R-orch-17).
+- **The fallback is loud (POSIX)**: `SCOPE_WARNING` puts one line on the spawner's stderr —
+  `autoos-agent: WARNING client runs UNSCOPED (<reason>): cancel falls back to the
+  process-group kill`. Windows is not shouted at; it has no scope to miss.
+- **Reasons, not silence**: `_probe_scope()` answers with the reason it hit (`""` = supported) —
+  `windows`, `no systemd-run`, `no systemctl`, `no user manager / XDG_RUNTIME_DIR`, `user manager
+  unreachable` — and `scope_unsupported_reason()` caches that one string while `scope_supported()`
+  became its bool projection. The gate and the record can no longer disagree, because there is only
+  one probe behind both.
+- **WSL / `0::/init.scope` (c)**: `worker_scope_unit_from_cgroup()` is the single reader of a
+  cgroup line for both `in_worker_scope()` and the inherited unit name, and it matches a *path
+  segment* shaped `autoos-worker-*….scope`. `0::/init.scope` is the session's own cgroup and
+  yields nothing, so a run there with a reachable user manager still gets a scope; the probe never
+  consulted the cgroup at all, so it rejects nothing either.
+- **Tests** (`tests/test_autoos_spawner.py`, new `ScopeRecordTests` + `CliScopeLaunchTests`): each
+  path value with its reason, each probe reason against a faked PATH/env/launch, the exact warning
+  line, Windows quiet, the registry record carrying `scope` at start and at end and `list_workers`
+  row-ing it (a pre-SCOPECLI-b record lists with `scope: null` rather than a guess), a full
+  `cmd_run` asserting `scope:` beside `writer:`, and the cgroup table with the synthetic
+  `0::/init.scope` line. `test_a_host_with_no_user_manager_is_unchanged` asserted the fallback was
+  *silent* (`err == ""`) — that silence was the defect, so it became
+  `test_a_host_with_no_user_manager_launches_the_same_argv_and_says_so` and now asserts the warning
+  while keeping the unchanged argv/env assertions.
+
+### Fixed — a `run` started from a shell launches its client in a scope too (SCOPECLI, 2026-09-29)
+
+SB-A2 item A gave a worker a cgroup so a cancel could follow a `setsid()` child, but only
+on the MCP path: `run_job` wraps the whole `autoos-agent.py run …` in
+`systemd-run --user --scope`. A `run` started straight from a shell reached `run_client`
+unscoped, so its client led nothing but a new session — no cgroup at all, and
+`systemctl --user stop` had no unit to stop, leaving only the group kill that a
+`setsid()` grandchild escapes.
+
+- **`tools/autoos-agent.py`**: `run_client`'s POSIX branch wraps the launch in
+  `worker_scope_launch()` when **both** gates hold: `scope_supported()` says a user
+  manager is reachable, and `in_worker_scope()` says no worker scope is already around
+  this process. `in_worker_scope()` reads the unit out of `/proc/self/cgroup` through
+  `self_cgroup()`, one small read so a test can hand it a synthetic cgroup. The second
+  gate is load-bearing: `systemd-run --scope` does not nest — the new scope lands as a
+  sibling under `app.slice` (measured on this host) — so an MCP-spawned run that scoped
+  its own client would move it out of the outer cgroup, and the MCP `cancel`, which stops
+  the outer scope by name, would stop reaching it. Windows and a host without a user
+  manager run exactly the code they ran before.
+- **Unit name**: `cli_scope_unit()` → `autoos-worker-cli-<run id>-a<attempt>.scope`, or
+  `…-cli-pid<pid>-a<attempt>…` where the run has no id. `cli-` keeps it out of the runner's
+  own `autoos-worker-<run id>.scope` name space, and the attempt number matters because the
+  fallthrough loop re-starts the client: a reused unit name is a `systemd-run` failure, not
+  a no-op. One line on the spawner's own stderr names the unit and the command that stops it,
+  since a shell user is the only canceller such a run has.
+- **Unchanged by construction** (measured, not assumed): `--scope` keeps the child's pid,
+  its process group and both pipes, so `start_new_session`, the group reap, the capture
+  pump and `record_attempt_group()` see the shape they saw unscoped, and the client's exit
+  code propagates through the wrapper (7 in, 7 out).
+- **Tests** (`tests/test_autoos_spawner.py`, `CliScopeLaunchTests`): the scoped argv
+  (`systemd-run --user --scope --unit autoos-worker-cli-<id>-a2 --collect`), the inner
+  `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS` with the bus address given to
+  systemd-run only (SCOPEBUS), no nesting when a worker scope already holds us, unchanged
+  argv/env with no user manager, `in_worker_scope()` against cgroup v1 and v2 lines, a
+  delegated sub-cgroup and near-miss names, and an end-to-end case that mocks no launcher:
+  a real client reads its OWN `/proc/self/cgroup` and names the unit (it skips where the
+  host has no reachable user manager; it passes against the real one here).
+- **Residual, stated**: where the probe says yes and the launch still fails (a user
+  manager that dies mid-run), the run exits with `systemd-run`'s code and the client never
+  starts — there is no silent fall back to an unscoped launch. The alternative is worse: a
+  run cannot tell `systemd-run`'s rc 1 from the client's own, so any fallback would be
+  guesswork, and the thing it guessed past is exactly the uncancellable run this closes. The
+  failure is loud: the stderr line names the unit the run tried to use. One cached probe
+  (`python -c pass` in a scope) runs per process, as it already does on the MCP path.
+- **Coupled test fixed in the same act** (`WinshimClientResolutionTests`):
+  `test_on_posix_a_resolvable_client_still_runs` asserted `argv[0] == <shim>`, which is only
+  true on a host that cannot scope. It now asserts the resolved file is in the argv and the
+  bare name is not — the WINSHIM fact — so it holds in both launch shapes.
 ### Fixed — apply adopts the live gateway's connections, and a failed combo re-create restores (APPLYADOPT, 2026-09-29)
 
 Two false statements in `configuration/omniroute/apply.sh`, both measured on the dockerised
