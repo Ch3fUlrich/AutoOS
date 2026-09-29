@@ -68,6 +68,31 @@ guarded review. A typo in a safety flag must not downgrade the flag to a comment
   refusal that launches nothing, and the regression that a known name — any spelling of
   it — keeps the fence's own exit 12.
 
+### Fixed — an own-account run records the route it actually ran (FAMILYFENCE-3 N4, 2026-09-29)
+
+`run --client qoder --tier 1 --model Efficient --dry-run` printed
+`route: t1-orchestrator reason=explicit-tier routing=1`, and the same lie reached the
+worker record and the run log: `t1-orchestrator` is an OmniRoute combo, and a native
+client never resolves one. `build_command` gives qoder/claude/agy the model pin (or the
+registry's `default_model`) verbatim, the `MODEL_INPUT` row for those clients carries no
+`("route",)` kind at all, and `own_account_track_entry` returns `None` for a non-gateway
+client precisely because "an own-account client never ran the gateway route it names". The
+route line was the one place still naming a route the run could not have run — so `ps`, the
+record and the log reported a gateway combo for a run that answered on the client's own model.
+
+- **`build_plan`** (`tools/autoos-agent.py`): when the client is not a gateway client, the
+  recorded combo is `native:<client>` (e.g. `native:qoder`). The rewrite happens *after*
+  `resolve_route`, on purpose: the FAMILYFENCE leg check and the PRIV3 sensitive-combo check
+  both read the card's real gateway combo, and standing them down alongside the label would
+  have opened a hole rather than closed a mislabel. `combo_legs("native:qoder", registry)`
+  answers no legs, which is the honest input to provider-benching, and the fallthrough
+  exclusion set now carries the same label the plan recorded.
+- **Tests** (`tests/test_autoos_spawner.py`, `NativeComboTests`): the live dry-run line for
+  qoder, claude and agy names `native:<client>` and not a `t…` combo, the in-process
+  `build_plan` route dict carries the native combo (with its tier and its `--model` pin
+  intact in the argv), and a gateway `--client opencode --card role=implement` keeps its real
+  resolver combo — the rewrite is for own-account clients only.
+
 ### Fixed — the fence judges the model that serves, not a combo that never does (FAMILYFENCE-3 B1, 2026-09-29)
 
 A live smoke from the FAMILYFENCE-b tip refused a run it must not:

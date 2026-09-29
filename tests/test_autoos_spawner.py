@@ -15502,6 +15502,59 @@ Options:
         self.assertIn("--model claude-sonnet-4-5", launched[0])
 
 
+class NativeComboTests(unittest.TestCase):
+    """FAMILYFENCE-3 N4: an own-account run answers with the client's OWN model,
+    never a gateway combo. Before this its route was recorded as `t1-orchestrator`
+    — a combo OmniRoute does not even serve it through — so `ps`, the worker
+    record and the run log all named a route the run never ran. The route a native
+    run records is now `native:<client>`; a gateway run keeps its real combo."""
+
+    def _route_line(self, *args, env=None):
+        r = plan_of(*args, env=env or claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_a_qoder_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "qoder", "--tier", "1", "--model",
+                               "Efficient", "t")
+        self.assertIn("route: native:qoder", out)
+        self.assertNotIn("t1-orchestrator", out)
+
+    def test_a_claude_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "claude", "--tier", "1", "t")
+        self.assertIn("route: native:claude", out)
+
+    def test_an_agy_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "agy", "--tier", "1", "t")
+        self.assertIn("route: native:agy", out)
+
+    def test_the_build_plan_route_combo_is_the_native_one_too(self):
+        # The record, the log and the print all read build_plan's route, so the
+        # rewrite has to live there — not only in the printed line.
+        agent = load_agent()
+        allow_in_place(self, agent)
+        args = argparse.Namespace(client="qoder", tier=1, card=None, task="t",
+                                  free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                                  model="Efficient", clean=False,
+                                  allow_training=False, title=None, lean=False,
+                                  joinable=False, auto=True, isolate=False,
+                                  max_depth=None, dry_run=True, no_defer=False,
+                                  not_family=None, review_of=None,
+                                  no_fallthrough=False, run_id=None)
+        cfg = {"agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator"}},
+               "providers": {"omniroute": {"models": {"t1-orchestrator": {}}}}}
+        with mock.patch.object(agent, "gateway_up", lambda: True):
+            plan = agent.build_plan(args, cfg)
+        self.assertEqual(plan["route"]["combo"], "native:qoder")
+        self.assertEqual(plan["route"]["tier"], 1)
+        self.assertIn("--model Efficient", " ".join(plan["cmd"]))
+
+    def test_a_gateway_run_keeps_its_real_combo(self):
+        out = self._route_line("--client", "opencode", "--card", "role=implement", "t")
+        self.assertIn("route: t", out)
+        self.assertNotIn("native:opencode", out)
+
+
 class QoderFenceTests(unittest.TestCase):
     """FAMILYFENCE-b requirement 2, the gate half: a pinned model is a model
     choice, so the fence rules it for an own-account client exactly as it rules

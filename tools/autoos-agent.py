@@ -3275,6 +3275,17 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     """
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
+    if not client.gateway:
+        # FAMILYFENCE-3 N4: an own-account run answers on the client's OWN model -
+        # `build_command` hands it the pin or the registry default and never names a
+        # route to OmniRoute. So the combo the resolver picked for it is a label no
+        # leg of it ever serves, and `ps`, the worker record and the run log used to
+        # report `t1-orchestrator` for a run that in fact ran `Efficient` on qoder.
+        # Recorded as `native:<client>`: honest, and `combo_legs` answers it with no
+        # legs, which is exactly what provider-benching should see. The rewrite is
+        # AFTER `resolve_route` on purpose: the fence and the PRIV3 check both read
+        # the real combo of the card, and standing them down here would be a hole.
+        route = dict(route, combo="native:%s" % client.name)
     depth, max_depth = clients.child_depth(os.environ, args.max_depth)
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
