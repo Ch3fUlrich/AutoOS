@@ -2961,7 +2961,8 @@ def cmd_ready(args) -> int:
     return 0
 
 
-def reviewer_run_override(review, client, cfg, tier, model, override, free):
+def reviewer_run_override(review, client, cfg, tier, model, override, free,
+                          fence=None):
     """``(model, combo, note)`` -- the run this reviewer resolution implies.
 
     A review card that names its author is a *reviewer* request, so when the
@@ -2975,6 +2976,12 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
     reviewer that lives on another client, and a non-gateway client (which takes
     its own ``--model`` and has no gateway combo to name) all keep what they had.
     Silence here would be the bug: the review would run on a model nobody chose.
+
+    ``fence`` (FAMILYFENCE-5 item 1) is the family fence this run carries. The swap
+    below is the SECOND model choice of the run, made after every upstream fence
+    check had already answered, so a reviewer inside the fence would otherwise reach
+    the client unfenced — which is why the callers hand it in rather than check the
+    answer afterwards.
     """
     if not review or review.get("state") != "resolved":
         return model, None, None
@@ -2993,6 +3000,10 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
         return (model, None,
                 "note: %s is not a gateway client, so --model stays the caller's; "
                 "policy.reviewers picked %s" % (client.name, asked))
+    # FAMILYFENCE-5 item 1: both returns below put the reviewer's own spelling on
+    # the run, so the fence is asked HERE — the resolver's route was fenced
+    # upstream, the reviewer that replaces it never was.
+    _fence_check_reviewer(asked, entry["model"], fence)
     # The gateway only serves a route the client config declares, so a combo
     # spelling is checked -- an undeclared heading is exactly the failure the
     # operator must see, not a silent fallback (item 4).
@@ -3108,7 +3119,7 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     # (REVROUTE item 2); a reviewer on another client is announced, never faked.
     model, reviewer_combo, reviewer_note = reviewer_run_override(
         result.get("review"), clients.CLIENTS[args.client], cfg, tier, model,
-        override, args.free)
+        override, args.free, fence=fence)
     if reviewer_combo:
         combo = reviewer_combo
     # DSBACK item 3: the rung the resolver scored has to reach the client that
@@ -3255,7 +3266,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         combo, reason = model_route_id(model), reason + "+model"
     review = resolve_review_plan(card)
     model, reviewer_combo, reviewer_note = reviewer_run_override(
-        review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free)
+        review, clients.CLIENTS[args.client], cfg, tier, model, override, args.free,
+        fence=fence)
     if reviewer_combo:
         combo = reviewer_combo
     return {"tier": tier, "model": model, "combo": combo, "reason": reason, "card": card,
@@ -3728,11 +3740,18 @@ def fence_unreadable_writer_refusal(review_of):
     difference from the plan alone. The message names the store it searched and both
     ways out, because "spawn it from where the writer ran" is the one the orchestrator
     usually wants.
-    """
+
+    FAMILYFENCE-5 item 2 (cross-family review Muse): the second way out used to be
+    "name the family with --not-family", but `--not-family` does not clear this
+    refusal — the writer stays unnamed and the run is still refused. The way out that
+    actually works is to drop `--review-of` and fence by name instead, so the text
+    says that; a caller following the old sentence would have re-spawned with one
+    more flag and the same exit 2."""
     return ("--review-of %s: no resolved writer family in this checkout's "
             "runner-private record store (%s), so no family can be fenced out - "
             "refusing. Spawn the review through the same autoos-agent MCP/checkout "
-            "that spawned the writer, or name the family with --not-family."
+            "that spawned the writer, or drop --review-of and name the writer's "
+            "family with --not-family."
             % (review_of, kill_store_dir()))
 
 
@@ -3781,6 +3800,31 @@ def fence_name_refusal(unknown, known):
     The refusal names both halves: what was typed, and what could be fenced."""
     return ("--not-family %s names no family the registry carries (known: %s)"
             % (", ".join(unknown), ", ".join(sorted(known))))
+
+
+def fence_blank_refusal():
+    """FAMILYFENCE-5 item 4 (cross-family review Muse): `fence_family_names` drops
+    a blank before the B2 check can call it unknown, so `--not-family ""` fenced
+    nothing and the run planned and launched UNFENCED while reading as guarded —
+    while MCP `spawn` had already refused that value as a broken argument. A blank
+    is a broken argument on the CLI too, and is refused before any name beside it is
+    judged, so one flag never answers rc 2 and another the fence's own code
+    depending on what rode with it."""
+    return ("--not-family takes a family name, not a blank value - a blank fences "
+            "nothing, so the run would not be fenced at all")
+
+
+def not_family_values(args):
+    """The raw `--not-family` values as a list, exactly as the caller typed them.
+
+    `fence_family_names` normalises names and drops blanks, so it cannot answer the
+    question "did the caller hand me a blank" — this reads the argument before that
+    normalisation and nothing else does (FAMILYFENCE-5 item 4). A bare string is one
+    value, the same rule `fence_family_names` applies."""
+    raw = getattr(args, "not_family", None)
+    if raw is None:
+        return []
+    return [raw] if isinstance(raw, str) else list(raw)
 
 
 def writer_family_of_run(run_id, read=None):
@@ -3901,6 +3945,29 @@ def _fence_check_route(combo, fence, registry=None):
         return
     if fence_blocks_route(combo, registry, fence):
         raise FamilyFenceRefused(route_fence_refusal(fence))
+
+
+def _fence_check_reviewer(asked, spelling, fence, registry=None):
+    """Refuse a review whose `policy.reviewers` pick the fence rules out.
+
+    The reviewer walk is cross-family to the card's ``author``; the fence is built
+    from ``--review-of``'s WRITER (or the names ``--not-family`` gave). When those
+    are two different models, every route the resolver saw can sit outside the fence
+    while the reviewer that then replaces the run's combo sits squarely inside it —
+    and no upstream check ever looked at it (FAMILYFENCE-5 item 1, cross-family
+    review Muse).
+
+    Judged on the model spelling, whose family is the registry's own
+    `policy.reviewers` declaration (`reviewer_family`), and on the combo's legs
+    where the registry carries that route — the same two reads the fence uses
+    everywhere else, so the first choice and this one cannot drift."""
+    if not spelling or not fence or not fence.get("families"):
+        return
+    registry = registry if registry is not None else load_live_registry()
+    if fence_blocks_model(spelling, registry, fence):
+        raise FamilyFenceRefused("%s: policy.reviewers picked %s" % (
+            route_fence_refusal(fence), asked))
+    _fence_check_route(model_route_id(spelling), fence, registry)
 
 
 def fence_refusal(fence):
@@ -7430,6 +7497,11 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     # FAMILYFENCE: who may NOT serve this run, settled before any leg is picked —
     # from here on the fence is read-only, and every leg choice reads it.
+    # FAMILYFENCE-5 item 4: a blank --not-family value is a broken argument, refused
+    # here (rc 2) before fence_family_names can drop it silently and let the run read
+    # as fenced while nothing is.
+    if any(not str(v).strip() for v in not_family_values(args)):
+        return refuse(fence_blank_refusal(), 2)
     fence = family_fence(args)
     # `--no-fallthrough` is read once, here, so the pin cannot be seen differently
     # by the branch that announces it and the branch that re-plans. The default is

@@ -14543,33 +14543,23 @@ class FamilyFenceFreeChainTests(unittest.TestCase):
         self.assertIn("opencode/ghost-1 is inside the fence", err)
         self.assertEqual(rc, 0, out + err)
 
-    def test_the_free_fallthrough_re_plan_carries_the_fence_into_build_plan(self):
-        # N1: build_plan answers the fence for whatever leg IT picks; a re-plan
-        # that rebuilds without the argument lets the fenced family back in one
-        # leg after the chain walk just refused to serve it.
-        agent = self.agent
-        fence = {"families": ["nvidia"], "review": True, "strict": True,
-                 "writer_family": "nvidia", "warn_no_writer": False}
-        registry = _fallthrough_registry(["r-free"], families=FENCE_FAMILIES)
-        seen = []
-
-        def spy_build_plan(*a, **k):
-            seen.append(k)
-            return {"model": FENCE_CHAIN[1], "route": {"combo": FENCE_CHAIN[1]}}
-
-        args = argparse.Namespace(free=True, free_model=FENCE_CHAIN[0])
-        plan = {"model": FENCE_CHAIN[0], "route": {"combo": FENCE_CHAIN[0]},
-                "sandbox": None}
-        with mock.patch.object(agent, "build_plan", spy_build_plan):
-            nxt, fell_from, fell_to = agent._free_fallthrough_plan(
-                args, {}, plan, list(FENCE_CHAIN), set(),
-                fence=fence, registry=registry)
-        self.assertIsNotNone(nxt)
-        self.assertEqual((fell_from, fell_to), (FENCE_CHAIN[0], FENCE_CHAIN[1]))
-        self.assertTrue(seen, "the re-plan ran no build_plan")
-        self.assertIs(seen[0].get("fence"), fence,
-                      "the free re-plan must hand build_plan the same fence "
-                      "the chain walk applied")
+    def test_a_fenced_model_next_in_line_is_walked_past_on_the_real_re_plan(self):
+        # N1, asserted on what the run DOES rather than on a keyword argument of a
+        # spy: the rate limit lands on mimo, the fenced family is the NEXT spelling
+        # in the ordered chain, and an un-fenced one sits behind it. The re-plan
+        # serves the run on that one — the fenced model is never launched, and the
+        # review is not refused for a chain that still has a legal leg left.
+        chain = ["opencode/mimo-v2.6-flash-free",
+                 "opencode/nemotron-3-ultra-free",
+                 "opencode/muse-spark-1.3-contributor-free"]
+        rc, out, err, calls, _ = self._run(
+            stops=1, over={"not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], [chain[0], chain[2]],
+                         "the fenced middle of the chain never served the re-plan")
+        self.assertNotIn("nemotron", " ".join(" ".join(cmd) for cmd in calls["cmds"]),
+                         out + err)
+        self.assertEqual(rc, 0, out + err)
 
     def test_a_write_role_run_keeps_an_unknown_family_candidate(self):
         # The fence excludes FAMILIES. It is the review role that additionally
@@ -14721,6 +14711,11 @@ class FamilyFenceUnreadableWriterTests(unittest.TestCase):
         combined = r.stdout + r.stderr
         self.assertEqual(r.returncode, 2, combined)
         self.assertNotIn("would run", combined)
+        # FAMILYFENCE-5 item 2: the way out has to be a way out. Naming a family
+        # while keeping --review-of does not clear this refusal — it re-fires, and
+        # the only two moves that work are the checkout the writer ran in, and
+        # dropping --review-of.
+        self.assertIn("drop --review-of", combined, combined)
 
     def test_a_readable_record_fences_the_writers_family_and_refuses_nothing(self):
         self._record({"provider": "qoder", "model": "Qwen3.8-Flash",
@@ -14801,6 +14796,96 @@ class FamilyFenceRouteTests(unittest.TestCase):
                   "card": "kind=implement"})
         self.assertEqual(rc, 0, out + err)
         self.assertIn("route: r-ghost", out)
+
+
+class FamilyFenceReviewerOverrideTests(unittest.TestCase):
+    """FAMILYFENCE-5 item 1 (cross-family review, Muse): the reviewer override is a
+    MODEL CHOICE made after the fence had already been consulted, so an authored
+    review card could be handed a `policy.reviewers` spelling inside the fenced
+    family and the plan said nothing — only the post-run backstop noticed, after the
+    same-family review had already run.
+
+    Reachable whenever the card's `author` is not `--review-of`'s writer: the
+    reviewer walk is cross-family to the AUTHOR, the fence is built from the WRITER,
+    and neither one sees the other. Same fixture as the reviewer gate (the reviewers
+    list has to exist for the override to fire at all)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "provider-state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        state = mock.patch.object(
+            self.agent.measure_mod, "client_state",
+            lambda *a, **k: {name: {"installed": True, "signed_in": True, "reason": ""}
+                             for name in ("opencode", "gemini", "qoder", "claude")})
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,author=qwen,paths=tools/registry.py",
+            allow_training=False, client="opencode", joinable=False, max_depth=None,
+            clean=False, model=None, free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, lean=False, title=None, dry_run=True, task="x",
+            no_defer=False, not_family=None, review_of=None, no_fallthrough=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def plan(self, **overrides):
+        """The run's own plan, built the way `cmd_run` builds it: the fence is
+        settled first and handed to build_plan, never re-derived after the route."""
+        args = self.args(**overrides)
+        fence = self.agent.family_fence(args)
+        return self.agent.build_plan(args, self.cfg(), fence=fence)
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_an_authored_v2_review_whose_reviewer_is_fenced_is_refused_at_plan(self):
+        # Muse (family meta) is what this fixture's reviewer list picks for a qwen
+        # author; fencing meta off has to stop the plan, not the report.
+        with self.assertRaises(self.agent.FamilyFenceRefused):
+            self.plan(card="kind=review,author=qwen,paths=tools/registry.py",
+                      not_family=["meta"])
+
+    def test_an_authored_v1_review_whose_reviewer_is_fenced_is_refused_at_plan(self):
+        # The v1 branch of resolve_route_unchecked has the same walk and the same
+        # missing check; a v1 card is `role=`, and the resolver never sees it.
+        with self.assertRaises(self.agent.FamilyFenceRefused):
+            self.plan(card="role=review,author=qwen", not_family=["meta"])
+
+    def test_the_fenced_reviewer_run_is_refused_before_it_is_announced(self):
+        # What the CLI answers: the fence's own exit code, and no plan line at all.
+        rc, out, err = self.run_cmd_run(not_family=["meta"])
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family meta left - refusing (FAMILYFENCE)",
+                      err)
+        self.assertNotIn("reviewer: ", out, "the review is never announced as running")
+        self.assertNotIn("would run", out + err, "nothing is planned, let alone launched")
+
+    def test_a_reviewer_outside_the_fence_still_serves_the_review(self):
+        # The other half: the fence rules the writer's family, and the reviewer the
+        # list picked is elsewhere — the override must not become a refusal.
+        route = self.plan(not_family=["anthropic"])["route"]
+        self.assertEqual(route["combo"], "muse", route)
+        self.assertEqual(route["model"], "omniroute/muse", route)
 
 
 class FamilyFenceServingModelTests(unittest.TestCase):
@@ -14927,6 +15012,36 @@ class FamilyFenceUnknownNameTests(unittest.TestCase):
             legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
             families={"nemotron-3-ultra": "nvidia"})
         self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_a_blank_not_family_is_refused_rather_than_fence_nothing(self):
+        # FAMILYFENCE-5 item 4: `fence_family_names` drops a blank before the B2
+        # name check can call it unknown, so `--not-family ""` planned and launched
+        # as an UNFENCED run that read as fenced. MCP `spawn` already rejects a
+        # blank; the CLI is the same fence and must answer it the same way.
+        env = clean_env(AUTOOS_STATE_DIR=tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        r = run_agent("run", "--client", "opencode",
+                      "--card", "role=review,complexity=trivial",
+                      "--isolate", "--lean",
+                      "--not-family", "", "--dry-run", "PONG", env=env)
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertIn("--not-family", combined)
+        self.assertNotIn("would run", combined, "a blank fences nothing, so nothing runs")
+
+    def test_a_blank_value_hides_no_family_from_the_name_check(self):
+        # A blank is a broken invocation, not a value to evaluate: it is refused
+        # before the names beside it are judged, so one flag never answers as rc 2
+        # and another as the fence's own code depending on what rode with it.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["", "nvidia"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("--not-family", err)
 
 
 class FamilyFenceStringNameTests(unittest.TestCase):
