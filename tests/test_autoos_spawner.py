@@ -5300,7 +5300,11 @@ elif mode in ("sandbox-write", "sandbox-write-provider-stop"):
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
     if mode.endswith("provider-stop"):
-        print("Error: Rate limit exceeded. Please try again later.")
+        # ERRCHANNEL (SB-B review 1): a rate-limit stop is the CLIENT's error
+        # line, and a CLI writes its errors to its own stderr — the spawner reads
+        # that channel and nothing the worker printed as content.
+        print("Error: Rate limit exceeded. Please try again later.",
+              file=sys.stderr)
     else:
         print("fake: wrote worker-new.txt in its sandbox")
 elif mode == "sandbox-write-conflicted":
@@ -5344,7 +5348,8 @@ elif mode == "refusal-then-provider-stop":
     # "provider", not 6 "logic".
     print('jetski: no output produced - a tool required the "command" '
           'permission that headless mode cannot prompt for, so it was auto-denied')
-    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached"')
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached"',
+          file=sys.stderr)
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
 elif mode == "sandbox-write-marker-mid-run":
@@ -5358,19 +5363,20 @@ elif mode == "sandbox-write-marker-mid-run":
     with open(os.path.join(os.getcwd(), "worker-new.txt"), "w") as fh:
         fh.write("work\\n")
 elif mode == "provider-stop-only":
-    print("Error: Rate limit exceeded. Please try again later.")
+    print("Error: Rate limit exceeded. Please try again later.", file=sys.stderr)
 elif mode == "agy-quota-rc3":
     # AGYFIX item 3 (K3 audit addendum 08:1xZ, measured 2026-09-27): agy
     # without --model ran its default Gemini, printed exactly this line and
     # exited 3 after ~157 s. It is a provider stop, so the spawner must
     # report PROVIDER-STOP (exit 8), not the client's own rc 3.
-    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached')
+    print('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached',
+          file=sys.stderr)
     sys.exit(3)
 elif mode == "parent-leak-provider-stop":
     # A leak AND a provider stop: LEAK 7 must win over PROVIDER-STOP 8.
     with open(os.path.join(root, "tracked.txt"), "a") as fh:
         fh.write("leaked\\n")
-    print("Error: Rate limit exceeded. Please try again later.")
+    print("Error: Rate limit exceeded. Please try again later.", file=sys.stderr)
 sys.exit(0)
 '''
 
@@ -5964,6 +5970,62 @@ class IsolateContainmentTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIsNone(agent.provider_stop("working\n" + line + "\n"))
 
+    # ERRCHANNEL (SB-B review 1, MED): the widened rate-limit family is exactly
+    # the wording a worker quotes when it cats its own brief or a log — "Error:
+    # Rate limit exceeded. Please try again later." is line 6 of a real
+    # T1FREE.r2.out and line 1 of the next run's task text. So a RATE-limit line
+    # must be seen on the client's own stderr channel; other outage markers (503,
+    # credits, billing) keep the merged window, and a caller with no channel
+    # split (stderr_tail=None) keeps the pre-review behaviour exactly.
+
+    def test_a_rate_limit_line_the_stderr_channel_says_is_a_stop(self):
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n",
+                                              "working\n" + line + "\n"), line)
+
+    def test_a_rate_limit_line_only_in_the_workers_stdout_is_not_a_stop(self):
+        # The same line as CONTENT: the client's stderr said something else, so
+        # no provider refused anything and no provider gets benched.
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertIsNone(agent.provider_stop("working\n" + line + "\n",
+                                              "working\n" + "\n"))
+
+    def test_a_rate_limit_line_in_the_window_but_not_the_channel_is_not_a_stop(self):
+        # An empty-but-present channel is the shape of a run whose client never
+        # wrote to stderr: the requirement stays a requirement.
+        agent = self.agent
+        self.assertIsNone(agent.provider_stop(
+            "working\nError: 429 Too Many Requests\n", ""))
+
+    def test_the_channel_rule_is_ansi_clean_on_both_sides(self):
+        # The client colours its stderr, the spawner compares the cleaned line:
+        # one coloured copy on either side must still match the other.
+        agent = self.agent
+        coloured = "\x1b[91mError: \x1b[0mRate limit exceeded"
+        self.assertEqual(agent.provider_stop("working\n" + coloured + "\n",
+                                             "working\nError: Rate limit exceeded\n"),
+                         "Error: Rate limit exceeded")
+
+    def test_the_channel_rule_spares_a_non_rate_limit_stop(self):
+        # ERRCHANNEL is scoped to the rate-limit family on purpose: a 503-all
+        # targets or an exhausted-credits line is an outage wherever the client
+        # printed it, and losing those on the stdout channel would cost the
+        # fallthrough its other two causes.
+        agent = self.agent
+        for line in ("Error: All targets were skipped by pre-dispatch filters.",
+                     "error: your personal credits have been exhausted"):
+            with self.subTest(line=line):
+                self.assertEqual(agent.provider_stop("working\n" + line + "\n", ""), line)
+
+    def test_no_channel_split_keeps_the_pre_review_answer(self):
+        # Every unit caller and every non-capture client lands here: with no
+        # split made, nothing may be demanded of a channel that was never read.
+        agent = self.agent
+        line = "Error: Rate limit exceeded. Please try again later."
+        self.assertEqual(agent.provider_stop("working\n" + line + "\n"), line)
+
     def test_provider_stop_matches_through_ansi_colour(self):
         # Clients colourise stderr: the prefix check must see past the ANSI
         # colour/bold codes wrapping the prefix (the returned line is the
@@ -5992,6 +6054,25 @@ class IsolateContainmentTests(unittest.TestCase):
         # initial commit and no WIP line was printed.
         self.assertNotIn("WIP-COMMITTED", out)
         self.assertNotIn("WIP(autoos-agent)", self._subject(self.lone_sandbox(state)))
+
+    @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
+    def test_a_brief_quoting_a_rate_limit_is_not_a_stop(self):
+        # ERRCHANNEL the other way, end to end: a fallthrough brief quotes the
+        # client's own refusal line (it is line 6 of the measured T1FREE.r2.out),
+        # and a worker that cats its instructions puts that exact line in the
+        # last window on STDOUT while its stderr stays empty. Grading that as
+        # PROVIDER-STOP would bench every leg of a healthy route over a quotation.
+        root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
+        task = ("\n".join((
+            "BRIEF SB-B (FIX-FIRST).",
+            "2. provider_stop must not fire on this line when it is content:",
+            "   Error: Rate limit exceeded. Please try again later.",
+            "REPORT: sha, tests before/after, lesson:, open:.",
+        )))
+        rc, out, err = self.run_isolated(root, stub, state, "brief-echo", task=task)
+        self.assertNotIn("PROVIDER-STOP", out + err)
+        self.assertNotIn("falling through", out + err)
+        self.assertEqual(rc, self.agent.EXIT_INCOMPLETE, out + err)
 
     @unittest.skipIf(os.name == "nt", "sh stub; POSIX only")
     def test_an_agy_quota_stop_that_exits_3_is_still_a_provider_stop(self):
@@ -6338,7 +6419,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     cfg = {"providers": {"omniroute": {"models": {rid: {} for rid in route_ids}}}}
 
     calls = {"n": 0, "cwds": [], "cmds": [], "envs": [], "route_marks": [],
-             "free_models": [], "cooldowns": [], "track": []}
+             "free_models": [], "cooldowns": [], "track": [], "attempts": []}
     real_build_plan = agent.build_plan
 
     def marking_build_plan(*a, **k):
@@ -6349,7 +6430,12 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         plan["env"]["AUTOOS_AGENT_TEST_MARK"] = plan["route"]["combo"]
         return plan
 
-    def fake_run_client(cmd, cwd, env, reap=True, capture=False):
+    def fake_run_client(cmd, cwd, env, reap=True, capture=False,
+                        run_id=None, attempt=None):
+        # `run_id`/`attempt` (SB-B merge) are what the launch records in the
+        # runner-private kill store; the fake ignores the write and keeps the
+        # calls it counts.
+        calls["attempts"].append(attempt)
         calls["n"] += 1
         calls["cwds"].append(cwd)
         calls["cmds"].append(cmd)
@@ -6376,6 +6462,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     env = dict(os.environ)
     env.update(env_over or {})
     env["AUTOOS_STATE_DIR"] = statedir
+    # RUNMODEL: a gateway run looks its writer up in the live call log with the
+    # host's manage key, and this host has one. The suite never reads a gateway:
+    # point the ai-stack config dir at the temp state dir, where no key file
+    # exists, so the lookup proves nothing and sends no request.
+    env["AUTOOS_AI_STACK_CONFIG"] = statedir
     # A gateway run needs a client key and a live gateway; both are faked
     # here. The key is what makes the run track-recorded at all.
     env["AUTOOS_OMNIROUTE_KEY"] = "test-only-key"
@@ -6601,6 +6692,21 @@ class ProviderStopFallthroughTests(unittest.TestCase):
         # re-run kept the stopped route's OPENCODE_CONFIG_CONTENT/session tag.
         _, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1)
         self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_every_attempt_is_launched_as_its_own_numbered_attempt(self):
+        # SB-B merge (scope + kill store): each fallthrough re-start is a NEW
+        # session, so `cancel` must be aimed at the group that is running now. The
+        # spawner hands the launch its attempt number, and the launch re-records
+        # its own group under it (`run_client` → `record_attempt_group`); the
+        # scope that wraps them is the runner's, and one cgroup holds every
+        # setsid() child in it, so the attempt needs no scope of its own.
+        cap = self.agent.MAX_FALLTHROUGH
+        _, out, err, calls, _ = self._run(_cap_routes(cap), stops=cap + 2)
+        self.assertEqual(calls["attempts"], list(range(1, cap + 2)),
+                         "%s: %s" % (calls["attempts"], out + err))
+        self.assertEqual(calls["n"], cap + 1, "one launch per attempt number")
+        single = self._run(["r-free", "r-cheap"], stops=0)
+        self.assertEqual(single[3]["attempts"], [1], single[1] + single[2])
 
     def test_fallthrough_stops_after_the_cap_and_exits_8(self):
         cap = self.agent.MAX_FALLTHROUGH
@@ -13793,6 +13899,286 @@ class ModeFlipRefusalTests(unittest.TestCase):
                                  if ln.startswith("take it:")]), out)
 
 
+@unittest.skipIf(os.name == "nt", "the mode bit: git core.fileMode and os.chmod "
+                                  "semantics the refusal is written against")
+class ModeFlipOptOutTests(unittest.TestCase):
+    """SB-B review 2 (MODEFLIP, item 3): the refusal needs a door, and the door
+    is opened by the CALLER before the worker runs — `run --allow-mode-only`, or
+    a spawn's `allow_mode_only=True` recorded in the runner's private record.
+    Not by anything the worker can write into the directory it owns."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    @staticmethod
+    def _flip_worker(cwd, n):
+        os.chmod(os.path.join(cwd, "tracked.txt"), 0o755)
+
+    def test_the_command_line_opt_out_offers_a_mode_only_diff(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, worker=self._flip_worker,
+            args_over={"allow_mode_only": True})
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("MODEFLIP", out + err)
+        self.assertIn("take it:", out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_the_spawn_time_record_opt_out_offers_it_without_the_flag(self):
+        # The MCP path: the field was recorded at spawn, and the verdict reads
+        # that record. One attempt, no `--allow-mode-only` on the argv the CLI
+        # itself parsed.
+        with mock.patch.object(self.agent, "read_kill_record",
+                               lambda run_id: {"allow_mode_only": True}):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, worker=self._flip_worker)
+        self.assertNotIn("MODEFLIP", out + err)
+        self.assertIn("take it:", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_job_json_claiming_the_opt_out_does_not_open_the_door(self):
+        # The verdict's only two inputs are the caller's argv and the record the
+        # runner wrote at spawn. A worker's own job file — which it writes in the
+        # task directory it owns, beside the sandbox — is not one of them: with
+        # the claim there and no record, a mode-only diff stays refused.
+        def flip_and_claim(cwd, n):
+            self._flip_worker(cwd, n)
+            with open(os.path.join(os.path.dirname(cwd), "job.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump({"allow_mode_only": True, "request": {"allow_mode_only": True}},
+                          fh)
+        with mock.patch.object(self.agent, "read_kill_record", lambda run_id: None):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, worker=flip_and_claim)
+        self.assertIn("mode-only diff (refused)", out + err)
+        self.assertNotIn("take it:", out + err)
+        self.assertEqual(rc, 5, out + err)
+
+    def test_the_refusal_names_the_door(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, worker=self._flip_worker)
+        self.assertIn("--allow-mode-only", out + err)
+        self.assertIn("allow_mode_only=True", out + err)
+
+    def test_the_mcp_field_reaches_the_cli_argv(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "tier": 2,
+                                         "allow_mode_only": True})
+        self.assertIn("--allow-mode-only", argv)
+        argv_default, _ = mcp_server.build_argv({"task": "t", "tier": 2})
+        self.assertNotIn("--allow-mode-only", argv_default)
+
+
+class ResolvedWriterTests(unittest.TestCase):
+    """RUNMODEL (D-103): every report about a run should say WHICH model wrote
+    it. A gateway combo resolves to a provider only at the gateway, so the run
+    asks the gateway's own call log for its session id — once, read-only — and
+    a native client already holds the answer in its plan. What cannot be proven
+    is written as `unresolved`; a guessed provider in a record people route on is
+    worse than an empty one."""
+
+    RUN_ID = "20260929-000000-runmodel-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    @staticmethod
+    def _rows(*rows):
+        return json.dumps(list(rows)).encode("utf-8")
+
+    def test_a_gateway_run_asks_the_log_under_its_own_session_id(self):
+        agent = self.agent
+        session = agent.session_header_value("lane-x", self.RUN_ID)
+        seen = {}
+
+        def fetch(url, headers, timeout):
+            seen["url"] = url
+            return 200, self._rows(
+                {"sessionTag": "other/run", "provider": "dead", "model": "dead-1",
+                 "status": 200, "timestamp": "2026-09-29T00:00:03Z"},
+                {"sessionTag": session, "provider": "mimo", "model": "mimo-7",
+                 "status": 200, "timestamp": "2026-09-29T00:00:01Z"},
+                # The newest row for THIS run, and an error row beside it: the
+                # refused leg names a provider that did not serve the run.
+                {"sessionTag": session, "provider": "Jetski", "model": "jetski-9",
+                 "status": 429, "error": "rate limit", "timestamp": "2026-09-29T00:00:02Z"})
+        self.assertEqual(agent.gateway_writer(session, gateway="http://gw.invalid",
+                                              key="manage-key", fetch=fetch),
+                         ("mimo", "mimo-7"))
+        self.assertIn("/api/usage/call-logs?", seen["url"])
+        self.assertNotIn("offset=2", seen["url"], "one read, never pages")
+
+    def test_a_gateway_run_that_fell_through_reports_the_leg_that_finished(self):
+        # Only error rows exist for the session (every leg refused it): the newest
+        # row is still the answer, because that is the one the run ended on.
+        agent = self.agent
+        rows = [{"sessionTag": self.RUN_ID, "provider": "a", "model": "a-1",
+                 "status": 429, "timestamp": "2026-09-29T00:00:01Z"},
+                {"sessionTag": self.RUN_ID, "provider": "b", "model": "b-2",
+                 "status": 503, "timestamp": "2026-09-29T00:00:02Z"}]
+        self.assertEqual(agent.gateway_writer(self.RUN_ID, gateway="http://gw.invalid",
+                                              key="k",
+                                              fetch=lambda *a: (200, self._rows(*rows))),
+                         ("b", "b-2"))
+
+    def test_an_unreadable_log_resolves_to_nothing_rather_than_a_guess(self):
+        agent = self.agent
+        for fetch in (lambda *a: (500, b"boom"),
+                      lambda *a: (200, b"not json"),
+                      lambda *a: (200, b'{"rows": 1}'),
+                      lambda *a: (_ for _ in ()).throw(OSError("connection refused"))):
+            with self.subTest(fetch=fetch):
+                self.assertIsNone(agent.gateway_writer(self.RUN_ID, gateway="http://gw",
+                                                       key="k", fetch=fetch))
+
+    def test_no_manage_key_means_no_request(self):
+        # The lookup is a read of the host's gateway log with the host's manage
+        # key. Without that key there is nothing to sign the GET with, and the
+        # suite (and any host with no gateway) must see exactly zero requests.
+        called = []
+        self.assertIsNone(self.agent.gateway_writer(
+            self.RUN_ID, gateway="http://gw.invalid", key="",
+            fetch=lambda *a: called.append(1)))
+        self.assertEqual(called, [])
+
+    def test_a_gateway_run_resolves_provider_model_and_family(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        registry = {"models": {"mimo-7": {"family": "mimo"}}}
+        with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
+             mock.patch.object(agent, "_call_log_rows",
+                               lambda *a, **k: [{"sessionTag": "lane-x/" + self.RUN_ID,
+                                                 "provider": "mimo", "model": "mimo-7",
+                                                 "status": 200,
+                                                 "timestamp": "2026-09-29T00:00:01Z"}]):
+            writer = agent.resolved_writer(plan, True, registry=registry)
+        self.assertEqual(writer, {"provider": "mimo", "model": "mimo-7",
+                                  "family": "mimo"})
+        self.assertEqual(agent.writer_line(writer), "writer: mimo/mimo-7 (mimo)")
+
+    def test_a_gateway_failure_is_written_as_unresolved(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        with mock.patch.object(agent, "manage_key", lambda env=None: None):
+            writer = agent.resolved_writer(plan, True, registry={"models": {}})
+        self.assertEqual(set(writer.values()), {agent.WRITER_UNRESOLVED})
+        self.assertEqual(agent.writer_line(writer),
+                         "writer: unresolved/unresolved (unresolved)")
+
+    def test_a_native_run_answers_from_its_own_plan(self):
+        # No gateway to ask: the client's model id is the answer, and the
+        # provider is the client itself — unless --free named one in the id.
+        agent = self.agent
+        registry = {"models": {"gemini-3.8-flash": {"family": "gemini"}}}
+        native = agent.resolved_writer({"client": "agy", "model": "gemini-3.8-flash"},
+                                       False, registry=registry)
+        self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
+                                  "family": "gemini"})
+        free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
+                                     False, registry={"models": {}})
+        self.assertEqual((free["provider"], free["model"]), ("jetski", "jetski-9"))
+
+    def test_the_run_end_prints_the_line_and_records_it_where_a_canceller_can_read(self):
+        agent = self.agent
+        writes = []
+        with mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record",
+                               lambda run_id: {"mode": "write"}), \
+             mock.patch.object(agent, "write_kill_record",
+                               lambda run_id, record: writes.append(
+                                   (run_id, dict(record))) or True):
+            rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("writer: mimo/mimo-7 (", out + err)
+        recorded = [r for _, r in writes if "writer" in r]
+        self.assertEqual(recorded[-1]["writer"]["provider"], "mimo")
+
+    def test_a_run_with_no_record_of_its_own_is_not_written_to(self):
+        # The direct CLI path has no canceller and no record: the line is still
+        # printed for whoever watches, and nothing is created behind it.
+        agent = self.agent
+        writes = []
+        with mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record", lambda run_id: None), \
+             mock.patch.object(agent, "write_kill_record",
+                               lambda run_id, record: writes.append(record) or True):
+            rc, out, err, calls, _ = _fallthrough_run(self, ["r-free"], stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("writer: mimo/mimo-7", out + err)
+        self.assertEqual([w for w in writes if "writer" in w], [])
+
+    def test_the_run_state_carries_the_writer_to_whoever_reports_the_run(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "agents", self.RUN_ID)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": self.RUN_ID, "run_id": self.RUN_ID, "request": {}, "task": "t",
+            "argv": [], "cwd": str(ROOT), "route": {}, "started": time.time(),
+            "pid": os.getpid()})
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": 0, "ended": time.time()})
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}, clear=False):
+            mcp_server.write_kill_record(self.RUN_ID, {
+                "mode": "write",
+                "writer": {"provider": "mimo", "model": "mimo-7", "family": "mimo"}})
+            st = mcp_server._state(path)
+        self.assertEqual(st["writer"], {"provider": "mimo", "model": "mimo-7",
+                                       "family": "mimo"}, st)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process groups; group_record() is empty on Windows")
+class AttemptGroupRecordTests(unittest.TestCase):
+    """SB-B merge, item 1: the fallthrough loop launches the client again and each
+    launch leads a NEW session, so the group `cancel` aims at has to follow it.
+    The runner-private record is the only place a kill target is read from, and
+    a launch may only update a record a server already minted."""
+
+    RUN_ID = "20260929-000000-attempt-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        patcher = mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _sleeper(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                start_new_session=True)
+        self.addCleanup(lambda: (proc.terminate(), proc.wait()))
+        return proc
+
+    def test_a_live_launch_moves_the_record_to_its_own_group(self):
+        proc = self._sleeper()
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write", "pgid": 1,
+                                                   "start": 1})
+        self.assertTrue(self.agent.record_attempt_group(self.RUN_ID, proc, 2))
+        rec = self.agent.read_kill_record(self.RUN_ID)
+        self.assertEqual(rec["pgid"], proc.pid, rec)
+        self.assertEqual(rec["attempt"], 2, rec)
+        # The decided-at-spawn fields are not re-decided by a launch, and the
+        # group the runner wrote for attempt 1 is gone: it is dead.
+        self.assertEqual(rec["mode"], "write", rec)
+
+    def test_a_run_with_no_record_creates_none(self):
+        proc = self._sleeper()
+        self.assertFalse(self.agent.record_attempt_group(self.RUN_ID, proc, 1))
+        self.assertIsNone(self.agent.read_kill_record(self.RUN_ID))
+
+    def test_the_launch_never_writes_through_the_workers_directory(self):
+        proc = self._sleeper()
+        job_dir = os.path.join(self.tmp, "agents", self.RUN_ID)
+        os.makedirs(job_dir)
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write"})
+        self.assertTrue(self.agent.record_attempt_group(self.RUN_ID, proc, 3))
+        self.assertEqual(os.listdir(job_dir), [],
+                         "job.json is where a cancelled worker could have read this")
+
+
 class TierOneWriterIsolationTests(unittest.TestCase):
     """SB-B (from SB-C's open item): `run --tier 1` / a card that routes to tier 1
     with a WRITE role still ran in the caller's checkout. leaf_isolation_refusal
@@ -13810,9 +14196,23 @@ class TierOneWriterIsolationTests(unittest.TestCase):
             self.assertIn("--isolate", refusal)
 
     def test_a_read_role_card_at_tier_1_still_runs_in_place(self):
-        for card in ({"role": "review"}, {"kind": "research"}, {"kind": "plan"}, None, {}):
+        for card in ({"role": "review"}, {"role": "orchestrate"},
+                     {"kind": "research"}, {"kind": "plan"}, {"kind": "review"},
+                     None):
             self.assertIsNone(self.agent.writer_isolation_refusal(1, False, "opencode",
                                                                   card), card)
+
+    def test_an_empty_card_at_tier_1_is_a_writer(self):
+        # SB-C's semantics, which the merged CLI now shares: a card that names no
+        # role takes the registry's default (`implement`), and a default is a
+        # writer — `role=implement, complexity=hard` routes UP to tier 1, so the
+        # tier-1 leg is not always the orchestrator. Only a run with NO card at all
+        # (`--tier 1`, the operator naming their own session) is exempt.
+        self.assertIsNotNone(self.agent.writer_isolation_refusal(1, False, "opencode", {}))
+        self.assertIsNotNone(self.agent.writer_isolation_refusal(
+            1, False, "opencode", "role=implement"))
+        self.assertIsNone(self.agent.writer_isolation_refusal(
+            1, False, "opencode", "role=orchestrate"))
 
     def test_an_isolated_or_read_only_run_needs_no_refusal(self):
         card = {"role": "implement"}
@@ -13844,16 +14244,36 @@ class TierOneWriterIsolationTests(unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(calls["n"], 1)
 
-    def test_the_mcp_spawn_forces_isolation_for_a_tier_1_writer(self):
-        # The server holds no rule table of its own: it asks the same helper.
+    def test_the_mcp_spawn_isolates_a_tier_1_writer_on_the_shared_rule(self):
+        # SB-B merge: the server holds no rule table of its own — its `is_write_role`
+        # is the spawner's — and the tier-1 leg it runs is SB-C's block, which
+        # records `default_isolate` rather than the leaf force's `forced_isolate`.
+        # Two forces for one run would be two answers about one request.
         agent = self.agent
+        self.assertIs(agent.is_write_role({"role": "implement"}), True)
+        self.assertIs(agent.is_write_role("role=review"), False)
         with mock.patch.object(agent.routing, "select_combo",
                                lambda card, allow: ("t1-frontier", "stub")):
             argv, route = mcp_server.build_argv({"task": "t", "card": "role=implement",
                                                  "cwd": str(ROOT)})
         self.assertEqual(route["combo"], "t1-frontier")
         self.assertIn("--isolate", argv, route)
-        self.assertTrue(route["forced_isolate"])
+        self.assertTrue(route["default_isolate"])
+        self.assertNotIn("forced_isolate", route)
+
+    def test_the_mcp_refusal_and_the_cli_refusal_agree_on_the_card(self):
+        # The drift this merge closes was two predicates: a v2 `kind` card is a
+        # reader to SB-C's old role-only check and was a writer to SB-B's. One
+        # answer now, from one function.
+        agent = self.agent
+        card = {"kind": "review", "privacy": "public"}
+        self.assertIs(agent.is_write_role(card), False)
+        self.assertIs(mcp_server.is_write_role({"card": card}), False)
+        self.assertIsNone(agent.writer_isolation_refusal(1, False, "opencode", card))
+        self.assertIs(agent.is_write_role({"kind": "implement"}), True)
+        self.assertIs(mcp_server.is_write_role({"card": {"kind": "implement"}}), True)
+
+
 class CancelChannelTests(unittest.TestCase):
     """SB-A2 (D-103) item A/B: what `cancel` reads has to be a record the worker
     can neither see nor write. SB-A recorded the client's pgid in
@@ -14703,6 +15123,23 @@ class RunnerPrivateRecordTests(unittest.TestCase):
                 self.assertIsInstance(record["pgid"], int, record)
                 self.assertEqual(0o600, os.stat(mcp_server.kill_store_path(out["id"])).st_mode & 0o777)
 
+    def test_spawn_records_the_mode_only_opt_out_and_nothing_else_does(self):
+        # MODEFLIP review 2: the opt-out is decided before the worker runs, so it
+        # lives in this record. A spawn that never asked for it leaves the field
+        # absent — the default is the refusal, not a flag that must be cleared.
+        out = mcp_server.spawn({"task": "chmod the installer %d" % 1, "cwd": str(ROOT),
+                                "tier": 2, "allow_mode_only": True, "dry_run": True})
+        self.assertNotIn("error", out, out)
+        self.wait_done(out["id"])
+        record = mcp_server.read_kill_record(out["id"])
+        self.assertTrue(record["allow_mode_only"], record)
+        plain = mcp_server.spawn({"task": "chmod the installer %d" % 2, "cwd": str(ROOT),
+                                  "tier": 2, "dry_run": True})
+        self.assertNotIn("error", plain, plain)
+        self.wait_done(plain["id"])
+        self.assertFalse(mcp_server.read_kill_record(plain["id"])
+                         .get("allow_mode_only"))
+
     def test_the_record_mode_does_not_reride_on_a_later_group_write(self):
         # The runner re-records its own group in run_job; that is not a second
         # chance to decide the mode, the scope or the created_at.
@@ -14837,7 +15274,6 @@ class RunnerPrivateRecordTests(unittest.TestCase):
                                                       "reason": "recycled"}]):
             st = mcp_server.cancel(self.RUN_ID)
         self.assertEqual(st["state"], "cancel-failed", st)
-
 
 
 if __name__ == "__main__":
