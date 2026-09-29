@@ -52,8 +52,12 @@ outside every worktree because the worktree is the worker's: the old record
 file sat in ``<git-dir>/autoos-prepush.log``, and anything that could write the
 checkout could certify its own push. That log stays — one line per push, the
 ``green_line`` shape — as a human-readable annotation, and readiness never reads
-it. ``autoos-agent.py ready`` calls ``local_green()`` as its fifth gate, and an
-orchestrator that means to waive it names a reason with ``--allow-unverified``.
+it. A gate that runs inside a worker's sandbox — ``AUTOOS_AGENT_RUN_ID`` set, the
+mark the spawner puts in every worker it starts — runs the checks and prints its
+verdict but writes no green record: the worker cannot certify its own push, so
+only an orchestrator's run records green and ``autoos-agent.py ready`` asks for
+that record as its fifth gate. An orchestrator that means to waive it names a
+reason with ``--allow-unverified``.
 
 OVERRIDE: ``AUTOOS_PREPUSH_OVERRIDE="<reason>"`` skips the checks, prints a loud
 line, and stores a ``kind: OVERRIDE`` record for the sha (and the same line in

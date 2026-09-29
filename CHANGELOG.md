@@ -5,6 +5,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the green record is the runner's, not the worker's (PREPUSH-3, 2026-09-29)
+
+PREPUSH-2 made the record's *shape* unreadable to a forgery; the forge was still
+trivial because the file it had to match sat in `<git-dir>/autoos-prepush.log`,
+inside the checkout the worker writes in. The certificate now lives in a
+runner-private store, `<state-dir>/prepush/<sha>.json` — the sibling of the
+spawner's kill record, same `clients.state_dir()` base, same 0700 dir / 0600
+file, the path imported from `autoos_clients` rather than restated, so the two
+stores move together. One JSON record per commit (the newest wins, so a green
+after an override still readies a sha and an override after green unready it),
+written atomically by temp + rename. It binds what a green run actually implies:
+the commit sha, that commit's *tree* hash, the sorted manifest of commands the
+gate ran, each command's exit result and its parsed `N passed` count, and the
+UTC stamp. `--check-ready <sha>` recomputes the sha's tree from the repo and
+accepts only a record whose sha AND tree match what git says now, whose stamp
+parses, whose manifest and results are both non-empty, and whose every result is
+ok: the sha check is what refuses a lane that amended after a green run (the
+record is filed under the commit it ran on), and the tree check is what refuses a
+record that names a commit it never actually verified. The old log file stays as a
+human-readable annotation and readiness never reads it. Finally, a gate run that
+carries `AUTOOS_AGENT_RUN_ID` — the mark the spawner puts into every worker — runs
+the checks, prints its verdict, and writes no green record: a worker cannot
+certify its own push, only the orchestrator that merges the lane can. `ready`
+needed no change; it asks `local_green()`, which is where the store is read.
+Tests: `LogRecordTests.test_the_record_binds_the_tree_the_commit_carries_and_the_sorted_manifest`,
+`test_the_record_stores_each_commands_result_and_parsed_counts`,
+`test_the_record_is_written_privately_and_atomically`,
+`test_the_store_lives_outside_the_checkout_the_worker_writes_in`;
+`CheckReadyTests.test_a_forged_line_in_the_worktree_log_certifies_nothing`,
+`test_a_record_that_binds_another_tree_is_not_green`,
+`test_a_record_with_a_red_result_is_not_green`,
+`test_a_green_record_does_not_carry_an_amended_commit`,
+`test_the_record_the_gate_writes_is_the_record_the_gate_reads` (round trip
+through the real gate); `WorkerRecordTests.test_a_worker_run_reports_green_and_records_nothing`,
+`test_a_worker_run_still_refuses_a_red_tree`, `test_the_same_gate_outside_a_worker_run_records_green`;
+and on the spawner side `ReadyCommandTests.test_a_forged_worktree_log_line_does_not_carry_ready`.
+
 ### Fixed — the PREPUSH gate reads its own record shape and nothing else (PREPUSH-2, 2026-09-29)
 
 `local_green()` and `--check-ready` called *any* second field that was not `OVERRIDE` a
