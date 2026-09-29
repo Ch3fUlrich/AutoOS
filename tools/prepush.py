@@ -64,6 +64,10 @@ USAGE
     python3 tools/prepush.py --check-ready <sha>
 
 Exit 0 green (or overridden), 1 a gate refused, 2 the gate itself could not run.
+1 is a verdict the lane can act on (merge the base, fix the red check); 2 is the
+absence of one — no checkout, no HEAD commit, no ``tools/affected-tests.py`` to
+derive the run list from, or a mapper that died — and a caller that waits on 1
+must not wait forever on it.
 
 The pre-push hook is a three-line shim that calls this file; it is installed by
 ``.agents/skills/unattended-orchestration/trust_worktree.py``, which chains rather
@@ -109,6 +113,22 @@ TAIL_LINES = 60
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SH_SUMMARY = re.compile(r"passed\s+(\d+)\s+failed\s+(\d+)\s+skipped\s+(\d+)")
 
+#: The gate's answers. ``REFUSED`` is a verdict the lane can act on — fix the tree,
+#: merge the base, run the check. ``COULD_NOT_RUN`` is the absence of a verdict: no
+#: command was named, no check was asked, because the gate itself had nothing to
+#: work with. They are different codes because they are different next actions, and
+#: a caller that treats "wait, the lane is not ready yet" as rc 1 must not wait
+#: forever on a checkout that cannot answer.
+REFUSED = 1
+COULD_NOT_RUN = 2
+
+
+class GateCouldNotRun(Exception):
+    """The gate never got to ask its question — raised by the helpers that locate
+    the checkout, its HEAD and its log, and turned into ``COULD_NOT_RUN`` by
+    ``main``. Library callers (``tools/autoos-agent.py``) read the record API
+    instead, and a failure here is theirs to decide about, not a silent exit."""
+
 
 def _git(repo, *args, check=False):
     """Run git in ``repo`` and return stdout, or None on a non-zero exit."""
@@ -126,7 +146,8 @@ def repo_root(path=None) -> Path:
     """The top level of the checkout ``path`` (default: the cwd) lives in."""
     out = _git(path or Path.cwd(), "rev-parse", "--show-toplevel")
     if out is None:
-        sys.exit("prepush: %s is not inside a git checkout" % (path or os.getcwd()))
+        raise GateCouldNotRun("prepush: %s is not inside a git checkout"
+                              % (path or os.getcwd()))
     return Path(out)
 
 
@@ -134,7 +155,7 @@ def log_path(repo) -> Path:
     """``<git-dir>/autoos-prepush.log`` — per worktree, and never a tracked file."""
     gitdir = _git(repo, "rev-parse", "--absolute-git-dir")
     if gitdir is None:
-        sys.exit("prepush: %s is not a git repository" % repo)
+        raise GateCouldNotRun("prepush: %s is not a git repository" % repo)
     return Path(gitdir) / LOG_NAME
 
 
@@ -164,7 +185,7 @@ def ci_env(extra=None) -> dict:
 def head_sha(repo) -> str:
     sha = _git(repo, "rev-parse", "HEAD")
     if sha is None:
-        sys.exit("prepush: %s has no HEAD commit" % repo)
+        raise GateCouldNotRun("prepush: %s has no HEAD commit" % repo)
     return sha
 
 
@@ -391,12 +412,14 @@ def gate(repo, base: str):
     ok, message = base_gate(repo, base)
     if not ok:
         print(message)
-        return 1
+        return REFUSED
     py = python_executable()
     plan, error = build_plan(repo, base, py)
     if error:
+        # No command was ever named, so there is no verdict here —
+        # not even a red one.
         print(error)
-        return 1
+        return COULD_NOT_RUN
     commands = commands_for(repo, plan, py)
     ran = []
     failures = []
@@ -423,7 +446,7 @@ def gate(repo, base: str):
               % len(failures))
         for text in failures:
             print("  failed: %s" % text)
-        return 1
+        return REFUSED
     record(repo, green_line(sha, ran))
     print("prepush: green — %d check(s) for %s" % (len(ran), sha[:12]))
     return 0
@@ -442,12 +465,16 @@ def main(argv=None) -> int:
                     help="exit 0 only if a green (not OVERRIDE) gate record exists "
                          "for exactly this sha (D-110)")
     args = ap.parse_args(argv)
-    repo = repo_root(args.repo)
-    if args.check_ready:
-        ok, message = ready_gate(repo, args.check_ready)
-        print(message)
-        return 0 if ok else 1
-    return gate(repo, args.base)
+    try:
+        repo = repo_root(args.repo)
+        if args.check_ready:
+            ok, message = ready_gate(repo, args.check_ready)
+            print(message)
+            return REFUSED if not ok else 0
+        return gate(repo, args.base)
+    except GateCouldNotRun as exc:
+        print(exc)
+        return COULD_NOT_RUN
 
 
 if __name__ == "__main__":

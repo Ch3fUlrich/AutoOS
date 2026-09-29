@@ -439,6 +439,68 @@ class LogRecordTests(RepoFixture):
         self.assertEqual(self.log_lines(), [])
 
 
+class CouldNotRunTests(RepoFixture):
+    """NB3: the docstring promises exit 2 when the gate itself could not run.
+
+    The two codes are different next actions, which is why the distinction is worth
+    a code: 1 means *a gate ran and said no* — fix the tree and push again; 2 means
+    *the question was never asked* — the checkout has no mapper in it, or is not a
+    checkout. `tools/autoos-agent.py`'s `ready` already refuses to conflate them for
+    its own git failures, and the gate it wraps cannot answer with 1 for everything.
+    """
+
+    def run_outside(self, path, *args):
+        proc = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(path)]
+                              + list(args), capture_output=True, text=True,
+                              cwd=str(path))
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_a_run_list_that_cannot_be_derived_is_not_a_refusal(self):
+        os.remove(str(self.repo / "tools" / "affected-tests.py"))
+        out = self.assert_rc(2)
+        self.assertIn("affected-tests.py", out)
+        self.assertEqual(self.log_lines(), [], "a gate that never asked left a record")
+
+    def test_a_mapper_that_prints_no_json_is_not_a_refusal(self):
+        self._write("tools/affected-tests.py", "print('not a plan')\n")
+        out = self.assert_rc(2)
+        self.assertIn("no JSON plan", out)
+
+    def test_a_mapper_that_exits_red_is_not_a_refusal(self):
+        # The mapper dying is not a test failing: no command of the run list was
+        # even named, so there is nothing red for the lane to go and fix.
+        self._write("tools/affected-tests.py", "import sys\nsys.exit(3)\n")
+        self.assert_rc(2)
+
+    def test_a_directory_that_is_not_a_checkout_is_not_a_refusal(self):
+        plain = self.tmp / "not-a-checkout"
+        plain.mkdir()
+        rc, out = self.run_outside(plain)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("not inside a git checkout", out)
+
+    def test_a_ready_check_on_a_non_checkout_is_not_a_refusal(self):
+        # D-110's own door: "no green record" (1, go run the gate) and "I could not
+        # look" (2) send an orchestrator to different work.
+        plain = self.tmp / "not-a-checkout"
+        plain.mkdir()
+        self.assertEqual(self.run_outside(plain, "--check-ready", "f" * 40)[0], 2)
+
+    def test_a_checkout_with_no_commit_is_not_a_refusal(self):
+        fresh = self.tmp / "fresh"
+        run_git("init", "-q", str(fresh))
+        rc, out = self.run_outside(fresh)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("no HEAD commit", out)
+
+    def test_a_red_check_is_still_a_refusal(self):
+        # The other half of the contract, so the split cannot quietly become
+        # "everything is 2": a gate that ran and found a red command answers 1.
+        self.suite_is_red()
+        self.set_plan({})
+        self.assert_rc(1)
+
+
 class OverrideTests(RepoFixture):
     """(f) An orchestrator may step over the gate — loudly, and on the record."""
 
