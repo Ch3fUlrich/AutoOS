@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a `not_family` handed over as one bare string fences one family, not its letters (FAMILYFENCE-3 N2, 2026-09-29)
+
+`fence_family_names` iterated its argument directly, which is right for the CLI's
+`append` list and wrong for every other caller: `not_family="mimo"` — the shape a
+programmatic caller of `family_fence` (a hand-built args namespace, an importable API
+call) hands over — fenced the families `"m"`, `"i"` and `"o"`, which the registry
+carries none of, and the real family stayed unfenced while the run read as guarded.
+The MCP spawn path builds a repeated `--not-family` flag and so was already a list; the
+defect was one call below, at the fence's single home. A bare string is now one name
+there.
+
+- **Test** (`tests/test_autoos_spawner.py`, `FamilyFenceStringNameTests`): a string
+  yields one `family_key`, and `family_fence` built from one string excludes exactly
+  that family.
+
 ### Fixed — the free fallthrough re-plan carries the fence into the leg choice (FAMILYFENCE-3 N1, 2026-09-29)
 
 `_free_fallthrough_plan` filtered the fenced families out of the chain it walks, then

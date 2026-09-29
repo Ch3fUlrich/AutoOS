@@ -14825,6 +14825,28 @@ class FamilyFenceUnknownNameTests(unittest.TestCase):
         self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
 
 
+class FamilyFenceStringNameTests(unittest.TestCase):
+    """FAMILYFENCE-3 N2: `not_family` reaching the fence as a BARE STRING — an API
+    caller or the MCP spawn tool, not the CLI's `append` list — was iterated
+    char-by-char, so "mimo" fenced the families "m", "i" and "o" (nothing) and the
+    real family stayed unfenced while the run read as guarded."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_a_bare_string_names_one_family_and_not_its_characters(self):
+        self.assertEqual(self.agent.fence_family_names("Mimo"), ["mimo"])
+        self.assertEqual(self.agent.fence_family_names(["mimo", "META"]),
+                         ["mimo", "meta"])
+
+    def test_family_fence_from_a_bare_string_excludes_that_one_family(self):
+        args = argparse.Namespace(not_family="nvidia", review_of=None,
+                                  card="kind=review", tier=None)
+        fence = self.agent.family_fence(args)
+        self.assertEqual(fence["families"], ["nvidia"],
+                         "one name typed as a string is one family, not four letters")
+
+
 class NoFallthroughTests(unittest.TestCase):
     """FAMILYFENCE item 3: `--no-fallthrough` pins the run to the model it was
     planned on. An orchestrator that wants a verdict from one named model would
