@@ -46,6 +46,48 @@ writer to the reader.
   four cases that write a shebang themselves, so every test that builds a suite stub skips
   on Windows by itself instead of 30 cases each repeating the reason.
 
+### Fixed — the gate's installer fails closed and keeps its own promises (PREPUSH-2, 2026-09-29)
+
+Four defects at the edges of the gate, each with a test that names it:
+
+- **A hook whose gate is missing refused the push (NB2).** The shim
+  `trust_worktree.py` installs printed `no $root/tools/prepush.py -- nothing was
+  checked` and exited **0**, so a lane that lost the gate — rebased onto a base
+  without it, checked out an older branch — pushed exactly the untested sha D-154
+  exists to stop, while the installer's own message said the gate was installed. A
+  check that could not run is not a check that passed. It now exits 1, points at the
+  `AUTOOS_PREPUSH_OVERRIDE` that leaves a record `--check-ready` refuses, and does
+  **not** exec the chained hook: the chain is what runs *after* the gate passes, so
+  handing over would let an operator's `exit 0` push the branch anyway. Tests:
+  `HookInstallTests.test_a_gate_that_is_not_there_refuses_the_push`,
+  `.test_a_gate_that_is_not_there_does_not_hand_over_to_the_operators_hook` — both a
+  real `git push` against a bare origin and its ref list, which is also how the first
+  cut's unterminated quote was found.
+- **`2` means the gate could not run (NB3).** The docstring promised it and every
+  path returned 1: no checkout, no HEAD commit, no `tools/affected-tests.py`, a
+  mapper that died or printed no JSON. 1 is a verdict the lane can act on; the
+  absence of a verdict is not, and a caller that waits on "not ready yet" waits
+  forever on a checkout that cannot answer — `tools/autoos-agent.py`'s `ready`
+  already splits its own git failures that way. The locating helpers raise
+  `GateCouldNotRun`, `main` maps it, and the refusals read as the `REFUSED` constant.
+  Test: `CouldNotRunTests` (six paths, plus
+  `.test_a_red_check_is_still_a_refusal` holding the other side).
+- **The install dir is where git says it is (NB1).** `hooks_dir` asks
+  `git rev-parse --git-path hooks`, which is the only answer that tracks
+  `core.hooksPath`; a path built from `.git/hooks` installs a gate no push reads on a
+  host that set it. That is how `dbba511` already wrote it, so the tests pass at this
+  HEAD: they are the regression pin, and were checked by hardcoding `.git/hooks` and
+  watching both go red. Test:
+  `HookInstallTests.test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it`,
+  `.test_a_relative_core_hooksPath_is_resolved_against_the_checkout`.
+- **One home for the gate's git helper (NB6).** `_git` existed twice, in
+  `tools/prepush.py` and in the skill's `trust_worktree.py`, and the only caller is
+  `hooks_dir` — so the copy that can drift is precisely the one that decides where
+  the gate lands. The skill now imports the gate's helper, lazily and *after* the
+  `tools/prepush.py` existence check, because a repository without the gate must hear
+  "nothing installed" rather than an ImportError. Test:
+  `HookInstallTests.test_the_git_helper_has_one_home_and_lives_in_the_gate`.
+
 ### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
 
 Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI
