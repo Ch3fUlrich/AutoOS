@@ -124,7 +124,11 @@ resolves does not refuse it (FAMILYFENCE-3 B1). `--review-of <run-id>` names the
 run whose WRITER this
 one reviews: a review defaults to fencing that writer's family, read from that
 run's runner-private kill record and never from its job.json (skill R-orch-17 —
-job.json lives in the directory the worker owns). A review with neither is
+job.json lives in the directory the worker owns). That store is per-checkout, so a
+review spawned from a tree that did not spawn its writer reads no family at all —
+and exits 2 naming the store searched and both ways out (spawn where the writer ran,
+or `--not-family`), because a fence that was asked for and cannot be built is not a
+warning (FAMILYFENCE-4). A review with neither is
 possible and says so on stderr, because its silence is what got measured.
 `--no-fallthrough` pins the run to the model it was planned on: a stop there is
 the run's answer, its own rc, with no re-plan onto whatever model survived. After
@@ -3712,6 +3716,26 @@ FAMILY_FENCE_NO_WRITER = ("autoos-agent: review without a known writer family - 
                           "cross-family not enforced")
 
 
+def fence_unreadable_writer_refusal(review_of):
+    """FAMILYFENCE-4: a `--review-of` whose writer family cannot be read is refused,
+    not warned about.
+
+    The record store is per-checkout (`kill_store_dir`), so a review spawned from a
+    lane that did not spawn its writer holds no record for it: `writer_family_of_run`
+    answers None, the fence excludes nothing, and the run used to continue onto a
+    combo carrying the writer's own family with one stderr line beside it. A warning
+    is not an answer to a fence that was ASKED for — and the caller cannot see the
+    difference from the plan alone. The message names the store it searched and both
+    ways out, because "spawn it from where the writer ran" is the one the orchestrator
+    usually wants.
+    """
+    return ("--review-of %s: no resolved writer family in this checkout's "
+            "runner-private record store (%s), so no family can be fenced out - "
+            "refusing. Spawn the review through the same autoos-agent MCP/checkout "
+            "that spawned the writer, or name the family with --not-family."
+            % (review_of, kill_store_dir()))
+
+
 def fence_family_names(values):
     """`values` in `resolver.family_key` form, de-duplicated, order kept.
 
@@ -3765,8 +3789,8 @@ def writer_family_of_run(run_id, read=None):
     The runner-private kill record and nothing else: job.json lives in the task
     directory the worker owns, so a writer that wanted a different family fenced
     off could put one there. A run with no record, or one whose writer never
-    resolved, has no known family — which is answered out loud by the caller, not
-    guessed at here."""
+    resolved, has no known family — and `family_fence` refuses the review rather
+    than running it unfenced (FAMILYFENCE-4)."""
     if not run_id:
         return None
     record = (read or read_kill_record)(run_id) or {}
@@ -3787,6 +3811,12 @@ def family_fence(args, registry=None):
     `strict` is the review role: a model the registry cannot place is NOT safe for a
     review either. An unknown reviewer name is the invented reviewer D-115 refuses —
     "I cannot tell you who this is" is never evidence of independence.
+
+    `refusal` is FAMILYFENCE-4's answer to a `--review-of` whose writer family this
+    checkout's record store cannot name: the caller asked for a fence and none can be
+    built, so the run is refused (exit 2) rather than planned unfenced beside a
+    warning. `warn_no_writer` is only the review that asked for nothing at all —
+    neither `--review-of` nor `--not-family` — and its silence is what got measured.
     """
     given = fence_family_names(getattr(args, "not_family", None))
     review_of = getattr(args, "review_of", None)
@@ -3798,14 +3828,11 @@ def family_fence(args, registry=None):
         card = {}  # an unparseable card is the router's problem, refused downstream
     review = (_card_asks_review(card) if isinstance(card, dict) else False) or \
         getattr(args, "tier", None) == 3
-    if not families:
-        # Nothing is excluded, so nothing can be fenced — but a review that asked
-        # for no fence has to say so, because its silence is what got measured.
-        return {"families": [], "review": review, "strict": review,
-                "writer_family": writer_family, "warn_no_writer": bool(review)}
     return {"families": families, "review": review, "strict": review,
-            "writer_family": writer_family, "warn_no_writer": review and not review_of
-            and not given}
+            "writer_family": writer_family,
+            "warn_no_writer": bool(review) and not review_of and not given,
+            "refusal": (fence_unreadable_writer_refusal(review_of)
+                        if review_of and not writer_family else None)}
 
 
 def fence_blocks_model(spelling, registry, fence):
@@ -7415,6 +7442,11 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--review-of %r is not a canonical run id "
                       "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as the spawner "
                       "mints one)" % (args.review_of, RUN_ID_SLUG_CAP), 2)
+    # FAMILYFENCE-4: the id is a run, but this checkout's store holds no writer
+    # family for it. Nothing can be fenced, so nothing runs — a warning here is what
+    # sent a Qwen-authored review onto a combo with qwen legs in it.
+    if fence.get("refusal"):
+        return refuse(fence["refusal"], 2)
     # FAMILYFENCE-3 B2: a `--not-family` the registry carries no family under
     # ("mimo" while the model opencode/mimo-v2.6-flash-free is family `xiaomi`)
     # excluded nothing, and the run planned and launched reading as fenced while
@@ -8359,7 +8391,9 @@ def _parser_run(sub):
     run.add_argument("--review-of", dest="review_of", metavar="RUN_ID",
                      help="FAMILYFENCE: this run reviews RUN_ID's diff, so the family "
                           "that WROTE it is fenced out. Read from that run's "
-                          "runner-private record, never from its job.json")
+                          "runner-private record, never from its job.json; a family "
+                          "this checkout's record store cannot name is refused (rc 2) "
+                          "rather than run unfenced (FAMILYFENCE-4)")
     run.add_argument("--no-fallthrough", dest="no_fallthrough", action="store_true",
                      help="FAMILYFENCE: a provider stop on the pinned model ends the run "
                           "with its stop code; no re-plan onto another model")

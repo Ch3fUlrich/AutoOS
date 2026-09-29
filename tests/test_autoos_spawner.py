@@ -14644,6 +14644,110 @@ class FamilyFenceFreeChainTests(unittest.TestCase):
         self.assertEqual(rc, 2, out + err)
 
 
+@unittest.skipIf(os.name == "nt", "the runner-private kill record the fence reads "
+                                  "is POSIX-only (write_kill_record is a no-op on nt)")
+class FamilyFenceUnreadableWriterTests(unittest.TestCase):
+    """FAMILYFENCE-4: `--review-of` is a request the fence must ANSWER, not a hint it
+    may note. A writer family this checkout's record store cannot name excludes
+    nothing, and the review went on UNFENCED with a warning beside it. Measured live
+    on a dry run of `--review-of 20260929-063303-familyfence-3-fix-round-3a237a` (a
+    Qwen writer, whose record sat in the spawning checkout's store) from a checkout
+    that did not hold it: it planned `t3-driver`, qwen legs and all, and printed
+    `review without a known writer family - cross-family not enforced`."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(self._restore)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _restore(self):
+        for name, value in self.old.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _env(self, **extra):
+        # clean_env drops the ambient AUTOOS_AGENT_* keys, so the subprocess sees
+        # exactly this test's store.
+        return clean_env(AUTOOS_STATE_DIR=self.tmp, **extra)
+
+    def _plan(self, *over):
+        return plan_of("--client", "opencode", "--card",
+                       "role=review,complexity=standard", "--isolate", "--lean",
+                       "--review-of", FENCE_WRITER_RUN, *over, "PONG",
+                       env=self._env())
+
+    def _record(self, writer):
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            self.assertTrue(self.agent.write_kill_record(
+                FENCE_WRITER_RUN, {"mode": "write", "writer": writer}))
+
+    def test_a_review_of_a_run_this_store_has_no_record_for_is_refused(self):
+        r = self._plan()
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertIn(FENCE_WRITER_RUN, combined, "the id it could not resolve")
+        self.assertIn(os.path.join(self.tmp, "kill"), combined,
+                      "the refusal has to name the store it searched")
+        self.assertIn("--not-family", combined, "one of the two ways out")
+        self.assertIn("checkout", combined, "the other way out: spawn where the writer ran")
+        self.assertNotIn("would run", combined, "nothing is planned, let alone launched")
+        self.assertNotIn("cross-family not enforced", combined,
+                         "a warning is not an answer to a fence that was asked for")
+
+    def test_a_record_whose_writer_never_resolved_is_refused_too(self):
+        # The other half of "cannot be read": the record is there and says nothing.
+        # `unresolved` is what a run that never got a witness writes, and fencing it
+        # off would exclude a family that is not a family.
+        self._record({"provider": self.agent.WRITER_UNRESOLVED,
+                      "model": self.agent.WRITER_UNRESOLVED,
+                      "family": self.agent.WRITER_UNRESOLVED,
+                      "source": self.agent.WRITER_UNRESOLVED})
+        r = self._plan()
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertNotIn("would run", combined)
+
+    def test_a_named_family_does_not_release_a_review_of_an_unknown_writer(self):
+        # `--not-family nvidia` is a second fence, not evidence about the writer.
+        # Honouring it here would let the run read as fenced while the family the
+        # caller actually asked about stayed unnamed.
+        r = self._plan("--not-family", "nvidia")
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertNotIn("would run", combined)
+
+    def test_a_readable_record_fences_the_writers_family_and_refuses_nothing(self):
+        self._record({"provider": "qoder", "model": "Qwen3.8-Flash",
+                      "family": "qwen", "source": "client-reported"})
+        args = argparse.Namespace(not_family=None, review_of=FENCE_WRITER_RUN,
+                                  card="kind=review", tier=None)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            fence = self.agent.family_fence(args)
+        self.assertEqual(fence["families"], ["qwen"], fence)
+        self.assertIsNone(fence.get("refusal"),
+                          "a fence built from a real family refuses nothing")
+        self.assertFalse(fence["warn_no_writer"], fence)
+
+    def test_the_mcp_spawn_surfaces_the_refusal_as_its_error(self):
+        # MCP `spawn(review_of=...)` preflights through the CLI's own dry run, so the
+        # same refusal reaches the orchestrator as the error string — a spawn that
+        # started an unfenced review would look like a completed one.
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                "card": {"role": "review"},
+                                "review_of": FENCE_WRITER_RUN})
+        self.assertIn("error", out, out)
+        self.assertIn("--not-family", out["error"])
+        self.assertIn(os.path.join(self.tmp, "kill"), out["error"],
+                      "the store the spawn searched is the spawn's own, named in the "
+                      "error: %s" % out["error"])
+
+
 class FamilyFenceRouteTests(unittest.TestCase):
     """FAMILYFENCE item 1 on the gateway leg: a route whose registry legs carry a
     fenced family is dropped from the plan, so neither the first route nor a

@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- FAMILYFENCE-4 (2026-09-29): `run --review-of <id>` and `spawn(review_of=...)` whose writer family this checkout's runner-private record store cannot name (no record, no writer, or an unresolved one) now REFUSE with rc 2 — the message names the store searched and the two ways out (spawn through the MCP/checkout that spawned the writer, or `--not-family`) — instead of warning and planning onto a combo carrying that family; `family_fence` gained the `refusal` field, and the `cross-family not enforced` warning stays only for a review naming neither (`FamilyFenceUnreadableWriterTests`).
 - WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
 ### Fixed — the CROSS-FAMILY verdict answers the question the exit code asked (FAMILYFENCE-3 N5, 2026-09-29)

@@ -1246,6 +1246,11 @@ def serve() -> None:
         review_of: the run id whose WRITER this review must not copy. The family
         is read from that run's runner-private kill record, never from its
         job.json, so a worker cannot pick who reviews it by editing its own file.
+        That store is per-checkout: when THIS checkout's store cannot name the
+        writer's family (no record, no writer, or an unresolved one), the spawn is
+        refused and this answers with the error naming the store searched — spawn
+        through the MCP/checkout that spawned the writer, or set not_family
+        (FAMILYFENCE-4). It is never a warning and an unfenced run.
         no_fallthrough: a stop on the pinned model ends the run with that rc; no
         re-plan onto another model. Off by default.
         `model` is a pin for an own-account client too (FAMILYFENCE-b): a qoder or
