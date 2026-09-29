@@ -43,6 +43,22 @@ def _load_tool():
 registry = _load_tool()
 
 
+def _load_resolver():
+    """Import tools/autoos_resolver.py the same way: the usable-legs invariant
+    asks the resolver's own context check rather than restating it. The resolver
+    does `from registry import ...` itself, so tools/ has to be on sys.path."""
+    if str(ROOT / "tools") not in sys.path:
+        sys.path.insert(0, str(ROOT / "tools"))
+    path = ROOT / "tools" / "autoos_resolver.py"
+    spec = importlib.util.spec_from_file_location("autoos_resolver_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+resolver = _load_resolver()
+
+
 def load_registry() -> dict:
     with REGISTRY_PATH.open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -3143,10 +3159,16 @@ def leg_tier(reg: dict, leg: str) -> str:
 
 
 def usable_legs(reg: dict, route_id: str) -> list:
-    """`live_legs` plus the two filters an agentic card also hits, so "usable"
+    """`live_legs` plus the three filters an agentic card also hits, so "usable"
     means what the resolver would actually plan: `tool_calls: proven` in the
-    tracked registry, and a priced model where the provider's tier is `credit`
-    (an unpriced grant bills $0, so the resolver refuses the leg fail-closed)."""
+    tracked registry, a priced model where the provider's tier is `credit`
+    (an unpriced grant bills $0, so the resolver refuses the leg fail-closed),
+    and a context that fits the route's declared need (FREEKEYS-2c,
+    rev-freekeys2 finding 2 -- asked of `autoos_resolver.route_leg_context_fits`,
+    the resolver's own promise check, never restated here: a 32k leg was counted
+    as one of t1's three fallbacks for a 1M card, and three "usable" legs that
+    cannot carry the request are one usable leg and two 413s)."""
+    route = reg["routes"][route_id]
     out = []
     for leg in live_legs(reg, route_id):
         provider_id, model_id = registry.resolve_leg(leg, reg)
@@ -3160,6 +3182,8 @@ def usable_legs(reg: dict, route_id: str) -> list:
                 priced = False
             if not priced:
                 continue
+        if not resolver.route_leg_context_fits(leg, route, reg):
+            continue
         out.append(leg)
     return out
 
@@ -3240,6 +3264,31 @@ class ComboCrossProviderTests(unittest.TestCase):
                 continue
             for leg in NEW_FREE_LEGS:
                 self.assertNotIn(leg, route.get("legs") or [], route_id)
+
+    def test_the_three_usable_legs_carry_the_route_promise(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 2): the >=3-usable-legs bar is only
+        worth having if those legs answer the requests this route's cards make.
+        Measured 128k of `context_advertised` behind a 128k route, they do; drop
+        one leg's window to 32k -- the shape the finding named, a small free
+        model counted as a fallback for full-size cards -- and the filter stops
+        counting it, while the two legs that do carry the promise stay counted.
+        The small leg is the weak link, not the band."""
+        reg = copy.deepcopy(self.reg)
+        small = "scaleway/mistral-small-3.2-24b-instruct-2506"
+        before = usable_legs(self.reg, "t3-driver")
+        self.assertIn(small, before)
+        reg["models"]["mistral-small-3.2-24b-instruct-2506"]["context_advertised"] = 32000
+        after = usable_legs(reg, "t3-driver")
+        self.assertNotIn(small, after,
+                         "a 32k leg was still counted usable for a 128k route")
+        self.assertIn("nebius/zai-org/GLM-5.2", after)
+        self.assertIn("scaleway/qwen3-235b-a22b-instruct-2507", after)
+        # and the promise it is measured against is the route's own declaration,
+        # not an invention of the filter: t3-driver sells 128k (combos.json
+        # `context`), so 128k is what a counted fallback must carry.
+        self.assertEqual(registry.context_label_to_tokens(
+            self.reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"]),
+            128000)
 
     def test_the_real_registry_still_passes_check(self):
         self.assertEqual(registry.check_registry(self.reg), [])

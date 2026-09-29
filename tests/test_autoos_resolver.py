@@ -4180,14 +4180,19 @@ class ComboFallthroughTests(unittest.TestCase):
 
     def test_the_fall_through_lands_on_a_leg_an_agentic_card_can_use(self):
         # A combo that falls through to a leg whose tool_calls is unproven (or to
-        # an unpriced credit leg) falls to a leg the resolver refuses to plan, so
-        # an agentic run landing there has no answer behind the fallback.
+        # an unpriced credit leg, or to one whose window is smaller than the
+        # context the route declares) falls to a leg the resolver refuses to plan
+        # or cannot carry the card at all, so an agentic run landing there has no
+        # answer behind the fallback. The context half is the resolver's own
+        # promise check, `route_leg_context_fits` -- named, not restated here
+        # (FREEKEYS-2c, rev-freekeys2 finding 2).
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
+            route = self.reg["routes"][route_id]
             usable = []
             for ref in combo["models"]:
-                provider_id, model_id = registry_tool.resolve_leg(
-                    self.leg_for_ref(route_id, ref), self.reg)
+                leg = self.leg_for_ref(route_id, ref)
+                provider_id, model_id = registry_tool.resolve_leg(leg, self.reg)
                 model = self.reg["models"][model_id]
                 if model.get("tool_calls") != "proven":
                     continue
@@ -4198,6 +4203,8 @@ class ComboFallthroughTests(unittest.TestCase):
                             continue
                     except (TypeError, ValueError):
                         continue
+                if not r.route_leg_context_fits(leg, route, self.reg):
+                    continue
                 usable.append(ref)
             self.assertGreaterEqual(
                 len(usable), 2, "%s: only %s of %s is usable by an agentic card"
