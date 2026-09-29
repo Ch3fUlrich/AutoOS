@@ -1134,5 +1134,64 @@ class CreditGuardFromRecordedRowsTests(unittest.TestCase):
         self.assertIn("$8.00", text)
 
 
+class ShippedRegistryGuardDollarTests(unittest.TestCase):
+    """D-153 (brief FREEKEYS-1c): the dollar the spend guard acts on for the
+    credit legs is the vendor's published price, read through `credit_guards` --
+    the builder the resolver's leg filter is handed -- over the COMMITTED
+    registry.
+
+    `test_the_shipped_registry_prices_the_freekeys1c_credit_legs` pins the
+    per-token conversion; this pins what the conversion is for. A price that
+    lands in the registry but never reaches the guard's figure is a number
+    nobody spends, and an unpriced row that reaches $0 with no `models_unpriced`
+    counter is the invisible drain FREEKEYS-1b was written about. Both halves
+    are asserted on one 1M-in / 1M-out call, so the arithmetic is the vendor
+    table read off the page: $0.14 + $0.40 for morph's DeepSeek V4 Flash,
+    $1.19 + $3.74 for its GLM-5.2 744B, and nothing at all for the google/* row
+    the table does not name."""
+
+    SINCE = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+    TS = iso(datetime.datetime(2026, 9, 29, 12, 0, tzinfo=datetime.timezone.utc))
+
+    def setUp(self):
+        with (ROOT / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            self.registry = json.load(fh)
+
+    def guard(self, provider, model):
+        rows = [{"timestamp": self.TS, "provider": provider, "model": model,
+                 "tokens": {"in": 1_000_000, "out": 1_000_000}}]
+        return usage.credit_guards(self.registry, rows, self.SINCE)[provider]
+
+    def test_a_morph_call_costs_the_vendors_published_dollars(self):
+        guard = self.guard("morph", "morph-dsv4flash")
+        self.assertAlmostEqual(guard["spend_usd"], 0.54, places=6)  # 0.14 + 0.40
+        self.assertEqual(guard["models_unpriced"], 0)
+        self.assertEqual(guard["cap_usd"], 10.0)
+        self.assertEqual(guard["state"], "ok")
+
+    def test_the_priced_morph_glm_leg_costs_its_published_dollars(self):
+        guard = self.guard("morph", "morph-glm52-744b")
+        self.assertAlmostEqual(guard["spend_usd"], 4.93, places=6)  # 1.19 + 3.74
+        self.assertEqual(guard["models_unpriced"], 0)
+        # $4.93 of a $10 cap is under the 80 % warn line, but one such call on
+        # top of it is not: the figure is what gates the leg, so pin the state
+        # the guard reaches at the cap it reads from the same row of data.
+        self.assertEqual(guard["warn_usd"], 8.0)
+        self.assertEqual(guard["state"], "ok")
+
+    def test_an_unpriced_deepinfra_call_is_a_gap_not_a_free_bill(self):
+        # google/gemini-3.7-flash is not in the operator's price table, so the
+        # row stayed 0: the grant reads as $0 spent WITH the gap named, which
+        # is the state the resolver refuses the leg on (D-153 fail-closed).
+        guard = self.guard("deepinfra", "google/gemini-3.7-flash")
+        self.assertEqual(guard["spend_usd"], 0.0)
+        self.assertEqual(guard["models_unpriced"], 1)
+
+    def test_the_priced_deepinfra_call_costs_its_published_dollars(self):
+        guard = self.guard("deepinfra", "deepseek-ai/DeepSeek-V4-Flash-0731")
+        self.assertAlmostEqual(guard["spend_usd"], 0.24, places=6)  # 0.06 + 0.18
+        self.assertEqual(guard["models_unpriced"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

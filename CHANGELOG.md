@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reader), `tests/test_autoos_resolver.py::CreditGuardCommittedRegistryTests`
   (the one-clear-line refusal, and a sweep that every `tier: credit` leg of the
   shipped registry is refused) and rule 14's provenance tests.
+  `tests/test_autoos_usage.py::ShippedRegistryGuardDollarTests` is the half that
+  says what the price is *for*: one 1M-in / 1M-out call through
+  `credit_guards` on the committed registry costs $0.54 (morph DeepSeek V4
+  Flash), $4.93 (morph GLM-5.2 744B) and $0.24 (deepinfra
+  DeepSeek-V4-Flash-0731) against each grant's own `monthly_cap_usd`, while an
+  unpriced google/* row still costs $0.00 **and** reports
+  `models_unpriced: 1` — a gap named, not a free bill.
 - FREEKEYS1c (2026-09-29, operator D-153): registry validate gained **rule 14 —
   price provenance**: a model with a positive `price_in`/`price_out` must carry a
   dated `price_source` (where the number came from, when it was seen), and every
