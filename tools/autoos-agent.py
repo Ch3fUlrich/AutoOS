@@ -85,6 +85,8 @@ Usage:
     python3 tools/autoos-agent.py run --isolate --read-only "Map every retry path in the spawner"
     python3 tools/autoos-agent.py run --card kind=research --isolate "Map every retry path"
     python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
+    python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
+    python3 tools/autoos-agent.py run --card kind=review --isolate --not-family nvidia --no-fallthrough "..."
     python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
     python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
@@ -106,6 +108,23 @@ fences. Free promo models may train on prompts, so --free refuses --clean. A
 on the next model of policy.free_client_models in catalog/ai-registry.json
 (SPAWNFREE item 1), and waits for a free slot before starting at all when the
 provider's live workers already reach policy.free_concurrency (item 2).
+
+Family fence (FAMILYFENCE): a review that runs on the writer's own model family is
+not an independent one, and before this the fallthrough walked the ordered free
+chain onto the writer's family and labelled the result a cross-family review
+(measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
+from the WHOLE plan — the model or route picked up front and every fallthrough
+candidate — and a plan with nothing outside the fence left exits 12 instead of
+serving the run inside it. `--review-of <run-id>` names the run whose WRITER this
+one reviews: a review defaults to fencing that writer's family, read from that
+run's runner-private kill record and never from its job.json (skill R-orch-17 —
+job.json lives in the directory the worker owns). A review with neither is
+possible and says so on stderr, because its silence is what got measured.
+`--no-fallthrough` pins the run to the model it was planned on: a stop there is
+the run's answer, its own rc, with no re-plan onto whatever model survived. After
+the run, a review prints `family: writer=... reviewer=... CROSS-FAMILY: yes|NO|
+unknown` beside its `writer:` line, and a resolved same-family answer exits 12 —
+OmniRoute can fall through to a leg inside a combo the spawner's plan never showed.
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the `omniroute:` line of configuration/api-keys.yml and is handed to the
@@ -134,7 +153,11 @@ research) that changed its sandbox anyway (READ-ONLY WRITE: changing nothing is 
 edit is the failure - the diff stat is printed, plus any commit the sandbox's own reflog still shows
 beyond its base (a commit the run reset away - SPAWNFIX3c), and the track record carries failure class
 "capability".
-The same marked run that only reported is NOT a failure: it exits 0 with "RESEARCH: report only"); the child's
+The same marked run that only reported is NOT a failure: it exits 0 with "RESEARCH: report only");
+12 = a run whose every remaining model and route sits inside its family fence (NO-OTHER-FAMILY:
+FAMILYFENCE — nothing outside the excluded families could serve the run, so it refuses instead of
+falling through onto the writer's own family and calling the result a cross-family review; the
+track record carries failure class "refusal", like the other refusals); the child's
 exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
 mode and the client's accepted list);
@@ -1103,7 +1126,9 @@ def free_model_chain(policy: dict | None, client: str, first: str) -> list:
 
 
 def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
-                           tried: set, benched: set | None = None) -> tuple:
+                           tried: set, benched: set | None = None,
+                           fence: dict | None = None,
+                           registry: dict | None = None) -> tuple:
     """The next --free attempt: the SAME task in the SAME sandbox on the next
     untried model of `chain`. Returns (plan, from, to), or (None, None, None)
     when the chain is spent or the re-plan is refused (privacy, depth, no
@@ -1118,12 +1143,28 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
     preferred, not required: opencode's whole free list sits on one provider, and
     a run that gave up at the first same-provider model would strand work that
     two healthy models could still finish.
+
+    `fence` (FAMILYFENCE) is removed from this chain before it is chosen, not
+    deprioritised: a run that has fenced the writer's family and finds only the
+    writer's family left raises `FamilyFenceRefused` and ends the run at
+    `EXIT_NO_OTHER_FAMILY`. Measured 2026-09-29, this is the exact walk that turned
+    two rate-limited cross-family reviews into a same-family one labelled
+    cross-family.
     """
     chain = list(chain or [plan["model"]])
     current = plan["model"]
     tried.add(current)
     at = chain.index(current) if current in chain else -1
     rest = [m for m in chain[at + 1:] if m and m not in tried]
+    if fence and fence.get("families"):
+        registry = registry if registry is not None else load_live_registry()
+        allowed = [m for m in rest if not fence_blocks_model(m, registry, fence)]
+        if rest and not allowed:
+            # Not an exhausted chain — an exhausted FENCE. The distinction is the
+            # whole report: exit 8 says "no leg answered", this says "the only leg
+            # left was the one the run must not use".
+            raise FamilyFenceRefused(fence_refusal(fence))
+        rest = allowed
     others = [m for m in rest if free_provider(m) not in (benched or set())]
     for model in others + [m for m in rest if m not in others]:
         given = args.free_model
@@ -1164,6 +1205,12 @@ EXIT_INCOMPLETE = 10
 # run marked read-only that changed its sandbox anyway is its own failure: the
 # report exists, the instruction was not followed.
 EXIT_READ_ONLY_WRITE = 11
+# FAMILYFENCE: a review that runs on the writer's own model family is not an
+# independent one (D-115), and "every cross-family reviewer is rate-limited" used to
+# be answered by walking the free chain onto the writer's family and calling the
+# result a cross-family review. This is the code for "nothing outside that family is
+# left to serve the run" — the run refuses rather than lie.
+EXIT_NO_OTHER_FAMILY = 12
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -2934,7 +2981,8 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free):
 
 def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
                       exclude_routes: set | None = None,
-                      provider_cooldown: dict | None = None) -> dict:
+                      provider_cooldown: dict | None = None,
+                      fence: dict | None = None) -> dict:
     """A v2 card is routed by the resolver, not select_combo (RUNV2, spec 6.1
     "run takes card v2"). Shares route_plan_for/autoos_resolver.plan with the
     `route` subcommand and the MCP `route` tool, so `run` and `route` can never
@@ -2971,6 +3019,18 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
         # A copy again: apply_provider_state returns one, and the shared
         # load_registry() object must not carry this run's bench into the next.
         registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
+    fenced = fenced_route_ids(registry, fence)
+    reachable = set((registry.get("routes") or {})) - set(exclude_routes or ())
+    if fence and fence.get("families") and reachable and not (reachable - fenced):
+        # Every route this run can still reach is inside the fence. The resolver
+        # would answer that with input_required and the run would exit 2, which
+        # reads as "the card was refused" — this is the fenced-family case, and it
+        # has its own code and its own words.
+        raise FamilyFenceRefused(fence_refusal(fence))
+    if fenced:
+        # The same copy the resolver reads, never the shared registry: a fenced
+        # family is out of THIS run's plan, not out of the catalog.
+        exclude_routes = set(exclude_routes or ()) | fenced
     if exclude_routes:
         # A copy, so the shared load_registry() cache (and the caller's own
         # reference) never loses the routes a previous attempt needs recorded.
@@ -3077,13 +3137,15 @@ def sensitive_combo_refusal(combo: str, registry: dict):
 
 
 def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
-                  provider_cooldown: dict | None = None) -> dict:
+                  provider_cooldown: dict | None = None,
+                  fence: dict | None = None) -> dict:
     """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
     explicit --model replaced the card's combo must still land on private-safe
     legs only (--allow-training keeps its compatibility escape, which now only
     waives that explicit-override check - it no longer unlocks a trainable leg,
     since 2026-09-27)."""
-    route = resolve_route_unchecked(args, cfg, client, exclude_routes, provider_cooldown)
+    route = resolve_route_unchecked(args, cfg, client, exclude_routes, provider_cooldown,
+                                    fence)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
         # model, which may train on prompts - never for a sensitive task.
@@ -3099,19 +3161,34 @@ def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
 
 
 def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None = None,
-                            provider_cooldown: dict | None = None) -> dict:
+                            provider_cooldown: dict | None = None,
+                            fence: dict | None = None) -> dict:
     """Tier/model/combo for this run: an explicit --tier, a v2 card through the
     resolver (RUNV2), or a v1 card through select_combo.
 
     ``exclude_routes`` and ``provider_cooldown`` are forwarded to
     _resolve_route_v2 only (SPAWNCAP, S2 / RATELIMITRETRY, SB-B): the v1/--tier
-    paths have a single combo and never fall through."""
+    paths have a single combo and never fall through.
+
+    ``fence`` (FAMILYFENCE) applies to every path that picks a model here: the
+    resolver's route set, the v1 combo, and the --tier agent's model. A fence that
+    leaves nothing raises ``FamilyFenceRefused`` rather than returning a route,
+    because a fallback past the excluded family is the defect, not a fallback.
+    """
     # --model names a gateway combo for opencode and the gateway clients; for
     # agy/claude/qoder it is the client's own model id and is not checked here.
     override = args.model if client.gateway else None
+    if fence and fence.get("families") and override and client.gateway:
+        # The caller's --model is a leg choice, so the fence rules it too — both the
+        # model spelling and whatever route it names.
+        registry = load_live_registry()
+        if fence_blocks_model(override, registry, fence):
+            raise FamilyFenceRefused(fence_refusal(fence))
+        _fence_check_route(model_route_id(override) or "", fence, registry)
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
         combo = model_route_id(model) or None
+        _fence_check_route(combo, fence)
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
                 "card": None, "privacy": "sensitive" if args.clean else "public",
                 "review": args.tier == 3, "read_only": read_only_run(args, None),
@@ -3119,9 +3196,10 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     parsed = routing.parse_card(args.card or "")
     if _is_v2_card(parsed):
         return _resolve_route_v2(args, parsed, cfg, override, exclude_routes,
-                                 provider_cooldown)
+                                 provider_cooldown, fence)
     card = routing.normalize(parsed)
     combo, reason = routing.select_combo(card, args.allow_training)
+    _fence_check_route(combo, fence)
     tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
@@ -3141,7 +3219,8 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                sandbox: dict | None = None,
-               provider_cooldown: dict | None = None) -> dict:
+               provider_cooldown: dict | None = None,
+               fence: dict | None = None) -> dict:
     """The full run plan for `args`.
 
     ``exclude_routes`` (SPAWNCAP, S2) is passed through to the resolver so a
@@ -3150,10 +3229,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     the providers that just rate-limited it, forwarded to the resolver the same
     way. ``sandbox`` reuses an existing clone (same path/branch) instead of
     naming a new one - a fallthrough re-runs in the same checkout, so its WIP
-    commit and its work stay on one branch.
+    commit and its work stay on one branch. ``fence`` (FAMILYFENCE) is the family
+    fence, applied to whatever leg this plan picks — see `family_fence`.
     """
     client = clients.CLIENTS[args.client]
-    route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown)
+    route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
     depth, max_depth = clients.child_depth(os.environ, args.max_depth)
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
     overlay = {}
@@ -3452,6 +3532,201 @@ def writer_line(writer: dict) -> str:
     return "writer: %s/%s (%s)" % (writer.get("provider") or WRITER_UNRESOLVED,
                                    writer.get("model") or WRITER_UNRESOLVED,
                                    writer.get("family") or WRITER_UNRESOLVED)
+
+
+# --- FAMILYFENCE: a review never silently runs on the writer's own family ------
+#
+# Measured 2026-09-29: an ORCH-A1 writer resolved to a NVIDIA nemotron, the two
+# cross-family reviews it asked for (mimo, muse) both hit their rate limits, and
+# SB-B's fallthrough walked the ordered free chain with no family rule in it onto
+# nemotron again. The run reported a same-family read as a cross-family review.
+# D-115 already had the family rule for the *lane record*; nothing had it for the
+# chain the spawner itself walks.
+#
+# One fence object (below) is the whole rule, and one predicate
+# (`fence_blocks_model`) answers it, so the first model choice, the fallthrough
+# candidates and the route filters cannot drift apart.
+
+class FamilyFenceRefused(Exception):
+    """A plan with nothing outside the fenced families left.
+
+    Deliberately NOT a ``ValueError``: every fallthrough path already catches a
+    ``ValueError`` as "this re-plan is impossible, end at exit 8", and a fence that
+    got relabelled as an ordinary provider exhaustion is the lie this exists to
+    stop. `cmd_run` catches it where it can name its own exit code."""
+
+
+FAMILY_FENCE_REFUSAL = "no model outside family %s left - refusing (FAMILYFENCE)"
+FAMILY_FENCE_NO_WRITER = ("autoos-agent: review without a known writer family - "
+                          "cross-family not enforced")
+
+
+def fence_family_names(values):
+    """`values` in `resolver.family_key` form, de-duplicated, order kept.
+
+    The registry's own spelling is the only comparison form for a family (REVFIX:
+    a record's "Meta" and the registry's "meta" are one family), so a caller typing
+    `--not-family NVIDIA` fences the same models as `nvidia`."""
+    out = []
+    for value in (values or []):
+        key = resolver.family_key(value)
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def writer_family_of_run(run_id, read=None):
+    """The family of the model that WROTE `run_id`'s diff, or None.
+
+    The runner-private kill record and nothing else: job.json lives in the task
+    directory the worker owns, so a writer that wanted a different family fenced
+    off could put one there. A run with no record, or one whose writer never
+    resolved, has no known family — which is answered out loud by the caller, not
+    guessed at here."""
+    if not run_id:
+        return None
+    record = (read or read_kill_record)(run_id) or {}
+    family = (record.get("writer") or {}).get("family")
+    if not family or family == WRITER_UNRESOLVED:
+        return None
+    return resolver.family_key(family)
+
+
+def family_fence(args, registry=None):
+    """The fence this run must respect, or None when nothing is excluded.
+
+    Two sources, one answer: the families named with `--not-family`, and the writer
+    family of the run named with `--review-of`. For a review role the writer family
+    is excluded automatically when it is known, because an unrequested same-family
+    review is the defect, not a configuration someone forgot to type.
+
+    `strict` is the review role: a model the registry cannot place is NOT safe for a
+    review either. An unknown reviewer name is the invented reviewer D-115 refuses —
+    "I cannot tell you who this is" is never evidence of independence.
+    """
+    given = fence_family_names(getattr(args, "not_family", None))
+    review_of = getattr(args, "review_of", None)
+    writer_family = writer_family_of_run(review_of)
+    families = fence_family_names(list(given) + ([writer_family] if writer_family else []))
+    try:
+        card = routing.parse_card(getattr(args, "card", None) or "")
+    except (ValueError, KeyError, TypeError):
+        card = {}  # an unparseable card is the router's problem, refused downstream
+    review = (_card_asks_review(card) if isinstance(card, dict) else False) or \
+        getattr(args, "tier", None) == 3
+    if not families:
+        # Nothing is excluded, so nothing can be fenced — but a review that asked
+        # for no fence has to say so, because its silence is what got measured.
+        return {"families": [], "review": review, "strict": review,
+                "writer_family": writer_family, "warn_no_writer": bool(review)}
+    return {"families": families, "review": review, "strict": review,
+            "writer_family": writer_family, "warn_no_writer": review and not review_of
+            and not given}
+
+
+def fence_blocks_model(spelling, registry, fence):
+    """True when `spelling` may not serve a run carrying `fence`.
+
+    The family is the registry's declaration for that spelling (`reviewer_family`,
+    which also reads `policy.reviewers`), never a guess from the name. Unknown is
+    unsafe only for a review — see `family_fence`."""
+    if not fence or not fence.get("families"):
+        return False
+    family = reviewer_family(spelling, registry)
+    if family is None:
+        return bool(fence.get("strict"))
+    return family in fence["families"]
+
+
+def fence_blocks_route(route_id, registry, fence):
+    """True when a gateway route may not serve a run carrying `fence`.
+
+    EVERY leg counts, not the first: a combo is a fall-through list, so a route
+    whose second leg is the writer's family can answer with it inside OmniRoute,
+    where the spawner cannot see it. A leg the registry cannot place is unknown,
+    and unknown is unsafe for a review.
+
+    A route id the registry does not carry at all is unknown in the same way. A
+    carried route with an EMPTY leg list is not: it declares no fall-through set,
+    so no leg of it can be the writer's family, and what actually serves such a
+    run (a --free run's promo model, for one) is fenced by `fence_blocks_model` at
+    the moment it is chosen. Fencing it here would refuse the plan on a marker."""
+    if not fence or not fence.get("families"):
+        return False
+    entry = (registry.get("routes") or {}).get(route_id)
+    if entry is None:
+        return bool(fence.get("strict"))
+    legs = entry.get("legs") or []
+    if not legs:
+        return False
+    for leg in legs:
+        try:
+            _, model_id = resolve_leg(leg, registry)
+        except ValueError:
+            model_id = None  # a leg the registry cannot resolve is an unknown family
+        if fence_blocks_model(model_id or leg, registry, fence):
+            return True
+    return False
+
+
+def fenced_route_ids(registry, fence):
+    """Every route id the fence rules out, so a caller can drop them in one copy."""
+    if not fence or not fence.get("families"):
+        return set()
+    return {rid for rid in (registry.get("routes") or {})
+            if fence_blocks_route(rid, registry, fence)}
+
+
+def _fence_check_route(combo, fence, registry=None):
+    """Refuse a run whose chosen route the fence rules out.
+
+    A combo the registry does not carry is left alone: this is a family rule, and
+    "no leg list" is not a leg list that contains the writer's family. The privacy
+    gate already refuses an id that is not a route where that matters."""
+    if not combo or not fence or not fence.get("families"):
+        return
+    registry = registry if registry is not None else load_live_registry()
+    if (registry.get("routes") or {}).get(combo) is None:
+        return
+    if fence_blocks_route(combo, registry, fence):
+        raise FamilyFenceRefused(fence_refusal(fence))
+
+
+def fence_refusal(fence):
+    """The one line that says why nothing ran."""
+    return FAMILY_FENCE_REFUSAL % ", ".join((fence or {}).get("families") or ["?"])
+
+
+def fence_free_head(chain, registry, fence):
+    """The first model of the free `chain` the fence allows, or None.
+
+    None is the whole plan being empty, and the caller refuses rather than starting
+    the run on a fenced model: an excluded family that is merely deprioritised is
+    still the family that writes the review."""
+    for model in (chain or []):
+        if not fence_blocks_model(model, registry, fence):
+            return model
+    return None
+
+
+def cross_family_line(writer, fence):
+    """The review run's own verdict on its independence, beside the writer line.
+
+    `writer` is the family of the model that wrote the diff being read
+    (`--review-of`'s record), `reviewer` the family that ACTUALLY served this run.
+    `NO` is printed only when both are known and equal — and `cmd_run` refuses the
+    run on that answer, because a same-family verdict that exits 0 is the lie this
+    whole fence exists to stop."""
+    reviewer = (writer or {}).get("family") or WRITER_UNRESOLVED
+    author = (fence or {}).get("writer_family") or WRITER_UNRESOLVED
+    unknown = (WRITER_UNRESOLVED, None, "")
+    if author in unknown or reviewer in unknown:
+        verdict = "unknown"
+    elif author == reviewer:
+        verdict = "NO"
+    else:
+        verdict = "yes"
+    return "family: writer=%s reviewer=%s CROSS-FAMILY: %s" % (author, reviewer, verdict)
 
 
 def cmd_list(cfg: dict) -> int:
@@ -5214,7 +5489,8 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
     "containment") and the INCOMPLETE (10, failure class "capability" like the
     NO-OP) and the READ-ONLY WRITE (11, "capability" too - a model that edits
     when told not to failed the instruction, which is answer quality) overrides
-    included.
+    included. The NO-OTHER-FAMILY fence (12) is "refusal" like rc 6: the fence
+    refused, so the route never got the chance to be unreliable (FAMILYFENCE).
 
     ``bucket`` is the resolver's own bucket (RUNV2: ``route["bucket"]``, set
     only for a v2-routed run) when there is one, else the v1 compat card's
@@ -5252,7 +5528,7 @@ def track_entry(plan: dict, rc: int, secs: float) -> dict | None:
         "gate": "pass" if rc == 0 else "fail",
         "failure_class": (None if rc == 0 else ("capability" if rc in (
                               5, EXIT_INCOMPLETE, EXIT_READ_ONLY_WRITE) else
-                          ("refusal" if rc == 6 else
+                          ("refusal" if rc in (6, EXIT_NO_OTHER_FAMILY) else
                            ("containment" if rc == 7 else
                             ("provider" if rc == 8 else "logic"))))),
     }
@@ -6652,8 +6928,48 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
     if args.joinable and client.name != "claude":
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
+    # FAMILYFENCE: who may NOT serve this run, settled before any leg is picked —
+    # from here on the fence is read-only, and every leg choice reads it.
+    fence = family_fence(args)
+    # `--no-fallthrough` is read once, here, so the pin cannot be seen differently
+    # by the branch that announces it and the branch that re-plans. The default is
+    # False, which is what the flag's absence means to argparse too.
+    args.no_fallthrough = bool(getattr(args, "no_fallthrough", False))
+    if getattr(args, "review_of", None) and not is_canonical_run_id(args.review_of):
+        # The writer's family comes out of that run's record, so the id has to name
+        # a run at all: a loose id here reads a stranger's record and fences off the
+        # wrong family (the same rule `--run-id` applies).
+        return refuse("--review-of %r is not a canonical run id "
+                      "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as the spawner "
+                      "mints one)" % (args.review_of, RUN_ID_SLUG_CAP), 2)
+    if fence["warn_no_writer"]:
+        print(FAMILY_FENCE_NO_WRITER, file=sys.stderr)
+    # SPAWNFREE (S2) item 1: the free-model chain, read BEFORE the plan because
+    # FAMILYFENCE removes the fenced families from it and the fence has to bind
+    # before the first model is chosen.
+    free_policy = None
+    free_chain = None
+    if args.free:
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None  # an unreadable registry leaves one free model
+        free_policy = (registry or {}).get("policy") or {}
+        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+        if fence["families"]:
+            head = fence_free_head(free_chain, registry, fence)
+            if head is None:
+                return refuse(fence_refusal(fence), EXIT_NO_OTHER_FAMILY)
+            if head != args.free_model:
+                print("family fence: %s is inside the fence (%s), this run starts on %s"
+                      % (args.free_model, ", ".join(fence["families"]), head),
+                      file=sys.stderr)
+                args.free_model = head
     try:
-        plan = build_plan(args, cfg)
+        plan = build_plan(args, cfg, fence=fence)
+    except FamilyFenceRefused as exc:  # FAMILYFENCE: its own code, never exit 2
+        return refuse(str(exc), EXIT_NO_OTHER_FAMILY)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
     except (RouteInputRequired, RouteDeferred, PrivacyRefused) as exc:  # plan's / PRIV3's own
@@ -6821,16 +7137,9 @@ def cmd_run(args, cfg: dict) -> int:
     # How many re-runs this run has already started (route or free model): the
     # one bound MAX_FALLTHROUGH is about.
     fallthroughs = 0
-    free_chain = None
-    free_policy = None
-    if args.free:
-        if registry is None:
-            try:
-                registry = load_registry(REGISTRY_PATH)
-            except (OSError, ValueError):
-                registry = None  # an unreadable registry leaves one free model
-        free_policy = (registry or {}).get("policy") or {}
-        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+    # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
+    # trims the chain before the first model is picked, so a second copy of that
+    # read here would be a fence applied too late to bind.
     # SPAWNFREE (S2) item 2: a free provider is one shared account, so a second
     # worker on it does not add capacity, it adds a 429. Wait for a slot before
     # anything is cloned or started (a queue that outlasts the bound costs
@@ -7037,43 +7346,62 @@ def cmd_run(args, cfg: dict) -> int:
         # (its model is the caller's --free-model, not the resolver's choice),
         # so it falls through the registry's ordered free-model list instead.
         fell_through = False
-        if (stop is not None and not args.joinable
+        fence_refused = None
+        if stop is not None and args.no_fallthrough:
+            # FAMILYFENCE item 3: a pinned run's stop IS its answer. Re-planning
+            # onto another model and reporting the verdict as that model's would be
+            # the same mislabelling the fence exists to stop, just with the
+            # spawner's blessing — so the run ends on the stop's own rc.
+            print("autoos-agent: --no-fallthrough: the run ends on its pinned model "
+                  "(%s), no re-plan" % (plan["model"] or plan["route"].get("combo")),
+                  file=sys.stderr)
+        if (stop is not None and not args.joinable and not args.no_fallthrough
                 and fallthroughs < MAX_FALLTHROUGH):
             next_plan = None
             fell_from = fell_to = None
-            if args.free:
-                next_plan, fell_from, fell_to = _free_fallthrough_plan(
-                    args, cfg, plan, free_chain, excluded_free_models,
-                    benched=set(provider_cooldown))
-            elif plan["route"].get("resolver") and plan["sandbox"]:
-                # RATELIMITRETRY: after a 429 the next leg is picked for a
-                # DIFFERENT provider, so walk past a candidate that every one of
-                # its legs benches. A candidate whose provider is not in the
-                # cooldown set is taken as it stands — preferring another provider
-                # is not the same as requiring one, and a route that resolves to no
-                # provider at all is a route we cannot blame for the 429.
-                excluded = excluded_routes | {plan["route"]["combo"]}
-                while True:
-                    try:
-                        next_plan = build_plan(args, cfg, exclude_routes=excluded,
-                                               sandbox=plan["sandbox"],
-                                               provider_cooldown=provider_cooldown)
-                    except (clients.DepthError, RouteInputRequired, RouteDeferred,
-                            PrivacyRefused, ValueError):
-                        next_plan = None  # no route left (or unplannable): exit 8 below
-                    next_combo = ((next_plan or {}).get("route") or {}).get("combo")
-                    if not next_combo or next_combo == plan["route"]["combo"]:
-                        next_plan = None
-                        break
-                    if not combo_is_benched(next_combo, provider_cooldown, live_registry):
-                        break
-                    if next_combo in excluded:
-                        next_plan = None  # every candidate benches: no way round it
-                        break
-                    excluded = excluded | {next_combo}
-                if next_plan is not None:
-                    fell_from, fell_to = plan["route"]["combo"], next_combo
-                    excluded_routes.add(plan["route"]["combo"])
+            try:
+                if args.free:
+                    next_plan, fell_from, fell_to = _free_fallthrough_plan(
+                        args, cfg, plan, free_chain, excluded_free_models,
+                        benched=set(provider_cooldown), fence=fence,
+                        registry=live_registry or registry)
+                elif plan["route"].get("resolver") and plan["sandbox"]:
+                    # RATELIMITRETRY: after a 429 the next leg is picked for a
+                    # DIFFERENT provider, so walk past a candidate that every one of
+                    # its legs benches. A candidate whose provider is not in the
+                    # cooldown set is taken as it stands — preferring another provider
+                    # is not the same as requiring one, and a route that resolves to no
+                    # provider at all is a route we cannot blame for the 429.
+                    excluded = excluded_routes | {plan["route"]["combo"]}
+                    while True:
+                        try:
+                            next_plan = build_plan(args, cfg, exclude_routes=excluded,
+                                                   sandbox=plan["sandbox"],
+                                                   provider_cooldown=provider_cooldown,
+                                                   fence=fence)
+                        except (clients.DepthError, RouteInputRequired, RouteDeferred,
+                                PrivacyRefused, ValueError):
+                            next_plan = None  # no route left (or unplannable): exit 8
+                        except FamilyFenceRefused as exc:
+                            fence_refused = exc
+                            next_plan = None
+                        next_combo = ((next_plan or {}).get("route") or {}).get("combo")
+                        if not next_combo or next_combo == plan["route"]["combo"]:
+                            next_plan = None
+                            break
+                        if not combo_is_benched(next_combo, provider_cooldown,
+                                                live_registry):
+                            break
+                        if next_combo in excluded:
+                            next_plan = None  # every candidate benches: no way round it
+                            break
+                        excluded = excluded | {next_combo}
+                    if next_plan is not None:
+                        fell_from, fell_to = plan["route"]["combo"], next_combo
+                        excluded_routes.add(plan["route"]["combo"])
+            except FamilyFenceRefused as exc:
+                fence_refused = exc
+                next_plan = None
             if next_plan is not None:
                 fell_through = True
                 fallthroughs += 1
@@ -7124,7 +7452,13 @@ def cmd_run(args, cfg: dict) -> int:
                     break
                 register_secret_env(env)
         if not fell_through:
-            if stop is not None and fallthroughs >= MAX_FALLTHROUGH:
+            if fence_refused is not None:
+                # FAMILYFENCE: the stop's own rc (8) says "no leg answered". What
+                # actually answered is "the only leg left was the fenced family",
+                # and that difference is the whole point of the exit code.
+                print("autoos-agent: %s" % fence_refused, file=sys.stderr)
+                rc = EXIT_NO_OTHER_FAMILY
+            elif stop is not None and fallthroughs >= MAX_FALLTHROUGH:
                 # RATELIMITRETRY (SB-B): the cap is the only thing that ends the
                 # run, so say what ran out — a silent exit 8 reads as "the task
                 # failed", not as "every leg we could reach refused to serve it".
@@ -7152,6 +7486,18 @@ def cmd_run(args, cfg: dict) -> int:
                       "family": WRITER_UNRESOLVED}
         if writer is not None:
             print(writer_line(writer))
+            # FAMILYFENCE item 4: a review's independence is a claim about the
+            # RESOLVED writer, and the plan cannot prove it — OmniRoute falls
+            # through to legs inside a combo that the spawner never sees. So the
+            # claim is checked here, after the run, against the same evidence the
+            # writer line uses, and a same-family verdict does not exit 0.
+            if fence["review"] or plan["route"].get("review"):
+                print(cross_family_line(writer, fence))
+                reviewer_family_name = writer.get("family")
+                if (rc == 0 and reviewer_family_name and fence["families"]
+                        and reviewer_family_name in fence["families"]):
+                    print("autoos-agent: %s" % fence_refusal(fence), file=sys.stderr)
+                    rc = EXIT_NO_OTHER_FAMILY
             # The record belongs to a spawn; a `run` started straight from a
             # shell has no record and mints one here for nothing to read.
             if read_kill_record(plan.get("run_id")) is not None:
@@ -7490,6 +7836,19 @@ def _parser_run(sub):
     run.add_argument("--model", help="a model declared in opencode.jsonc, e.g. omniroute/t2-orchestrator")
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")
     run.add_argument("--free-model", default=DEFAULT_FREE_MODEL)
+    run.add_argument("--not-family", dest="not_family", action="append",
+                     metavar="FAMILY",
+                     help="FAMILYFENCE: exclude a model FAMILY from the whole plan "
+                          "(the initial leg and every fallthrough candidate); repeat it "
+                          "for more than one. A review run gets its writer's family "
+                          "excluded automatically when --review-of can name it")
+    run.add_argument("--review-of", dest="review_of", metavar="RUN_ID",
+                     help="FAMILYFENCE: this run reviews RUN_ID's diff, so the family "
+                          "that WROTE it is fenced out. Read from that run's "
+                          "runner-private record, never from its job.json")
+    run.add_argument("--no-fallthrough", dest="no_fallthrough", action="store_true",
+                     help="FAMILYFENCE: a provider stop on the pinned model ends the run "
+                          "with its stop code; no re-plan onto another model")
     run.add_argument("--isolate", action="store_true",
                      help="run in a private git clone on its own branch; writes outside it are "
                           "denied. Mandatory for every spawned tier (%s): a clone holds "

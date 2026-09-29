@@ -5,6 +5,69 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a review never silently runs on the writer's model family (FAMILYFENCE / 2026-09-29)
+
+D-115 says a review is independent because it comes from another model family. The
+spawner did not enforce that about its *own* choices: measured 2026-09-29, an
+ORCH-A1 writer resolved to NVIDIA `nemotron-3-ultra`, both requested cross-family
+reviewers (`mimo`, `muse`) hit rate limits, and SB-B's fallthrough walked the
+ordered free chain — which lists nemotron too, with no family exclusion anywhere —
+onto the writer's own model. The run exited 0 and printed the review. Nothing said
+the word "same family"; the label "cross-family" was simply inherited from the
+request.
+
+- **The fence is one object and one predicate** (`tools/autoos-agent.py`):
+  `family_fence()` settles who may not serve the run *before* any leg is picked, and
+  `fence_blocks_model()` answers it at every choice the spawner makes — the `--free`
+  chain head, an explicit `--model`, the v1 `select_combo` route, `--tier`, the v2
+  resolver's route set and every fallthrough candidate. Families are compared only in
+  `resolver.family_key` form and read only from the registry (`reviewer_family`), never
+  guessed from a model name, so the rule cannot be restated differently per site.
+  `--not-family <fam>` (repeatable) removes those families from the WHOLE plan.
+- **A review fences its writer by default**: `--review-of <run-id>` takes that run's
+  WRITER family out of the plan without being asked, reading it from the run's
+  **runner-private kill record** — never from its `job.json`, which lives in the
+  directory the worker owns and would let a writer choose who reviews it
+  (skill R-orch-17). A review with neither flag still runs, and says so on stderr:
+  `review without a known writer family - cross-family not enforced`. Its silence
+  is what got measured.
+- **Refuse rather than lie** (new `EXIT_NO_OTHER_FAMILY = 12`, documented beside
+  `EXIT_READ_ONLY_WRITE`, in the module docstring's exit-code table, and in
+  `autoos_track.py`'s failure-class comment): when every remaining model or route is
+  inside the fence the run exits 12 with
+  `no model outside family <fam> left - refusing (FAMILYFENCE)` and launches nothing.
+  `FamilyFenceRefused` is deliberately **not** a `ValueError`, because every
+  fallthrough path already catches `ValueError` as "no leg answered → exit 8", and a
+  fence relabelled as an ordinary provider exhaustion is the same lie in a different
+  code. An exhausted chain of un-fenced models still exits 8. The track record classifies
+  rc 12 as `refusal` like rc 6 — the fence refused, so the route never got the chance to
+  be unreliable (`NON_QUALITY_FAILURES` ignores it in `p_success`).
+- **`--no-fallthrough`** pins the run to the model it was planned on: a stop there is
+  the run's answer, with its own rc and no re-plan onto whatever survived. An
+  orchestrator that asked for a verdict from one named model would otherwise get one
+  from whichever model answered, and the report says nothing about which.
+- **The claim is checked after the run too**: a review prints
+  `family: writer=<fam> reviewer=<fam> CROSS-FAMILY: yes|NO|unknown` beside its
+  `writer:` line, judged on the *resolved* writer (the gateway call log, not the plan) —
+  OmniRoute can fall through to a leg inside a combo the spawner never saw. A resolved
+  same-family answer exits 12 instead of 0. A model the registry cannot place is not
+  safe for a review (unknown is never evidence of independence); a write-role run keeps it.
+- **Callers reach it** (`tools/autoos_agent_mcp.py`): `spawn` takes `not_family`
+  (a list of names, validated — a dict would reach the CLI as one flag per key),
+  `review_of` and `no_fallthrough`. `FamilyFenceMcpPlumbingTests` includes an
+  unmocked real spawn (R-orch-19) asserting `--not-family nvidia` is in the argv the
+  runner actually started the CLI with.
+- **Tests** (`tests/test_autoos_spawner.py`): `FamilyFenceFreeChainTests` (the
+  measured chain: mimo + muse rate-limited, writer family nvidia → `free_models`
+  stops at the two honest reviewers, nemotron never launched, rc 12; the forged
+  `job.json` that loses to the kill record; the unknown-family skip; exit-8
+  exhaustion preserved), `FamilyFenceRouteTests`, `NoFallthroughTests`,
+  `CrossFamilyReportTests`, `FamilyFenceRecordTests`, `FamilyFenceMcpPlumbingTests`.
+- **Deviation worth naming**: there is no `verify` card role in either card dialect
+  (v1 `role` is orchestrate|implement|review, v2 `kind` adds plan/research/bulk/
+  debug/final), so the role default fires for `review` — v1 or v2 spelling — and for
+  `--tier 3`, which is the reviewer agent.
+
 ### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
 
 CI 36506339556's bash suite went red on three cases the lane's filtered pytest runs never

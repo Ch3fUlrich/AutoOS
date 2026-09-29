@@ -29,9 +29,11 @@ GATES = ("pass", "fail")
 # (and rc 10, the INCOMPLETE stop, the same class: no edit and nothing to
 # believe; and rc 11, the READ-ONLY WRITE, the same class again: the report is
 # there but the run did not follow the one instruction that mattered),
-# rc 6 -> refusal (a headless client auto-denied a tool), rc 7 -> containment,
-# rc 8 -> provider. Omitting one made validate() reject the record and
-# record_run() silently drop it (REVFIX).
+# rc 6 -> refusal (a headless client auto-denied a tool), and rc 12 the same
+# (FAMILYFENCE: nothing outside the fenced families was left to serve the run —
+# the fence refused, the route never got the chance to be unreliable),
+# rc 7 -> containment, rc 8 -> provider. Omitting one made validate() reject the
+# record and record_run() silently drop it (REVFIX).
 FAILURES = (None, "logic", "capability", "containment", "provider", "refusal")
 
 # Failure classes that are NOT the route's own answer quality, per spec

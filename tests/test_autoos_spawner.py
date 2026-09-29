@@ -6367,7 +6367,7 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
-def _fallthrough_registry(route_ids, policy=None, legs=None):
+def _fallthrough_registry(route_ids, policy=None, legs=None, families=None):
     """A registry whose routes are exactly `route_ids`, plus the clients the
     capability gate reads and an optional `policy` section (SPAWNFREE: the
     ordered free-model list a --free fallthrough reads from here). The resolver
@@ -6378,14 +6378,21 @@ def _fallthrough_registry(route_ids, policy=None, legs=None):
     spawner reads the provider that took a stop off the route's own legs, so a
     test about "the next leg on a DIFFERENT provider" needs legs to name one.
     The providers/models sections it derives are the minimum `resolve_leg`
-    accepts."""
+    accepts.
+
+    `families` (FAMILYFENCE) is {model_id: family}, declared on the same derived
+    `models` rows — a family the fence can only read from the registry, never
+    guess from the name."""
     legs = legs or {}
+    families = families or {}
     providers, models = {}, {}
     for leg_list in legs.values():
         for leg in leg_list:
             pid, _, mid = leg.partition("/")
             providers.setdefault(pid, {"id": pid})
             models.setdefault(mid, {"id": mid, "provider_id": pid})
+    for model_id, family in families.items():
+        models.setdefault(model_id, {"id": model_id})["family"] = family
     return {
         "clients": {
             "opencode": {"capabilities": {"shell": True, "write": True}},
@@ -6433,7 +6440,7 @@ def _cap_routes(cap):
 
 def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
                      stop_tail=None, env_over=None, legs=None, stop_rc=0,
-                     worker=None, select_combo=None):
+                     worker=None, select_combo=None, families=None, prepare=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -6460,6 +6467,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     `worker` replaces the fake client's "writes attemptN.txt" step (SB-B
     MODEFLIP: a worker that only flips file modes). `select_combo` replaces the
     v1 card's route, so a write-role card can be routed to tier 1.
+    `families` (FAMILYFENCE) declares registry families for the models the test
+    names. `prepare` (FAMILYFENCE) is called as ``prepare(statedir, root)`` after
+    every mock is in place and before `cmd_run`, so a test can write real files
+    into the run's own throwaway state dir — the runner-private kill record the
+    fence reads, for instance — through the production path rather than a stub.
     """
     agent = case.agent
     root = _init_git_root()
@@ -6522,7 +6534,10 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         client="opencode", tier=None, card="kind=implement", task="edit README.md",
         free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
         joinable=False, model=None, clean=False, allow_training=False,
-        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False,
+        # FAMILYFENCE: the fence's three inputs, unset by default — the same
+        # defaults the CLI's argparse gives them.
+        not_family=None, review_of=None, no_fallthrough=False)
     args.__dict__.update(args_over or {})
     env = dict(os.environ)
     env.update(env_over or {})
@@ -6543,7 +6558,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch.object(agent, "load_registry",
                                    lambda path: _fallthrough_registry(route_ids, policy,
-                                                                      legs)):
+                                                                      legs, families)):
                 with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
                         mock.patch.object(agent, "build_plan", marking_build_plan), \
                         mock.patch.object(agent, "gateway_up", lambda: True), \
@@ -6562,6 +6577,8 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                                                 return_value="/usr/bin/opencode"):
                                     with contextlib.redirect_stdout(out), \
                                             contextlib.redirect_stderr(err):
+                                        if prepare is not None:
+                                            prepare(statedir, root)
                                         rc = agent.cmd_run(args, cfg)
     finally:
         os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
@@ -14434,6 +14451,408 @@ class ResolvedWriterTests(unittest.TestCase):
             st = mcp_server._state(path)
         self.assertEqual(st["writer"], {"provider": "mimo", "model": "mimo-7",
                                        "family": "mimo"}, st)
+
+
+# FAMILYFENCE: the shape that broke D-115 in the field (measured 2026-09-29). An
+# ORCH-A1 writer resolved to a NVIDIA nemotron; both cross-family reviews it asked
+# for (mimo, muse) hit their rate limits and SB-B's fallthrough walked the ordered
+# free chain with no family exclusion, landed on nemotron again, and reported a
+# same-family read as an independent review. The three spellings below are the
+# measured chain, in the measured order.
+FENCE_CHAIN = ["opencode/mimo-v2.6-flash-free",
+               "opencode/muse-spark-1.3-contributor-free",
+               "opencode/nemotron-3-ultra-free"]
+FENCE_FAMILIES = {"mimo-v2.6-flash-free": "mimo",
+                  "muse-spark-1.3-contributor-free": "meta",
+                  "nemotron-3-ultra-free": "nvidia"}
+FENCE_WRITER_RUN = "20260929-000000-writer-f00001"
+
+
+@unittest.skipIf(os.name == "nt", "the runner-private kill record the fence reads "
+                                  "is POSIX-only (write_kill_record is a no-op on nt)")
+class FamilyFenceFreeChainTests(unittest.TestCase):
+    """FAMILYFENCE item 1 on the --free leg, where the whole chain is the
+    spawner's own choice: a fenced family is removed from the initial model AND
+    from every fallthrough candidate, a candidate the registry cannot place is
+    not safe for a review, and a plan with nothing outside the fence left exits
+    its own code rather than serving the run on the writer's own model."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, stops, over=None, policy=None, families=None, prepare=None):
+        args_over = {"free": True, "free_model": FENCE_CHAIN[0], "isolate": True,
+                     "card": "kind=review"}
+        args_over.update(over or {})
+        return _fallthrough_run(
+            self, ["r-free"], stops, args_over=args_over,
+            policy=policy if policy is not None
+            else {"free_client_models": {"opencode": FENCE_CHAIN}},
+            families=families if families is not None else FENCE_FAMILIES,
+            prepare=prepare)
+
+    @staticmethod
+    def _writer_record(statedir, root, family="nvidia"):
+        """The writer's own runner-private record, written through the real store
+        (the fence reads a family from there and nowhere else)."""
+        agent = load_agent()
+        assert agent.kill_store_dir() == os.path.join(statedir, "kill"), \
+            "prepare() must run inside the test's own AUTOOS_STATE_DIR"
+        agent.write_kill_record(FENCE_WRITER_RUN, {
+            "mode": "write",
+            "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                       "family": family}})
+
+    def test_the_measured_case_a_fenced_family_never_serves_the_fallthrough(self):
+        rc, out, err, calls, _ = self._run(
+            stops=2, over={"review_of": FENCE_WRITER_RUN},
+            prepare=lambda s, r: self._writer_record(s, r))
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2],
+                         "the two un-fenced models ran; nemotron never launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_the_fence_removes_the_head_too_and_says_what_it_pinned_instead(self):
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"not_family": ["mimo"]})
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[1]],
+                         "the given free model is inside the fence, so the next one runs")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("family fence", out + err)
+
+    def test_a_candidate_of_an_unknown_family_is_not_safe_for_a_review(self):
+        # `ghost` has no registry row at all, so nothing can say which family it
+        # is — and an unknown reviewer is exactly the invented name D-115 refuses.
+        # The fence is active (a family is named), so a review walks past it.
+        chain = ["opencode/ghost-1"] + FENCE_CHAIN
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"free_model": "opencode/ghost-1", "not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[0]], out + err)
+        self.assertIn("opencode/ghost-1 is inside the fence", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_role_run_keeps_an_unknown_family_candidate(self):
+        # The fence excludes FAMILIES. It is the review role that additionally
+        # refuses what it cannot place — a writer is not graded on independence.
+        chain = ["opencode/ghost-1"] + FENCE_CHAIN
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"card": "kind=implement", "free_model": "opencode/ghost-1",
+                           "not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], ["opencode/ghost-1"], out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_chain_spent_of_its_own_is_still_exit_8(self):
+        # The fence is not an excuse to relabel an ordinary exhaustion: with only
+        # the two un-fenced models listed, the run gives up exactly as it did
+        # before, having never been offered a fenced one.
+        rc, out, err, calls, _ = self._run(
+            stops=9, over={"not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": FENCE_CHAIN[:2]}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2], out + err)
+        self.assertNotIn("FAMILYFENCE", out + err)
+
+    def test_an_explicit_model_of_the_excluded_family_is_refused_before_launch(self):
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"free": False, "free_model": None, "isolate": False,
+                           "model": "opencode/nemotron-3-ultra-free",
+                           "not_family": ["nvidia"]})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_a_review_without_a_known_writer_family_says_it_is_not_enforced(self):
+        rc, out, err, calls, _ = self._run(stops=0)
+        self.assertIn("review without a known writer family - cross-family not "
+                      "enforced", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_review_with_a_named_family_does_not_warn_about_the_writer(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"not_family": ["nvidia"]})
+        self.assertNotIn("cross-family not enforced", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_run_neither_warns_nor_fences_nothing(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"card": "kind=implement"})
+        self.assertNotIn("cross-family not enforced", err)
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[0]], out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_the_writer_family_is_read_from_the_record_and_never_from_job_json(self):
+        # job.json lives in the writer's own task directory, so a run can rewrite
+        # it; the kill record is the runner's. The forged row claims the writer was
+        # a mimo, which would fence off the two honest reviewers and leave the run
+        # on nemotron — the exact bug. The record's nvidia is what binds.
+        def forge(statedir, root):
+            self._writer_record(statedir, root)
+            path = os.path.join(statedir, "agents", FENCE_WRITER_RUN)
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "job.json"), "w", encoding="utf-8") as fh:
+                json.dump({"id": FENCE_WRITER_RUN, "request": {}, "task": "t",
+                           "writer": {"provider": "mimo", "model": "mimo-v2.6",
+                                      "family": "mimo"}}, fh)
+        rc, out, err, calls, _ = self._run(stops=2, over={"review_of": FENCE_WRITER_RUN},
+                                          prepare=forge)
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2], out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unreadable_review_of_is_refused_rather_than_run_unfenced(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"review_of": "../etc"})
+        self.assertEqual(calls["n"], 0, "a run id that is not a run id is refused")
+        self.assertEqual(rc, 2, out + err)
+
+
+class FamilyFenceRouteTests(unittest.TestCase):
+    """FAMILYFENCE item 1 on the gateway leg: a route whose registry legs carry a
+    fenced family is dropped from the plan, so neither the first route nor a
+    fallthrough re-plan can serve a fenced run."""
+
+    LEGS = {"r-nvidia": ["nvidia/nemotron-3-ultra"],
+            "r-mimo": ["mimo/mimo-7"]}
+    FAMILIES = {"nemotron-3-ultra": "nvidia", "mimo-7": "mimo"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, route_ids, stops, over=None, legs=None, families=None):
+        # A v2 card is the resolver-routed path, and the resolver is what picks
+        # among the registry's route ids; a v1 card names one combo outright.
+        return _fallthrough_run(
+            self, route_ids, stops,
+            args_over=dict({"card": "kind=review"}, **(over or {})),
+            legs=legs if legs is not None else self.LEGS,
+            families=families if families is not None else self.FAMILIES)
+
+    def test_a_route_whose_leg_is_fenced_is_not_routed_to(self):
+        rc, out, err, calls, _ = self._run(["r-nvidia", "r-mimo"], 0,
+                                          over={"not_family": ["nvidia"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-mimo", out)
+        self.assertNotIn("route: r-nvidia", out)
+
+    def test_a_plan_whose_only_route_is_fenced_exits_no_other_family(self):
+        rc, out, err, calls, _ = self._run(["r-nvidia"], 0,
+                                          over={"not_family": ["nvidia"]})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_a_review_drops_a_route_the_registry_cannot_place(self):
+        # r-ghost's leg has no models row, so its family is unknown — and an
+        # unknown reviewer is exactly the invented name D-115 refuses.
+        rc, out, err, calls, _ = self._run(
+            ["r-ghost", "r-mimo"], 0, over={"not_family": ["nvidia"]},
+            legs={"r-ghost": ["ghost/ghost-1"], "r-mimo": ["mimo/mimo-7"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-mimo", out)
+
+    def test_a_write_route_run_keeps_an_unplaceable_leg(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-ghost", "r-mimo"], 0,
+            over={"not_family": ["nvidia"],
+                  "card": "kind=implement"})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-ghost", out)
+
+
+class NoFallthroughTests(unittest.TestCase):
+    """FAMILYFENCE item 3: `--no-fallthrough` pins the run to the model it was
+    planned on. An orchestrator that wants a verdict from one named model would
+    otherwise get one from whichever model survived the rate limits — and nothing
+    in the report says which."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def test_a_pinned_run_ends_on_its_stop_rc_with_one_attempt(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=9, stop_rc=1,
+            args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 1, "the pinned model is the only attempt")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("no-fallthrough", err)
+        self.assertNotIn("falling through to", out + err)
+
+    def test_a_pinned_run_without_a_stop_completes_normally(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, args_over={"no_fallthrough": True})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_a_run_without_the_flag_still_falls_through(self):
+        rc, out, err, calls, _ = _fallthrough_run(self, ["r-free", "r-cheap"], stops=1,
+                                                  legs={"r-cheap": ["mimo/mimo-7"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the default is unchanged")
+
+
+class CrossFamilyReportTests(unittest.TestCase):
+    """FAMILYFENCE item 4: the report header has to SAY whose family read the
+    diff, and a same-family verdict may not leave as rc 0. The gateway is the only
+    witness of who served a run — OmniRoute can fall through to a leg inside a
+    combo the spawner's plan never showed, which is why this check runs after the
+    run and not only before it."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, served, over=None, stops=0):
+        agent = self.agent
+
+        def read_kill_record(run_id):
+            # The writer's record holds the family the fence is built from; this
+            # run has a record of its own (mode only), so the writer line is still
+            # written back where a canceller can read it.
+            if run_id == FENCE_WRITER_RUN:
+                return {"mode": "write",
+                        "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                                   "family": "nvidia"}}
+            return {"mode": "write"}
+
+        with mock.patch.object(agent, "gateway_writer", lambda session, **kw: served), \
+                mock.patch.object(agent, "read_kill_record", read_kill_record):
+            return _fallthrough_run(
+                self, ["r-free"], stops,
+                args_over=dict({"card": "kind=review", "review_of": FENCE_WRITER_RUN,
+                                "isolate": False}, **(over or {})),
+                families={"mimo-7": "mimo", "nemotron-3-ultra": "nvidia"})
+
+    def test_a_cross_family_review_says_so(self):
+        rc, out, err, calls, _ = self._run(("mimo", "mimo-7"))
+        self.assertIn("family: writer=nvidia reviewer=mimo CROSS-FAMILY: yes",
+                      out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_same_family_verdict_exits_no_other_family(self):
+        # The plan was fenced and clean; the gateway answered with the writer's own
+        # family anyway. rc 0 here is a same-family verdict passing as independent.
+        rc, out, err, calls, _ = self._run(("nvidia", "nemotron-3-ultra"))
+        self.assertIn("family: writer=nvidia reviewer=nvidia CROSS-FAMILY: NO",
+                      out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unresolved_reviewer_is_reported_as_unknown_and_costs_nothing(self):
+        rc, out, err, calls, _ = self._run(None)
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_run_prints_no_family_line(self):
+        rc, out, err, calls, _ = self._run(("mimo", "mimo-7"),
+                                          over={"card": "kind=implement"})
+        self.assertNotIn("CROSS-FAMILY", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+
+class FamilyFenceMcpPlumbingTests(unittest.TestCase):
+    """FAMILYFENCE: a spawn that cannot pass the fence down cannot enforce it, so
+    the three new fields have to reach the argv the runner starts the CLI with."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def wait_done(self, run_id, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline:
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("submitted", "working"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
+
+    def test_the_fence_fields_reach_the_cli_argv(self):
+        argv, _ = mcp_server.build_argv({
+            "task": "t", "card": {"role": "review"}, "not_family": ["nvidia", "meta"],
+            "review_of": FENCE_WRITER_RUN, "no_fallthrough": True})
+        self.assertEqual([a for a in argv if a == "--not-family"], ["--not-family"] * 2)
+        self.assertIn("nvidia", argv)
+        self.assertIn("meta", argv)
+        self.assertEqual(argv[argv.index("--review-of") + 1], FENCE_WRITER_RUN)
+        self.assertIn("--no-fallthrough", argv)
+
+    def test_the_fence_flags_are_absent_when_nothing_was_asked(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "tier": 2})
+        for flag in ("--not-family", "--review-of", "--no-fallthrough"):
+            self.assertNotIn(flag, argv)
+
+    def test_an_unusable_not_family_is_refused_rather_than_stringified(self):
+        # A dict would reach the CLI as one flag per KEY, and an int would reach
+        # it as the argv builder's own TypeError — both read as a spawn that
+        # fenced something.
+        for bad in ({"nvidia": True}, 7, [["nvidia"]]):
+            with self.subTest(bad=bad):
+                out = mcp_server.spawn({"task": "t", "cwd": str(ROOT),
+                                        "not_family": bad})
+                self.assertIn("not_family", out["error"])
+
+    def test_a_real_spawn_carries_the_fence_to_the_cli(self):
+        """No mock on the launch: the runner is really started (dry run), so an
+        argv that dropped a flag shows up as the CLI's own answer instead of as a
+        passing assertion about a list this process built for itself."""
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                "card": {"role": "review"}, "not_family": ["nvidia"]})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(mcp_server.state_root(), out["id"],
+                                                 "job.json"))
+        self.assertIn("--not-family", job["argv"])
+        self.assertIn("nvidia", job["argv"])
+        st = self.wait_done(out["id"])
+        self.assertEqual(st["state"], "completed",
+                         mcp_server.result(out["id"]).get("text"))
+
+
+class FamilyFenceRecordTests(unittest.TestCase):
+    """FAMILYFENCE, the two places a new exit code has to land the same moment it
+    is added: the docstring table every caller reads (R-orch-11) and the track
+    record's failure class, which a validator rejects silently if it is missing
+    (REVFIX)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_the_exit_code_table_names_the_no_other_family_code(self):
+        doc = self.agent.__doc__
+        self.assertEqual(self.agent.EXIT_NO_OTHER_FAMILY, 12)
+        self.assertIn("12 = a run whose every remaining model and route sits inside",
+                      doc)
+        self.assertIn("NO-OTHER-FAMILY", doc)
+
+    def test_a_fence_refusal_is_recorded_as_a_refusal_not_a_route_failure(self):
+        # rc 6's class already means "the run refused, the route was never given a
+        # chance", and p_success ignores it (spec 5.7). rc 12 is the same story with
+        # a different cause — and a record the validator rejects would be dropped.
+        cli = self.agent
+        plan = {"route": {"combo": "t3-driver", "class": "cheap", "review": True},
+                "client": "opencode", "free": False}
+        tracked = cli.track_entry(plan, cli.EXIT_NO_OTHER_FAMILY, 1.0)
+        self.assertIsNotNone(tracked)
+        self.assertEqual(tracked["gate"], "fail")
+        self.assertEqual(tracked["failure_class"], "refusal")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track.jsonl")
+            self.assertTrue(cli.record_run(path, tracked),
+                            "rc 12 must be recorded, not dropped")
+            self.assertEqual(self.agent.track.load(path)[0]["failure_class"],
+                             "refusal")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; group_record() is empty on Windows")

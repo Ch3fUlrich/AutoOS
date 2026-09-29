@@ -70,7 +70,14 @@ python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."      # -clean
 python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
 python3 tools/autoos-agent.py run --tier 1 --free "..."       # no key, no gateway, no spend
 python3 tools/autoos-agent.py run --card role=review --isolate --dry-run "..."   # print the plan only
+python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
 ```
+
+A review names its author: `--review-of <writer-run-id>` fences that writer's
+model family out of the whole plan, so the review cannot land on the family that
+wrote the diff it is judging (FAMILYFENCE; the rule and its exit code 12 are in
+the CLI's own docstring, which is the source of truth). Pass it — a review with no
+known writer family only warns on stderr and runs unfenced.
 
 `--isolate` is not optional for a spawned tier: tiers 2 and 3 are refused in
 place (exit 2), and the MCP `spawn` tool forces the clone for them. The clone is

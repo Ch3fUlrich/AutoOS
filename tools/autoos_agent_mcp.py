@@ -467,12 +467,32 @@ def build_argv(req: dict, run_id: str | None = None,
                  # MODEFLIP opt-out (SB-B review 2): a spawn that means the chmod
                  # names it here, and the runner records the same fact in the
                  # private record below.
-                 "allow_mode_only"):
+                 "allow_mode_only",
+                 # FAMILYFENCE item 3: a stop on the pinned model ends the run.
+                 "no_fallthrough"):
         if req.get(flag):
             argv.append("--" + flag.replace("_", "-"))
+    # FAMILYFENCE item 1: the excluded families are a repeated flag, and a value
+    # that is not a list of names would reach the CLI as one flag per dict KEY (or
+    # as the argv builder's own TypeError). Refused here, where the message can
+    # still name the field the caller got wrong.
+    not_family = req.get("not_family")
+    if not_family is not None:
+        if isinstance(not_family, str) or not isinstance(not_family, (list, tuple)) \
+                or not all(isinstance(family, str) and family.strip()
+                           for family in not_family):
+            raise ValueError("not_family must be a list of family names (e.g. "
+                             "[\"nvidia\"]), got %r" % (not_family,))
+        for family in not_family:
+            argv += ["--not-family", family.strip()]
     for opt in ("model", "title", "max_depth"):
         if req.get(opt) is not None:
             argv += ["--" + opt.replace("_", "-"), str(req[opt])]
+    if req.get("review_of") is not None:
+        # FAMILYFENCE item 2: which run's WRITER this review must not copy. The
+        # family is read from that run's runner-private record by the CLI, so all
+        # this path carries is the id.
+        argv += ["--review-of", str(req["review_of"]).strip()]
     if run_id:
         argv += ["--run-id", run_id]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
@@ -1182,6 +1202,9 @@ def serve() -> None:
                cwd: str | None = None, dry_run: bool = False,
                allow_shared_checkout: bool = False,
                allow_mode_only: bool = False,
+               not_family: list[str] | None = None,
+               review_of: str | None = None,
+               no_fallthrough: bool = False,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
@@ -1213,13 +1236,26 @@ def serve() -> None:
         that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that
         needs it rather than exporting AUTOOS_CLAUDE_CRITICAL server-wide, where
         every later caller would inherit it; it is what the returned route cites.
-        A card field of the same name is not one — the card is the worker's text."""
+        A card field of the same name is not one — the card is the worker's text.
+
+        FAMILYFENCE (a review never silently runs on the writer's model family):
+        not_family: model families this spawn must never run on, e.g. ["nvidia"] —
+        a list of names, each one removed from the WHOLE plan (the leg chosen up
+        front and every fallthrough candidate). A review of a known writer does
+        not need it: the writer's family is excluded by default.
+        review_of: the run id whose WRITER this review must not copy. The family
+        is read from that run's runner-private kill record, never from its
+        job.json, so a worker cannot pick who reviews it by editing its own file.
+        no_fallthrough: a stop on the pinned model ends the run with that rc; no
+        re-plan onto another model. Off by default."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
                       "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
                       "allow_shared_checkout": allow_shared_checkout,
                       "allow_mode_only": allow_mode_only,
+                      "not_family": not_family, "review_of": review_of,
+                      "no_fallthrough": no_fallthrough,
                       "claude_reason": claude_reason})
 
     @app.tool(name="status")
