@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the PREPUSH gate reads its own record shape and nothing else (PREPUSH-2, 2026-09-29)
+
+`local_green()` and `--check-ready` called *any* second field that was not `OVERRIDE` a
+green record, so one line appended to the log certified a push that never happened:
+`echo "$SHA anything-at-all" >> <git-dir>/autoos-prepush.log` and the sha was ready
+(measured on the lane's own HEAD, ee92774). The log lives in the git dir, where any
+process that can write the checkout can append to it, and `ready` is the last gate before
+main moves — a substring test was never enough. `parse_record()` is now the file's only
+reader: it accepts `green_line`'s `<sha> <utc> green: <commands>` and the override's
+`<sha> OVERRIDE <reason>`, requires the full 40-hex sha and the UTC stamp the gate stamps
+itself, and ignores every other line. `green_records()` is the one predicate both
+`local_green()` and `--check-ready` ask, so the two cannot drift apart.
+Tests: `CheckReadyTests.test_a_forged_free_text_line_is_not_green`,
+`test_only_the_two_shapes_the_gate_writes_count_as_records`,
+`test_a_malformed_line_is_ignored_and_hides_no_real_record`, and a round trip pinning the
+writer to the reader.
+
 ### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
 
 Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI

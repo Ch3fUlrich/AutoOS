@@ -39,8 +39,12 @@ WHAT IT DOES, IN ORDER
      and was pushed once already).
 
 GREEN LEAVES A RECORD: ``<git-dir>/autoos-prepush.log``, one line per push —
-``<sha> <utc> green: <commands>``. The log lives in the git dir, so it is never
-committed and every worktree keeps its own. ``--check-ready <sha>`` (rule D-110)
+``<sha> <utc> green: <commands>``, written by ``green_line``. The log lives in the git
+dir, so it is never committed and every worktree keeps its own; ``parse_record`` is the
+only reader, and it accepts that shape and the override shape and nothing else — a line
+of any other text is not a record, because a file any process can append to must not
+certify a push (``<sha> looks fine`` read as green until the 2026-09-29 fix round).
+``--check-ready <sha>`` (rule D-110)
 answers for exactly that sha, which is how a lane that pushed with
 ``git push --no-verify`` — outside any hook's reach — is caught later, when the
 orchestrator tries to declare it ready: ``autoos-agent.py ready`` calls
@@ -83,6 +87,16 @@ LOG_NAME = "autoos-prepush.log"
 #: The second field of an override record. It is what makes an override readable as
 #: "the gate was stepped over" a month later, and what --check-ready refuses.
 OVERRIDE_MARKER = "OVERRIDE"
+#: The normalised kind of a green record, as ``parse_record`` returns it.
+GREEN = "green"
+#: The third field of a green record, written by ``green_line`` and the only text
+#: that makes a record mean "the gate ran and nothing failed".
+GREEN_MARKER = "green:"
+#: A record's first field, exactly as ``git rev-parse HEAD`` prints it. An
+#: abbreviated or hand-typed sha is not a record the gate wrote.
+SHA_HEX = re.compile(r"[0-9a-f]{40}\Z")
+#: A record's second field, exactly as ``now_utc`` stamps it.
+UTC_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 #: The CI plan job's two commands (.github/workflows/ci.yml, linux-plan).
 PLAN_CHECKS = ("tests/test_ci_shards.py", "tests/ci-shards.py")
 #: Identity variables a developer host carries and CI does not (the SBA red).
@@ -237,41 +251,72 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(keep[-lines:]) if len(keep) > lines else text
 
 
+def parse_record(line: str):
+    """``(sha, kind, stamp, detail)`` for one record this tool wrote, else ``None``.
+
+    Two shapes exist and only two: ``green_line``'s ``<sha> <utc> green: <commands>``
+    and the override's ``<sha> OVERRIDE <reason>``. Anything else is not a record.
+    This is the file's *only* parser — `local_green` and ``--check-ready`` both read
+    through it, so what counts as green cannot drift apart between them.
+
+    WHY the shape is checked and not just the second field: the log lives in the git
+    dir, where any process that can write the checkout can append a line. Accepting
+    ``<sha> <anything but OVERRIDE>`` made `echo "$SHA looks fine" >> the log` certify
+    an untested sha, and a ready claim is the last gate before main moves (measured on
+    the PREPUSH lane's own HEAD, 2026-09-29).
+    """
+    fields = line.split(None, 2)
+    if len(fields) < 3 or not SHA_HEX.match(fields[0]):
+        return None
+    sha, second, rest = fields
+    if second == OVERRIDE_MARKER:
+        return (sha, OVERRIDE_MARKER, "", rest)
+    if (UTC_STAMP.match(second)
+            and (rest == GREEN_MARKER or rest.startswith(GREEN_MARKER + " "))):
+        return (sha, GREEN, second, rest[len(GREEN_MARKER):].strip())
+    return None
+
+
 def read_records(repo):
-    """``[(sha, kind, rest)]`` in file order; kind is the second field."""
+    """``[(sha, kind, stamp, detail)]`` in file order; a line that is not a record
+    is ignored, neither green nor fatal."""
     path = log_path(repo)
     if not path.is_file():
         return []
     records = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        fields = line.split(None, 2)
-        if len(fields) >= 2:
-            records.append((fields[0], fields[1], fields[2] if len(fields) > 2 else ""))
+        record = parse_record(line)
+        if record:
+            records.append(record)
     return records
 
 
-def local_green(sha, repo=None) -> bool:
-    """True when this checkout ran a green gate for exactly ``sha`` (D-110).
+def green_records(records, target):
+    """The one predicate: the records that certify ``target`` as tested.
 
-    An ``OVERRIDE`` record is never green — that is the point: the lane stepped
-    over the gate, and a ready claim must not inherit that. A later green record
-    for the same sha beats an earlier override.
+    Only a green record is among them — an ``OVERRIDE`` never is, which is the whole
+    point: the lane stepped over the gate and a ready claim must not inherit that.
+    A green record written after an override beats it, because both readers ask this
+    one question rather than walking the file with their own rules.
     """
-    target = resolve_sha(repo or Path.cwd(), str(sha))
-    for recorded, kind, _rest in read_records(repo or Path.cwd()):
-        if recorded == target and kind != OVERRIDE_MARKER:
-            return True
-    return False
+    return [r for r in records if r[0] == target and r[1] == GREEN]
+
+
+def local_green(sha, repo=None) -> bool:
+    """True when this checkout ran a green gate for exactly ``sha`` (D-110)."""
+    repo = repo or Path.cwd()
+    return bool(green_records(read_records(repo),
+                              resolve_sha(repo, str(sha))))
 
 
 def ready_gate(repo, sha: str):
     """``(ok, message)`` for ``--check-ready <sha>`` (rule D-110)."""
     target = resolve_sha(repo, sha)
     records = read_records(repo)
-    if any(r[0] == target and r[1] != OVERRIDE_MARKER for r in records):
-        utc = next((r[1] for r in records if r[0] == target and r[1] != OVERRIDE_MARKER), "")
+    green = green_records(records, target)
+    if green:
         return True, "prepush: %s is ready — a green gate record exists (%s)" % (
-            target[:12], utc or "no timestamp")
+            target[:12], green[0][2] or "no timestamp")
     overridden = any(r[0] == target and r[1] == OVERRIDE_MARKER for r in records)
     why = ("its only record is an OVERRIDE, which means the gate was stepped over"
            if overridden else "no gate record for it was ever written")
@@ -279,13 +324,14 @@ def ready_gate(repo, sha: str):
 
 
 def green_line(sha: str, ran=()) -> str:
-    """The record a green gate writes — the only shape ``--check-ready`` accepts.
+    """The record a green gate writes — the only shape ``parse_record`` accepts.
 
     Lives here rather than inline at the call site because a lane that claims ready
-    and a test that stages a ready lane must agree on it byte for byte; a second
-    copy of the format is how a green record stops being readable.
+    and a test that stages a ready lane must agree on it byte for byte: this is the
+    writer, ``parse_record`` is its one reader, and a test pins the two together — a
+    change to either shape fails there instead of unreadying every lane quietly.
     """
-    return "%s %s green: %s" % (sha, now_utc(), "; ".join(ran))
+    return "%s %s %s %s" % (sha, now_utc(), GREEN_MARKER, "; ".join(ran))
 
 
 def record(repo, line: str) -> Path:

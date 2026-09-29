@@ -489,6 +489,67 @@ class CheckReadyTests(RepoFixture):
         self.assert_rc(0, env={"AUTOOS_PREPUSH_OVERRIDE": reason})
         return run_git("rev-parse", "HEAD", cwd=self.repo)
 
+    def forge(self, *lines):
+        """Append raw lines to the record file the way any process that can reach
+        the git dir can — which is exactly why the reader must accept only the
+        shape the gate itself writes."""
+        for line in lines:
+            prepush.record(self.repo, line)
+
+    def test_a_forged_free_text_line_is_not_green(self):
+        # B1: the reader treated *any* second field but OVERRIDE as a green record,
+        # so `echo "$SHA anything" >> <git-dir>/autoos-prepush.log` certified a push
+        # that was never run — measured at ee92774, where --check-ready returned 0.
+        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
+        self.forge("%s anything-at-all" % sha)
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+        out = self.assert_rc(1, ("--check-ready", sha))
+        self.assertIn("NOT READY", out)
+
+    def test_only_the_two_shapes_the_gate_writes_count_as_records(self):
+        # Every half of the green shape carries meaning: the sha, the UTC stamp the
+        # gate stamps itself, and the `green:` field. A line missing any of them is
+        # not a record, so it cannot be green and cannot make a later line unreadable.
+        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
+        for line in ("",
+                    "prose, not a record",
+                    sha,
+                    "%s" % ("0" * 40),
+                    "%s nope" % sha,
+                    "%s green: pytest ran" % sha,
+                    "%s yesterday green: pytest ran" % sha,
+                    "%s 2026-01-01T00:00:00Z green pytest ran" % sha,
+                    "%s 2026-01-01 00:00:00 green: pytest ran" % sha,
+                    "%s 2026-01-01T00:00:00Z notgreen: pytest ran" % sha,
+                    "%s 2026-01-01T00:00:00Z OVERRIDE green: pytest ran" % sha,
+                    "note about %s 2026-01-01T00:00:00Z green: pytest ran" % sha,
+                    "%s 2026-01-01T00:00:00Z green: pytest ran but the gate died"
+                    % ("z" * 40)):
+            self.assertIsNone(prepush.parse_record(line), line)
+            self.forge(line)
+        self.assertEqual(prepush.read_records(self.repo), [])
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+
+    def test_the_record_the_gate_writes_is_the_record_the_gate_reads(self):
+        # One writer, one parser, one predicate. If `green_line` ever changes shape
+        # this test fails here instead of every lane quietly losing its ready claim.
+        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
+        line = prepush.green_line(sha, ["python3 -m pytest -q tests/test_x.py",
+                                        "bash tests/run-tests.sh --filter gate"])
+        self.forge(line)
+        self.assertEqual([r[0] for r in prepush.read_records(self.repo)], [sha])
+        self.assertTrue(prepush.local_green(sha, repo=self.repo))
+        out = self.assert_rc(0, ("--check-ready", sha))
+        self.assertIn(sha[:8], out)
+
+    def test_a_malformed_line_is_ignored_and_hides_no_real_record(self):
+        # Junk in the file costs a lane nothing but a skipped line: the gate's own
+        # green record below it must still read green.
+        sha = self.green_sha()
+        self.forge("prose, not a record", "%s anything-at-all" % sha)
+        self.assertTrue(prepush.local_green(sha, repo=self.repo))
+        self.assert_rc(0, ("--check-ready", sha))
+
     def test_a_green_sha_passes_the_check(self):
         sha = self.green_sha()
         out = self.assert_rc(0, ("--check-ready", sha))
