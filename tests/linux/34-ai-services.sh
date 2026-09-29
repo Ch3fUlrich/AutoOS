@@ -613,6 +613,7 @@ _node_sandbox() {
     : >"$d/calls.log"
     : >"$d/curl.log"
     : >"$d/argv.log"
+    : >"$d/bearer.log"
     printf '[]\n' >"$d/nodes.json"
     printf '[]\n' >"$d/connections.json"
     printf '%s\n' openai meta-llama muse-code free-ai opencode-zen cheaperinference groq \
@@ -721,7 +722,18 @@ reply="" code=200
 case "$url" in
     */api/health) reply='{"status":"ok"}' ;;
     */v1/models)
-        if [[ -f "$d/models.json" ]]; then reply="$(cat "$d/models.json")"
+        # APPLYADOPT-2 H: this read carries the omniroute *client* key. The
+        # stand-in takes the bearer out of apply.sh's own curl --config file and
+        # records what it found, so a key sent as -H argv (readable in `ps` for
+        # the lifetime of the call) cannot pass: with $d/require_bearer an empty
+        # bearer answers 401.
+        bearer=""
+        [[ -n "$cfg" && -f "$cfg" ]] && bearer="$(sed -n 's/.*Bearer //p' "$cfg" |
+            head -n 1 | tr -d '"')"
+        printf 'bearer=%s\n' "${bearer:-none}" >>"$d/bearer.log"
+        if [[ -f "$d/require_bearer" && -z "$bearer" ]]; then
+            reply='{"error":"no bearer in the request"}'; code=401
+        elif [[ -f "$d/models.json" ]]; then reply="$(cat "$d/models.json")"
         else reply='{"data":[]}'; fi ;;
     */api/provider-nodes*)
         if [[ "$method" == "GET" ]]; then
@@ -810,10 +822,18 @@ PY
             reply='{"error":"HTTP 503"}'
             code=503
         else
+            # $d/partial_total reports a page that served fewer connections
+            # than the document counts (APPLYADOPT-2 E): the shape of a
+            # truncated list, which must not be read as "these are all there
+            # is".
             reply="$(python3 - "$d/connections.json" <<'PY'
-import json, sys
+import json, os, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
-print(json.dumps({"connections": rows, "total": len(rows)}))
+total = len(rows)
+path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "partial_total")
+if os.path.exists(path):
+    total = len(rows) + int(open(path, encoding="utf-8").read().strip() or 0)
+print(json.dumps({"connections": rows, "total": total}))
 PY
 )"
         fi ;;
@@ -1401,8 +1421,8 @@ SH
 # docker): "model" carries the full ref, providerId repeats its first segment.
 # "split" is the upstream-source shape (model without the provider segment).
 _drift_json() {
-    local d="$1" swap="${2:-}" split="${3:-}"
-    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" "$split" >"$d/drift.json" <<'PY'
+    local d="$1" swap="${2:-}" split="${3:-}" broken="${4:-}"
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" "$split" "$broken" >"$d/drift.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 combos = []
@@ -1418,6 +1438,15 @@ if sys.argv[2] and combos:
     for c in combos:
         if len(c["models"]) > 1:
             c["models"].reverse()
+            break
+if sys.argv[4] and combos:
+    # APPLYADOPT-2 B: a step the normaliser cannot turn into a ref — the shape
+    # of a leg type this version of apply.sh does not understand. The store
+    # still answers, so a caller that reads the combo must be able to see that
+    # what it got back is not the whole tier.
+    for c in combos:
+        if len(c["models"]) > 1:
+            c["models"][0] = {"kind": "combo", "comboId": "an-older-sub-tier"}
             break
 print(json.dumps({"combos": combos, "active": None, "error": None}))
 PY
@@ -1592,8 +1621,8 @@ fi
 # combos.json itself: the same document _drift_json renders for --drift, so the
 # two paths cannot drift apart.
 _combo_live_json() {
-    local d="$1" swap="${2:-}" split="${3:-}"
-    _drift_json "$d" "$swap" "$split"
+    local d="$1" swap="${2:-}" split="${3:-}" broken="${4:-}"
+    _drift_json "$d" "$swap" "$split" "$broken"
     mv "$d/drift.json" "$d/live.json"
 }
 # _combo_names - every combo id in combos.json, one per line.
@@ -1840,6 +1869,20 @@ for c in data["combos"]:
         print(c["name"])
         break' "$ROOT/configuration/omniroute/combos.json"
 }
+# _combo_unique_victim - the first combo whose leg list no other combo shares.
+# The stand-in's fail_create switch is keyed on --models, and several tiers do
+# ship the same legs (three "deepseek/deepseek-flash" as of 2026-09-29), so a
+# test that means to fail exactly one tier has to pick one of these.
+_combo_unique_victim() {
+    python3 -c 'import json,sys,collections
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = [(c["name"], ",".join(c["models"])) for c in data["combos"]]
+seen = collections.Counter(models for _name, models in rows)
+for name, models in rows:
+    if seen[models] == 1:
+        print(name)
+        break' "$ROOT/configuration/omniroute/combos.json"
+}
 
 if it "apply combos: a create that fails after the delete restores the previous version"; then
     d="$(_prune_sandbox)"
@@ -1931,6 +1974,287 @@ PY
         || { ok=0; echo "tally: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a brand-new combo's failure was reported as a restore"; fi
+fi
+
+# ─── APPLYADOPT-2: the REST adoption review findings ────────────────────────
+# c7ca607 made the gateway decide "already registered" and made a failed combo
+# re-create restore what it deleted. Review found seven ways each can still be
+# wrong — a false "no previous version", a restore of a combo whose live legs
+# were only partly readable, an inactive connection read as usable, another
+# node's connection adopted by name, a truncated page read as complete, the
+# key-carrying response body left in a variable, and the client key in argv.
+# Each case below has one switch on the stand-in side and asserts the real path
+# (a management call the run actually made, recorded in curl.log / argv.log /
+# bearer.log), never a convenient inner function.
+
+# Item H: `curl -H "Authorization: Bearer <client key>"` puts the key in argv,
+# where any user on the machine reads it out of `ps` for the lifetime of the
+# call — the reason omni_rest writes a 0600 --config file instead. The stand-in
+# answers /v1/models only with a bearer taken out of that config file, so the
+# case proves both halves: the key arrived, and it never arrived as an argument.
+if it "apply adopt2: the /v1/models read carries the client key in a curl config file, never in argv"; then
+    d="$(_node_sandbox)"
+    printf 'omniroute: sk-client-key-DO-NOT-PS\n' >"$d/keys.yml"
+    touch "$d/require_bearer"
+    # A catalog that answers with real refs, so "the read worked" is observable
+    # rather than an empty list that reads the same as a refused call.
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$d/models.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+refs = {ref for c in data.get("combos", []) for ref in c.get("models", [])}
+json.dump({"data": [{"id": r} for r in sorted(refs)]},
+          open(sys.argv[2], "w", encoding="utf-8"))
+PY
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"could not read /v1/models"* ]] \
+        && { ok=0; echo "the gateway refused the read: $(tr '\n' ' ' <"$d/bearer.log") / $(head -3 <<<"$out")" >&2; }
+    grep -q '^bearer=sk-client-key-DO-NOT-PS$' "$d/bearer.log" \
+        || { ok=0; echo "the key never reached the config file: $(cat "$d/bearer.log")" >&2; }
+    grep -q 'sk-client-key-DO-NOT-PS' "$d/argv.log" \
+        && { ok=0; echo "the client key reached a command line: $(cat "$d/argv.log")" >&2; }
+    [[ "$out" == *"sk-client-key-DO-NOT-PS"* ]] && { ok=0; echo "the client key was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the catalog read passed the omniroute client key through argv"; fi
+fi
+
+# Item E: {"connections":[…],"total":N} with N > the rows served is a truncated
+# page, not the gateway's whole answer. Deciding "not registered" from it would
+# add a duplicate connection, so it is treated exactly like a refused read: the
+# CLI's list decides, and the run says which and why.
+if it "apply adopt2: a partial connection page is not read as the whole list"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    printf '2\n' >"$d/partial_total"
+    out="$(_node_apply "$d")"
+    ok=1
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "the REST read never ran: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the truncated page was trusted, the CLI fallback never ran: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"connection list is partial"* ]] \
+        || { ok=0; echo "the fallback did not say why: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the truncated page still re-added it: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a truncated connection list was read as complete"; fi
+fi
+
+# Item C: a connection with isActive == false serves nothing. Adopting it would
+# print "already registered" for a provider that answers no request, so it does
+# not count — but adding a second connection would not fix the operator's
+# problem either, and leaves a row to clean up. The run names the one action
+# that does fix it.
+if it "apply adopt2: an inactive connection is not adopted and gets no second one"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": False}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! scaleway has an inactive connection - enable it in the dashboard"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] \
+        && { ok=0; echo "a dead connection was reported as registered: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "a second connection was added: $(cat "$d/calls.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    # The key the run would have used is still not printed, and the one
+    # connection the gateway holds is the one it already had.
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an inactive connection was adopted, or duplicated"; fi
+fi
+
+# The same rule for a node-bound connection: the node exists and is active, the
+# key bound to it is disabled. Reporting "already registered" would hide that
+# nothing routes; adding a second connection would hide it differently.
+if it "apply adopt2: a node provider whose connection is inactive is reported, not duplicated"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000001",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": False}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! meta-api has an inactive connection - enable it in the dashboard"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"  = meta-api already registered"* ]] \
+        && { ok=0; echo "a dead connection was reported as registered: $out" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a second connection was added: $(cat "$d/calls.log")" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an inactive node-bound connection was adopted, or duplicated"; fi
+fi
+
+# Item D: a connection bound to SOME OTHER node can carry the name apply gives
+# its own connections ("meta-api", say, from a node the operator renamed and
+# re-created). Adopting it by name alone would report the provider as
+# registered while its key is bound to an endpoint that is not the registry's —
+# and would never bind it to the right node.
+if it "apply adopt2: a connection bound to another provider node is not adopted by name"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"},
+           {"id": "openai-compatible-chat-00000002",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "somewhere-else", "prefix": "somewhere-else",
+            "baseUrl": "https://example.invalid/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000002",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  = meta-api already registered"* ]] \
+        && { ok=0; echo "another node's connection was adopted: $out" >&2; }
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -qx 'providers add openai-compatible-chat-00000001 --name meta-api --credential-env AUTOOS_KEY_META --yes' \
+        "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    python3 - "$d/connections.json" <<'PY' || ok=0
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+bound = [r for r in rows if r.get("provider") == "openai-compatible-chat-00000001"]
+if len(bound) != 1:
+    print("the key was never bound to the meta-api node: %s" % rows)
+    sys.exit(1)
+PY
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a connection on a different node satisfied the name match"; fi
+fi
+
+# Items F and G have no observable behaviour of their own — a shell variable a
+# later line never prints, and a function-local that leaks into the script's
+# global scope — so the assertion is on the source: the parse that consumes the
+# key-carrying body is followed by the clear, and register_provider declares its
+# own node_exists. Red before: the reader kept REST_BODY set and node_exists was
+# a bare assignment.
+if it "apply adopt2: the connection reader clears the key-carrying body and keeps no leaked global"; then
+    src="$ROOT/configuration/omniroute/apply.sh"
+    ok=1
+    body="$(awk '/^omni_connections\(\) \{/,/^\}/' "$src")"
+    [[ -n "$body" ]] || { ok=0; echo "omni_connections is gone from $src" >&2; }
+    # The clear has to come AFTER the parse: the parse is what reads the body.
+    parse_line="$(printf '%s\n' "$body" | grep -n 'python3' | head -1 | cut -d: -f1)"
+    clear_line="$(printf '%s\n' "$body" | grep -n 'REST_BODY=""' | head -1 | cut -d: -f1)"
+    [[ -n "$parse_line" && -n "$clear_line" && $clear_line -gt $parse_line ]] \
+        || { ok=0; echo "the reader never clears the key-carrying body after parsing it: [$body]" >&2; }
+    fn="$(awk '/^register_provider\(\) \{/,/^\}/' "$src")"
+    [[ "$fn" == *'local '*node_exists* ]] \
+        || { ok=0; echo "register_provider does not declare node_exists local" >&2; }
+    printf '%s\n' "$fn" | grep -qE '^[[:space:]]+node_exists=' \
+        && { ok=0; echo "register_provider assigns node_exists outside its local block" >&2; }
+    if (( ok )); then pass; else fail "a key-carrying body or a leaked global survived"; fi
+fi
+
+# Item A: "(no previous version)" is only true when the store was read and did
+# not hold the name. When the list was unreadable apply never looked, and the
+# delete it just performed may well have removed a tier — the operator has to be
+# told the state is unknown, not that there was nothing there.
+if it "apply combos: a failed re-create over an unreadable store says the previous version is unknown"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_unique_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    # The store holds the combo (live.json) but the CLI cannot report it — the
+    # state the sentence must describe is "unknown", not "absent".
+    touch "$d/live.fail"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version unknown (live list unreadable)"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"(no previous version)"* ]] \
+        && { ok=0; echo "claimed the store never held it: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    [[ "$out" == *"restored"* ]] && { ok=0; echo "claimed a restore it never attempted: $out" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "the combo survived the delete it should have taken" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    # An unreadable store means every tier is rewritten, so the run is 1 failed
+    # and the rest replaced — the failure must be counted, not hidden.
+    [[ "$out" == *"Combos: 0 unchanged, 0 created, $((want_n - 1)) replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable store was reported as an empty one"; fi
+fi
+
+# Item B: the restore is only faithful if the live combo was read whole. A leg
+# the normaliser could not parse (a step shape this script does not know) is
+# dropped from the refs it remembers, so a re-create from those refs would put
+# back a SHORTER tier and print "restored" over the loss. Refuse it and say so.
+if it "apply combos: a restore with unreadable live legs is refused, never a partial re-create"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap '' broken
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    printf '%s\n%s\n' "$new_legs" "$old_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version LOST, restore refused"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"previous version restored"* ]] \
+        && { ok=0; echo "a partial tier was restored and called restored: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    # Two create attempts for the victim and no third: a partial --models value
+    # would be the third call, and it would SUCCEED against the stand-in (the
+    # legs it drops are not listed in fail_create), which is the whole danger.
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "a partial combo was written back" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a combo whose live legs were partly unreadable was restored short"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
