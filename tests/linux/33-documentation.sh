@@ -698,9 +698,21 @@ fi
 
 # ORCH-A1 phase 1: role launch profiles are rendered from the harness
 # fences (tools/launch_profiles.py render --check) and the rendered matchers
-# pass the branch-scope, secret-scope and always-deny contradiction tables.
+# pass the profile-shape, secret-scope and always-deny contradiction tables.
 if it "launch profiles: rendered from the harness fences, scope tables green (ORCH-A1 phase 1)"; then
-    out="$(python3 tests/test_launch_profiles.py 2>&1 && python3 tools/launch_profiles.py render --check 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    rc=0
+    tests="$(python3 tests/test_launch_profiles.py 2>&1)" || rc=$?
+    check="$(python3 tools/launch_profiles.py render --check 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s\n%s\n' "$tests" "$check" | tail -n 20)"; fi
+fi
+
+# ORCH-A1 phase 1 round 13 (routing-00 D-159): every push and dispatch
+# spelling lives in tests/fixtures/push-corpus.json and is decided against the
+# same rendered profiles - the real-git premise tests run git in a temporary
+# directory only.
+if it "push corpus: every push spelling decides as the fixture says (ORCH-A1 round 13)"; then
+    out="$(python3 tests/test_push_corpus.py 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s\n' "$out" | tail -n 20)"; fi
 fi
 
 # tools/probe-toolcalls.py: tool-calling probe writes the overlay (routing v2 spec 3.1, 5.3, 10).
