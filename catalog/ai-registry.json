@@ -3750,14 +3750,14 @@
       }
     },
     "t3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the head; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) kept that measured head (200, 125 rpm, 625k tpm) in first place and put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) straight behind it, ahead of every paid leg; the two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "class": "cheap",
       "id": "t3-driver",
       "legs": [
-        "mistral/mistral-code-latest",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
         "scaleway/qwen3-235b-a22b-instruct-2507",
+        "mistral/mistral-code-latest",
         "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",
         "cheaperinference/glm-5.2",

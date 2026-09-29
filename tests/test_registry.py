@@ -2506,11 +2506,23 @@ class MistralPlanLimitsTests(unittest.TestCase):
                 registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
                 [], route_id)
 
-    def test_t3_driver_keeps_the_codestral_mistral_leg(self):
-        # Only the dead model left the route: codestral measures 200/125 rpm on
-        # this plan and is still t3-driver's head.
-        self.assertEqual(self.reg["routes"]["t3-driver"]["legs"][0],
-                         "mistral/mistral-code-latest")
+    def test_t3_driver_heads_with_the_free_band(self):
+        # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
+        # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
+        # agentic combo, and a 429 on the head falls through the combo, so the
+        # head must be a grant, not the operator's money. MISTRALFIX's measurement
+        # still stands and still decides WHICH paid leg is first:
+        # mistral/mistral-code-latest answers 200 at 125 rpm (625k tpm) while
+        # mistral-small-latest is dead at 0 rpm, so it stays the first PAID leg -
+        # now behind the free band instead of ahead of it.
+        legs = self.reg["routes"]["t3-driver"]["legs"]
+        self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
+        self.assertEqual(legs[0], "scaleway/mistral-small-3.2-24b-instruct-2506")
+        self.assertEqual(legs[:3], ["scaleway/mistral-small-3.2-24b-instruct-2506",
+                                    "nebius/zai-org/GLM-5.2",
+                                    "scaleway/qwen3-235b-a22b-instruct-2507"])
+        paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
+        self.assertEqual(paid[0], "mistral/mistral-code-latest")
 
     # -- the invariant ------------------------------------------------------
 
