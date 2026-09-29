@@ -92,6 +92,36 @@ class RepoFixture(unittest.TestCase):
         # The fetched copy the ancestor check reads, written without a network.
         run_git("update-ref", "refs/remotes/origin/main", base_sha, cwd=self.repo)
         self._write("tools/affected-tests.py", AFFECTED_STUB)
+        # The record store is redirected per-test. Two reasons, both load-bearing:
+        # the real location is the runner-private state tree, and a suite that
+        # certified its synthetic shas there would be writing certificates into
+        # the host's live store; and every fixture commits "base" with the same
+        # content, so two fixtures can mint the *same sha* — in a shared store a
+        # record from one test would certify another. The spawner redirects the
+        # same state tree for its kill store; this is its sibling.
+        old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = str(self.tmp / "store")
+        self.addCleanup(self._restore_state, old_state)
+
+    @staticmethod
+    def _restore_state(old):
+        if old is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = old
+
+    def base_env(self, env=None):
+        """The parent env, minus the worker run id, plus this test's overrides.
+
+        On a spawned orchestrator's host the suite itself runs with
+        ``AUTOOS_AGENT_RUN_ID`` in the environment — and the gate refuses to
+        record green under it (D-154). Every fixture here wants the
+        orchestrator's path unless a test names the worker one.
+        """
+        full = dict(os.environ)
+        full.pop("AUTOOS_AGENT_RUN_ID", None)
+        full.update(env or {})
+        return full
 
     def _write(self, rel, text):
         path = self.repo / rel
@@ -131,11 +161,9 @@ class RepoFixture(unittest.TestCase):
         self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_RED)
 
     def prepush(self, *args, env=None):
-        full = dict(os.environ)
-        full.update(env or {})
         proc = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.repo)]
-                              + list(args), capture_output=True, text=True, env=full,
-                              cwd=str(self.repo))
+                              + list(args), capture_output=True, text=True,
+                              env=self.base_env(env), cwd=str(self.repo))
         return proc.returncode, proc.stdout + proc.stderr
 
     def assert_rc(self, expected, args=(), env=None):
@@ -148,6 +176,17 @@ class RepoFixture(unittest.TestCase):
         if not log.is_file():
             return []
         return [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def head(self):
+        return run_git("rev-parse", "HEAD", cwd=self.repo)
+
+    def store_record(self, sha=None):
+        """The runner-private store's record for ``sha`` (default: HEAD), or None."""
+        sha = sha or self.head()
+        path = prepush.record_path(sha)
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def move_main_ahead(self):
         """Point refs/remotes/origin/main at a commit this branch does not carry."""
@@ -391,17 +430,84 @@ class GitEnvTests(RepoFixture):
 
 
 class LogRecordTests(RepoFixture):
-    """(e) A green run leaves a record a later gate can read; a red leaves nothing."""
+    """(e) D-154: a green run certifies itself in the runner-private store — one
+    JSON record binding the commit, its tree, the manifest, and every command's
+    result. The git-dir log stays a human-readable log; nothing reads it."""
 
-    def test_green_appends_sha_utc_and_commands(self):
+    def test_a_green_run_writes_one_store_record(self):
+        self.suite_is_green()
+        self.set_plan({})
+        self.assert_rc(0)
+        rec = self.store_record()
+        self.assertIsNotNone(rec, "the gate ran green and left no certificate")
+        self.assertEqual(rec["kind"], prepush.GREEN)
+        self.assertEqual(rec["sha"], self.head())
+
+    def test_the_record_binds_the_tree_the_commit_carries_and_the_sorted_manifest(self):
+        self.suite_is_green()
+        self.set_plan({"pytest": ["tests/test_skill_rules.py"], "terms": "gate"})
+        self.assert_rc(0)
+        rec = self.store_record()
+        self.assertEqual(rec["tree"],
+                         run_git("rev-parse", "HEAD^{tree}", cwd=self.repo))
+        self.assertRegex(rec["utc"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(rec["commands"], sorted(rec["commands"]),
+                         "the manifest is the run list, sorted")
+        joined = "\n".join(rec["commands"])
+        for expected in ("tests/test_skill_rules.py", "tests/test_ci_shards.py",
+                         "tests/ci-shards.py", "--filter gate"):
+            self.assertIn(expected, joined, rec["commands"])
+
+    def test_the_record_stores_each_commands_result_and_parsed_counts(self):
+        self.suite_is_green()
+        self.set_plan({"pytest": ["tests/test_skill_rules.py"], "terms": "gate"})
+        self.assert_rc(0)
+        rec = self.store_record()
+        by_cmd = {r["command"]: r for r in rec["results"]}
+        self.assertEqual(sorted(by_cmd), sorted(rec["commands"]))
+        self.assertTrue(all(r["ok"] for r in rec["results"]))
+        bash = [c for c in by_cmd if "run-tests.sh" in c]
+        self.assertTrue(bash, rec["commands"])
+        self.assertEqual(by_cmd[bash[0]]["passed"], 3,
+                         "the stub printed 'passed 3 failed 0 skipped 0'")
+        pytest_cmd = [c for c in by_cmd if "pytest" in c][0]
+        self.assertEqual(by_cmd[pytest_cmd]["passed"], 1,
+                         "the stub suite is one test; pytest says '1 passed'")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not Windows semantics")
+    def test_the_record_is_written_privately_and_atomically(self):
+        # The kill store's shape: 0700 dir, 0600 file, temp + rename — a record
+        # that appears half-written is a record nothing can read, and a store
+        # any process can rename into is not private.
+        self.suite_is_green()
+        self.set_plan({})
+        self.assert_rc(0)
+        path = prepush.record_path(self.head())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        strays = [p.name for p in path.parent.iterdir() if ".tmp-" in p.name]
+        self.assertEqual(strays, [], "the atomic write left its temp file behind")
+
+    def test_the_store_lives_outside_the_checkout_the_worker_writes_in(self):
+        self.suite_is_green()
+        self.set_plan({})
+        self.assert_rc(0)
+        store = prepush.store_dir().resolve()
+        for inside in (self.repo.resolve(),
+                       Path(run_git("rev-parse", "--absolute-git-dir",
+                                    cwd=self.repo)).resolve()):
+            self.assertFalse(store.is_relative_to(inside),
+                             "%s is inside %s — a worker's checkout cannot hold "
+                             "the certificate that gates its own push" % (store, inside))
+
+    def test_a_green_run_still_leaves_the_human_log_line(self):
         self.suite_is_green()
         self.set_plan({"pytest": ["tests/test_skill_rules.py"]})
         self.assert_rc(0)
         lines = self.log_lines()
         self.assertEqual(len(lines), 1, lines)
-        head = run_git("rev-parse", "HEAD", cwd=self.repo)
         fields = lines[0].split()
-        self.assertEqual(fields[0], head)
+        self.assertEqual(fields[0], self.head())
         self.assertRegex(fields[1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertIn("green", lines[0])
         self.assertIn("tests/test_ci_shards.py", lines[0])
@@ -416,17 +522,18 @@ class LogRecordTests(RepoFixture):
                          run_git("status", "--porcelain", cwd=self.repo))
 
     def test_the_log_lives_in_the_worktrees_own_git_dir(self):
-        # A linked worktree has its own gitdir; the record belongs to the head it
-        # certifies, not to the parent checkout.
+        # A linked worktree has its own gitdir; the *human log* belongs to the
+        # head it annotates. The certificate does not — it goes to the shared
+        # runner-private store, keyed by sha, where the orchestrator's `ready`
+        # finds it whatever checkout ran the gate.
         worktree = self.tmp / "wt"
         self.suite_is_green()
         self.set_plan({})
         run_git("add", "-A", cwd=self.repo)
         run_git("commit", "-q", "-m", "stub suite", cwd=self.repo)
         run_git("worktree", "add", "-q", "-b", "wt-branch", str(worktree), cwd=self.repo)
-        full = dict(os.environ)
         proc = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(worktree)],
-                              capture_output=True, text=True, env=full,
+                              capture_output=True, text=True, env=self.base_env(),
                               cwd=str(worktree))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         own = prepush.log_path(worktree)
@@ -438,6 +545,7 @@ class LogRecordTests(RepoFixture):
         self.set_plan({})
         self.assert_rc(1)
         self.assertEqual(self.log_lines(), [])
+        self.assertIsNone(self.store_record(), "a red run left a certificate")
 
 
 class CouldNotRunTests(RepoFixture):
@@ -516,6 +624,11 @@ class OverrideTests(RepoFixture):
         self.assertEqual(lines[0].split()[0], head)
         self.assertIn("OVERRIDE", lines[0])
         self.assertIn("docs only", lines[0])
+        rec = self.store_record()
+        self.assertEqual(rec["kind"], prepush.OVERRIDE_MARKER)
+        self.assertIn("docs only", rec["reason"])
+        self.assertEqual(rec["tree"],
+                         run_git("rev-parse", "HEAD^{tree}", cwd=self.repo))
 
     def test_the_override_runs_no_suite(self):
         self.suite_is_green()
@@ -548,7 +661,10 @@ class OverrideTests(RepoFixture):
 
 
 class CheckReadyTests(RepoFixture):
-    """D-110: a ready claim is only good for a sha this gate actually ran green."""
+    """D-110 as D-154 made it unforgeable: a ready claim is only good for a sha
+    the gate itself certified in the runner-private store, bound to this exact
+    commit *and tree*, with every recorded result ok. The worktree's log — the
+    file a worker owns — is never read for readiness."""
 
     def green_sha(self):
         self.suite_is_green()
@@ -562,66 +678,97 @@ class CheckReadyTests(RepoFixture):
         self.assert_rc(0, env={"AUTOOS_PREPUSH_OVERRIDE": reason})
         return run_git("rev-parse", "HEAD", cwd=self.repo)
 
-    def forge(self, *lines):
-        """Append raw lines to the record file the way any process that can reach
-        the git dir can — which is exactly why the reader must accept only the
-        shape the gate itself writes."""
-        for line in lines:
-            prepush.record(self.repo, line)
+    def tree_of_head(self):
+        return run_git("rev-parse", "HEAD^{tree}", cwd=self.repo)
 
-    def test_a_forged_free_text_line_is_not_green(self):
-        # B1: the reader treated *any* second field but OVERRIDE as a green record,
-        # so `echo "$SHA anything" >> <git-dir>/autoos-prepush.log` certified a push
-        # that was never run — measured at ee92774, where --check-ready returned 0.
-        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
-        self.forge("%s anything-at-all" % sha)
+    def write(self, rec):
+        """Stage a store record through the gate's own writer — a fixture that
+        invented the shape would keep passing after the real format changed."""
+        prepush.write_store_record(rec)
+
+    def handwrite(self, sha, text):
+        path = prepush.record_path(sha)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_a_forged_line_in_the_worktree_log_certifies_nothing(self):
+        # Item 4: the log inside the checkout may keep the exact line shape the
+        # gate used to write — the worktree is the worker's, and readiness never
+        # reads it. This is the forgery the old reader accepted at ee92774.
+        sha = self.head()
+        prepush.record(self.repo, prepush.green_line(
+            sha, ["python3 -m pytest -q tests/test_x.py"]))
         self.assertFalse(prepush.local_green(sha, repo=self.repo))
         out = self.assert_rc(1, ("--check-ready", sha))
         self.assertIn("NOT READY", out)
 
-    def test_only_the_two_shapes_the_gate_writes_count_as_records(self):
-        # Every half of the green shape carries meaning: the sha, the UTC stamp the
-        # gate stamps itself, and the `green:` field. A line missing any of them is
-        # not a record, so it cannot be green and cannot make a later line unreadable.
-        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
-        for line in ("",
-                    "prose, not a record",
-                    sha,
-                    "%s" % ("0" * 40),
-                    "%s nope" % sha,
-                    "%s green: pytest ran" % sha,
-                    "%s yesterday green: pytest ran" % sha,
-                    "%s 2026-01-01T00:00:00Z green pytest ran" % sha,
-                    "%s 2026-01-01 00:00:00 green: pytest ran" % sha,
-                    "%s 2026-01-01T00:00:00Z notgreen: pytest ran" % sha,
-                    "%s 2026-01-01T00:00:00Z OVERRIDE green: pytest ran" % sha,
-                    "note about %s 2026-01-01T00:00:00Z green: pytest ran" % sha,
-                    "%s 2026-01-01T00:00:00Z green: pytest ran but the gate died"
-                    % ("z" * 40)):
-            self.assertIsNone(prepush.parse_record(line), line)
-            self.forge(line)
-        self.assertEqual(prepush.read_records(self.repo), [])
-        self.assertFalse(prepush.local_green(sha, repo=self.repo))
-
     def test_the_record_the_gate_writes_is_the_record_the_gate_reads(self):
-        # One writer, one parser, one predicate. If `green_line` ever changes shape
-        # this test fails here instead of every lane quietly losing its ready claim.
-        sha = run_git("rev-parse", "HEAD", cwd=self.repo)
-        line = prepush.green_line(sha, ["python3 -m pytest -q tests/test_x.py",
-                                        "bash tests/run-tests.sh --filter gate"])
-        self.forge(line)
-        self.assertEqual([r[0] for r in prepush.read_records(self.repo)], [sha])
+        # One writer, one predicate, and the round trip runs the real gate —
+        # not a hand-formatted fixture — so a drift between write and read
+        # fails here instead of unreadying every lane quietly.
+        sha = self.green_sha()
         self.assertTrue(prepush.local_green(sha, repo=self.repo))
         out = self.assert_rc(0, ("--check-ready", sha))
         self.assertIn(sha[:8], out)
 
-    def test_a_malformed_line_is_ignored_and_hides_no_real_record(self):
-        # Junk in the file costs a lane nothing but a skipped line: the gate's own
-        # green record below it must still read green.
-        sha = self.green_sha()
-        self.forge("prose, not a record", "%s anything-at-all" % sha)
-        self.assertTrue(prepush.local_green(sha, repo=self.repo))
-        self.assert_rc(0, ("--check-ready", sha))
+    def test_a_record_that_binds_another_tree_is_not_green(self):
+        # Item 3: the check recomputes the commit's tree and refuses a record
+        # that names anything else.
+        sha = self.head()
+        self.write(prepush.green_record(sha, "0" * 40,
+                                        [{"command": "x", "ok": True, "passed": 1}]))
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+        out = self.assert_rc(1, ("--check-ready", sha))
+        self.assertIn("NOT READY", out)
+        self.assertIn("tree", out)
+
+    def test_a_record_with_a_red_result_is_not_green(self):
+        sha = self.head()
+        self.write(prepush.green_record(sha, self.tree_of_head(),
+                                        [{"command": "x", "ok": False, "passed": 0}]))
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+        self.assert_rc(1, ("--check-ready", sha))
+
+    def test_a_record_with_an_empty_manifest_or_results_is_not_green(self):
+        # A certificate that names no command tested nothing, whatever it says.
+        sha = self.head()
+        rec = prepush.green_record(sha, self.tree_of_head(), [])
+        self.write(rec)
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+        self.assert_rc(1, ("--check-ready", sha))
+
+    def test_a_record_filed_under_a_sha_it_does_not_name_is_not_green(self):
+        # The file name is not the fact; the sha *inside* the record is matched
+        # against both the name and the commit, so a copy pasted between keys
+        # reads as nothing.
+        sha = self.head()
+        self.handwrite(sha, json.dumps({"kind": prepush.GREEN, "sha": "0" * 40,
+                                        "tree": self.tree_of_head(),
+                                        "utc": prepush.now_utc(),
+                                        "commands": ["x"],
+                                        "results": [{"command": "x", "ok": True}]}))
+        self.assertFalse(prepush.local_green(sha, repo=self.repo))
+        self.assert_rc(1, ("--check-ready", sha))
+
+    def test_only_a_record_this_tool_wrote_shapes_like_counts(self):
+        # Every half of the binding carries meaning: kind, sha, tree, the utc
+        # stamp, the manifest and the results. Anything else — junk, JSON that
+        # is not a record, a record missing a field — is not green, and must
+        # not raise while saying so.
+        sha = self.head()
+        for junk in ("", "not json", "{}", json.dumps({"sha": sha}),
+                     json.dumps({"kind": prepush.GREEN, "sha": sha}),
+                     json.dumps({"kind": prepush.GREEN, "sha": sha,
+                                 "tree": self.tree_of_head(), "utc": "yesterday",
+                                 "commands": ["x"],
+                                 "results": [{"command": "x", "ok": True}]}),
+                     json.dumps({"kind": prepush.GREEN, "sha": sha,
+                                 "tree": self.tree_of_head(),
+                                 "utc": prepush.now_utc()})):
+            self.handwrite(sha, junk)
+            self.assertFalse(prepush.local_green(sha, repo=self.repo), junk)
+        out = self.assert_rc(1, ("--check-ready", sha))
+        self.assertIn("NOT READY", out)
 
     def test_a_green_sha_passes_the_check(self):
         sha = self.green_sha()
@@ -649,6 +796,20 @@ class CheckReadyTests(RepoFixture):
     def test_an_abbreviated_sha_is_resolved_before_the_match(self):
         sha = self.green_sha()
         self.assert_rc(0, ("--check-ready", sha[:9]))
+
+    def test_a_green_record_does_not_carry_an_amended_commit(self):
+        # A new commit is a new sha, so the old record cannot certify it even
+        # if the amended commit shares its history — the store is keyed by the
+        # commit and the reader is bound to its tree.
+        sha = self.green_sha()
+        (self.repo / "extra.txt").write_text("amended\n", encoding="utf-8")
+        run_git("add", "extra.txt", cwd=self.repo)
+        run_git("commit", "-q", "--amend", "--no-edit", cwd=self.repo)
+        amended = self.head()
+        self.assertNotEqual(amended, sha)
+        self.assertFalse(prepush.local_green(amended, repo=self.repo))
+        out = self.assert_rc(1, ("--check-ready", amended))
+        self.assertIn("NOT READY", out)
 
     def test_local_green_is_callable_as_a_function(self):
         sha = self.green_sha()
@@ -881,7 +1042,8 @@ class HookInstallTests(RepoFixture):
         run_git("commit", "-q", "-m", "stubs, gate and operator hook", cwd=self.repo)
         self.install()
         proc = subprocess.run(["git", "-C", str(self.repo), "push", "-q", str(origin),
-                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True,
+                               env=self.base_env())
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertTrue(marker.exists(), "the chained hook never ran")
 
@@ -897,7 +1059,8 @@ class HookInstallTests(RepoFixture):
         # main moves ahead: the push must now be refused by the hook, not by luck.
         self.move_main_ahead()
         proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin),
-                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True,
+                               env=self.base_env())
         combined = proc.stdout + proc.stderr
         self.assertNotEqual(proc.returncode, 0, combined)
         self.assertIn("R-coord-01", combined)
@@ -910,7 +1073,8 @@ class HookInstallTests(RepoFixture):
 
     def push_lane(self, origin):
         proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin),
-                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True,
+                               env=self.base_env())
         return proc.returncode, proc.stdout + proc.stderr
 
     def origin_refs(self, origin):
@@ -993,7 +1157,8 @@ class HookInstallTests(RepoFixture):
                          "the gate was written where core.hooksPath says git must not look")
         self.move_main_ahead()
         proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin),
-                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True,
+                               env=self.base_env())
         combined = proc.stdout + proc.stderr
         self.assertNotEqual(proc.returncode, 0, combined)
         self.assertIn("R-coord-01", combined)

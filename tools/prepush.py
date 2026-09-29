@@ -38,24 +38,28 @@ WHAT IT DOES, IN ORDER
      the tally is read as well as the status (R-worker-05 — "no tests ran" exited 0
      and was pushed once already).
 
-GREEN LEAVES A RECORD: ``<git-dir>/autoos-prepush.log``, one line per push —
-``<sha> <utc> green: <commands>``, written by ``green_line``. The log lives in the git
-dir, so it is never committed and every worktree keeps its own; ``parse_record`` is the
-only reader, and it accepts that shape and the override shape and nothing else — a line
-of any other text is not a record, because a file any process can append to must not
-certify a push (``<sha> looks fine`` read as green until the 2026-09-29 fix round).
-``--check-ready <sha>`` (rule D-110)
-answers for exactly that sha, which is how a lane that pushed with
-``git push --no-verify`` — outside any hook's reach — is caught later, when the
-orchestrator tries to declare it ready: ``autoos-agent.py ready`` calls
-``local_green()`` as its fifth gate, and an orchestrator that means to waive it
-names a reason with ``--allow-unverified``.
+GREEN LEAVES A RECORD: one JSON certificate per commit in the runner-private
+store at ``<state-dir>/prepush/<sha>.json`` (rule D-154). ``store_dir()`` is the
+sibling of the spawner's kill record — same ``clients.state_dir()`` base, same
+0700 dir and 0600 files — and the location is imported from there, not copied,
+so the two runner-private stores move together. A record binds: the commit sha,
+that commit's *tree* hash, the sorted manifest of the commands the gate ran,
+each command's result and parsed ``N passed`` count, and a UTC stamp. It is
+written atomically (temp + rename). ``--check-ready <sha>`` (rule D-110)
+recomputes the sha's tree and accepts only a record whose sha AND tree match and
+whose every result is ok; an ``OVERRIDE`` record is never green. The store lives
+outside every worktree because the worktree is the worker's: the old record
+file sat in ``<git-dir>/autoos-prepush.log``, and anything that could write the
+checkout could certify its own push. That log stays — one line per push, the
+``green_line`` shape — as a human-readable annotation, and readiness never reads
+it. ``autoos-agent.py ready`` calls ``local_green()`` as its fifth gate, and an
+orchestrator that means to waive it names a reason with ``--allow-unverified``.
 
 OVERRIDE: ``AUTOOS_PREPUSH_OVERRIDE="<reason>"`` skips the checks, prints a loud
-line, and logs ``<sha> OVERRIDE <reason>`` in the same file. It is for an
-orchestrator that has run the checks some other way; a worker pushing its own lane
-has no reason that fits. An override is never green, so ``--check-ready`` still
-refuses it.
+line, and stores a ``kind: OVERRIDE`` record for the sha (and the same line in
+the human log). It is for an orchestrator that has run the checks some other way;
+a worker pushing its own lane has no reason that fits. An override is never
+green, so ``--check-ready`` still refuses it.
 
 USAGE
 -----
@@ -85,21 +89,43 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The store's base location is the spawner's own state tree; the import is the
+# one-home rule (Principle 1) — `clients.state_dir()` decides where runner state
+# lives, and `kill_store_dir()` in tools/autoos-agent.py reads from the same
+# function. Insert the tools dir first so the import resolves when this file is
+# loaded by path (tests) as well as run as a script or imported by the agent.
+_TOOLS_DIR = str(Path(__file__).resolve().parent)
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+try:
+    import autoos_clients as clients  # noqa: E402
+except ImportError:  # the pre-push hook's shim may run a copy of this file
+    clients = None                     # alone; store_root() falls back to the
+                                       # same formula from the script's own dir
+
 DEFAULT_BASE = "origin/main"
 OVERRIDE_ENV = "AUTOOS_PREPUSH_OVERRIDE"
 LOG_NAME = "autoos-prepush.log"
-#: The second field of an override record. It is what makes an override readable as
+#: The gate's record store: ``<state-dir>/prepush``, the sibling of the
+#: spawner's kill store (``kill_store_dir`` names ``<state-dir>/kill``).
+STORE_SUBDIR = "prepush"
+#: Set by the spawner for every worker it launches (tools/autoos-agent.py).
+#: The gate still runs and reports under it, but it records nothing: a green
+#: certificate is an orchestrator's act, not a worker's (D-154).
+RUN_ID_ENV = "AUTOOS_AGENT_RUN_ID"
+#: The ``kind`` of an override record. It is what makes an override readable as
 #: "the gate was stepped over" a month later, and what --check-ready refuses.
 OVERRIDE_MARKER = "OVERRIDE"
-#: The normalised kind of a green record, as ``parse_record`` returns it.
+#: The ``kind`` of a green record, as ``green_record`` writes and
+#: ``record_is_green`` reads it.
 GREEN = "green"
-#: The third field of a green record, written by ``green_line`` and the only text
-#: that makes a record mean "the gate ran and nothing failed".
+#: The third field of the human-readable log line, written by ``green_line``.
+#: The log annotates the push; readiness reads the store, not this (D-154).
 GREEN_MARKER = "green:"
-#: A record's first field, exactly as ``git rev-parse HEAD`` prints it. An
-#: abbreviated or hand-typed sha is not a record the gate wrote.
+#: A commit's full id, exactly as ``git rev-parse HEAD`` prints it — the sha a
+#: record binds and the only name a store file may take.
 SHA_HEX = re.compile(r"[0-9a-f]{40}\Z")
-#: A record's second field, exactly as ``now_utc`` stamps it.
+#: A record's timestamp, exactly as ``now_utc`` stamps it.
 UTC_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 #: The CI plan job's two commands (.github/workflows/ci.yml, linux-plan).
 PLAN_CHECKS = ("tests/test_ci_shards.py", "tests/ci-shards.py")
@@ -112,6 +138,9 @@ TAIL_LINES = 60
 #: the runner is not writing to a terminal. See ``suite_selected_cases``.
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SH_SUMMARY = re.compile(r"passed\s+(\d+)\s+failed\s+(\d+)\s+skipped\s+(\d+)")
+#: pytest's own summary — ``5 passed``, ``1 passed, 2 warnings in 0.4s``. What
+#: ``parse_passed`` reads off a run, alongside the bash suite's tally.
+PYTEST_PASSED = re.compile(r"(\d+) passed")
 
 #: The gate's answers. ``REFUSED`` is a verdict the lane can act on — fix the tree,
 #: merge the base, run the check. ``COULD_NOT_RUN`` is the absence of a verdict: no
@@ -125,8 +154,8 @@ COULD_NOT_RUN = 2
 
 class GateCouldNotRun(Exception):
     """The gate never got to ask its question — raised by the helpers that locate
-    the checkout, its HEAD and its log, and turned into ``COULD_NOT_RUN`` by
-    ``main``. Library callers (``tools/autoos-agent.py``) read the record API
+    the checkout, its HEAD and the store path, and turned into ``COULD_NOT_RUN``
+    by ``main``. Library callers (``tools/autoos-agent.py``) read the record API
     instead, and a failure here is theirs to decide about, not a silent exit."""
 
 
@@ -152,7 +181,9 @@ def repo_root(path=None) -> Path:
 
 
 def log_path(repo) -> Path:
-    """``<git-dir>/autoos-prepush.log`` — per worktree, and never a tracked file."""
+    """``<git-dir>/autoos-prepush.log`` — the *human-readable* log: one line per
+    push, kept because an operator reading a worktree wants to see what the gate
+    did there. Readiness never reads it (D-154): the worker owns this file."""
     gitdir = _git(repo, "rev-parse", "--absolute-git-dir")
     if gitdir is None:
         raise GateCouldNotRun("prepush: %s is not a git repository" % repo)
@@ -272,91 +303,182 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(keep[-lines:]) if len(keep) > lines else text
 
 
-def parse_record(line: str):
-    """``(sha, kind, stamp, detail)`` for one record this tool wrote, else ``None``.
+def store_dir() -> Path:
+    """The runner-private home of the gate's records: ``<state-dir>/prepush``.
 
-    Two shapes exist and only two: ``green_line``'s ``<sha> <utc> green: <commands>``
-    and the override's ``<sha> OVERRIDE <reason>``. Anything else is not a record.
-    This is the file's *only* parser — `local_green` and ``--check-ready`` both read
-    through it, so what counts as green cannot drift apart between them.
+    The sibling of the spawner's kill store — ``kill_store_dir()`` in
+    tools/autoos-agent.py names ``<state-dir>/kill`` off the same
+    ``clients.state_dir()`` this imports, so the location has one home and the
+    two stores that must not live in a worker's checkout move together.
 
-    WHY the shape is checked and not just the second field: the log lives in the git
-    dir, where any process that can write the checkout can append a line. Accepting
-    ``<sha> <anything but OVERRIDE>`` made `echo "$SHA looks fine" >> the log` certify
-    an untested sha, and a ready claim is the last gate before main moves (measured on
-    the PREPUSH lane's own HEAD, 2026-09-29).
+    WHY not the git dir (D-154): the record used to be a line in
+    ``<git-dir>/autoos-prepush.log``, inside the worktree the worker owns, and
+    any process that could write the checkout could certify its own push. A
+    certificate the certified party holds is not one. (Residual, stated as the
+    kill store states its own: a same-uid worker that goes looking can find
+    this directory through its inherited ``AUTOOS_STATE_DIR`` — what it cannot
+    do is get the gate to write a green record into it; see ``RUN_ID_ENV``.)
     """
-    fields = line.split(None, 2)
-    if len(fields) < 3 or not SHA_HEX.match(fields[0]):
+    if clients is not None:
+        return Path(clients.state_dir()) / STORE_SUBDIR
+    # A copy of this file with no tools/autoos_clients.py beside it (the hook's
+    # shim run from a stripped checkout). The defaulting formula belongs to
+    # autoos_clients alone; the only state root this file may name for itself
+    # is the one the environment already names.
+    root = (os.environ.get("AUTOOS_STATE_DIR") or "").strip()
+    if not root:
+        raise GateCouldNotRun("prepush: no tools/autoos_clients.py and no "
+                              "AUTOOS_STATE_DIR — the record store's location "
+                              "has no owner here")
+    return Path(root) / STORE_SUBDIR
+
+
+def record_path(sha: str) -> Path:
+    """The one record file for ``sha``, named so no value escapes the store —
+    the rule ``kill_store_path`` applies to run ids, with the gate's own
+    40-hex test. A non-sha is not a commit, so it is not a record."""
+    if not SHA_HEX.match(str(sha)):
+        raise GateCouldNotRun("prepush: %r is not a full commit sha" % (sha,))
+    return store_dir() / ("%s.json" % sha)
+
+
+def write_store_record(rec: dict) -> Path:
+    """Write one record atomically: temp file + rename, 0700 dir, 0600 file —
+    the kill store's shape, because a record that appears half-written is a
+    record nothing can read, and a store any process can rename into is not
+    private."""
+    path = record_path(rec["sha"])
+    directory = path.parent
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o700)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def read_store_record(sha: str):
+    """The stored record for a full sha, or None: no file, JSON that does not
+    parse, or a file that does not name the sha it is filed under. None is the
+    shape of every refusal here — a garbage record certifies nothing and never
+    raises."""
+    try:
+        path = record_path(sha)
+    except GateCouldNotRun:
         return None
-    sha, second, rest = fields
-    if second == OVERRIDE_MARKER:
-        return (sha, OVERRIDE_MARKER, "", rest)
-    if (UTC_STAMP.match(second)
-            and (rest == GREEN_MARKER or rest.startswith(GREEN_MARKER + " "))):
-        return (sha, GREEN, second, rest[len(GREEN_MARKER):].strip())
-    return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("sha") != path.stem:
+        return None
+    return rec
 
 
-def read_records(repo):
-    """``[(sha, kind, stamp, detail)]`` in file order; a line that is not a record
-    is ignored, neither green nor fatal."""
-    path = log_path(repo)
-    if not path.is_file():
-        return []
-    records = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        record = parse_record(line)
-        if record:
-            records.append(record)
-    return records
+def tree_of(repo, commit: str):
+    """The tree hash ``commit`` points at, or None when it resolves to no
+    commit. A record binds it (D-154 item 2) because a rebase or an amend
+    re-mints history and a certificate must name the content that was tested,
+    not only an id that floats."""
+    return _git(repo, "rev-parse", "--verify", "--quiet", "%s^{tree}" % commit)
 
 
-def green_records(records, target):
-    """The one predicate: the records that certify ``target`` as tested.
+def green_record(sha: str, tree: str, results) -> dict:
+    """The record a green gate writes: the sha, its tree, the UTC stamp, the
+    sorted manifest, and each command's result and parsed count in run order.
 
-    Only a green record is among them — an ``OVERRIDE`` never is, which is the whole
-    point: the lane stepped over the gate and a ready claim must not inherit that.
-    A green record written after an override beats it, because both readers ask this
-    one question rather than walking the file with their own rules.
+    Lives here rather than inline at the call site because a lane that claims
+    ready and a test that stages a ready lane must agree on the shape field for
+    field: this is the writer, ``record_is_green`` is its one reader, and a
+    test pins the two together — a change to either shape fails there instead
+    of unreadying every lane quietly.
     """
-    return [r for r in records if r[0] == target and r[1] == GREEN]
+    return {"kind": GREEN, "sha": sha, "tree": tree, "utc": now_utc(),
+            "commands": sorted(r["command"] for r in results),
+            "results": list(results)}
+
+
+def override_record(sha: str, tree: str, reason: str) -> dict:
+    """The record an override writes. Stored with the same bindings as a green
+    one, and never accepted as one."""
+    return {"kind": OVERRIDE_MARKER, "sha": sha, "tree": tree,
+            "utc": now_utc(), "reason": oneline(reason)}
+
+
+def record_is_green(rec, sha: str, tree) -> bool:
+    """The one predicate (D-154 item 3): does this record certify ``sha``?
+
+    Only a complete green record does: it names this sha, binds this exact
+    tree, carries the manifest the gate ran and a result per command, every
+    one ok, and the UTC stamp only ``now_utc`` writes. An ``OVERRIDE`` never
+    is — the lane stepped over the gate and a ready claim must not inherit
+    that. A record missing any of that is not a record the gate wrote, and
+    nothing half-shaped gets to certify a push.
+    """
+    if not isinstance(rec, dict) or rec.get("sha") != sha:
+        return False
+    if rec.get("kind") != GREEN or not tree or rec.get("tree") != tree:
+        return False
+    if not UTC_STAMP.match(str(rec.get("utc") or "")):
+        return False
+    commands = rec.get("commands")
+    results = rec.get("results")
+    if not isinstance(commands, list) or not commands:
+        return False
+    if not isinstance(results, list) or not results:
+        return False
+    return all(isinstance(r, dict) and r.get("command") in commands
+               and r.get("ok") is True for r in results)
 
 
 def local_green(sha, repo=None) -> bool:
-    """True when this checkout ran a green gate for exactly ``sha`` (D-110)."""
+    """True when the runner-private store holds a green, tree-matching record
+    for exactly ``sha`` (D-110, D-154). The worktree's own log is not read —
+    a worker can write its checkout."""
     repo = repo or Path.cwd()
-    return bool(green_records(read_records(repo),
-                              resolve_sha(repo, str(sha))))
+    target = resolve_sha(repo, str(sha))
+    return record_is_green(read_store_record(target), target,
+                           tree_of(repo, target))
 
 
 def ready_gate(repo, sha: str):
-    """``(ok, message)`` for ``--check-ready <sha>`` (rule D-110)."""
+    """``(ok, message)`` for ``--check-ready <sha>`` (rule D-110): recompute
+    the sha's tree, accept only the store's record for that sha whose tree
+    matches and whose every result is ok."""
     target = resolve_sha(repo, sha)
-    records = read_records(repo)
-    green = green_records(records, target)
-    if green:
-        return True, "prepush: %s is ready — a green gate record exists (%s)" % (
-            target[:12], green[0][2] or "no timestamp")
-    overridden = any(r[0] == target and r[1] == OVERRIDE_MARKER for r in records)
-    why = ("its only record is an OVERRIDE, which means the gate was stepped over"
-           if overridden else "no gate record for it was ever written")
+    tree = tree_of(repo, target)
+    rec = read_store_record(target)
+    if record_is_green(rec, target, tree):
+        return True, "prepush: %s is ready — a green gate record binds this commit and tree (%s)" % (
+            target[:12], rec["utc"])
+    if rec and rec.get("kind") == OVERRIDE_MARKER:
+        why = ("its record is an OVERRIDE, which means the gate was stepped over")
+    elif tree is None:
+        why = "the sha is no commit in this checkout, so its tree cannot be read"
+    elif rec is None:
+        why = "no gate record for it was ever written"
+    else:
+        why = ("the record does not bind this commit's tree, or does not carry "
+               "this shape, or not every result is ok")
     return False, "prepush: %s NOT READY — %s (D-110)" % (target[:12], why)
 
 
 def green_line(sha: str, ran=()) -> str:
-    """The record a green gate writes — the only shape ``parse_record`` accepts.
+    """The line a green gate leaves in the worktree's human-readable log.
 
-    Lives here rather than inline at the call site because a lane that claims ready
-    and a test that stages a ready lane must agree on it byte for byte: this is the
-    writer, ``parse_record`` is its one reader, and a test pins the two together — a
-    change to either shape fails there instead of unreadying every lane quietly.
+    An annotation, nothing more: the certificate is ``green_record``'s store
+    file, and no reader of readiness ever opens this one (D-154 item 4).
     """
     return "%s %s %s %s" % (sha, now_utc(), GREEN_MARKER, "; ".join(ran))
 
 
 def record(repo, line: str) -> Path:
-    """Append one line to the gate log (the file may not exist yet)."""
+    """Append one human-readable line to the worktree's log (the file may not
+    exist yet). Never read for readiness."""
     path = log_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8", newline="\n") as fh:
@@ -399,11 +521,39 @@ def is_suite_run(argv) -> bool:
     return any(str(part).endswith("run-tests.sh") for part in argv)
 
 
+def parse_passed(output: str):
+    """The ``N passed`` a run printed — the bash suite's tally or pytest's
+    summary line — or None when it printed neither.
+
+    Stored per command (D-154 item 2) so a reader sees what was examined, not
+    only that the exit code was 0: a plan-check script that exits 0 in silence
+    legitimately prints neither, and the gate's own zero-case refusal for the
+    bash suite reads ``suite_selected_cases``, not this.
+    """
+    text = ANSI.sub("", output or "")
+    last = None
+    for line in text.splitlines():
+        found = SH_SUMMARY.search(line)
+        if found:
+            last = found
+    if last is not None:
+        return int(last.group(1))
+    for line in reversed(text.splitlines()):
+        found = PYTEST_PASSED.search(line)
+        if found:
+            return int(found.group(1))
+    return None
+
+
 def gate(repo, base: str):
     """Run the gate. Returns 0 green, 1 refused, 2 the gate could not run."""
     override = oneline(os.environ.get(OVERRIDE_ENV) or "")
     sha = head_sha(repo)
+    tree = tree_of(repo, sha)
+    if tree is None:
+        raise GateCouldNotRun("prepush: cannot read the tree of %s" % sha)
     if override:
+        write_store_record(override_record(sha, tree, override))
         record(repo, "%s %s %s" % (sha, OVERRIDE_MARKER, override))
         print("prepush: CHECKS SKIPPED by AUTOOS_PREPUSH_OVERRIDE — %s\n"
               "prepush: nothing was run for %s; --check-ready will refuse this sha, "
@@ -421,11 +571,10 @@ def gate(repo, base: str):
         print(error)
         return COULD_NOT_RUN
     commands = commands_for(repo, plan, py)
-    ran = []
+    results = []
     failures = []
     for argv, extra in commands:
         text = render(argv, extra)
-        ran.append(text)
         good, out = run_command(repo, argv, extra)
         if good and is_suite_run(argv) and suite_selected_cases(out) == 0:
             # Exit 0 and an empty tally: the selection matched no case, so nothing
@@ -433,6 +582,7 @@ def gate(repo, base: str):
             good = False
             out += ("\n[the run examined no case: passed 0 failed 0 skipped 0 -- "
                     "a selection that matches no test is not a green test]\n")
+        results.append({"command": text, "ok": good, "passed": parse_passed(out)})
         if good:
             print("prepush: ok   %s" % text)
         else:
@@ -447,8 +597,18 @@ def gate(repo, base: str):
         for text in failures:
             print("  failed: %s" % text)
         return REFUSED
-    record(repo, green_line(sha, ran))
-    print("prepush: green — %d check(s) for %s" % (len(ran), sha[:12]))
+    try:
+        write_store_record(green_record(sha, tree, results))
+    except OSError as exc:
+        # The checks passed and the certificate cannot be written: there is no
+        # verdict the ready gate could read, so the push is not certified —
+        # the same refusal a missing record answers with later.
+        print("prepush: green for %s, but the record could not be written (%s) — "
+              "nothing was certified; --check-ready will refuse this sha"
+              % (sha[:12], exc))
+        return COULD_NOT_RUN
+    record(repo, green_line(sha, [r["command"] for r in results]))
+    print("prepush: green — %d check(s) for %s" % (len(results), sha[:12]))
     return 0
 
 
@@ -462,8 +622,9 @@ def main(argv=None) -> int:
                     help="the fetched base ref HEAD must carry (default: %s)"
                          % DEFAULT_BASE)
     ap.add_argument("--check-ready", metavar="SHA", default=None,
-                    help="exit 0 only if a green (not OVERRIDE) gate record exists "
-                         "for exactly this sha (D-110)")
+                    help="exit 0 only if the runner-private store holds a green "
+                         "gate record binding exactly this sha and its tree, with "
+                         "every result ok (D-110, D-154)")
     args = ap.parse_args(argv)
     try:
         repo = repo_root(args.repo)

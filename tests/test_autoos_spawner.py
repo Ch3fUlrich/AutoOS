@@ -9324,6 +9324,21 @@ class ReadyCommandTests(unittest.TestCase):
         self.addCleanup(os.unlink, self.registry_path)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self.registry, fh)
+        # D-154: the gate's records live in the runner-private store, not in the
+        # worktree — so a fixture stages them by moving the state root into a
+        # temp dir (the same redirect the spawner's own tests use), never by
+        # writing into the clone it controls.
+        self._old_state = os.environ.get("AUTOOS_STATE_DIR")
+        self.store_dir = tempfile.mkdtemp()
+        os.environ["AUTOOS_STATE_DIR"] = self.store_dir
+        self.addCleanup(shutil.rmtree, self.store_dir, True)
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self._old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self._old_state
 
     def write_record(self, *lines):
         fd, path = tempfile.mkstemp(suffix=".md")
@@ -9355,9 +9370,10 @@ class ReadyCommandTests(unittest.TestCase):
         green=False no pre-push record is written, the state a lane is in when it
         pushed with `git push --no-verify` — which D-110 refuses.
 
-        The green record is written through the gate's own `green_line`/`record`,
-        not hand-formatted here: a fixture that invented the shape would keep
-        passing after the real format changed and stop testing anything.
+        The green record is staged through the gate's own
+        ``green_record``/``write_store_record``, not hand-formatted here: a
+        fixture that invented the shape would keep passing after the real
+        format changed and stop testing anything.
         """
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
@@ -9380,7 +9396,12 @@ class ReadyCommandTests(unittest.TestCase):
             subprocess.run(git + ["-C", repo, "push", "-q", "origin",
                                   "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
         if green:
-            prepush_tool.record(repo, prepush_tool.green_line(sha, ["pytest -q staged"]))
+            tree = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD^{tree}"],
+                                  check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            prepush_tool.write_store_record(prepush_tool.green_record(
+                sha, tree, [{"command": "pytest -q staged", "ok": True,
+                             "passed": 1}]))
         return repo, sha
 
     def ready(self, record, repo, sha, inbox, extra=()):
@@ -9673,11 +9694,28 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertIn(sha[:12], out)
         self.assertEqual(self.read_inbox(inbox), "")
 
+    def test_a_forged_worktree_log_line_does_not_carry_ready(self):
+        # D-154 item 4 through the production reader: the log inside the
+        # checkout is the worker's file. It may carry the exact line the old
+        # gate wrote, and `ready` still refuses — the certificate is only what
+        # the runner-private store holds.
+        repo, sha = self.make_repo(green=False)
+        prepush_tool.record(repo, prepush_tool.green_line(sha, ["pytest -q staged"]))
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
     def test_an_override_record_is_not_green(self):
         # The lane stepped over the gate; a ready claim must not inherit that, or
         # the override would be the ordinary path.
         repo, sha = self.make_repo(green=False)
-        prepush_tool.record(repo, "%s %s the operator said so" % (sha, prepush_tool.OVERRIDE_MARKER))
+        tree = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD^{tree}"], check=True,
+            capture_output=True, text=True).stdout.strip()
+        prepush_tool.write_store_record(
+            prepush_tool.override_record(sha, tree, "the operator said so"))
         inbox = self.make_inbox("")
         rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
         self.assertEqual(rc, 1, out)
