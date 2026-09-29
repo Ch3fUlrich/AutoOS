@@ -111,11 +111,18 @@ class RepoFixture(unittest.TestCase):
     SH_RED = ('printf "  passed 2   failed 1   skipped 0\\n"\n'
               "echo 'suite failed' >&2\nexit 1\n")
 
+    # The gate invokes the bash suite as `bash tests/run-tests.sh`, so every stub that
+    # stands in for it is a POSIX-only fixture (CI 36529545083 shard f:
+    # RepoLintTests.test_posix_guards_are_clean refuses an unguarded shebang in a test
+    # file). Guarding the *helpers* rather than each caller is what makes the 30-odd
+    # tests that build a suite stub skip on Windows by themselves.
+    @unittest.skipIf(os.name == "nt", "the suite stub is a bash script")
     def suite_is_green(self):
         for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.exit(0)\n")
         self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_GREEN)
 
+    @unittest.skipIf(os.name == "nt", "the suite stub is a bash script")
     def suite_is_red(self):
         for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.stderr.write('plan check failed\\n')\n"
@@ -219,6 +226,7 @@ class PlanCheckTests(RepoFixture):
 class RunListTests(RepoFixture):
     """(c) The FREEKEYS2 red: the run list is derived, never guessed by the worker."""
 
+    @unittest.skipIf(os.name == "nt", "the suite stub is a bash script")
     def capture_suite(self):
         """A run-tests.sh stub that records every invocation it receives."""
         log = self.repo / "suite-calls.txt"
@@ -268,6 +276,7 @@ class RunListTests(RepoFixture):
         out = self.assert_rc(1)
         self.assertIn("run-tests.sh", out)
 
+    @unittest.skipIf(os.name == "nt", "the runner stub it rewrites is a bash script")
     def test_a_green_run_that_examined_no_case_is_refused(self):
         # R-worker-05, in the gate's own shape: run-tests.sh prints
         # `passed 0 failed 0 skipped 0` and exits 0 when its --filter matches no
@@ -282,6 +291,7 @@ class RunListTests(RepoFixture):
         self.assertIn("run-tests.sh", out)
         self.assertIn("no test", out.lower(), out)
 
+    @unittest.skipIf(os.name == "nt", "the runner stub it rewrites is a bash script")
     def test_a_part_selection_that_skips_every_case_still_ran_something(self):
         # A run whose cases were all skipped did at least examine a selection: on a
         # host where a part's cases are platform-skipped, refusing this would tell
@@ -630,6 +640,45 @@ class MappingTests(unittest.TestCase):
             ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
             plan["pytest"], plan)
 
+    def test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite(self):
+        # CI 36529545083, the root cause of both reds this lane fixes: the lane added
+        # `tests/test_prepush.py`, ran the file it had just written, and CI went red in
+        # shard b (`SuiteWiringTests`: every `tests/test_*.py` must be *run* by some
+        # harness) and shard f (`RepoLintTests`: every POSIX-only pattern in one needs a
+        # Windows guard). Neither of them mentions `test_prepush.py` — each scans the
+        # whole tree, so no case-level mention can derive them and the mapping named
+        # neither. A new tree-wide lint over the suites belongs in REPO_META_SCANS for
+        # the same reason a new harness belongs in test_suite_wiring.py's WIRING.
+        wiring = ("tests/test_suite_wiring.py",)
+        portability = ("tests/test_windows_portability.py",)
+        both = wiring + portability
+        for path, expected in (
+                ("tests/test_prepush.py", both),
+                # an added file is the shape that broke: nothing named it yet.
+                ("tests/test_brand_new.py", both),
+                # the harnesses the wiring test reads: a part that stops running a unit
+                # test un-wires it.
+                ("tests/linux/33-documentation.sh", wiring),
+                ("tests/run-tests.ps1", both),
+                (".github/workflows/ci.yml", wiring),
+                # the BOM lint runs over `git ls-files *.ps1 *.psm1`, wherever they are.
+                ("lib/windows/AutoOS.Catalog.psm1", portability),
+                ("tests/test_windows_portability.py", ())):
+            plan = self.plan_for([path])
+            for meta in expected:
+                self.assertIn(meta, plan["pytest"], "%s -> %s (%s)" % (path, meta, plan))
+            if path.startswith("tests/") and path.endswith(".py"):
+                self.assertIn(path, plan["pytest"], path)
+
+    def test_an_ordinary_change_selects_no_repo_wide_lint(self):
+        # The rule is a scan, not a sledgehammer: a catalog edit is not an input to the
+        # suite lints, and selecting them on every change teaches nothing about the tree.
+        for path in ("catalog/linux.json", "web/index.html", "setup.sh",
+                     ".agents/skills/unattended-orchestration/SKILL.md"):
+            plan = self.plan_for([path])
+            self.assertNotIn("tests/test_windows_portability.py", plan["pytest"], path)
+            self.assertNotIn("tests/test_suite_wiring.py", plan["pytest"], path)
+
     def test_a_skill_code_change_does_not_drag_in_another_skill_s_tests(self):
         # Over-inclusion is allowed, but not across the whole tree: the tests that
         # answer a skill are its own, not every skill's.
@@ -739,6 +788,7 @@ class HookInstallTests(RepoFixture):
         self.assertEqual(hook.read_text(encoding="utf-8"), before)
         self.assertFalse((self.hooks_dir() / "pre-push.autoos-chained").exists())
 
+    @unittest.skipIf(os.name == "nt", "the foreign hook is an sh script")
     def test_a_hook_thats_not_ours_is_kept_and_renamed_not_overwritten(self):
         theirs = self.hooks_dir() / "pre-push"
         theirs.parent.mkdir(parents=True, exist_ok=True)
@@ -750,6 +800,7 @@ class HookInstallTests(RepoFixture):
         self.assertIn("pre-push.autoos-chained", (self.hooks_dir() / "pre-push")
                       .read_text(encoding="utf-8"))
 
+    @unittest.skipIf(os.name == "nt", "the chained hook is an sh script run by touch")
     def test_the_chained_hook_actually_runs_after_ours(self):
         # The production path: a real `git push` invokes the hook; ours passes the
         # gate and falls through to the operator's.

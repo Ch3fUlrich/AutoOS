@@ -626,6 +626,23 @@ SKILL_RULES_TEST = "tests/test_skill_rules.py"
 # id is otherwise invisible until CI reads the file the lane never ran.
 RULE_CITING_PATHS = (".agents/skills/", "docs/")
 RULE_CITING_FILES = ("CHANGELOG.md",)
+# CI 36529545083 (shards b and f, 2026-09-29) — the gap behind both reds: a lane added
+# `tests/test_prepush.py`, ran the file it had written, and CI went red in two tests that
+# own no mention of it. `SuiteWiringTests` requires every `tests/test_*.py` to be wired
+# into a harness; `RepoLintTests` requires every POSIX-only pattern in one to carry a
+# Windows guard. They are *scans* over the suite, so a changed file is their input and
+# nothing in a case body names them — the mapping selects them by the shape of the path.
+# A new tree-wide lint over the suites must be added here, the way a new harness must be
+# added to `tests/test_suite_wiring.py`'s WIRING: an unstated scan is an unselected one.
+REPO_META_SCANS = (
+    # every unit test file, and every harness that runs one.
+    ("tests/test_suite_wiring.py",
+     re.compile(r"^tests/(test_[^/]+\.py|linux/[^/]+\.sh|run-tests\.ps1)$"
+                r"|^\.github/workflows/[^/]+\.ya?ml$")),
+    # the POSIX-guard scan over tests/, and the BOM scan over every .ps1/.psm1 in git.
+    ("tests/test_windows_portability.py",
+     re.compile(r"^tests/test_[^/]+\.py$|\.psm?1$")),
+)
 # FREEKEYS2 (CI 36506339556 shard e): the registry flipped and none of the render
 # tests ran. The pytest half is named outright; the bash half is the render/apply
 # filters, which no test *name* ties to the registry file and so cannot be derived
@@ -693,6 +710,10 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
     live outside `tests/`, so every changed `.py` is answered a second way — by the
     pytest files whose text names it — and a changed test file is always run, in
     whichever directory holds it.
+    A change to a file a *tree-wide lint* scans is answered by that lint: `tests/` and
+    the harnesses over it select `REPO_META_SCANS` (`SuiteWiringTests`, `RepoLintTests`),
+    because the scan reads every file of a shape and no case body can name it (the two
+    reds of CI 36529545083, where a lane ran only the test file it had just written).
     Over-inclusion is allowed and a miss is not: a lane that ran too much loses a
     minute, a lane that ran too little loses CI.
     """
@@ -710,6 +731,13 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
             parts.add(match.group(1))
         if path.startswith("tools/") and path.endswith(".py"):
             tool_files.append(path)
+        for meta, scanned in REPO_META_SCANS:
+            # A tree-wide lint is answered by the lint itself, not by the file that
+            # tripped it: the scan reads every file of a shape, so any change to one
+            # is a change to its input (CI 36529545083). `search`, because a pattern
+            # here is a set of anchored alternatives, not one anchored expression.
+            if scanned.search(path):
+                pytest.add(meta)
         name = path.rsplit("/", 1)[-1]
         if name.startswith("test_") and name.endswith(".py"):
             # A changed test file runs whatever directory holds it: the file that

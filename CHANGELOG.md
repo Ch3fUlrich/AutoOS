@@ -22,6 +22,30 @@ Tests: `CheckReadyTests.test_a_forged_free_text_line_is_not_green`,
 `test_a_malformed_line_is_ignored_and_hides_no_real_record`, and a round trip pinning the
 writer to the reader.
 
+- **The root cause of both CI 36529545083 reds is the mapping, not the two tests.** A lane
+  that adds `tests/test_x.py` was sent only `tests/test_x.py`: `SuiteWiringTests` (every
+  `tests/test_*.py` must be *run* by a harness) and `RepoLintTests` (every POSIX-only
+  pattern in one must carry a Windows guard) are tree-wide *scans*, so they name no file
+  and no case body mentions them — the lane ran the file it had written and CI went red in
+  the two lints that read it. `tools/affected-tests.py` now keeps `REPO_META_SCANS`, a
+  `(lint, scanned-paths)` table: a change to `tests/test_*.py`, a suite harness
+  (`tests/linux/*.sh`, `tests/run-tests.ps1`), a workflow, or any `.ps1`/`.psm1` selects
+  the lint that scans it. A new tree-wide lint over the suites must be added there the way
+  a new harness must be added to `test_suite_wiring.py`'s `WIRING` — an unstated scan is an
+  unselected one. Test:
+  `MappingTests.test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite`,
+  with `test_an_ordinary_change_selects_no_repo_wide_lint` holding the other side.
+- **CI1 (shard b): `tests/test_prepush.py` is wired into a harness**, with the same
+  `python3 tests/<name>.py` run shape as its neighbour `test_affected_tests.py`, in
+  `tests/linux/33-documentation.sh`. `tests/test_suite_wiring.py` refuses a unit-test file
+  no harness runs, and 60 gate cases had been sitting unexecuted since the file landed.
+- **CI2 (shard f): its bash fixtures carry a Windows guard.** Seven `#!/usr/bin/env bash`
+  and `#!/bin/sh` stubs — the `run-tests.sh` fakes and the foreign-hook fixtures — had none,
+  which is what `RepoLintTests.test_posix_guards_are_clean` is there to catch. The guard sits
+  on `RepoFixture.suite_is_green`/`suite_is_red` and `RunListTests.capture_suite`, plus the
+  four cases that write a shebang themselves, so every test that builds a suite stub skips
+  on Windows by itself instead of 30 cases each repeating the reason.
+
 ### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
 
 Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI
