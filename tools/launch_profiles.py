@@ -434,8 +434,8 @@ MAIN_FENCE = (
     "Bash(*git push * heads/main:*)",
     "Bash(*git push *:heads/main)",
     "Bash(*git push *:heads/main *)",
-    # :HEAD destinations (round 11) - <src>:HEAD updates the remote's HEAD
-    # target (main), so it is denied.
+    # :HEAD destinations (round 11) - <src>:HEAD creates a remote branch literally
+    # named HEAD (main unchanged, real git); it breaks tools that resolve HEAD, so it is denied.
     "Bash(*git push *:HEAD)",
     "Bash(*git push *:HEAD *)",
     "Bash(*git push *--force*)",
