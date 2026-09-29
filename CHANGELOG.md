@@ -28,7 +28,15 @@ human-readable annotation and readiness never reads it. Finally, a gate run that
 carries `AUTOOS_AGENT_RUN_ID` — the mark the spawner puts into every worker — runs
 the checks, prints its verdict, and writes no green record: a worker cannot
 certify its own push, only the orchestrator that merges the lane can. `ready`
-needed no change; it asks `local_green()`, which is where the store is read.
+needed no change; it asks `local_green()`, which is where the store is read. The
+reader is guarded the same way as the writer, because the default state root is
+`<checkout>/logs`: a runner that was never given `AUTOOS_STATE_DIR` keeps its
+records under the very tree it certifies, so under the worker's mark a store that
+resolves inside that checkout is refused outright instead of believed — otherwise
+a hand-written JSON of exactly the gate's shape would be a self-issued certificate
+(what the spawner's env does to `AUTOOS_STATE_DIR` is not a boundary a gate may
+depend on). Measured on this lane's own sandbox: `--check-ready HEAD` answers with
+that refusal, and the refusal names its remedy.
 Tests: `LogRecordTests.test_the_record_binds_the_tree_the_commit_carries_and_the_sorted_manifest`,
 `test_the_record_stores_each_commands_result_and_parsed_counts`,
 `test_the_record_is_written_privately_and_atomically`,
@@ -39,7 +47,8 @@ Tests: `LogRecordTests.test_the_record_binds_the_tree_the_commit_carries_and_the
 `test_a_green_record_does_not_carry_an_amended_commit`,
 `test_the_record_the_gate_writes_is_the_record_the_gate_reads` (round trip
 through the real gate); `WorkerRecordTests.test_a_worker_run_reports_green_and_records_nothing`,
-`test_a_worker_run_still_refuses_a_red_tree`, `test_the_same_gate_outside_a_worker_run_records_green`;
+`test_a_worker_run_still_refuses_a_red_tree`, `test_the_same_gate_outside_a_worker_run_records_green`,
+`test_a_record_kept_in_the_workers_own_checkout_certifies_nothing`;
 and on the spawner side `ReadyCommandTests.test_a_forged_worktree_log_line_does_not_carry_ready`.
 
 ### Fixed — the PREPUSH gate reads its own record shape and nothing else (PREPUSH-2, 2026-09-29)

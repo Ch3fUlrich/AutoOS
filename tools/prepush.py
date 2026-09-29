@@ -56,8 +56,11 @@ it. A gate that runs inside a worker's sandbox — ``AUTOOS_AGENT_RUN_ID`` set, 
 mark the spawner puts in every worker it starts — runs the checks and prints its
 verdict but writes no green record: the worker cannot certify its own push, so
 only an orchestrator's run records green and ``autoos-agent.py ready`` asks for
-that record as its fifth gate. An orchestrator that means to waive it names a
-reason with ``--allow-unverified``.
+that record as its fifth gate. Under the same mark the reader is guarded too: a
+state root that was never given defaults to ``<checkout>/logs``, and a store that
+resolves inside the sandbox it certifies is refused rather than believed. An
+orchestrator that means to waive the record names a reason with
+``--allow-unverified``.
 
 OVERRIDE: ``AUTOOS_PREPUSH_OVERRIDE="<reason>"`` skips the checks, prints a loud
 line, and stores a ``kind: OVERRIDE`` record for the sha (and the same line in
@@ -321,7 +324,10 @@ def store_dir() -> Path:
     certificate the certified party holds is not one. (Residual, stated as the
     kill store states its own: a same-uid worker that goes looking can find
     this directory through its inherited ``AUTOOS_STATE_DIR`` — what it cannot
-    do is get the gate to write a green record into it; see ``RUN_ID_ENV``.)
+    do is get the gate to write a green record into it; see ``RUN_ID_ENV``. And
+    where the state root was never given and defaults to ``<checkout>/logs``, the
+    store lands inside the sandbox itself — ``store_cannot_certify`` answers that
+    from the reader's side.)
     """
     if clients is not None:
         return Path(clients.state_dir()) / STORE_SUBDIR
@@ -335,6 +341,38 @@ def store_dir() -> Path:
                               "AUTOOS_STATE_DIR — the record store's location "
                               "has no owner here")
     return Path(root) / STORE_SUBDIR
+
+
+def store_is_inside(repo) -> bool:
+    """True when the record store this run would read resolves inside ``repo``.
+
+    The state root defaults to ``<checkout>/logs``, and a runner that was never
+    given ``AUTOOS_STATE_DIR`` therefore keeps its records under the very tree it
+    certifies. For the orchestrator that is its own working copy and nothing
+    else's; for a run carrying ``RUN_ID_ENV`` it is the sandbox the certified
+    party writes in — which is the objection that moved the record out of the git
+    dir, so the reader applies it too (D-154 item 1, read from the other end).
+    """
+    try:
+        store = store_dir().resolve()
+        real = Path(str(repo)).resolve()
+    except (GateCouldNotRun, OSError):
+        return False
+    if hasattr(store, "is_relative_to"):
+        return store.is_relative_to(real)
+    return store == real or real in store.parents
+
+
+def store_cannot_certify(repo) -> bool:
+    """``(refused, why)``: when a run may not read this store as a certificate."""
+    if os.environ.get(RUN_ID_ENV) and store_is_inside(repo):
+        return True, ("the record store resolves inside this checkout while %s is "
+                      "set, so it is a directory the certified party writes in, "
+                      "and a certificate kept here certifies nothing — set "
+                      "AUTOOS_STATE_DIR to a state tree outside the checkout this "
+                      "run certifies, or read ready from the orchestrator's own "
+                      "tree" % RUN_ID_ENV)
+    return False, ""
 
 
 def record_path(sha: str) -> Path:
@@ -444,6 +482,8 @@ def local_green(sha, repo=None) -> bool:
     for exactly ``sha`` (D-110, D-154). The worktree's own log is not read —
     a worker can write its checkout."""
     repo = repo or Path.cwd()
+    if store_cannot_certify(repo)[0]:
+        return False
     target = resolve_sha(repo, str(sha))
     return record_is_green(read_store_record(target), target,
                            tree_of(repo, target))
@@ -454,6 +494,11 @@ def ready_gate(repo, sha: str):
     the sha's tree, accept only the store's record for that sha whose tree
     matches and whose every result is ok."""
     target = resolve_sha(repo, sha)
+    refused, why_store = store_cannot_certify(repo)
+    if refused:
+        # Asked before the store is opened: this refusal is about *where* the
+        # answer would come from, and a green-looking file there is the reason.
+        return False, "prepush: %s NOT READY — %s (D-110)" % (target[:12], why_store)
     tree = tree_of(repo, target)
     rec = read_store_record(target)
     if record_is_green(rec, target, tree):

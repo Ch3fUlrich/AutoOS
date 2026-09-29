@@ -875,6 +875,39 @@ class WorkerRecordTests(RepoFixture):
         sha = self.head()
         self.assert_rc(1, ("--check-ready", sha))
 
+    def test_a_record_kept_in_the_workers_own_checkout_certifies_nothing(self):
+        # Item 1 answers to the reader too. The store is the *runner's* state
+        # tree, and a runner that was never given AUTOOS_STATE_DIR defaults it to
+        # `<checkout>/logs` — which, for a worker, is a directory inside the
+        # sandbox the worker owns. A certificate the certified party can file is
+        # the same objection that moved the record out of the git dir, so under the
+        # worker's mark readiness refuses to read a store that resolves inside the
+        # checkout it is asked about — even when the record is exactly the shape the
+        # gate writes.
+        sha = self.head()
+        tree = run_git("rev-parse", "%s^{tree}" % sha, cwd=self.repo)
+        inside = str(self.repo / "logs")
+        old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = inside
+        self.addCleanup(self._restore_state, old)
+        prepush.write_store_record(prepush.green_record(
+            sha, tree, [{"command": "python -m pytest -q forged",
+                         "ok": True, "passed": 1}]))
+        self.assertTrue(prepush.record_path(sha).is_file())
+
+        # The worker's own read: refused, and it says which half refused.
+        out = self.assert_rc(1, ("--check-ready", sha),
+                             env=dict(self.WORKER, AUTOOS_STATE_DIR=inside))
+        self.assertIn("NOT READY", out)
+        self.assertIn("certifies nothing", out)
+
+        # The control: the same file, the same tree, no worker's mark — an
+        # orchestrator running in its own checkout. The guard is the run id, not
+        # the path.
+        out = self.assert_rc(0, ("--check-ready", sha),
+                             env={"AUTOOS_STATE_DIR": inside})
+        self.assertIn("is ready", out)
+
 
 class MappingTests(unittest.TestCase):
     """The file -> test mapping, one test per measured red (c)."""
