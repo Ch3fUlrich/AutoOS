@@ -566,20 +566,18 @@
         },
         {
           "id": "agent-skills",
-          "name": "agent-skills + MCP servers",
-          "description": "Clone Ch3fUlrich/agent-skills and wire up the MCP stack",
+          "name": "agent-skills (retired)",
+          "description": "Retired: its work moved to other components",
           "provider": "custom",
           "package": "agent-skills",
-          "requires": [
-            "git",
-            "nodejs"
+          "tombstone": true,
+          "note": "its work moved to the mcp-* components",
+          "replaced_by": [
+            "mcp-graphify",
+            "mcp-serena",
+            "mcp-playwright",
+            "mcp-context7"
           ],
-          "postInstall": "Install-AutoOSAgentSkills",
-          "profiles": [
-            "workstation",
-            "ai-coding"
-          ],
-          "prompt": "omnigraph_url",
           "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {

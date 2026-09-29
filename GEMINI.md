@@ -14,8 +14,7 @@ This file is *only* the Gemini/Antigravity delta. Start at the router:
   error. **Never write project memory to the `memory` graph.**
 - Which name is right? Ask the server, not this file:
   `curl -fsS -H "Authorization: Bearer $OMNIGRAPH_TOKEN" http://localhost:8080/graphs`
-  Then confirm with the `whoami` query in `CLAUDE.md` — `Project.repository`
-  must equal `git remote get-url origin`.
+  Then confirm with the `whoami` query in `CLAUDE.md`: it must return exactly one row.
 - Token-only, all-or-nothing: no header ⇒ 401; missing grant ⇒ 403.
 - Before changing a design choice, check for a `docs/decisions/` equivalent;
   before building something, check `.agents/skills/` — it may already exist.

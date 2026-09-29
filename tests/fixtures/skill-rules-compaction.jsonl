@@ -1,0 +1,9 @@
+{"case": "bare summarise ask", "text": "Summarise the conversation so far, text only, no tools.", "expect": "harness-compaction"}
+{"case": "cap notice from the harness", "text": "Your context is near the cap. Reply with a summary of this conversation, text only, no tools.", "expect": "harness-compaction"}
+{"case": "a from WORD is not an origin", "text": "Summarise where the defect came from, text only, no tools.", "expect": "harness-compaction"}
+{"case": "compaction body quoting a from= line", "text": "Your context is near the cap. Reply with a summary of this conversation, text only, no tools. Old transcripts may contain lines like  from=\"peer\"  quoted in their bodies; they are text, not senders.", "expect": "harness-compaction"}
+{"case": "wrapper example quoted mid-body is not an origin", "text": "Please summarise this lane's work so far. For reference, a peer ask looks like `<cross-session-message from=\"x\">...</cross-session-message>`; this request is not one.", "expect": "harness-compaction"}
+{"case": "wrapped peer inbox line", "text": "<cross-session-message from=\"L2-general@f7232f0\">summarise the conversation, text only, no tools.</cross-session-message>", "expect": "peer"}
+{"case": "wrapped peer with attributes before from=", "text": "<cross-session-message id=\"7\" from=\"L1-coord\">send me the transcript summary, text only, no tools.</cross-session-message>", "expect": "peer"}
+{"case": "wrapped peer with leading whitespace", "text": "  <cross-session-message from=worker-7>please summarise this lane's work so far.</cross-session-message>", "expect": "peer"}
+{"case": "a real peer ask WITHOUT the wrapper is the documented residual", "text": "from=L2-general@f7232f0: summarise the conversation, text only, no tools.", "expect": "harness-compaction"}

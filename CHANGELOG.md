@@ -5,6 +5,172 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
+
+SB-A2 took the group out of `pgrp.json` and wrote it into `job.json` — but
+`job.json` lives in the run dir, which `run_job` exports to the worker as
+`AUTOOS_TASK_DIR`, and the worker is the same uid as the file. `cancel` then read
+`job["scope"]` and `job["group"]` verbatim, so the process being cancelled could
+still aim the killer at any `--user` unit, at another run's scope, or at any
+process group.
+
+- **`tools/autoos-agent.py`**: `worker_scope_unit(run_id)` derives the unit name
+  `autoos-worker-<run id>.scope` and raises for anything that is not a run id
+  (`is_killable_run_id` / `KILL_RUN_ID_RE`, 64-char cap); `stop_scope()`
+  re-validates the name it is handed (`scope_unit_is_worker_scope`: prefix,
+  `.scope` suffix, unit-safe charset, length) and refuses — with no `systemctl`
+  call — anything else, so the guard lives in the killer, not only at the call
+  site.
+- **`tools/autoos_agent_mcp.py`**: `cancel` never reads a scope from a file. It
+  derives it from the run id it was given and refuses a `job.json` that claims a
+  different run. The fallback group record moved out of the task dir into a
+  runner-private store, `$(state dir)/kill/<run id>.json` (dir 0700, file 0600,
+  atomic write, `kill_store_dir`/`write_kill_record`); `spawn` and `run_job`
+  write it, `cancel` reads only it, and `job.json` carries no `group` any more —
+  its `scope` field stays as information only.
+- **Residual, stated**: a same-uid worker that goes looking can still find the
+  kill store through `AUTOOS_STATE_DIR`; a file cannot be hidden from the uid that
+  owns it. The scope path — derived, no file involved — is the primary and is what
+  a host with a user manager uses.
+- **Tests** (`tests/test_autoos_spawner.py`, `CancelDerivesKillTargetTests`): a
+  rewritten `job.json` scope (`foo.service`, another run's scope) does not change
+  what `cancel` stops; `stop_scope` refuses every non-worker-scope name; a
+  malformed run id is refused at both levels; the group kill reads only the
+  private record (an edited `job.json` group kills nothing); the store is not
+  under `AUTOOS_TASK_DIR`, is not named in the worker env, and is 0700/0600.
+### Fixed — Claude-family spelling escape, wrapper-only peer origin, orchestrator-only shared checkout, deepseek-flash priced (SB-C2, 2026-09-28)
+
+Four items from the SB-C2 brief, all red-then-green against HEAD:
+
+- **deny-claude-paid-api spelling escape (HIGH)** (`catalog/ai-registry.json`):
+  the rule matched only `*/claude-*`, so a third-party leg named by its family
+  word alone — `openrouter/anthropic/opus-5`, `bluesminds/sonnet-5`,
+  `free-ai/haiku-4-5`, `zen/fable-5` — escaped it and was usable the moment the
+  budget gate said yes. Added `deny-claude-family-{opus,sonnet,haiku,fable}`
+  (`*/*<word>*`, the CLAUDE_MODEL_MARKERS the gate itself reads) and
+  `deny-anthropic-paid` (`anthropic/*`; `anthropic` is not one of the two seat
+  rows, `cc/*` and `antigravity/*`, whose allows precede every family deny).
+  Placed after the seats, before every provider wildcard allow, so first-match-
+  wins still allows a seat leg and a family deny can never be outranked. A
+  registry sweep confirmed no *non-Claude* model/leg name carries opus/sonnet/
+  haiku/fable, so no carve-out was needed (pinned by
+  `test_no_registered_non_claude_name_carries_a_family_word`).
+- **classify_origin wrapper-only `from=` (MED)** (`tools/skill-rules.py`): R-worker-11
+  read `from=` anywhere in the text, so a compaction request could be dressed as
+  a peer by quoting the marker in its own body. Only a `from=` attribute on a
+  *leading* `<cross-session-message …>` wrapper tag counts now; quoted text, code
+  spans and body `from=` are ignored. Documented residual (stated in the rule
+  docstring): a real peer message that arrives without the wrapper reads as
+  harness-compaction — the safe miss, since complying is the correct action for a
+  self-managed context anyway. The fixture carries all three SB-C2 cases.
+- **SPAWNISO override is orchestrator-only (MED)** (`tools/autoos_agent_mcp.py`):
+  `allow_shared_checkout` was SB-C's writer escape hatch, but a leaf cannot spawn
+  at all (KEYDENY3), so it made the shared-worktree hole explicit. The MCP spawn
+  now refuses `allow_shared_checkout=True` unless the card's role is `orchestrate`,
+  and records an accepted override as `shared_checkout_override` on the run's route.
+- **deepseek-flash priced and resolvable (REGISTRY GAP, L1-main)**: the D-102 gate
+  refused `deepseek-flash` by bare name as unpriceable, though it is the allowed
+  paid bulk leg under DSGUARD's $25 cap. Added `price_source` to
+  `models.deepseek-flash` citing the numbers it already carries — `price_in 3e-07 /
+  price_out 1.2e-06 / price_cache_read 6e-09`, reused from `models.deepseek-v4-flash`
+  (the retired llm-models.json sibling) and the exact prices `autoos_usage`/
+  `deepseek_call.check_cap` bill — no invented number. The gate's unknown-combo
+  branch now reads a priced registry model row (bare name and the `deepseek-v4-flash`
+  alias, with `omniroute/…#effort` normalised) instead of refusing; an anthropic-
+  family row still reads as Claude, and a string with no row at all still fails
+  closed. `tools/registry.py` exempted `price_source` from rule 5 so its dated
+  attribution passes the check.
+
+### Fixed — spawn isolation, compaction rule, and the zen Claude leg hole (SB-C, 2026-09-28)
+
+Three items from the SB-C brief:
+
+- **SPAWNISO** (`tools/autoos_agent_mcp.py`): KEYDENY3 forced tiers 2-3 and every
+  leaf role into an isolated clone, but a tier-1 *write* role still ran in the
+  caller's checkout — and `role=implement, complexity=hard` routes UP to tier 1
+  (`routing.select_combo`'s public-strong bucket). A write-role card now defaults
+  to `isolate`, and one that explicitly asks for `isolate=False` while `cwd` is the
+  caller's own worktree is refused unless the call names `allow_shared_checkout=True`.
+  The MCP tool's `isolate` default became `None` (absent = the default applies) so a
+  caller that never mentions it is not read as asking to run in place. Read-only
+  roles (review, orchestrate) still run in place.
+- **COMPACTRULE** (D-146): `.agents/skills/unattended-orchestration/SKILL.md` gains
+  `R-worker-11` — a "summarise, no tools" ask carrying no cross-session `from=` is
+  the agent's own harness compacting it, so it should comply or hand off before the
+  cap; only a `from=` line can be a peer. `classify_origin()` in
+  `tools/skill-rules.py` decides it, pinned by `tests/fixtures/skill-rules-compaction.jsonl`
+  (both verdicts must appear in the fixture).
+- **ZENCLAUDE** (`catalog/ai-registry.json`, found by FREEKEYS-1): `leg_rules`
+  matched `allow-opencode-zen-client-bound` (`opencode-zen/*`) before
+  `deny-claude-paid-api` (`*/claude-*`), so a Claude leg spelled under zen was never
+  denied by the leg rules. Measured live, not latent: with `AUTOOS_CLAUDE_FINAL`
+  declared (the gate the leg rules are supposed to sit under), the resolver returned
+  `opencode-zen/claude-sonnet-5` as a usable leg; without the declaration the Claude
+  budget held it, so only that first half was open. `deny-claude-paid-api` now
+  precedes every provider wildcard allow, with the two free Claude seats
+  (`cc/*`, `antigravity/*`) moved up with it so they keep matching first. Sweeping
+  every leg the registry names: no committed verdict changed
+  (`tests/test_autoos_resolver.py ZenClaudeLegRulesTests`).
+
+### Changed — `agent-skills` is a tombstone on Windows too; its installer no longer clones (SPEC-OMNI A7, D-066, 2026-09-28)
+
+A7 retired `agent-skills` on Linux and macOS and left Windows live — its entry
+cloned a second repository and its installer did the MCP wiring. This lane
+finishes the retirement on Windows. The native Windows twins
+(`agent-skill-links`, `omnigraph-client`) are deliberately *not* added (D-066:
+the Windows path is frozen to fixes), so the four `mcp-*` components are the
+only successors the catalog names there. What `Install-AutoOSAgentSkills`
+additionally did on Windows (the project-scope `omnigraph`/`autoos-agent` pins,
+the Antigravity MCP merge, the user-scope skill links) now has no catalog
+caller: it is reachable only from tests, and its Windows successor is the parked
+w1 lane. Known, accepted under D-066. Leftovers deliberately kept (a frozen
+path gets fixes only): the unreachable `agent-skills` probe in
+`AutoOS.Detect.psm1` and the function itself as a test fixture.
+
+- **`catalog/windows.json`**: `agent-skills` is `"tombstone": true` with the
+  note *its work moved to the mcp-\* components* and `replaced_by` naming the
+  four ids that took it (`mcp-graphify`, `mcp-serena`, `mcp-playwright`,
+  `mcp-context7` — the only successors this platform ships; naming
+  `agent-skill-links`/`omnigraph-client` would promise work Windows does not
+  have). `postInstall`, `prompt`, `requires` and `profiles` go with the live
+  row.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` no longer
+  clones `Documents\Code\agent-skills` (nor pulls it): the servers it wires are
+  declared by this checkout's own `.mcp.json`, so the project-scope pins now
+  read `$script:RepoRoot`. `Write-AutoOSOmnigraphReadiness`'s parameter is
+  renamed `-AgentSkillsDir` → `-RepoRoot` to match. The MCP wiring, the
+  `omnigraph`/`autoos-agent` project pins, the Antigravity config merge and the
+  repo/user skill links are unchanged, as is the retargeting of links into the
+  retired clone (a machine that ran the old installer keeps its checkout — this
+  never deletes it). The function is now reachable only from tests: no catalog
+  entry carries it as `postInstall`.
+- **Tests**: `tests/linux/18-mcp-wiring.sh`'s tombstone case becomes
+  per-platform (Windows expects the four-successor set) and validates
+  `catalog/windows.json`; a new case proves the Windows installer names no clone
+  URL, runs no `git clone`/`pull` and writes nothing into the retired path.
+  `tests/run-tests.ps1` gains the matching pwsh cases (`agent-skills is never
+  cloned`, asserted on the installer body and the whole module; and the Windows
+  catalog entry carries the flag, the note and exactly the four successors with
+  no installer hooks).
+- **`docs/catalog.md`**: the `replaced_by` example now shows both shapes and says
+  why Windows names four.
+- **Open, recorded rather than hidden**: with the row retired, the
+  `omnigraph_url` prompt in `catalog/windows.json` is owned by no component, so
+  a Windows run never asks it and `Set-AutoOSAntigravityMcp` falls back to
+  `localhost:8080`. Fixing that belongs to the parked w1 lane (which adds the
+  Windows `omnigraph-client` twin), not to this frozen-path lane.
+
+Verified: `bash tests/run-tests.sh --filter catalog` 69 passed / 0 failed;
+`AUTOOS_TEST_PARTS=18 bash tests/run-tests.sh --filter agent-skills` 21 passed /
+0 failed, and the schema case validates `catalog/windows.json`. pwsh 7.6 on this
+Linux host ran too: `-Filter agent-skills` 23 passed / 2 failed and
+`-Filter catalog,tombstone` 319 passed / 2 failed — all four failures reproduce
+at the branch point, so none is new (two backup-record cases, the Linux-only
+`powershell`-on-PATH `--CheckCatalog` case, and an unrelated usb case). The real
+gate is still one `powershell -File tests\run-tests.ps1` on a Windows
+workstation, where the Windows PowerShell 5.1 code paths these cases cover
+actually run.
+
 ### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
 
 Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated
