@@ -40,6 +40,135 @@ function Get-AutoOSAnswer {
     if ($script:Answers.ContainsKey($Key)) { $script:Answers[$Key] } else { $Default }
 }
 
+# ─── OmniRoute gateway key resolution (mirrors lib/linux/install.sh) ───
+function Test-AutoOSLocalGateway {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $true }
+    try {
+        $uri = [Uri]$Url
+        $host = $uri.Host
+    } catch {
+        return $false
+    }
+    $host = $host.Trim('[',']').ToLowerInvariant()
+    $host -in @('127.0.0.1','localhost','::1')
+}
+
+function Get-AutoOSHostConfigPath {
+    if ($env:AUTOOS_HOST_CONFIG) { return [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG) }
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        return Join-Path ($env:LOCALAPPDATA -or "$env:USERPROFILE\AppData\Local") 'autoos\host.yml'
+    }
+    return Join-Path ($env:XDG_CONFIG_HOME -or "$env:HOME/.config") 'autoos/host.yml'
+}
+
+function Normalize-AutoOSHostName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+    $Name = $Name.Split('.')[0]
+    $Name = $Name.ToLowerInvariant()
+    $Name -replace '[^a-z0-9_]','_'
+}
+
+function Get-AutoOSHostName {
+    # Order: 1) AUTOOS_HOST_NAME env, 2) host_name: from host.yml, 3) short hostname
+    if ($env:AUTOOS_HOST_NAME) { return Normalize-AutoOSHostName $env:AUTOOS_HOST_NAME }
+    $hostFile = Get-AutoOSHostConfigPath
+    if (Test-Path -LiteralPath $hostFile) {
+        foreach ($line in (Get-Content -LiteralPath $hostFile -Encoding utf8)) {
+            $line = $line.Trim()
+            if ($line -match '^host_name\s*:\s*(.+)$') {
+                $v = $Matches[1].Trim().Trim('"',"'")
+                if ($v) { return Normalize-AutoOSHostName $v }
+            }
+        }
+    }
+    try { $fqdn = [System.Net.Dns]::GetHostName() } catch { $fqdn = 'localhost' }
+    $normalized = Normalize-AutoOSHostName $fqdn
+    Write-AutoOSLine "AutoOS: using hostname '$normalized' for omniroute key field (set AUTOOS_HOST_NAME or host_name in $hostFile to override)"
+    return $normalized
+}
+
+function Get-AutoOSClientKeyField {
+    $gatewayUrl = $env:AUTOOS_OMNIROUTE_URL
+    if (Test-AutoOSLocalGateway $gatewayUrl) {
+        return "omniroute_$(Get-AutoOSHostName)"
+    } else {
+        return 'omniroute_server'
+    }
+}
+
+function Get-AutoOSKeyValue {
+    # Last uncommented (as bash keys_value, tail -n1) `<Name>: <value>` line in a YAML-ish key file.
+    # YAML plain/quoted scalar parse (enough for this file):
+    #   - starts with " : up to the next " (no escapes)
+    #   - starts with ' : up to the next '
+    #   - otherwise    : up to the first # preceded by space or tab, then trim
+    # CR is stripped. Returns '' when the file or key is missing, or when the
+    # value starts with REPLACE_WITH_ (the placeholder for "not filled in").
+    param([string]$Path, [string]$Name)
+    if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    $escaped = [regex]::Escape($Name)
+    $last = ''
+    $found = $false
+    foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
+        $line = $raw -replace '\r$',''
+        if ($line -cmatch "^$escaped\s*:\s*(.+)$") {
+            $v = $Matches[1]
+            if ($v -match '^\s*#') { continue }
+            if ($v.Length -gt 0 -and $v[0] -eq '"') {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf('"')
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            elseif ($v.Length -gt 0 -and $v[0] -eq "'") {
+                $rest = $v.Substring(1)
+                $q = $rest.IndexOf("'")
+                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
+            }
+            else {
+                $m = [regex]::Match($v, '([ \t])#')
+                if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
+                $v = $v.TrimEnd()
+            }
+            if ($v -clike 'REPLACE_WITH_*') { $v = '' }
+            $last = $v
+            $found = $true
+        }
+    }
+    if (-not $found) { return '' }
+    $last
+}
+
+function Get-AutoOSClientKey {
+    param([string]$KeysFile)
+    # 1. Explicit env always wins
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)) {
+        return $env:AUTOOS_OMNIROUTE_KEY
+    }
+    $field = Get-AutoOSClientKeyField
+    $isLocal = Test-AutoOSLocalGateway $env:AUTOOS_OMNIROUTE_URL
+    # 2. New field
+    if (Test-Path -LiteralPath $KeysFile) {
+        $key = Get-AutoOSKeyValue -Path $KeysFile -Name $field
+        if (-not [string]::IsNullOrWhiteSpace($key)) { return $key }
+    }
+    # 3. Legacy fallback (one release, read-only)
+    $legacyField = if ($isLocal) { 'omniroute' } else { "omniroute_client_$(Get-AutoOSHostName)" }
+    if (Test-Path -LiteralPath $KeysFile) {
+        $legacyKey = Get-AutoOSKeyValue -Path $KeysFile -Name $legacyField
+        if (-not [string]::IsNullOrWhiteSpace($legacyKey)) {
+            Write-AutoOSLine "api-keys.yml: '$legacyField' is deprecated, rename it to '$field'"
+            return $legacyKey
+        }
+    }
+    # 4. Missing - clear error
+    $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }
+    $hostFile = Get-AutoOSHostConfigPath
+    Write-AutoOSLine "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname." -Level error
+    return $null
+}
+
 function ConvertTo-AutoOSProcessArgument {
     param([AllowEmptyString()][string]$Value)
     # Windows CommandLineToArgvW quoting, including trailing backslashes.
@@ -3242,17 +3371,8 @@ if _files_written:
         $argDeepseek = if ($deepseekKey) { $deepseekKey } else { 'null' }
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
         $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
-        $omniKey = if ($env:AUTOOS_OMNIROUTE_KEY) { $env:AUTOOS_OMNIROUTE_KEY } elseif ($secrets.ContainsKey('omniroute')) { $secrets['omniroute'] } else { $null }
-        if (-not $omniKey) {
-            # Fall back to the repo's single source of truth for keys.
-            $keysYml = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
-            if (Test-Path $keysYml) {
-                foreach ($line in (Get-Content $keysYml -Encoding utf8)) {
-                    $t = $line.Trim()
-                    if ($t -match '^omniroute\s*:\s*(.+)$' -and $t -notmatch 'REPLACE') { $omniKey = $matches[1].Trim().Trim('"').Trim("'"); break }
-                }
-            }
-        }
+        $keysYml = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
+        $omniKey = Get-AutoOSClientKey -KeysFile $keysYml
         $argOmni = if ($omniKey) { $omniKey } else { 'null' }
 
         # The gateway default takes its windows from the model catalog; a

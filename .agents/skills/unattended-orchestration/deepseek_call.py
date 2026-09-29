@@ -112,17 +112,12 @@ def read_key(path: Path, name: str) -> str | None:
 
 
 def load_key() -> str:
-    key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-    if key:
-        return key
-    path = find_keys_file()
-    if path is None:
-        raise KeyError_("no api-keys.yml found (set AUTOOS_API_KEYS or AUTOOS_ROOT, or create "
-                        "<AutoOS>/configuration/api-keys.yml; see AutoOS docs/api-keys.md)")
-    key = read_key(path, "omniroute")
-    if not key:
-        raise KeyError_("no omniroute key in %s" % path)
-    return key
+    # Use the new gateway-named key resolution from tools/autoos_gateway_key.py
+    from autoos_gateway_key import resolve_client_key
+    try:
+        return resolve_client_key(os.environ)
+    except KeyError as e:
+        raise KeyError_(str(e))
 
 
 # ── policy (catalog/ai-registry.json) ──────────────────────────────────────────

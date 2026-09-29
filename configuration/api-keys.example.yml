@@ -44,6 +44,14 @@ zen: REPLACE_WITH_ZEN_KEY
 # ── OmniRoute itself ────────────────────────────────────────────────────────
 # Client key the apps send to http://127.0.0.1:20128/v1
 # (dashboard -> api-manager -> Create API Key).
+# NEW: gateway-named fields (WS-OMNIREMOTE):
+#   omniroute_server: sk-...      # the key for a NON-LOCAL gateway (AUTOOS_OMNIROUTE_URL set and non-loopback)
+#   omniroute_<host>: sk-...      # the key for THIS host's LOCAL gateway (AUTOOS_OMNIROUTE_URL unset/empty or loopback)
+#     e.g. omniroute_workstation: sk-...  (this host's local gateway, when host_name is "workstation")
+#     on the server machine itself host_name is "server", so its local lookup is omniroute_server
+# LEGACY (one release, read-only fallback, then removed):
+#   omniroute: sk-...             # (local case) deprecated - rename to omniroute_<host>
+#   omniroute_client_<host>: sk-..# (server case) deprecated - rename to omniroute_server
 omniroute: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
 # opencode_password: REPLACE_WITH_A_LONG_RANDOM_STRING   # opencode serve Basic auth (user opencode); ai-stack.sh init copies it
 # Optional: oma_live_… management token, only needed for remote management

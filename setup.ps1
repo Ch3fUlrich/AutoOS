@@ -153,7 +153,9 @@ param(
     [string]$ImageSha256,
     [string]$WriteMode,
     [switch]$ListUsb,
-    [switch]$ListEngines
+    [switch]$ListEngines,
+    # D-148: set machine host_name in host.yml (creates if missing, never overwrites)
+    [string]$HostName
 )
 
 Set-StrictMode -Version Latest
@@ -178,6 +180,20 @@ Import-Module (Join-Path $LibDir 'AutoOS.Catalog.psm1') -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
+
+# ─── -HostName: set machine host_name in host.yml ───────────────────────────────
+# If -HostName was given, write host.yml (creates if missing, never overwrites).
+if ($HostName) {
+    $hostFile = Get-AutoOSHostConfigPath
+    if (Test-Path -LiteralPath $hostFile) {
+        Write-AutoOSLine "host.yml exists at $hostFile - skipped (use AUTOOS_HOST_NAME to override at runtime)"
+    } else {
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
+        "host_name: $HostName" | Set-Content -LiteralPath $hostFile -Encoding utf8
+        Write-AutoOSLine "Created $hostFile with host_name: $HostName" -Level ok
+    }
+    exit 0
+}
 
 if ($NoColor) { Set-AutoOSColor $false }
 if ($NoVerify) { Set-AutoOSVerify $false }

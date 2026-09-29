@@ -62,15 +62,95 @@ function Get-AutoOSKeyValue {
     $last
 }
 
-$Key = $env:AUTOOS_OMNIROUTE_KEY
-if ([string]::IsNullOrWhiteSpace($Key)) {
-    $Key = Get-AutoOSKeyValue -Path $keysFile -Name 'omniroute'
+# ─── OmniRoute gateway key resolution (mirrors lib/linux/install.sh) ───
+function Test-AutoOSLocalGateway {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $true }
+    try {
+        $uri = [Uri]$Url
+        $host = $uri.Host
+    } catch {
+        return $false
+    }
+    $host = $host.Trim('[',']').ToLowerInvariant()
+    $host -in @('127.0.0.1','localhost','::1')
 }
-if ([string]::IsNullOrWhiteSpace($Key)) {
-    Write-Host 'No OmniRoute client key. Add `omniroute: sk-...` to configuration\api-keys.yml,'
-    Write-Host 'or set $env:AUTOOS_OMNIROUTE_KEY. Then configure providers: .\configuration\omniroute\apply.ps1'
-    exit 1
+
+function Get-AutoOSHostConfigPath {
+    if ($env:AUTOOS_HOST_CONFIG) { return [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG) }
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        return Join-Path ($env:LOCALAPPDATA -or "$env:USERPROFILE\AppData\Local") 'autoos\host.yml'
+    }
+    return Join-Path ($env:XDG_CONFIG_HOME -or "$env:HOME/.config") 'autoos/host.yml'
 }
+
+function Normalize-AutoOSHostName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+    $Name = $Name.Split('.')[0]
+    $Name = $Name.ToLowerInvariant()
+    $Name -replace '[^a-z0-9_]','_'
+}
+
+function Get-AutoOSHostName {
+    # Order: 1) AUTOOS_HOST_NAME env, 2) host_name: from host.yml, 3) short hostname
+    if ($env:AUTOOS_HOST_NAME) { return Normalize-AutoOSHostName $env:AUTOOS_HOST_NAME }
+    $hostFile = Get-AutoOSHostConfigPath
+    if (Test-Path -LiteralPath $hostFile) {
+        foreach ($line in (Get-Content -LiteralPath $hostFile -Encoding utf8)) {
+            $line = $line.Trim()
+            if ($line -match '^host_name\s*:\s*(.+)$') {
+                $v = $Matches[1].Trim().Trim('"',"'")
+                if ($v) { return Normalize-AutoOSHostName $v }
+            }
+        }
+    }
+    try { $fqdn = [System.Net.Dns]::GetHostName() } catch { $fqdn = 'localhost' }
+    $normalized = Normalize-AutoOSHostName $fqdn
+    Write-Host "AutoOS: using hostname '$normalized' for omniroute key field (set AUTOOS_HOST_NAME or host_name in $hostFile to override)"
+    return $normalized
+}
+
+function Get-AutoOSClientKeyField {
+    $gatewayUrl = $env:AUTOOS_OMNIROUTE_URL
+    if (Test-AutoOSLocalGateway $gatewayUrl) {
+        return "omniroute_$(Get-AutoOSHostName)"
+    } else {
+        return 'omniroute_server'
+    }
+}
+
+function Get-AutoOSClientKey {
+    param([string]$KeysFile)
+    # 1. Explicit env always wins
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)) {
+        return $env:AUTOOS_OMNIROUTE_KEY
+    }
+    $field = Get-AutoOSClientKeyField
+    $isLocal = Test-AutoOSLocalGateway $env:AUTOOS_OMNIROUTE_URL
+    # 2. New field
+    if (Test-Path -LiteralPath $KeysFile) {
+        $key = Get-AutoOSKeyValue -Path $KeysFile -Name $field
+        if (-not [string]::IsNullOrWhiteSpace($key)) { return $key }
+    }
+    # 3. Legacy fallback (one release, read-only)
+    $legacyField = if ($isLocal) { 'omniroute' } else { "omniroute_client_$(Get-AutoOSHostName)" }
+    if (Test-Path -LiteralPath $KeysFile) {
+        $legacyKey = Get-AutoOSKeyValue -Path $KeysFile -Name $legacyField
+        if (-not [string]::IsNullOrWhiteSpace($legacyKey)) {
+            Write-Host "api-keys.yml: '$legacyField' is deprecated, rename it to '$field'"
+            return $legacyKey
+        }
+    }
+    # 4. Missing - clear error
+    $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }
+    $hostFile = Get-AutoOSHostConfigPath
+    Write-Host "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname."
+    return $null
+}
+
+$Key = Get-AutoOSClientKey -KeysFile $keysFile
+if ($null -eq $Key) { exit 1 }
 # Export so the launched apps inherit it: opencode.jsonc and the Zed settings
 # carry no key by design ("key via env"), so without this the apps the script
 # launches would start unauthenticated.

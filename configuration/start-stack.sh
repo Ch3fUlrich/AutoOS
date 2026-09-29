@@ -5,17 +5,21 @@
 #   ./configuration/start-stack.sh opencode|zed|nvim|openhands|opencode-serve
 set -euo pipefail
 
+# Source the shared gateway key functions from install.sh
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/linux/install.sh
+. "$ROOT/lib/linux/install.sh"
+
 GATEWAY="http://127.0.0.1:20128"
 APP="${1:-none}"
-# The key file sits next to this script: configuration/api-keys.yml.
 KEYS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api-keys.yml"
-if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -f "$KEYS_FILE" ]]; then
-    AUTOOS_OMNIROUTE_KEY="$(sed -n 's/^omniroute[[:space:]]*:[[:space:]]*//p' "$KEYS_FILE" | head -1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+# Resolve the client key using the new gateway-named field logic
+if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+    AUTOOS_OMNIROUTE_KEY="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
     export AUTOOS_OMNIROUTE_KEY
 fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-    echo "No OmniRoute client key. Add 'omniroute: sk-...' to configuration/api-keys.yml,"
-    echo "or export AUTOOS_OMNIROUTE_KEY. Then configure providers: ./configuration/omniroute/apply.sh"
+    # The error message from autoos_resolve_client_key already names the expected field
     exit 1
 fi
 

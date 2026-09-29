@@ -71,6 +71,10 @@ if ! command -v omniroute >/dev/null && [[ $DRIFT -ne 1 ]]; then
     fi
 fi
 
+# Source the shared gateway key functions from install.sh
+# shellcheck source=../../lib/linux/install.sh
+. "$ROOT/lib/linux/install.sh"
+
 # ─── Parse the flat key: value map without needing PyYAML ───────────────────
 declare -A KEYS=()
 if [[ -f "$KEYS_FILE" ]]; then
@@ -778,8 +782,10 @@ fi
 
 # ─── (Re)create combos ──────────────────────────────────────────────────────
 live_ids=""
-if command -v python3 >/dev/null; then
-    live_ids="$(curl -sf -m 10 -H "Authorization: Bearer ${KEYS[omniroute]:-}" \
+# Resolve the client key using the new gateway-named field logic
+_client_key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
+if command -v python3 >/dev/null && [[ -n "$_client_key" ]]; then
+    live_ids="$(curl -sf -m 10 -H "Authorization: Bearer $_client_key" \
         "$GATEWAY/v1/models" 2>/dev/null |
         python3 -c 'import json,sys
 try:
@@ -1037,7 +1043,7 @@ fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then
-    key="${KEYS[omniroute]:-}"
+    key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
     if [[ -z "$key" || $DRY -eq 1 ]]; then
         echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
     elif (( ${#PROBE_COMBOS[@]} == 0 )); then

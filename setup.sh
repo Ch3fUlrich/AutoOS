@@ -69,6 +69,9 @@ AutoOS — post-install provisioning for Linux
   --no-verify        Skip the post-install "does it actually work" check
   --undo             Restore files AutoOS backed up (does NOT uninstall packages)
                      (does not cover a USB write — that cannot be undone)
+  --host-name <name> Set the machine's host_name in host.yml (creates if missing,
+                     default = normalised short hostname). If host.yml exists,
+                     reports skipped and never overwrites.
 
   --create-usb           Build a bootable installer/rescue USB (--dry-run shows the plan only)
   --image <id>            catalog/images.json entry to write
@@ -119,6 +122,7 @@ while [[ $# -gt 0 ]]; do
         --save-state) STATE_PATH="${2:-}"; shift 2 ;;
         --no-verify)  AUTOOS_VERIFY=0; shift ;;
         --undo)       DO_UNDO=1; shift ;;
+        --host-name)  AUTOOS_HOST_NAME_CLI="${2:-}"; shift 2 ;;
         --create-usb)       DO_CREATE_USB=1; shift ;;
         --image)            USB_IMAGE="${2:-}"; shift 2 ;;
         --kind)              USB_KIND="${2:-installer}"; shift 2 ;;
@@ -135,6 +139,23 @@ while [[ $# -gt 0 ]]; do
         *) printf 'Unknown option: %s\n\n' "$1"; usage; exit 2 ;;
     esac
 done
+
+# ─── --host-name: set machine host_name in host.yml ─────────────────────────────
+# If --host-name was given, write host.yml (creates if missing, never overwrites).
+if [[ -n "${AUTOOS_HOST_NAME_CLI:-}" ]]; then
+    # Use the shared functions from install.sh
+    # shellcheck source=lib/linux/install.sh
+    . "$LIB/install.sh"
+    host_file="$(_host_config_path)"
+    if [[ -f "$host_file" ]]; then
+        ui_info "host.yml exists at $host_file - skipped (use AUTOOS_HOST_NAME to override at runtime)"
+    else
+        mkdir -p "$(dirname "$host_file")"
+        printf 'host_name: %s\n' "${AUTOOS_HOST_NAME_CLI}" >"$host_file"
+        ui_ok "Created $host_file with host_name: ${AUTOOS_HOST_NAME_CLI}"
+    fi
+    exit 0
+fi
 
 ui_init
 
