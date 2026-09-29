@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
+
+Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI
+36517453134) cited rule R-orch-17 that existed only on a newer main — it never merged main and
+never ran `tests/test_skill_rules.py`; **SBA** (CI 36493098467) had a fixture `git commit` die
+with rc 128 on the runner, because it passed at home only thanks to the dev host's global
+`user.name`/`user.email`; **FREEKEYS2** (CI 36506339556 shard e) shipped 17 red render tests
+because the worker ran the pytest files it *guessed* were relevant, not the ones its own changed
+files imply. Each is a missing run, not a missing fix — so the gate computes the run list from the
+diff and refuses the push.
+
+- **`tools/prepush.py`** (new; one home for the logic, the hook is a three-line shim onto it): the
+  fetched `origin/main` must be an ancestor of HEAD (R-coord-01), with no network; CI's own plan
+  check runs first (`tests/test_ci_shards.py`, `tests/ci-shards.py`); the rest of the run list
+  comes from the changed files; the suite runs in **CI's git env**
+  (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, inherited `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+  dropped) under `/usr/bin/python3`, so a test that leans on a host identity or a venv shim fails
+  here instead of in CI. Green appends `<sha> <utc> green: <commands>` to
+  `<git-dir>/autoos-prepush.log` (per worktree, never tracked); red exits 1 and prints the failing
+  command. `AUTOOS_PREPUSH_OVERRIDE="<reason>"` steps over it loudly, for orchestrators, and is
+  logged as **never green**.
+- **`tools/affected-tests.py`** gained a file-based question: `--changed-files-from REV` (with
+  `--format plan` for the gate). The mapping rules are the three reds — skills, `CHANGELOG.md` and
+  `docs/**` always pull `tests/test_skill_rules.py`; registry/route/combo files pull the render
+  and sync tests *plus* the bash `render`/`apply` filters; `tools/X.py` pulls the tests that name
+  it; a changed `tests/linux/NN-*.sh` pulls that part. A bash part is never run unfiltered
+  (R-host-08).
+- **`autoos-agent.py ready`** now reads that log (D-110): reviews and a pushed sha prove the lane
+  was looked at and shipped, only the record proves it was run — which is what catches a lane that
+  pushed with `git push --no-verify`, a path no hook can reach. An orchestrator that means to waive
+  names a reason with `--allow-unverified "<reason>"`, and the reason rides on the line.
+- **`trust_worktree.py`** installs the hook into `git rev-parse --git-path hooks` as part of
+  approving a fresh worktree, and **chains** a pre-push hook it did not write
+  (`pre-push.autoos-chained`) rather than replacing it. It is idempotent (a second run reports
+  `skipped`) and reachable alone via `--hook-only`, because rule D-111 keeps this path away from
+  `~/.claude.json` — the hook step never reads or writes that file.
+- **Skill**: `R-coord-12` and the code-enforced list in `unattended-orchestration/SKILL.md` state
+  the rule; the gate's own docstring stays the source of truth for its order.
+- **Tests** (`tests/test_prepush.py`, 50; 8 more in `ReadyCommandTests`): each refusal shape, the
+  CI-like git env proven behaviourally (a temp global config that the gate forces to `/dev/null`,
+  so the fixture commit fails 128 — and a repo carrying its own identity still passes, so isolation
+  is not a wall), the green and override records, `--check-ready`'s exact-sha match, the hook
+  install's idempotence and chaining with `HOME` pointed at a temp dir (asserting `~/.claude.json`
+  is never created), and the file→tests mapping against the real tree for all three measured reds.
+
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
 
 L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,

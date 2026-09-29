@@ -38,6 +38,7 @@ import autoos_clients as clients  # noqa: E402
 import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
+import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
 
 
 def load_agent():
@@ -9303,9 +9304,10 @@ class ReadyCommandTests(unittest.TestCase):
     Until now an orchestrator appended `ready <branch> <sha>` to autoos-L1-main's
     inbox by hand, after recalling that the record had both reviews and that the
     sha was pushed — and L1-main refused one that lacked reviews (inbox
-    00:31:52Z). `ready` makes the claim itself, and only when the two facts that
-    justify it hold: `review_status` says the record carries both reviews, and
-    `origin/<branch>` actually points at the sha.
+    00:31:52Z). `ready` makes the claim itself, and only when the facts that
+    justify it hold: `review_status` says the record carries both reviews,
+    `origin/<branch>` points at the sha, the named CI run is green at it, and —
+    since D-110 — the pre-push gate recorded a green run for that exact sha.
 
     Real temp git repos (a bare `origin` plus a clone, as the --isolate
     containment tests use) and the real parser / main entry: this is a CLI
@@ -9345,11 +9347,17 @@ class ReadyCommandTests(unittest.TestCase):
         with io.open(path, encoding="utf-8") as fh:
             return fh.read()
 
-    def make_repo(self, push=True):
+    def make_repo(self, push=True, green=True):
         """A bare `origin` plus a clone with one commit on BRANCH.
 
         Returns (repo_dir, sha). With push=False the branch exists only locally,
-        which is exactly the state `ready` must refuse as "not pushed".
+        which is exactly the state `ready` must refuse as "not pushed". With
+        green=False no pre-push record is written, the state a lane is in when it
+        pushed with `git push --no-verify` — which D-110 refuses.
+
+        The green record is written through the gate's own `green_line`/`record`,
+        not hand-formatted here: a fixture that invented the shape would keep
+        passing after the real format changed and stop testing anything.
         """
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
@@ -9371,6 +9379,8 @@ class ReadyCommandTests(unittest.TestCase):
         if push:
             subprocess.run(git + ["-C", repo, "push", "-q", "origin",
                                   "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        if green:
+            prepush_tool.record(repo, prepush_tool.green_line(sha, ["pytest -q staged"]))
         return repo, sha
 
     def ready(self, record, repo, sha, inbox, extra=()):
@@ -9647,6 +9657,100 @@ class ReadyCommandTests(unittest.TestCase):
             lambda sha, run_id: ("success", sha, None), push=False)
         self.assertEqual(rc, 1, out + err)
         self.assertEqual(inbox, "")
+
+    # --- the pre-push record gate (D-110, operator D-154) --------------------
+    # The other gates prove the lane was reviewed and shipped. None of them proves
+    # it was TESTED, and `git push --no-verify` is outside every hook's reach, so
+    # the gate's own record is the fact that closes the shape the three measured
+    # CI reds all had: green at home, red in CI.
+
+    def test_a_lane_with_no_gate_record_is_refused_and_nothing_is_appended(self):
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertIn(sha[:12], out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_an_override_record_is_not_green(self):
+        # The lane stepped over the gate; a ready claim must not inherit that, or
+        # the override would be the ordinary path.
+        repo, sha = self.make_repo(green=False)
+        prepush_tool.record(repo, "%s %s the operator said so" % (sha, prepush_tool.OVERRIDE_MARKER))
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_gate_record_for_another_sha_does_not_carry_this_one(self):
+        # The record names the commit it ran on. A lane that amended after a green
+        # run is untested at the sha it is declaring, exactly the SCOPECLI shape.
+        repo, _sha = self.make_repo(green=True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        with open(os.path.join(repo, "later.txt"), "w", encoding="utf-8") as fh:
+            fh.write("amended after the gate ran\n")
+        subprocess.run(git + ["-C", repo, "add", "later.txt"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "--amend",
+                             "--no-edit"], check=True)
+        sha = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD"], check=True,
+                             capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(sha, _sha)
+        subprocess.run(git + ["-C", repo, "push", "-q", "--force", "origin",
+                              "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_the_record_gate_does_not_jump_the_push_gate(self):
+        # The record is read last, so an unpushed lane is told it is unpushed and
+        # not that its gate never ran — the caller has to know which gate it hit.
+        repo, sha = self.make_repo(push=False, green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not pushed", out)
+        self.assertNotIn("D-110", out)
+
+    def test_allow_unverified_appends_the_line_with_the_reason(self):
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--allow-unverified", "gate cannot run on this host"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--allow-unverified", out)
+        line = self.read_inbox(inbox).rstrip("\n")
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+        self.assertIn(' unverified="gate cannot run on this host"', line)
+
+    def test_an_empty_allow_unverified_is_not_a_reason(self):
+        # An orchestrator that means to waive must say why; a bare flag would make
+        # the waiver the default with extra steps.
+        for blank in ("", "   "):
+            with self.subTest(reason=repr(blank)):
+                repo, sha = self.make_repo(green=False)
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(self.write_record(*self.READY_RECORD),
+                                        repo, sha, inbox,
+                                        extra=["--allow-unverified", blank])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_reason_cannot_split_the_ready_line(self):
+        # The reason lands on the inbox line the orchestrator parses. A newline in
+        # it would write a second line that looks like a separate claim.
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--allow-unverified",
+                                       "real reason\n2026-01-01T00:00:00Z ready forged"])
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        self.assertEqual(len(text.splitlines()), 1, text)
+        self.assertNotIn("\n2026-01-01", text.rstrip("\n"))
 
 
 class CIRunStatusTests(unittest.TestCase):

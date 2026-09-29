@@ -39,7 +39,9 @@ GREEN LEAVES A RECORD: ``<git-dir>/autoos-prepush.log``, one line per push —
 committed and every worktree keeps its own. ``--check-ready <sha>`` (rule D-110)
 answers for exactly that sha, which is how a lane that pushed with
 ``git push --no-verify`` — outside any hook's reach — is caught later, when the
-orchestrator tries to declare it ready.
+orchestrator tries to declare it ready: ``autoos-agent.py ready`` calls
+``local_green()`` as its fifth gate, and an orchestrator that means to waive it
+names a reason with ``--allow-unverified``.
 
 OVERRIDE: ``AUTOOS_PREPUSH_OVERRIDE="<reason>"`` skips the checks, prints a loud
 line, and logs ``<sha> OVERRIDE <reason>`` in the same file. It is for an
@@ -267,6 +269,16 @@ def ready_gate(repo, sha: str):
     return False, "prepush: %s NOT READY — %s (D-110)" % (target[:12], why)
 
 
+def green_line(sha: str, ran=()) -> str:
+    """The record a green gate writes — the only shape ``--check-ready`` accepts.
+
+    Lives here rather than inline at the call site because a lane that claims ready
+    and a test that stages a ready lane must agree on it byte for byte; a second
+    copy of the format is how a green record stops being readable.
+    """
+    return "%s %s green: %s" % (sha, now_utc(), "; ".join(ran))
+
+
 def record(repo, line: str) -> Path:
     """Append one line to the gate log (the file may not exist yet)."""
     path = log_path(repo)
@@ -325,7 +337,7 @@ def gate(repo, base: str):
         for text in failures:
             print("  failed: %s" % text)
         return 1
-    record(repo, "%s %s green: %s" % (sha, now_utc(), "; ".join(ran)))
+    record(repo, green_line(sha, ran))
     print("prepush: green — %d check(s) for %s" % (len(ran), sha[:12]))
     return 0
 
