@@ -15195,6 +15195,500 @@ def CancelVerifiedAlive(pid):
         return False
 
 
+@unittest.skipIf(os.name == "nt", "systemd-run --user is a Linux mechanism")
+class CliScopeLaunchTests(unittest.TestCase):
+    """SCOPECLI: the CLI path is the other half of SB-A2 item A.
+
+    `autoos_agent_mcp.run_job` wraps the whole `autoos-agent.py run …` in a
+    transient scope, but a `run` started straight from a shell never went through
+    it: its client led only a new SESSION, so there was no cgroup and
+    `systemctl --user stop` — the one kill that still reaches a `setsid()` child —
+    had nothing to stop. run_client now scopes the client itself, with two gates:
+    a user manager must be reachable, and this process must not already be inside
+    a worker scope (a nested `systemd-run --scope` MOVES the client out of the
+    outer cgroup, so the MCP `cancel`, which stops the outer scope, would no
+    longer reach it).
+    """
+
+    RUN_ID = "20260929-000000-scopecli-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state, old_state)
+
+    @staticmethod
+    def _restore_state(value):
+        if value is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = value
+
+    class _StubPopen:
+        """A subprocess.Popen stand-in that records the argv/env and starts nothing.
+
+        Exits 0 and is never reaped (`reap=False`), so no signal is sent to the
+        recorded pid — a test must not be able to kill the suite's own group.
+        """
+
+        def __init__(self, box):
+            self.box = box
+
+        def __call__(self, cmd, **kw):
+            self.box["cmd"] = list(cmd)
+            self.box["env"] = dict(kw.get("env") or {})
+            self.box["kw"] = kw
+            return self
+
+        @property
+        def pid(self):
+            return os.getpid()
+
+        stdout = None
+        stderr = None
+
+        def wait(self):
+            return 0
+
+    def _launch(self, supported, cgroup, reason="", **client_kw):
+        """Run one un-captured client launch and return (rc, argv box, stderr)."""
+        box = {}
+        env = self.agent.spawner_child_env()
+        err = io.StringIO()
+        with mock.patch.object(self.agent, "scope_supported", lambda: supported), \
+             mock.patch.object(self.agent, "scope_unsupported_reason",
+                               lambda force=False: reason), \
+             mock.patch.object(self.agent, "self_cgroup", lambda: cgroup), \
+             mock.patch.object(self.agent.subprocess, "Popen", self._StubPopen(box)):
+            with contextlib.redirect_stderr(err):
+                rc = self.agent.run_client([sys.executable, "-c", "pass"], self.tmp,
+                                           env, reap=False, **client_kw)
+        box["child_env"] = env
+        return rc, box, err.getvalue()
+
+    def test_a_shell_run_launches_its_client_in_a_scope(self):
+        rc, box, err = self._launch(True, "0::/init.scope",
+                                    run_id=self.RUN_ID, attempt=2)
+        argv = box["cmd"]
+        self.assertEqual(int(rc), 0)
+        self.assertEqual(argv[:6], ["systemd-run", "--user", "--scope", "--unit",
+                                    "autoos-worker-cli-%s-a2" % self.RUN_ID,
+                                    "--collect"], argv)
+        inner = argv[argv.index("--") + 1:]
+        self.assertEqual(inner[:5], [shutil.which("env") or "/usr/bin/env"]
+                         + [a for n in self.agent.SCOPE_BUS_ENV for a in ("-u", n)],
+                         inner)
+        self.assertEqual(inner[5:], [sys.executable, "-c", "pass"], inner)
+        # SCOPEBUS: the scrubbed child env carries no bus address, so systemd-run
+        # gets the caller's on top of it and `env -u` takes it back off inside.
+        for name in self.agent.SCOPE_BUS_ENV:
+            if os.environ.get(name):
+                self.assertEqual(box["env"].get(name), os.environ[name], name)
+            self.assertTrue(any(inner[i:i + 2] == ["-u", name] for i in range(len(inner))),
+                            "%s not stripped inside the scope: %s" % (name, inner))
+        self.assertTrue(box["kw"].get("start_new_session"),
+                        "the client lost its own session")
+        # the shell user is told the unit, and how to stop it
+        self.assertIn("autoos-worker-cli-%s-a2.scope" % self.RUN_ID, err)
+        self.assertIn("systemctl --user stop", err)
+
+    def test_a_run_already_inside_a_worker_scope_never_nests_one(self):
+        cgroup = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                  "autoos-worker-%s.scope" % self.RUN_ID)
+        rc, box, err = self._launch(True, cgroup, run_id=self.RUN_ID, attempt=1)
+        self.assertEqual(int(rc), 0)
+        self.assertEqual(box["cmd"], [sys.executable, "-c", "pass"], box["cmd"])
+        self.assertNotIn(self.agent.SCOPE_WRAPPER, box["cmd"])
+        self.assertEqual(box["env"], box["child_env"],
+                         "an unscoped launch must pass the caller's env through")
+        self.assertEqual(err, "", err)
+
+    def test_in_worker_scope_reads_the_unit_out_of_the_cgroup(self):
+        cases = (
+            ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+             "autoos-worker-%s.scope" % self.RUN_ID, True),
+            # a delegated sub-cgroup under the scope is still inside it
+            ("1:name=systemd:/user.slice/user@1000.service/autoos-worker-x.scope/"
+             "payload", True),
+            ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+             "some-other.scope", False),
+            ("0::/init.scope", False),
+            ("", False),
+        )
+        for text, want in cases:
+            with mock.patch.object(self.agent, "self_cgroup", lambda t=text: t):
+                self.assertEqual(self.agent.in_worker_scope(), want, text)
+
+    def test_a_host_with_no_user_manager_launches_the_same_argv_and_says_so(self):
+        """SCOPECLI-b (b): the fallback launch is unchanged, but it is no longer
+        SILENT. L1-main found a WSL run sitting in `0::/init.scope` with no unit
+        and nothing in the log to say so — an operator reading that log could not
+        tell a host that has no scope mechanism from one whose scope failed to
+        start, and `cancel` there only reaches a process group."""
+        rc, box, err = self._launch(False, "0::/init.scope", reason="no systemd-run",
+                                    run_id=self.RUN_ID, attempt=1)
+        self.assertEqual(int(rc), 0)
+        self.assertEqual(box["cmd"], [sys.executable, "-c", "pass"], box["cmd"])
+        self.assertEqual(box["env"], box["child_env"], box["env"])
+        self.assertEqual(err.splitlines(), [
+            "autoos-agent: WARNING client runs UNSCOPED (no systemd-run): "
+            "cancel falls back to the process-group kill"], err)
+        self.assertEqual(rc.scope, {"path": "unscoped", "unit": None,
+                                    "reason": "no systemd-run"})
+
+    def test_a_scoped_launch_reports_the_unit_it_uses_on_the_exit(self):
+        rc, box, err = self._launch(True, "0::/init.scope",
+                                    run_id=self.RUN_ID, attempt=1)
+        self.assertEqual(rc.scope, {"path": "scoped",
+                                    "unit": "autoos-worker-cli-%s-a1.scope" % self.RUN_ID,
+                                    "reason": ""})
+        self.assertNotIn("WARNING", err)
+
+    def test_an_inherited_scope_is_recorded_and_stays_quiet(self):
+        outer = "autoos-worker-%s.scope" % self.RUN_ID
+        cgroup = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + outer)
+        rc, box, err = self._launch(True, cgroup, run_id="another-run", attempt=1)
+        self.assertEqual(box["cmd"], [sys.executable, "-c", "pass"], box["cmd"])
+        self.assertEqual(rc.scope, {"path": "inherited", "unit": outer,
+                                    "reason": "already inside " + outer})
+        self.assertEqual(err, "", err)
+
+    def test_a_real_shell_run_really_lands_in_its_scope(self):
+        """End to end through the real Popen chain: the client reads its OWN
+        /proc/self/cgroup. Mocking the launcher is what let SB-A ship a wrapper
+        the real launcher could never start, so nothing here mocks Popen.
+
+        The one thing a test cannot escape is its own cgroup: where the suite runs
+        inside a worker scope (a lane sandbox), only the cgroup READ is patched, so
+        the launch itself is still the real one.
+        """
+        agent = self.agent
+        if not agent.scope_supported():
+            self.skipTest("systemd-run --user is not available on this host")
+        unit = agent.scope_unit_name("cli-pid%d-a1" % os.getpid())
+        code = "print(open('/proc/self/cgroup').read())"
+        err = io.StringIO()
+
+        def run():
+            with contextlib.redirect_stderr(err):
+                return agent.run_client([sys.executable, "-c", code], self.tmp,
+                                        dict(os.environ), capture=True)
+
+        if agent.in_worker_scope():
+            with mock.patch.object(agent, "self_cgroup",
+                                   lambda: "0::/user.slice/user@1000.service/init.scope"):
+                rc = run()
+        else:
+            rc = run()
+        self.assertEqual(int(rc), 0, rc.tail + err.getvalue())
+        self.assertIn(unit, rc.tail,
+                     "the client's own cgroup is not the scope it was told about: "
+                     "%s / cgroup said %r" % (err.getvalue(), rc.tail))
+        self.assertIn("systemctl --user stop %s" % unit, err.getvalue())
+
+
+class ScopeRecordTests(unittest.TestCase):
+    """SCOPECLI-b: which launch path a run took is a fact the run STATES.
+
+    SCOPECLI built the scope; L1-main's evidence was that nothing said whether a
+    run got one. On WSL a `run --isolate` sat in `0::/init.scope`, no unit existed,
+    and neither `ps` nor the run log could tell an operator whether `cancel` would
+    follow a `setsid()` child (a scope is a cgroup) or only the process group it
+    leads. One dict — `{path: scoped|inherited|unscoped, unit, reason}` — is now
+    decided in `scope_decision()`, read by `run_client` for the launch, written to
+    the worker registry record, and printed beside the `writer:` line. Nothing
+    goes into job.json: the worker owns that file's directory and SB-A4 is explicit
+    that a kill target read out of it is a channel the cancelled process writes
+    through (R-orch-17), so this lives in the runner-private records only.
+    """
+
+    RUN_ID = "20260929-030000-scopeclib-abcdef"
+    WARNING = ("autoos-agent: WARNING client runs UNSCOPED (%s): "
+               "cancel falls back to the process-group kill")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        old = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state, old)
+        # The support probe is cached host-wide; these tests force re-probes, so
+        # they hand the cache back exactly as they found it.
+        cached = getattr(self.agent, "_SCOPE_UNSUPPORTED", None)
+        self.addCleanup(setattr, self.agent, "_SCOPE_UNSUPPORTED", cached)
+
+    @staticmethod
+    def _restore_state(value):
+        if value is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = value
+
+    def _env(self, **over):
+        """A copy of this process's env with `over` applied (None drops a key)."""
+        env = dict(os.environ)
+        for name, value in over.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        return env
+
+    # --- the decision, per path -------------------------------------------------
+
+    def test_a_process_in_init_scope_with_a_user_manager_is_scoped(self):
+        """(c) WSL's shape: `0::/init.scope` is the session's own cgroup, not a
+        worker scope, so it must NOT be read as one and must NOT stop a scope from
+        being launched — `systemd-run --user` works from there."""
+        agent = self.agent
+        with mock.patch.object(agent, "scope_supported", lambda: True), \
+             mock.patch.object(agent, "self_cgroup", lambda: "0::/init.scope"):
+            rec = agent.scope_decision(self.RUN_ID, 2)
+        self.assertEqual(rec, {"path": "scoped",
+                               "unit": "autoos-worker-cli-%s-a2.scope" % self.RUN_ID,
+                               "reason": ""})
+        self.assertEqual(agent.scope_line(rec), "scope: scoped unit=%s" % rec["unit"])
+
+    def test_a_run_inside_a_worker_scope_inherits_that_unit(self):
+        agent = self.agent
+        outer = agent.scope_unit_name(self.RUN_ID)
+        cgroup = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + outer)
+        with mock.patch.object(agent, "scope_supported", lambda: True), \
+             mock.patch.object(agent, "self_cgroup", lambda: cgroup):
+            rec = agent.scope_decision("20260929-040000-other-000000", 1)
+        self.assertEqual(rec["path"], "inherited")
+        # the unit is the OUTER one, read out of the cgroup — not derived from the
+        # run id this call was handed, which is a fallthrough re-run's id.
+        self.assertEqual(rec["unit"], outer)
+        self.assertEqual(rec["reason"], "already inside " + outer)
+
+    def test_a_windows_run_is_unscoped_because_there_is_no_scope_there(self):
+        agent = self.agent
+        with mock.patch.object(agent.os, "name", "nt"):
+            rec = agent.scope_decision(self.RUN_ID, 1)
+        self.assertEqual(rec, {"path": "unscoped", "unit": None,
+                               "reason": "windows"})
+
+    def test_the_unscoped_reason_is_the_one_the_host_actually_fails_on(self):
+        agent = self.agent
+        cases = (
+            ({"systemd-run": None, "systemctl": "/usr/bin/systemctl"},
+             "no systemd-run"),
+            ({"systemd-run": "/usr/bin/systemd-run", "systemctl": None},
+             "no systemctl"),
+        )
+        for found, want in cases:
+            with self.subTest(found=found):
+                def which(name, *a, **k):
+                    return found.get(name)
+                with mock.patch.object(agent.shutil, "which", side_effect=which), \
+                     mock.patch.dict(os.environ, self._env(XDG_RUNTIME_DIR="/run/user/1000"),
+                                     clear=True):
+                    self.assertEqual(agent.scope_unsupported_reason(force=True), want)
+
+    def test_no_xdg_runtime_dir_names_the_user_manager_it_cannot_reach(self):
+        agent = self.agent
+        with mock.patch.object(agent.shutil, "which",
+                               lambda name, *a, **k: "/usr/bin/" + name), \
+             mock.patch.dict(os.environ, self._env(XDG_RUNTIME_DIR=None), clear=True):
+            self.assertEqual(agent.scope_unsupported_reason(force=True),
+                             "no user manager / XDG_RUNTIME_DIR")
+
+    def test_a_probe_that_starts_and_fails_is_a_reason_of_its_own(self):
+        """A container can ship both binaries and run no user manager: the launch
+        itself is the only honest probe, and its failure gets a reason rather than
+        silence (spec 5823: a worker that never started is worse than a fallback)."""
+        agent = self.agent
+        for outcome in (lambda *a, **k: 1,
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no bus"))):
+            with self.subTest(outcome=outcome):
+                with mock.patch.object(agent.shutil, "which",
+                                       lambda name, *a, **k: "/usr/bin/" + name), \
+                     mock.patch.dict(
+                        os.environ, self._env(XDG_RUNTIME_DIR="/run/user/1000"),
+                        clear=True), \
+                     mock.patch.object(agent.subprocess, "call", side_effect=outcome):
+                    self.assertEqual(agent.scope_unsupported_reason(force=True),
+                                     "user manager unreachable")
+                    self.assertFalse(agent.scope_supported(force=True))
+
+    def test_a_host_whose_probe_launches_has_no_reason_and_is_supported(self):
+        agent = self.agent
+        with mock.patch.object(agent.shutil, "which",
+                               lambda name, *a, **k: "/usr/bin/" + name), \
+             mock.patch.dict(os.environ, self._env(XDG_RUNTIME_DIR="/run/user/1000"),
+                             clear=True), \
+             mock.patch.object(agent.subprocess, "call", lambda *a, **k: 0):
+            self.assertEqual(agent.scope_unsupported_reason(force=True), "")
+            self.assertTrue(agent.scope_supported(force=True))
+
+    def test_the_gate_and_the_reason_are_one_probe(self):
+        """`scope_supported()` is the bool of `scope_unsupported_reason()` — one
+        home for the answer, and the cached reason is what the line states."""
+        agent = self.agent
+        with mock.patch.object(agent, "_probe_scope", lambda: "no systemd-run"):
+            self.assertFalse(agent.scope_supported(force=True))
+            self.assertEqual(agent.scope_unsupported_reason(), "no systemd-run")
+        with mock.patch.object(agent, "_probe_scope", lambda: ""):
+            self.assertTrue(agent.scope_supported(force=True))
+
+    def test_a_decision_with_no_gate_reason_still_says_why(self):
+        # A caller that patched only the bool (the shape several SCOPECLI tests
+        # use) must still get a stated reason, never an empty one beside
+        # "unscoped" — an unexplained unscoped run is the defect this task closes.
+        agent = self.agent
+        with mock.patch.object(agent, "scope_supported", lambda: False), \
+             mock.patch.object(agent, "scope_unsupported_reason",
+                               lambda force=False: ""), \
+             mock.patch.object(agent, "self_cgroup", lambda: "0::/init.scope"):
+            rec = agent.scope_decision(self.RUN_ID, 1)
+        self.assertEqual(rec["path"], "unscoped")
+        self.assertTrue(rec["reason"], rec)
+
+    # --- what each path prints --------------------------------------------------
+
+    def test_the_scope_line_names_the_unit_or_the_reason(self):
+        agent = self.agent
+        unit = "autoos-worker-cli-%s-a1.scope" % self.RUN_ID
+        self.assertEqual(agent.scope_line({"path": "scoped", "unit": unit,
+                                          "reason": ""}),
+                         "scope: scoped unit=%s" % unit)
+        self.assertEqual(agent.scope_line({"path": "inherited", "unit": unit,
+                                          "reason": "already inside " + unit}),
+                         "scope: inherited unit=%s" % unit)
+        self.assertEqual(agent.scope_line({"path": "unscoped", "unit": None,
+                                           "reason": "no systemd-run"}),
+                         "scope: unscoped (no systemd-run)")
+
+    def test_a_windows_client_launch_is_recorded_and_stays_quiet(self):
+        """(b) is POSIX-only: a Windows run has no scope to miss, so it must not
+        be shouted at — but its record says `unscoped (windows)` all the same."""
+        agent = self.agent
+        popen = mock.MagicMock()
+        popen.return_value.wait.return_value = 0
+        popen.return_value.pid = 4242
+        err = io.StringIO()
+        with mock.patch.object(agent.shutil, "which",
+                               lambda name, *a, **k: "/usr/bin/" + name), \
+             mock.patch.object(agent.os, "name", "nt"), \
+             mock.patch.object(agent.subprocess, "CREATE_NEW_PROCESS_GROUP",
+                               0x0800, create=True), \
+             mock.patch.object(agent.subprocess, "Popen", popen), \
+             mock.patch.object(agent, "_terminate_group"):
+            with contextlib.redirect_stderr(err):
+                rc = agent.run_client([sys.executable, "-c", "pass"], ".",
+                                      dict(os.environ), run_id=self.RUN_ID,
+                                      attempt=1)
+        self.assertEqual(int(rc), 0)
+        self.assertEqual(rc.scope, {"path": "unscoped", "unit": None,
+                                    "reason": "windows"})
+        self.assertEqual(err.getvalue(), "", err.getvalue())
+
+    # --- the records that carry it ----------------------------------------------
+
+    def _plan(self, run_id):
+        return {"run_id": run_id, "session_tag": "lane-x", "client": "opencode",
+                "model": "omniroute/r-t2", "route": {"combo": ""}, "cwd": ".",
+                "sandbox": {"path": ""}, "depth": [1, 3]}
+
+    def test_the_unit_read_out_of_a_cgroup_never_mists_init_scope_for_one(self):
+        """(c) The one place that decides "am I already in a worker scope" — both
+        `in_worker_scope()` and the inherited unit name read it from here, so
+        `0::/init.scope`, WSL's session cgroup, must yield nothing."""
+        agent = self.agent
+        outer = "autoos-worker-%s.scope" % self.RUN_ID
+        cases = (
+            ("0::/init.scope", None),
+            ("", None),
+            ("0::/system.slice/sshd.service", None),
+            ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/" + outer,
+             outer),
+            # a delegated sub-cgroup under the scope is still inside it
+            ("1:name=systemd:/user.slice/user@1000.service/" + outer + "/payload",
+             outer),
+        )
+        for text, want in cases:
+            with self.subTest(cgroup=text):
+                self.assertEqual(agent.worker_scope_unit_from_cgroup(text), want)
+                with mock.patch.object(agent, "self_cgroup", lambda t=text: t):
+                    self.assertEqual(agent.in_worker_scope(), want is not None, text)
+
+    def test_the_worker_record_carries_the_scope_of_its_own_attempt(self):
+        agent = self.agent
+        args = argparse.Namespace(task="edit README.md", title=None)
+        with mock.patch.object(agent, "scope_supported", lambda: True), \
+             mock.patch.object(agent, "self_cgroup", lambda: "0::/init.scope"):
+            with tempfile.TemporaryDirectory() as d:
+                wid, rec = agent._worker_record_start(self._plan(self.RUN_ID), args, d,
+                                                      attempt=2)
+                on_disk = json.load(open(os.path.join(d, wid + ".json")))
+                agent._worker_record_end(d, wid, rec, 0)
+                ended = json.load(open(os.path.join(d, wid + ".json")))
+                row = agent.list_workers(d, include_ended=True)[-1]
+        want = {"path": "scoped", "unit": "autoos-worker-cli-%s-a2.scope" % self.RUN_ID,
+                "reason": ""}
+        # live for the whole run: `ps` on a run in progress already says which
+        # kill channel it is on, and the ended rewrite keeps it.
+        self.assertEqual(on_disk["scope"], want)
+        self.assertEqual(ended["scope"], want)
+        self.assertEqual(row["scope"], want)
+
+    def test_a_record_written_before_this_landed_still_lists(self):
+        agent = self.agent
+        path = os.path.join(self.tmp, "old.json")
+        agent._write_worker_record(path, {"id": "old", "pid": os.getpid(),
+                                         "started": agent.utc_now_iso()})
+        rows = agent.list_workers(self.tmp)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIsNone(rows[0]["scope"], "an old record has no path to report")
+
+    def test_the_run_prints_the_scope_line_beside_the_writer_line(self):
+        agent = self.agent
+        workers = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workers, True)
+        with mock.patch.object(agent, "scope_supported", lambda: True), \
+             mock.patch.object(agent, "self_cgroup", lambda: "0::/init.scope"), \
+             mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record", lambda run_id: None):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, env_over={"AUTOOS_WORKERS_DIR": workers})
+        self.assertEqual(rc, 0, out + err)
+        rows = agent.list_workers(workers, include_ended=True)
+        self.assertEqual(len(rows), 1, rows)
+        unit = "autoos-worker-cli-%s-a1.scope" % rows[0]["id"]
+        self.assertEqual(rows[0]["scope"], {"path": "scoped", "unit": unit,
+                                            "reason": ""})
+        said = [ln for ln in out.splitlines()
+                if ln.startswith(("writer:", "scope:"))]
+        self.assertEqual(len(said), 2, out)
+        self.assertTrue(said[0].startswith("writer: mimo/mimo-7"), said)
+        self.assertEqual(said[1], "scope: scoped unit=" + unit, out)
+
+    def test_an_unscoped_run_prints_the_reason_it_gave(self):
+        agent = self.agent
+        workers = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workers, True)
+        with mock.patch.object(agent, "scope_supported", lambda: False), \
+             mock.patch.object(agent, "scope_unsupported_reason",
+                               lambda force=False: "no systemd-run"), \
+             mock.patch.object(agent, "self_cgroup", lambda: "0::/init.scope"), \
+             mock.patch.object(agent, "gateway_writer",
+                               lambda session, **kw: ("mimo", "mimo-7")), \
+             mock.patch.object(agent, "read_kill_record", lambda run_id: None):
+            rc, out, err, calls, _ = _fallthrough_run(
+                self, ["r-free"], stops=0, env_over={"AUTOOS_WORKERS_DIR": workers})
+        self.assertEqual(rc, 0, out + err)
+        row = agent.list_workers(workers, include_ended=True)[-1]
+        self.assertEqual(row["scope"], {"path": "unscoped", "unit": None,
+                                        "reason": "no systemd-run"})
+        self.assertIn("scope: unscoped (no systemd-run)", out)
+
+
 class CommittedRefSetTests(unittest.TestCase):
     """SB-A2 item C (NOOPCOMMIT): SB-A compared each ref to the sha it held at
     the START under the SAME name, so a worker that only checked out a ref that
@@ -15694,7 +16188,12 @@ class WinshimClientResolutionTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             rc = self.agent.run_client(["opencode", "run", "t"], d, dict(os.environ),
                                        capture=True)
-        self.assertEqual(seen["argv"][0], shim, seen["argv"])
+        # SCOPECLI made this host-dependent on purpose: on a machine with a user
+        # manager the launch IS wrapped, so the WINSHIM fact under test is which
+        # FILE starts, not its position in argv. The bare name must be gone.
+        self.assertIn(shim, seen["argv"], seen["argv"])
+        self.assertNotIn("opencode", seen["argv"],
+                         "the bare name was handed to Popen, not the resolved file")
         self.assertEqual(int(rc), 0, rc.tail)
         self.assertIn("shim-ran", rc.tail)
 

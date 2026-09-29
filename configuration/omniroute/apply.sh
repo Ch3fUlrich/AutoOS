@@ -14,7 +14,12 @@
 # unchanged is left alone, and a retired combo that is already gone is simply
 # not found again. Model refs the live catalog does not know are skipped with a
 # warning, so a renamed upstream model degrades one tier leg instead of breaking
-# the run.
+# the run. "Already registered" is decided from the gateway's own connection
+# list wherever a manage key makes it readable — the CLI's `providers list`
+# answers from its local store, which on a dockerised host is not the gateway
+# (see provider_already_registered). A combo whose re-create fails after the
+# retry's delete is restored from the version read before it, never reported as
+# untouched (see the Combos loop).
 #
 #   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift]
 #
@@ -619,6 +624,35 @@ sys.exit(1)
 ' "$1" "$2" <<<"$REST_BODY"
 }
 
+# rest_provider_ids - the gateway's own answer to "which connections exist".
+# Sets REST_CONNECTION_IDS to the `provider` field of every connection, one per
+# line, and exits 0 when the read answered a JSON document — an empty list is
+# still an answer (a gateway with no connections holds none). Exit 1 when the
+# gateway refused or the body was not the documented document, so the caller
+# falls back to the CLI's list.
+# Only the provider field is kept and the body is never printed: GET
+# /api/providers returns every stored apiKey.
+REST_CONNECTION_IDS=""
+rest_provider_ids() {
+    REST_CONNECTION_IDS=""
+    omni_rest GET '/api/providers?limit=5000' || return 1
+    REST_CONNECTION_IDS="$(python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+rows = doc.get("connections") if isinstance(doc, dict) else doc
+if not isinstance(rows, list):
+    sys.exit(1)
+for c in rows:
+    if isinstance(c, dict):
+        v = c.get("provider")
+        if isinstance(v, str) and v:
+            print(v)
+' <<<"$REST_BODY")" || return 1
+    return 0
+}
+
 # ensure_provider_node <provider-id> - sets the globals NODE_NOTE ("created" or
 # "existing") and NODE_ID, so the caller can say which one it was. Globals, not
 # stdout, and called without $( ): the REST calls below own the two temp files
@@ -673,10 +707,22 @@ register_provider() {
     if [[ $DRY -eq 1 ]]; then
         # Say how the connection would be made, not only that it would be: an
         # id with no built-in needs its provider node first. Reading the CLI's
-        # catalog is a read; the dry run creates no node and adds no key.
+        # catalog and the gateway's node list is a read; the dry run creates no
+        # node and adds no key. A node the gateway already holds is not "would
+        # create" — the plan must not promise to create what exists (APPLYADOPT).
         if gateway_up && provider_needs_node "$provider_id"; then
-            echo "  - $provider_id: would create its provider node (OpenAI-compatible" \
-                "endpoint ${PROVIDER_BASE[$provider_id]}) and add the key to it"
+            node_exists=0
+            if [[ -n "$REST_KEY" ]]; then
+                provider_node_id "$provider_id"
+                [[ -n "$NODE_ID" ]] && node_exists=1
+            fi
+            if [[ $node_exists -eq 1 ]]; then
+                echo "  - $provider_id: would add the key to its existing provider node" \
+                    "(${PROVIDER_BASE[$provider_id]})"
+            else
+                echo "  - $provider_id: would create its provider node (OpenAI-compatible" \
+                    "endpoint ${PROVIDER_BASE[$provider_id]}) and add the key to it"
+            fi
         fi
         echo "  - $provider_id: would register (key from $key_name)"
         # The catalog step below plans from this list too: a dry run has to say
@@ -731,6 +777,37 @@ register_provider() {
     fi
 }
 
+# provider_already_registered <provider-id> - does the gateway hold a connection
+# for this id already, so re-adding it would only duplicate it?
+# WHERE the answer comes from is the whole point. `omniroute providers list`
+# reads the CLI's own ~/.omniroute store, which on the dockerised host is not the
+# gateway: measured 2026-09-29, the CLI listed 14 connections while the gateway's
+# REST list held 32 (most of them named "main"). Deciding from the CLI therefore
+# re-added scaleway, nebius, free-ai, bazaarlink, navy, arcee-ai, bluesminds,
+# agentrouter, novita and together on a real operator's machine, and a dry run
+# planned a provider node that already existed. With a manage key the existing
+# set is therefore read from the gateway once for the whole loop
+# (EXISTING_FROM_REST, set where $existing_ids is read below), and a node
+# provider — whose connection's `provider` field is the node's "<type>-<uuid>"
+# id, never the registry id, so an id match cannot see it — is decided by its
+# node plus the connection bound to it. The CLI's list stays the fallback for a
+# run that cannot ask the gateway: no manage key (a local gateway, where the
+# CLI's store is the gateway's own), or a connection read the gateway refused.
+provider_already_registered() {
+    local provider_id="$1"
+    if [[ $EXISTING_FROM_REST -eq 1 ]]; then
+        if provider_needs_node "$provider_id"; then
+            provider_node_id "$provider_id"
+            [[ -n "$NODE_ID" ]] || return 1
+            provider_connection_exists "$NODE_ID" "$provider_id"
+        else
+            grep -qxF "$provider_id" <<<"$REST_CONNECTION_IDS"
+        fi
+        return
+    fi
+    grep -qxF "$provider_id" <<<"$existing_ids"
+}
+
 echo "Providers:"
 # A provider whose every route leg is registry-unavailable (task A5a) is
 # reported here and never touched below - no key lookup, no existing-id
@@ -744,11 +821,24 @@ done
 # A down gateway (dry run) has no list to read; the plan then comes from the
 # key file alone instead of from whatever else answers the CLI.
 existing_ids=""
+EXISTING_FROM_REST=0
 if gateway_up; then
-    existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9_-]+' | grep -oE '[a-z0-9_-]+$' || true)"
+    if [[ -n "$REST_KEY" ]] && rest_provider_ids; then
+        EXISTING_FROM_REST=1
+    else
+        if [[ -n "$REST_KEY" ]]; then
+            # Say which source decided: the CLI's store can disagree with the
+            # gateway, and an operator reading a duplicate connection afterwards
+            # needs to know this run could not ask the gateway itself. The
+            # gateway's own words are not printed — the refusal body of this
+            # endpoint is not guaranteed to be key-free.
+            echo "  ! the gateway's connection list is unreadable - deciding from the CLI's local store instead" >&2
+        fi
+        existing_ids="$(omni providers list 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+[a-z0-9_-]+' | grep -oE '[a-z0-9_-]+$' || true)"
+    fi
 fi
 for entry in "${PROVIDER_MAP[@]}"; do
-    if grep -qxF "${entry#*:}" <<<"$existing_ids"; then
+    if provider_already_registered "${entry#*:}"; then
         echo "  = ${entry#*:} already registered"
         continue
     fi
@@ -961,13 +1051,45 @@ while IFS=$'\t' read -r name strategy models; do
         combo_created=$((combo_created + 1))
         PROBE_COMBOS+=("$name")
     else
+        # The delete below is destructive and irreversible unless what it
+        # removes was read first. LIVE_COMBO_REFS/LIVE_COMBO_STRATEGY hold the
+        # combo as the store had it moments ago, so remember them BEFORE the
+        # delete: if the re-create fails too, the tier can be put back instead
+        # of being left as a hole. (The old wording claimed the previous
+        # version was "untouched" — false the moment the delete ran.)
+        had_previous=0
+        prev_refs=""
+        prev_strategy="$strategy"
+        if [[ "${LIVE_COMBO_HELD[$name]-}" == 1 ]]; then
+            had_previous=1
+            prev_refs="${LIVE_COMBO_REFS[$name]}"
+            # An empty strategy column means the live document reported none
+            # (the shape measured on 3.8.51), so the file's strategy is the best
+            # description of what was there.
+            prev_strategy="${LIVE_COMBO_STRATEGY[$name]-}"
+            [[ -n "$prev_strategy" ]] || prev_strategy="$strategy"
+        fi
         omni combo delete "$name" --yes >/dev/null 2>&1 || true
         if omni combo create "$name" --strategy "$strategy" --models "$keep" >/dev/null 2>&1; then
             echo "  + $name replaced ($strategy)"
             combo_replaced=$((combo_replaced + 1))
             PROBE_COMBOS+=("$name")
+        elif [[ $had_previous -eq 1 ]] && [[ -n "$prev_refs" ]] &&
+            omni combo create "$name" --strategy "$prev_strategy" --models "$prev_refs" >/dev/null 2>&1; then
+            echo "  ! $name creation failed - previous version restored"
+            combo_failed=$((combo_failed + 1))
+        elif [[ $had_previous -eq 1 ]] && [[ -n "$prev_refs" ]]; then
+            # Nothing restores it but the words: name the exact command the
+            # operator has to run to put the tier back. The one state this reads
+            # as lost and that is not is a delete that failed *and* left the old
+            # combo standing — the command then answers "already exists" and
+            # says so. Deliberate: this line may over-warn, it may never again
+            # assure the operator that nothing was touched after a delete.
+            echo "  ! $name creation failed - previous version LOST, restore failed:" \
+                "omniroute combo create $name --strategy $prev_strategy --models $prev_refs"
+            combo_failed=$((combo_failed + 1))
         else
-            echo "  ! $name creation failed (previous version, if any, is untouched)"
+            echo "  ! $name creation failed (no previous version)"
             combo_failed=$((combo_failed + 1))
         fi
     fi

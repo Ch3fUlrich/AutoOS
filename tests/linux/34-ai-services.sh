@@ -347,6 +347,14 @@ if [[ "${1:-} ${2:-}" == "combo create" ]]; then
             *) shift ;;
         esac
     done
+    if [[ -f "$d/fail_create" ]] && grep -qxF "$models" "$d/fail_create"; then
+        # APPLYADOPT B: a create whose legs are listed (one per line) in
+        # $d/fail_create fails, the way a gateway-side validation error does.
+        # That is how a test reaches the retry path's SECOND failure - and the
+        # restore apply owes the operator after it has already deleted.
+        printf 'Error: creating combo "%s" failed (stand-in)\n' "$name" >&2
+        exit 1
+    fi
     if ! [[ -s "$d/live.json" ]]; then
         printf 'Created combo %s.\n' "$name"; exit 0
     fi
@@ -615,6 +623,12 @@ d="$(cd "$(dirname "$0")/.." && pwd)"
 printf '%s\n' "$*" >>"$d/calls.log"
 printf '%s\n' "$*" >>"$d/argv.log"
 if [[ "${1:-} ${2:-}" == "providers list" ]]; then
+    # APPLYADOPT A: this is the divergence the live host shows today — the CLI
+    # answers from its own ~/.omniroute store while the dockerised gateway's
+    # REST list holds twice as many connections. $d/local_stale makes the list
+    # answer nothing while /api/providers still serves connections.json, so a
+    # test can tell the two sources apart.
+    [[ -f "$d/local_stale" ]] && exit 0
     # The real columns (measured 2026-09-28): 8-char hex id, provider, name,
     # status. A node-bound connection's provider is its node id, which is why
     # apply.sh's own "already registered" scan cannot see it and the REST
@@ -790,12 +804,19 @@ PY
     */api/providers*)
         # The live shape: {"connections":[…],"total":N}. The stored apiKey is a
         # stand-in, never a real value, and apply.sh must not print this body.
-        reply="$(python3 - "$d/connections.json" <<'PY'
+        # $d/no_rest makes the gateway refuse the read (a wrong-scope key, a
+        # 5xx) instead: /api/health still answers, so the gateway reads "up".
+        if [[ -f "$d/no_rest" ]]; then
+            reply='{"error":"HTTP 503"}'
+            code=503
+        else
+            reply="$(python3 - "$d/connections.json" <<'PY'
 import json, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
 print(json.dumps({"connections": rows, "total": len(rows)}))
 PY
-)" ;;
+)"
+        fi ;;
     *) reply='{}' ;;
 esac
 if [[ -n "$out" ]]; then printf '%s' "$reply" >"$out"; else printf '%s' "$reply"; fi
@@ -1068,6 +1089,169 @@ PY
         || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "an existing node with no connection was not simply bound"; fi
+fi
+
+# ─── APPLYADOPT A: the gateway, not the CLI's local store, decides ───────────
+# `omniroute providers list` reads the CLI's own ~/.omniroute store. On the
+# dockerised gateway that store is not the gateway: measured 2026-09-29, the CLI
+# listed 14 connections while GET /api/providers answered 32 (many of them named
+# "main"). Deciding "already registered" from the CLI therefore re-added
+# scaleway, nebius, free-ai, bazaarlink, navy, arcee-ai, bluesminds, agentrouter,
+# novita and together — a second connection for each, on someone's real machine.
+# With a manage key the existing set comes from the gateway's own connection
+# list. The stand-in divergence is $d/local_stale: the fake CLI's list answers
+# nothing while the fake REST surface keeps serving connections.json.
+if it "apply adopt: a connection the gateway holds but the CLI's list hides is already registered"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\nnebius: not-a-real-key-2\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([
+    {"id": "abcd0001", "provider": "scaleway", "name": "main",
+     "apiKey": "sk-stand-in-key-do-not-print", "isActive": True},
+    {"id": "abcd0002", "provider": "nebius", "name": "main",
+     "apiKey": "sk-stand-in-key-do-not-print", "isActive": True},
+], open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    # The line the CLI list could not produce, in the wording the idempotence
+    # contract already promises.
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "scaleway: $out" >&2; }
+    [[ "$out" == *"  = nebius already registered"* ]] || { ok=0; echo "nebius: $out" >&2; }
+    [[ "$out" == *"  + scaleway registered"* ]] && { ok=0; echo "a duplicate was added: $out" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "providers add ran: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    # It took the REST branch, not the convenient one: the gateway was asked,
+    # and the stale local store was never read at all.
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "no REST read: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        && { ok=0; echo "the CLI's stale store was consulted too: $(cat "$d/calls.log")" >&2; }
+    # The connection store is unchanged — two rows, no duplicates.
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "2" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    # And the body, which carries every stored apiKey, was never printed.
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    [[ "$out" == *"fake-manage-key-MUSEREG"* ]] && { ok=0; echo "the manage key was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the CLI's stale local list decided what the gateway already holds"; fi
+fi
+
+# A node provider is the harder half: its connection's `provider` field is the
+# node's own "<type>-<uuid>" id, never the registry id, so an id match against
+# the connection list cannot see it. It counts as registered when the node
+# exists AND a connection is bound to it. The dry run has to say the same —
+# before this change it planned "would create its provider node" for a node and
+# a connection that were both already there.
+if it "apply adopt: a node provider whose node and connection exist is already registered, dry run too"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000001",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a duplicate connection was added: $(cat "$d/calls.log")" >&2; }
+    : >"$d/calls.log"
+    : >"$d/curl.log"
+    out="$(_node_apply "$d" --dry-run)"
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "dry run: $out" >&2; }
+    [[ "$out" == *"would create its provider node"* ]] && { ok=0; echo "the dry run plans an existing node: $out" >&2; }
+    [[ "$out" == *"meta-api: would register"* ]] && { ok=0; echo "the dry run plans an existing connection: $out" >&2; }
+    [[ "$out" == *"would refresh meta-api's models"* ]] && { ok=0; echo "the plan registers what exists: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the dry run wrote the gateway: $(cat "$d/curl.log")" >&2; }
+    grep -qE '^providers add|^combo create' "$d/calls.log" \
+        && { ok=0; echo "the dry run called the CLI: $(cat "$d/calls.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an existing provider node and connection were planned as new"; fi
+fi
+
+# The fallback is the point of the flag, not an afterthought: a gateway that
+# refuses the connection read (a key with no manage scope, a 5xx) must leave the
+# behaviour the script had before — the CLI's list decides. Asserting the
+# fallback through the same sandbox means a REST failure cannot silently become
+# "register everything again".
+if it "apply adopt: a gateway that refuses the REST read falls back to the CLI list"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/no_rest"
+    out="$(_node_apply "$d")"
+    ok=1
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "the REST read was never attempted: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the CLI fallback never ran: $(cat "$d/calls.log")" >&2; }
+    # The degraded source is announced — an operator who later finds a duplicate
+    # connection has to be able to see that this run could not ask the gateway.
+    [[ "$out" == *"the gateway's connection list is unreadable"* ]] \
+        || { ok=0; echo "the fallback was silent: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the fallback still re-added it: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the refused body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable REST list lost the CLI fallback"; fi
+fi
+
+# A gateway with no manage key has no REST branch to take: the CLI list alone
+# decides, exactly as before. (`providers list` is what the local, non-docker
+# gateway's store answers, so the fallback is not a degraded path there.)
+if it "apply adopt: with no manage key the CLI list alone decides, and nothing is duplicated"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" 2>&1)"
+    ok=1
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the CLI list never decided: $(cat "$d/calls.log")" >&2; }
+    # No key is not a failed read: on a local gateway the CLI store IS the
+    # gateway, so this path must not cry wolf about an unreadable list.
+    [[ "$out" == *"connection list is unreadable"* ]] \
+        && { ok=0; echo "a keyless run warned about a read it never needed: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the keyless run re-added it: $(cat "$d/calls.log")" >&2; }
+    # /api/health and /v1/models are public reads and go through curl with no
+    # key; a *management* call here would mean the run guessed at a credential.
+    grep -qE '^(GET|POST) .*/api/(provider-nodes|providers)' "$d/curl.log" \
+        && { ok=0; echo "a keyless run made a management call: $(cat "$d/curl.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the no-manage-key run changed the existing-source rule"; fi
 fi
 
 # ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
@@ -1614,6 +1798,139 @@ if it "apply combos: --dry-run says what it would keep, what it would replace, a
         || { ok=0; echo "claimed a live read it could not make: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the combos dry run does not say what it would keep"; fi
+fi
+
+# ─── APPLYADOPT B: the retry path restores what it deleted ──────────────────
+# `omni combo create` refuses a name the store holds, so the retry deletes and
+# re-creates. When the re-create fails too the old tier is already gone, and
+# apply printed "previous version, if any, is untouched" — after a delete that
+# is simply false, and it hid a hole in a live tier (AGENTS.md rule 3: no
+# destructive action nobody opted into). The refs and strategy read from the
+# store BEFORE the delete are what make the restore possible, so they are
+# remembered. $d/fail_create is the stand-in's "a create with these legs fails"
+# switch (one --models value per line).
+# _combo_legs <name> [rev] - the --models value combos.json gives for <name>.
+_combo_legs() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if c["name"] == sys.argv[2]:
+        refs = list(c["models"])
+        if sys.argv[3]:
+            refs.reverse()
+        print(",".join(refs))
+        break' "$ROOT/configuration/omniroute/combos.json" "$1" "${2:-}"
+}
+# _combo_strategy <name> - the strategy combos.json asks for.
+_combo_strategy() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if c["name"] == sys.argv[2]:
+        print(c.get("strategy", "priority"))
+        break' "$ROOT/configuration/omniroute/combos.json" "$1"
+}
+# _combo_swap_victim - the first multi-leg combo, the one _combo_live_json swap
+# holds in the reversed order (so apply wants to replace it).
+_combo_swap_victim() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"])
+        break' "$ROOT/configuration/omniroute/combos.json"
+}
+
+if it "apply combos: a create that fails after the delete restores the previous version"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    strat="$(_combo_strategy "$victim")"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version restored"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    grep -qxF "combo create $victim --strategy $strat --models $old_legs" "$d/calls.log" \
+        || { ok=0; echo "creates: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    python3 - "$d/live.json" "$victim" "$old_legs" <<'PY' || ok=0
+import json, sys
+path, name, want = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+doc = json.load(open(path, encoding="utf-8"))
+combo = next((c for c in doc.get("combos", []) if c.get("name") == name), None)
+if combo is None:
+    print("the store no longer holds %s" % name)
+    sys.exit(1)
+refs = [m.get("model") for m in combo.get("models", [])]
+if refs != want:
+    print("%s legs: expected %s got %s" % (name, want, refs))
+    sys.exit(1)
+PY
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed re-create left the tier deleted and claimed it untouched"; fi
+fi
+
+if it "apply combos: a restore that fails too names the exact command, never a false claim"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    strat="$(_combo_strategy "$victim")"
+    printf '%s\n%s\n' "$new_legs" "$old_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version LOST, restore failed: \
+omniroute combo create $victim --strategy $strat --models $old_legs"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 3 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "the store still holds the combo" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a lost combo was not reported as lost, with the way back"; fi
+fi
+
+# Nothing to restore when the store never held the name: the message must say so
+# plainly, and must not invent a restore attempt for a combo that did not exist.
+if it "apply combos: a create that fails for a combo the store never held says no previous version"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_names | head -1)"
+    new_legs="$(_combo_legs "$victim")"
+    python3 - "$d/live.json" "$victim" <<'PY' >"$d/live.json.new"
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+doc["combos"] = [c for c in doc["combos"] if c["name"] != sys.argv[2]]
+print(json.dumps(doc))
+PY
+    mv "$d/live.json.new" "$d/live.json"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed (no previous version)"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    [[ "$out" == *"restored"* ]] && { ok=0; echo "claimed a restore it never attempted: $out" >&2; }
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a brand-new combo's failure was reported as a restore"; fi
 fi
 
 # A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
