@@ -4,6 +4,24 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- FREEKEYS1c (2026-09-29, operator D-153): the credit legs are priced. Three
+  registry rows matched the vendor price table by **exact** model id and got the
+  per-token price plus a dated `price_source` —
+  `morph-dsv4flash` $0.14/$0.40 (cached input $0.04), `morph-glm52-744b`
+  $1.19/$3.74 ($0.20) from morphllm.com, and deepinfra
+  `deepseek-ai/DeepSeek-V4-Flash-0731` $0.06/$0.18 from deepinfra.com. The five
+  rows the table does not name (`google/gemini-2.5-flash`, `-3.5-flash`,
+  `-3.7-flash`, `-3.1-flash-lite`, `inclusionAI/Ling-3.0-flash`) stay at 0 =
+  UNPRICED, which `autoos_usage.prices_from_registry` drops and
+  `autoos_resolver.credit_leg_priced` refuses — fail-closed, never routed as
+  priced credit. The morph legs keep their `routes.*.unavailable_legs` gate:
+  lifting it adds the leg to the rendered `configuration/omniroute/combos.json`,
+  and re-rendering that artifact is not a worker's action (R-worker-01), so the
+  gate comment now names the change that must delete the entry *and* re-render.
+  Pinned by `tests/test_autoos_usage.py` (the conversion through the guard's own
+  reader), `tests/test_autoos_resolver.py::CreditGuardCommittedRegistryTests`
+  (the one-clear-line refusal, and a sweep that every `tier: credit` leg of the
+  shipped registry is refused) and rule 14's provenance tests.
 - FREEKEYS1c (2026-09-29, operator D-153): registry validate gained **rule 14 —
   price provenance**: a model with a positive `price_in`/`price_out` must carry a
   dated `price_source` (where the number came from, when it was seen), and every

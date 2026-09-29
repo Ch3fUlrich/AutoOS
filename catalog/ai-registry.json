@@ -1328,9 +1328,10 @@
       "reasoning": true,
       "effort_ladder": [],
       "tool_calls": "proven",
-      "price_in": 0,
-      "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "price_in": 6e-08,
+      "price_out": 1.8e-07,
+      "price_source": "deepinfra vendor pricing, $0.06 in / $0.18 out per 1M (https://deepinfra.com/pricing and https://deepinfra.com/models, seen 2026-09; operator D-153 price table, exact id match deepseek-ai/DeepSeek-V4-Flash-0731); divided by 1e6 for the per-token shape tools/autoos_usage.py prices_from_registry multiplies by. No cached-input figure on the vendor page for this row, so price_cache_read stays absent.",
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-1c (operator D-153, 2026-09-29): the price columns are no longer 0 - the vendor's published $0.06 in / $0.18 out per 1M are on file, so providers.deepinfra's `tier: credit` guard can cost a call billed against this model instead of reading it as free. The row routes nowhere and never did: it is in no route's legs, and policy.leg_rules deny-deepseek (*deepseek*) denies the leg spelling anyway (V4 weights, not the operator's V4.1 Flash)."
     },
     "inclusionAI/Ling-3.0-flash": {
       "id": "inclusionAI/Ling-3.0-flash",
@@ -1379,9 +1380,11 @@
       "reasoning": true,
       "effort_ladder": [],
       "tool_calls": "proven",
-      "price_in": 0,
-      "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-dsv4flash', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "price_in": 1.4e-07,
+      "price_out": 4e-07,
+      "price_cache_read": 4e-08,
+      "price_source": "morph vendor pricing page https://morphllm.com/glm-5.2-api, seen 2026-09 (operator D-153 price table, exact id match morph-dsv4flash): $0.14 in / $0.40 out per 1M, cached input $0.04 per 1M; each figure divided by 1e6 for the per-token shape tools/autoos_usage.py prices_from_registry multiplies by.",
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-dsv4flash', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-1c (operator D-153, 2026-09-29): the price columns are no longer 0 - the vendor's published per-1M figures are on file, so providers.morph's `tier: credit` guard can cost this leg (routes.*.unavailable_legs says what still gates it)."
     },
     "morph-glm52-744b": {
       "id": "morph-glm52-744b",
@@ -1396,9 +1399,11 @@
       "reasoning": true,
       "effort_ladder": [],
       "tool_calls": "proven",
-      "price_in": 0,
-      "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-glm52-744b', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "price_in": 1.19e-06,
+      "price_out": 3.74e-06,
+      "price_cache_read": 2e-07,
+      "price_source": "morph vendor pricing page https://morphllm.com/glm-5.2-api, seen 2026-09 (operator D-153 price table, exact id match morph-glm52-744b): $1.19 in / $3.74 out per 1M, cached input $0.20 per 1M; each figure divided by 1e6 for the per-token shape tools/autoos_usage.py prices_from_registry multiplies by.",
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-glm52-744b', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-1c (operator D-153, 2026-09-29): the price columns are no longer 0 - the vendor's published per-1M figures are on file, so providers.morph's `tier: credit` guard can cost this leg (routes.*.unavailable_legs says what still gates it)."
     },
     "zai-org/GLM-5.1": {
       "id": "zai-org/GLM-5.1",
@@ -3395,7 +3400,7 @@
           "available": false
         },
         "morph/morph-dsv4flash": {
-          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-dsv4flash carries no real price (price_in/price_out 0 = 'no price on file'), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and registry.gateway_legs() must drop it here too - an unpriced grant renders as a free leg to the gateway and would drain the grant with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven, 1M advertised). GATE LIFTED BY: adding a real per-token price to the model row, then deleting this entry.",
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant). THE PRICE HAS LANDED SINCE (FREEKEYS-1c, operator D-153, 2026-09-29): models.morph-dsv4flash carries the vendor's per-token price with a dated price_source, so tools/autoos_resolver.py credit_leg_priced() no longer refuses the leg and autoos_usage.py can cost it against providers.morph.monthly_cap_usd. It stays gated here for one reason only: deleting this entry ADDS the leg to the rendered configuration/omniroute/combos.json, and a worker never regenerates a rendered artifact (tools/registry.py render is run with --check only, R-worker-01 - --out once erased 461 committed lines). GATE LIFTED BY: a change that deletes this entry AND re-renders combos.json in the same commit, so registry.py render omniroute --check stays green. Probe-passed (FREEKEYS-1: tool_calls proven, 1M advertised).",
           "available": false
         },
         "deepinfra/google/gemini-3.5-flash": {
@@ -3607,7 +3612,7 @@
       },
       "unavailable_legs": {
         "morph/morph-dsv4flash": {
-          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-dsv4flash carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant). THE PRICE HAS LANDED SINCE (FREEKEYS-1c, operator D-153, 2026-09-29): models.morph-dsv4flash carries the vendor's per-token price with a dated price_source, so tools/autoos_resolver.py credit_leg_priced() no longer refuses the leg and autoos_usage.py can cost it against providers.morph.monthly_cap_usd. It stays gated here for one reason only: deleting this entry ADDS the leg to the rendered configuration/omniroute/combos.json, and a worker never regenerates a rendered artifact (tools/registry.py render is run with --check only, R-worker-01). GATE LIFTED BY: a change that deletes this entry AND re-renders combos.json in the same commit. Probe-passed (FREEKEYS-1: tool_calls proven).",
           "available": false
         },
         "deepinfra/google/gemini-3.1-flash-lite": {
@@ -3816,7 +3821,7 @@
       },
       "unavailable_legs": {
         "morph/morph-glm52-744b": {
-          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-glm52-744b carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant). THE PRICE HAS LANDED SINCE (FREEKEYS-1c, operator D-153, 2026-09-29): models.morph-glm52-744b carries the vendor's per-token price with a dated price_source, so tools/autoos_resolver.py credit_leg_priced() no longer refuses the leg and autoos_usage.py can cost it against providers.morph.monthly_cap_usd. It stays gated here for one reason only: deleting this entry ADDS the leg to the rendered configuration/omniroute/combos.json, and a worker never regenerates a rendered artifact (tools/registry.py render is run with --check only, R-worker-01). GATE LIFTED BY: a change that deletes this entry AND re-renders combos.json in the same commit. Probe-passed (FREEKEYS-1: tool_calls proven).",
           "available": false
         },
         "deepinfra/google/gemini-3.7-flash": {
