@@ -115,10 +115,13 @@ chain onto the writer's family and labelled the result a cross-family review
 (measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
 from the WHOLE plan — the model or route picked up front and every fallthrough
 candidate — and a plan with nothing outside the fence left exits 12 instead of
-serving the run inside it. It removes them from what SERVES: when `--free` (or an
-own-account `--model` pin) already decided the model, the fence is judged on that
-model, and a gateway combo whose legs no run of this shape ever resolves does not
-refuse it (FAMILYFENCE-3 B1). `--review-of <run-id>` names the run whose WRITER this
+serving the run inside it. A name the registry carries no family under is refused
+(rc 2) before any leg choice, because a fence that excludes nothing reads as a
+guard while it is none (FAMILYFENCE-3 B2). It removes them from what SERVES: when
+`--free` (or an own-account `--model` pin) already decided the model, the fence is
+judged on that model, and a gateway combo whose legs no run of this shape ever
+resolves does not refuse it (FAMILYFENCE-3 B1). `--review-of <run-id>` names the
+run whose WRITER this
 one reviews: a review defaults to fencing that writer's family, read from that
 run's runner-private kill record and never from its job.json (skill R-orch-17 —
 job.json lives in the directory the worker owns). A review with neither is
@@ -3703,6 +3706,31 @@ def fence_family_names(values):
         if key and key not in out:
             out.append(key)
     return out
+
+
+def registry_family_names(registry):
+    """Every family the registry itself declares, in `resolver.family_key` form.
+
+    The `models` rows and `policy.reviewers` rows — the same two sources
+    `reviewer_family` reads, so a name this lists as known and the family a fence
+    compares against cannot drift apart (FAMILYFENCE-3 B2)."""
+    out = []
+    models = (registry or {}).get("models") or {}
+    rows = list(models.values()) if isinstance(models, dict) else list(models)
+    for entry in rows + list(((registry or {}).get("policy") or {})
+                             .get("reviewers") or []):
+        key = resolver.family_key((entry or {}).get("family"))
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def fence_name_refusal(unknown, known):
+    """FAMILYFENCE-3 B2: a `--not-family` that names no family the registry
+    carries excludes nothing, and the run reads as fenced while nothing is.
+    The refusal names both halves: what was typed, and what could be fenced."""
+    return ("--not-family %s names no family the registry carries (known: %s)"
+            % (", ".join(unknown), ", ".join(sorted(known))))
 
 
 def writer_family_of_run(run_id, read=None):
@@ -7333,6 +7361,25 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--review-of %r is not a canonical run id "
                       "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as the spawner "
                       "mints one)" % (args.review_of, RUN_ID_SLUG_CAP), 2)
+    # FAMILYFENCE-3 B2: a `--not-family` the registry carries no family under
+    # ("mimo" while the model opencode/mimo-v2.6-flash-free is family `xiaomi`)
+    # excluded nothing, and the run planned and launched reading as fenced while
+    # it was not. Only the names THIS caller typed are checked — a writer family
+    # the fence read out of a kill record is the registry's own answer already.
+    # An unreadable registry or one that declares no family at all is not evidence
+    # a name is wrong, so the check stands down rather than refuse every fence.
+    typed_families = fence_family_names(getattr(args, "not_family", None))
+    if typed_families:
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None
+        known_families = registry_family_names(registry)
+        if known_families:
+            unknown = [name for name in typed_families if name not in known_families]
+            if unknown:
+                return refuse(fence_name_refusal(unknown, known_families), 2)
     if fence["warn_no_writer"]:
         print(FAMILY_FENCE_NO_WRITER, file=sys.stderr)
     # SPAWNFREE (S2) item 1: the free-model chain, read BEFORE the plan because

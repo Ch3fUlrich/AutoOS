@@ -14751,6 +14751,52 @@ class FamilyFenceServingModelTests(unittest.TestCase):
         self.assertIn("use --free or pin --model outside family nvidia", err)
 
 
+class FamilyFenceUnknownNameTests(unittest.TestCase):
+    """FAMILYFENCE-3 B2: a `--not-family` naming no family the registry carries
+    (e.g. "mimo" while the registry says the model's family is "xiaomi") excluded
+    nothing at all, and the run planned and launched as if it were fenced. The
+    name is refused (rc 2) with the known families named, before any leg choice."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def test_an_unknown_not_family_is_refused_naming_the_known_families(self):
+        env = clean_env(AUTOOS_STATE_DIR=tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        r = run_agent("run", "--client", "opencode",
+                      "--card", "role=review,complexity=trivial",
+                      "--free", "--isolate", "--lean",
+                      "--not-family", "mimo", "--dry-run", "PONG", env=env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        combined = r.stdout + r.stderr
+        self.assertIn("mimo", combined)
+        self.assertIn("xiaomi", combined)
+        self.assertNotIn("would run", combined)
+
+    def test_an_unknown_name_refuses_before_anything_launches(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["ghostfam"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("ghostfam", err)
+        self.assertIn("nvidia", err)
+
+    def test_a_name_the_registry_carries_still_costs_the_run_its_fence(self):
+        # The regression half: a KNOWN name keeps the fence's own exit code — the
+        # check is about the name, never about weakening the fence.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["NVIDIA"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+
 class NoFallthroughTests(unittest.TestCase):
     """FAMILYFENCE item 3: `--no-fallthrough` pins the run to the model it was
     planned on. An orchestrator that wants a verdict from one named model would

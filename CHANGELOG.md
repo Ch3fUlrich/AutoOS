@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a `--not-family` name the registry does not carry is refused, not a silent no-op (FAMILYFENCE-3 B2, 2026-09-29)
+
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family mimo --dry-run` exited **0** and planned the run: `mimo` names no family
+the registry declares — `opencode/mimo-v2.6-flash-free` is family `xiaomi` — so the
+fence excluded nothing while the run read, to its caller and to any later judge, as a
+guarded review. A typo in a safety flag must not downgrade the flag to a comment.
+
+- **`registry_family_names`** (`tools/autoos-agent.py`): the known families are the
+  `models` rows' and `policy.reviewers` rows' `family` fields in `resolver.family_key`
+  form — the same two sources `reviewer_family` compares against, so the name check and
+  the fence cannot drift. `cmd_run` checks the names *this caller typed* (a writer
+  family read from a kill record is already the registry's own answer) right after the
+  fence is built and before any leg is chosen; an unknown name exits 2 naming it and
+  the known families (`fence_name_refusal`). An unreadable registry, or one that
+  declares no family at all, is not evidence a name is wrong — the check stands down.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceUnknownNameTests`): the live
+  `--not-family mimo` case (rc 2, names `mimo`, lists `xiaomi`, plans nothing), a stub
+  refusal that launches nothing, and the regression that a known name — any spelling of
+  it — keeps the fence's own exit 12.
+
 ### Fixed — the fence judges the model that serves, not a combo that never does (FAMILYFENCE-3 B1, 2026-09-29)
 
 A live smoke from the FAMILYFENCE-b tip refused a run it must not:
