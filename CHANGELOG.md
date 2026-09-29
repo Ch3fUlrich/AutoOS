@@ -93,6 +93,76 @@ unscoped, so its client led nothing but a new session — no cgroup at all, and
   `test_on_posix_a_resolvable_client_still_runs` asserted `argv[0] == <shim>`, which is only
   true on a host that cannot scope. It now asserts the resolved file is in the argv and the
   bare name is not — the WINSHIM fact — so it holds in both launch shapes.
+### Fixed — the REST adoption c7ca607 added is hardened (APPLYADOPT-2, 2026-09-29)
+
+Eight non-blocking findings from review of c7ca607, all in `configuration/omniroute/apply.sh`.
+Each was a sentence the run could print that was not true, or a credential in the wrong place:
+
+- **"(no previous version)" could be a guess.** The retry path printed it whenever
+  `LIVE_COMBO_HELD` did not name the combo — including a run whose live combo list was never
+  read (`! live combo list unreadable - replacing every combo`), where the delete had just
+  removed a tier nobody had looked at. It now says
+  `! <name> creation failed - previous version unknown (live list unreadable)` in that case, and
+  keeps "(no previous version)" only when the store *was* readable and did not hold the name.
+- **A restore could put back a shorter tier.** `live_combo_norm` skipped a step whose shape it
+  did not understand and printed the refs it did read, so the restore wrote a combo with the
+  unknown leg silently missing and announced "previous version restored". The normaliser now
+  prints a fourth column — the number of steps it could not read — and the retry path refuses to
+  restore a combo whose count is non-zero: `! <name> creation failed - previous version LOST,
+  restore refused: … recreate <name> from your own record …`. `--drift` tolerates the extra
+  column (it compares legs, and a short leg list is already drift).
+- **An inactive connection counted as registered.** `isActive: false` is the dashboard's
+  disabled toggle: the row exists and routes nothing, so the old code promised the operator a
+  working provider and never added the one connection that would work. A disabled connection is
+  now *not* registered — and apply adds no second one either, because that is not the fix; it
+  prints `! <id> has an inactive connection - enable it in the dashboard` and moves on. Same rule
+  on the node-bound path (`register_provider` re-reads the binding after the node check).
+- **Another node's connection could be adopted by name.** `provider_connection_exists` matched
+  `provider == <node-id>` **or** `name == <provider-id>`, and the name is only ever the registry
+  id apply itself passes — so a connection left behind on a *different* provider node (a renamed
+  or re-created node) satisfied the check, and the provider read as registered with its key bound
+  to an endpoint the registry does not name. The name now decides only for a connection carrying
+  this node's id or the registry id as its provider; the node id alone is sufficient.
+- **A truncated page was read as the whole list.** `{"connections":[…],"total":N}` with `N`
+  beyond the rows served is a slice, and deciding "not registered" from a slice adds a duplicate
+  connection. `omni_connections` refuses it (exit 2 from the parser), the Providers step falls
+  back to the CLI's list, and the one line it prints names the actual condition —
+  `! the gateway's connection list is partial - deciding from the CLI's local store instead` —
+  instead of the generic "unreadable".
+- **The key-carrying body outlived the parse.** `GET /api/providers` returns every stored
+  `apiKey`; `REST_BODY` was left set after the rows were read, so anything later in the run that
+  prints a captured body could find that one. Cleared the moment the parse has consumed it.
+- **`register_provider` leaked a global.** `node_exists` was assigned bare inside the dry-run
+  branch. Declared in the function's `local` block with the rest of its state.
+- **The omniroute client key was in argv.** The catalog read was
+  `curl -sf -H "Authorization: Bearer <client key>" $GATEWAY/v1/models` — readable by every user
+  on the machine out of `ps` for the lifetime of the call, the exact thing `omni_rest` exists to
+  avoid. The read now goes through `omni_rest`, which gained a bearer argument (the manage key
+  stays the default) and writes the token into its 0600 `curl --config` file that the interrupt
+  trap removes on every path. No second copy of that code.
+
+`omni_rest`'s doc comment records the bash trap the fallback line had to route around: an
+apostrophe inside a `${VAR:-default}` expansion *within a double-quoted string* makes bash fail
+to parse the whole script (`unexpected EOF while looking for matching '`), so the default is
+assigned in a variable first.
+
+Tests: eight new cases in `tests/linux/34-ai-services.sh`, each with one new switch on the
+stand-in side. `$d/require_bearer` makes the fake curl answer `/v1/models` only from a bearer it
+reads out of apply's own config file (recording what it found in `bearer.log`), so a key sent as
+`-H` argv fails the case twice over; `$d/partial_total` reports a `total` beyond the rows served;
+`isActive: false` rows and a connection bound to a second node need no switch beyond
+`connections.json`/`nodes.json`. The two restore cases drive `$d/live.fail` (store unreadable,
+combo present in `live.json`) and `_drift_json … broken` (a `{"kind":"combo"}` step in the same
+tier `swap` reverses) — the broken-leg case is the one that matters: without the guard the third
+create *succeeds* against the stand-in, because the legs a partial restore drops are not the ones
+listed in `fail_create`. Red before: all eight. Green after: `--filter apply` 70 / 0,
+`--filter 'node,prune,drift,combo'` 48 / 0, shellcheck clean on `apply.sh`, pytest 176 passed.
+No run touched a live gateway.
+
+**Out of scope:** `configuration/omniroute/apply.ps1:418` still prints the "untouched" line and
+still decides from the local CLI list (recorded under APPLYADOPT above); the Windows twin takes
+these eight in its own lane.
+
 ### Fixed — apply adopts the live gateway's connections, and a failed combo re-create restores (APPLYADOPT, 2026-09-29)
 
 Two false statements in `configuration/omniroute/apply.sh`, both measured on the dockerised
