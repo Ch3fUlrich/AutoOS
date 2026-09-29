@@ -706,6 +706,11 @@ if it "probe-recall: multi-needle recall probe writes the overlay (unit tests)";
     out="$(python3 tests/test_probe_recall.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/claude-cli-lag.py: version lag check, no pin (CLIPIN / D-137).
+if it "claude-cli-lag: host version vs the newest release and the autoupdater state (unit tests)"; then
+    out="$(python3 tests/test_claude_cli_lag.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/autoos_report.py: BRIEF/REPORT protocol parser (routing v2 spec 5.7, 8.2).
 if it "autoos_report: BRIEF/REPORT protocol parser (unit tests)"; then
     out="$(python3 tests/test_autoos_report.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
