@@ -845,6 +845,50 @@ class HookInstallTests(RepoFixture):
         self.assertFalse((self.hooks_dir() / "pre-push").exists())
         self.assertIn("prepush", out.lower())
 
+    def push_lane(self, origin):
+        proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin),
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def origin_refs(self, origin):
+        return run_git("--git-dir", str(origin), "for-each-ref", cwd=self.repo)
+
+    def test_a_gate_that_is_not_there_refuses_the_push(self):
+        # NB2: the shim exited 0 when tools/prepush.py was missing, so a lane that
+        # lost the gate — rebased onto a base without it, checked out an older
+        # branch — pushed exactly the untested sha the gate exists to stop, while
+        # the installer's message said it was installed. A check that cannot run is
+        # not a check that passed: refuse, and let an orchestrator step over it with
+        # the recorded override (which `--check-ready` then refuses to call ready).
+        origin = self.tmp / "origin.git"
+        run_git("init", "-q", "--bare", str(origin))
+        self.install()
+        os.remove(str(self.repo / "tools" / "prepush.py"))
+        rc, out = self.push_lane(origin)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("nothing was checked", out)
+        self.assertEqual(self.origin_refs(origin), "", "the push landed past a gate "
+                         "that never ran")
+
+    @unittest.skipIf(os.name == "nt", "the chained hook is an sh script run by touch")
+    def test_a_gate_that_is_not_there_does_not_hand_over_to_the_operators_hook(self):
+        # The chain is what runs *after* the gate passes. Handing over because the
+        # gate could not be found would make the fail-closed refusal the operator's
+        # hook's problem — and an operator hook that exits 0 would push the branch.
+        origin = self.tmp / "origin.git"
+        run_git("init", "-q", "--bare", str(origin))
+        self.install()
+        trust = _load("trust_worktree_for_chained", self.TRUST)
+        chained = self.hooks_dir() / trust.CHAINED_NAME
+        marker = self.tmp / "operator-hook-ran.txt"
+        chained.write_text("#!/bin/sh\ntouch %s\nexit 0\n" % str(marker), encoding="utf-8")
+        chained.chmod(0o755)
+        os.remove(str(self.repo / "tools" / "prepush.py"))
+        rc, out = self.push_lane(origin)
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(marker.exists(), "the shim exec'd the chained hook with no "
+                         "gate in front of it")
+
     def test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it(self):
         # NB1: `installed` into `.git/hooks` is a lie when the operator set
         # core.hooksPath — git reads the other directory and the lane pushes untested

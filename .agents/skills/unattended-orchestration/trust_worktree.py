@@ -358,7 +358,16 @@ def hooks_dir(worktree: Path) -> Path | None:
 
 
 def hook_text() -> str:
-    """The shim: run the gate, then exec the chained hook if there is one."""
+    """The shim: run the gate, then exec the chained hook if there is one.
+
+    A missing gate is a refusal, not a pass (NB2): a lane that lost
+    ``tools/prepush.py`` — rebased onto a base without it, checked out an older
+    branch — would otherwise push exactly the untested sha the gate exists to stop.
+    The chained hook is what runs *after* the gate passes, so it is not exec'd here.
+    An orchestrator that means to step over the gate does it with the logged
+    override (``AUTOOS_PREPUSH_OVERRIDE``), which leaves a record ``--check-ready``
+    refuses to call ready.
+    """
     return (
         "#!/bin/sh\n"
         "# %s — installed by .agents/skills/unattended-orchestration/"
@@ -368,8 +377,10 @@ def hook_text() -> str:
         "root=$(git rev-parse --show-toplevel) || exit 1\n"
         'gate="$root/tools/prepush.py"\n'
         'if [ ! -f "$gate" ]; then\n'
-        '    echo "pre-push gate: no $gate -- nothing was checked" >&2\n'
-        "    exit 0\n"
+        '    echo "pre-push gate: no $gate -- nothing was checked, refusing" >&2\n'
+        '    echo "pre-push gate: to step over the gate deliberately, run it with" >&2\n'
+        '    echo "  AUTOOS_PREPUSH_OVERRIDE=<reason>, which leaves a record." >&2\n'
+        "    exit 1\n"
         "fi\n"
         'if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; else py=python3; fi\n'
         '"$py" "$gate" || exit 1\n'
