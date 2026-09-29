@@ -316,7 +316,7 @@ class SettingsShapeTests(unittest.TestCase):
         # The scope tables below exercise the rendered file through decide(),
         # so decide() must read the same `permissions` object the CLI reads.
         profile = load_profile("l1-coordinator")
-        self.assertEqual(decide(profile, "Bash", "git push origin wt-example-1"), "allow")
+        self.assertEqual(decide(profile, "Bash", "git push origin L1-routing/x"), "allow")
         self.assertEqual(decide(profile, "Bash", "git push origin main"), "deny")
         bare_old_shape = {"allow": ["Bash(git push:*)"], "deny": ["Bash(*git push * main)"]}
         self.assertEqual(decide(bare_old_shape, "Bash", "git push origin main"), "none")
@@ -369,12 +369,15 @@ BRANCH_DENY_COMMANDS = (
 # remotes (e.g. `git push upstream wt-example-1`) are no longer pre-granted
 # - they fall to the permission prompt (none), tested in the round-8
 # falls-to-prompt table, not here.
+# Round 12: the L1 grant is lane-prefix shaped (L1-*, L2-*, WS-*, worktree-*).
+# Only these prefixes are pre-granted.
 BRANCH_LANE_COMMANDS = (
-    "git push origin wt-example-1",
-    "git push origin agent/20260928-120000-example-task-a1b2c3",
-    "git push origin main2",
-    "git push origin WS-FOO",
-    "git push -u origin L1-backlog/x",
+    "git push origin L1-routing/x",
+    "git push origin L2-general/wt-example-1",
+    "git push origin WS-OMNIREMOTE",
+    "git push origin worktree-abc",
+    "git push -u origin L1-routing/x",
+    "git push -q origin L2-general/wt-example-1",
 )
 
 # L2 own-prefix pushes (round 3, D-138): the only pushes the l2-orchestrator
@@ -859,10 +862,22 @@ class BranchScopeTests(unittest.TestCase):
             for command in BRANCH_LANE_COMMANDS:
                 with self.subTest(role=role, command=command):
                     self.assertEqual(decide(profile, "Bash", command), "deny")
-        for role in UNGRANTED_ROLES + L2_ROLES:
+        # L2 grant covers L2-* prefix (plain and -u only), so L2 lane commands
+        # with plain/-u are allowed on L2. Other lane prefixes and -q variant get none.
+        # Ungranted roles (l0-router) get none
+        for role in UNGRANTED_ROLES:
             profile = load_profile(role)
             for command in BRANCH_LANE_COMMANDS:
                 with self.subTest(role=role, command=command):
+                    self.assertEqual(decide(profile, "Bash", command), "none")
+        # L2 role: L2-* plain/-u commands allowed, other lane prefixes and -q none
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_LANE_COMMANDS:
+            with self.subTest(role="l2-orchestrator", command=command):
+                # L2 grant: git push origin L2-* and git push -u origin L2-*
+                if command.startswith("git push origin L2-") or command.startswith("git push -u origin L2-"):
+                    self.assertEqual(decide(profile, "Bash", command), "allow")
+                else:
                     self.assertEqual(decide(profile, "Bash", command), "none")
 
     def test_explicit_main_dispatch_of_gh_workflow_run_is_denied(self):
@@ -885,13 +900,13 @@ class BranchScopeTests(unittest.TestCase):
     def test_lane_dispatch_of_gh_workflow_run_is_l1_only(self):
         for role in L1_ROLES:
             profile = load_profile(role)
-            command = "gh workflow run ci.yml --ref wt-example-1"
+            command = "gh workflow run ci.yml --ref L1-routing/x"
             with self.subTest(role=role, command=command):
                 self.assertFalse(decide_deny(profile, "Bash", command))
                 self.assertEqual(decide(profile, "Bash", command), "allow")
         for role in UNGRANTED_ROLES + L2_ROLES + LEAF_ROLES:
             profile = load_profile(role)
-            command = "gh workflow run ci.yml --ref wt-example-1"
+            command = "gh workflow run ci.yml --ref L1-routing/x"
             with self.subTest(role=role, command=command):
                 self.assertEqual(decide(profile, "Bash", command), "none")
 
@@ -1187,38 +1202,40 @@ class L2ScopeTests(unittest.TestCase):
                 self.assertEqual(decide(profile, "Bash", command), "allow")
 
     def test_l1_l0_leaf_results_unchanged_for_l2_shape_commands(self):
-        # Round 5: the new shape denies render ONLY into the
-        # l2-orchestrator profile, so every other role decides these
-        # commands exactly as before this round - pinned per command,
-        # because unlike round 4 the L1/l0 decisions are mixed here (L1
-        # allows the unlisted-option shapes via its full lane-push grant
-        # and denies the fenced ones; l0 mirrors that as none/deny).
-        # Leaves deny every row via the leaf push fence.
-        pinned = dict(
-            (command, (l1, l0)) for command, l1, l0 in BRANCH_L2_ROUND5_OTHER_ROLES
+        # Round 5: the L2 shape denies render ONLY into the
+        # l2-orchestrator profile. L1 now has its own shape denies (round 12)
+        # which cover similar ground. This test verifies the L2-only commands
+        # still behave correctly on L2, and that L1/L0/leaf results for
+        # non-L1-shape commands are unchanged.
+        # L1 lane grant covers L2-* as a lane prefix. Trailing args after
+        # the ref are denied by L1 push deny. Leading options (--force, -f)
+        # are denied by MAIN_FENCE. Refs/heads/ source is not covered.
+        l2_trailing_args_commands = (
+            "git push origin L2-x L1-foo",
+            "git push origin L2-x L2-y",
+            "git push origin L2-x --prune",
+            "git push origin L2-x --no-verify",
+            "git push origin L2-x -o x",
+            "git push -u origin L2-x L1-foo",
+            "git push -u origin L2-x --prune",
         )
-        commands = (
-            BRANCH_L2_TRAILING_DENY_COMMANDS
-            + BRANCH_L2_LEADING_OPTION_DENY_COMMANDS
-        )
-        self.assertEqual(set(pinned), set(commands))
-        for command in commands:
-            l1_expected, l0_expected = pinned[command]
+        for command in l2_trailing_args_commands:
             for role in L1_ROLES:
                 profile = load_profile(role)
                 with self.subTest(role=role, command=command):
+                    # L1 push deny catches trailing args after lane ref
                     self.assertEqual(
                         decide(profile, "Bash", command),
-                        l1_expected,
-                        "%s is not %s on %s" % (command, l1_expected, role),
+                        "deny",
+                        "%s is not deny on %s" % (command, role),
                     )
             for role in UNGRANTED_ROLES:
                 profile = load_profile(role)
                 with self.subTest(role=role, command=command):
                     self.assertEqual(
                         decide(profile, "Bash", command),
-                        l0_expected,
-                        "%s is not %s on %s" % (command, l0_expected, role),
+                        "none",
+                        "%s is not none on %s" % (command, role),
                     )
             for role in LEAF_ROLES:
                 profile = load_profile(role)
@@ -1228,13 +1245,72 @@ class L2ScopeTests(unittest.TestCase):
                         "deny",
                         "%s is not denied by %s" % (command, role),
                     )
+        # Leading options denied by MAIN_FENCE on all roles (--force, -f, --tags)
+        # --prune is denied by L1 shape deny on L1 roles only; l0-router gets none
+        l2_leading_option_commands_main = (
+            "git push origin L2-x --force",
+            "git push origin L2-x --force-with-lease",
+            "git push origin L2-x -f",
+            "git push origin L2-x --tags",
+            "git push --force origin L2-x",
+            "git push -f origin L2-x",
+        )
+        for command in l2_leading_option_commands_main:
+            for role in L1_ROLES + UNGRANTED_ROLES:
+                profile = load_profile(role)
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "deny",
+                        "%s is not deny on %s" % (command, role),
+                    )
+            for role in LEAF_ROLES:
+                profile = load_profile(role)
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        decide(profile, "Bash", command),
+                        "deny",
+                        "%s is not denied by %s" % (command, role),
+                    )
+        # --prune is denied by L1 shape deny on L1 roles; l0-router gets none
+        for role in L1_ROLES:
+            profile = load_profile(role)
+            with self.subTest(role=role, command="git push --prune origin L2-x"):
+                self.assertEqual(
+                    decide(profile, "Bash", "git push --prune origin L2-x"),
+                    "deny",
+                    "git push --prune origin L2-x is not deny on %s" % role,
+                )
+        for role in UNGRANTED_ROLES:
+            profile = load_profile(role)
+            with self.subTest(role=role, command="git push --prune origin L2-x"):
+                self.assertEqual(
+                    decide(profile, "Bash", "git push --prune origin L2-x"),
+                    "none",
+                    "git push --prune origin L2-x is not none on %s" % role,
+                )
+        for role in LEAF_ROLES:
+            profile = load_profile(role)
+            with self.subTest(role=role, command="git push --prune origin L2-x"):
+                self.assertEqual(
+                    decide(profile, "Bash", "git push --prune origin L2-x"),
+                    "deny",
+                    "git push --prune origin L2-x is not denied by %s" % role,
+                )
+        # L2 own-prefix commands still allow on L2
+        profile = load_profile("l2-orchestrator")
+        for command in BRANCH_L2_PLAIN_ALLOW_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(decide_deny(profile, "Bash", command))
+                self.assertEqual(decide(profile, "Bash", command), "allow")
 
     def test_l1_l0_leaf_results_unchanged_for_l2_fence_commands(self):
-        # Round 4: the new colon/refs/delete denies render ONLY into the
-        # l2-orchestrator profile, so every other role decides these
-        # commands exactly as before this round: L1 allows (the full
-        # lane-push grant, no new deny), l0-router stays unlisted
-        # (fail closed), leaves stay denied (the leaf push fence).
+        # Round 4: the L2-only colon/refs/delete denies render ONLY into the
+        # l2-orchestrator profile. L1 now has a lane-prefix grant that covers
+        # L2-* as a lane prefix (round 12), so L2 refspecs to lane destinations
+        # are allowed on L1. Commands with refs/heads/ source are not covered.
+        # L1 push deny catches trailing flags (--delete, -d) after lane ref.
+        # Lane delete form (:L2-x) is allowed. Leaves deny every push.
         commands = (
             BRANCH_L2_REFSPEC_DENY_COMMANDS
             + BRANCH_L2_DELETE_DENY_COMMANDS
@@ -1243,10 +1319,26 @@ class L2ScopeTests(unittest.TestCase):
             profile = load_profile(role)
             for command in commands:
                 with self.subTest(role=role, command=command):
+                    # L1 lane grant covers L2-* prefix. RefSpecs to lane
+                    # destinations (L1-foo, etc.) are allowed. RefSpecs with
+                    # refs/heads/ source are not covered (none).
+                    # Trailing --delete/-d after lane ref are denied by L1 push deny.
+                    # Lane delete form (:L2-x) is allowed.
+                    if command.startswith("git push origin refs/heads/"):
+                        expected = "none"
+                    elif command.endswith(" --delete") or command.endswith(" -d"):
+                        expected = "deny"
+                    elif command in ("git push origin --delete L2-x", "git push origin -d L2-x"):
+                        # Leading flag forms not covered by allow
+                        expected = "none"
+                    elif command == "git push origin :L2-x":
+                        expected = "allow"
+                    else:
+                        expected = "allow"
                     self.assertEqual(
                         decide(profile, "Bash", command),
-                        "allow",
-                        "%s is not allowed by %s" % (command, role),
+                        expected,
+                        "%s is not %s on %s" % (command, expected, role),
                     )
         for role in UNGRANTED_ROLES:
             profile = load_profile(role)
@@ -1699,7 +1791,7 @@ class WrapperScopeTests(unittest.TestCase):
                     )
 
     def test_compound_lane_push_is_pre_granted_to_l1_only(self):
-        command = "git push origin wt-a && git push origin wt-b"
+        command = "git push origin L1-routing/a && git push origin L1-routing/b"
         for role in L1_ROLES:
             with self.subTest(role=role):
                 self.assertEqual(decide(load_profile(role), "Bash", command), "allow")
@@ -2105,6 +2197,103 @@ CONTRADICTION_TARGETS = {
     # The :heads/main patterns also match the -q variant
     "Bash(*git push *:heads/main)": "git push -q origin FETCH_HEAD:heads/main",
     "Bash(*git push *:heads/main *)": "git push -q origin FETCH_HEAD:heads/main --dry-run",
+    # Round-12 tag push denies (every role)
+    "Bash(*git push *refs/tags*)": "git push origin refs/tags/v1.0",
+    "Bash(*git push *--follow-tags*)": "git push origin L1-x --follow-tags",
+    "Bash(*git push *tag *)": "git push origin tag v1.0",
+    # Round-12 glob character denies (every role)
+    # fnmatch pattern [*?] matches a single * or ? character
+    "Bash(*git push *refs/heads/[*?]*)": "git push origin refs/heads/*",
+    "Bash(*git push *refs/[*?]*)": "git push origin refs/*",
+    "Bash(*git push *[*?]*:refs/heads/*)": "git push origin *:refs/heads/main",
+    # Round-12 L1 push deny (trailing args after lane ref) - l1-coordinator, l1-routing
+    "Bash(git push origin L1-* *)": "git push origin L1-x L1-foo",
+    "Bash(git push -u origin L1-* *)": "git push -u origin L1-x L1-foo",
+    "Bash(git push -q origin L1-* *)": "git push -q origin L1-x L1-foo",
+    "Bash(git push origin L2-* *)": "git push origin L2-x L1-foo",
+    "Bash(git push -u origin L2-* *)": "git push -u origin L2-x L1-foo",
+    "Bash(git push -q origin L2-* *)": "git push -q origin L2-x L1-foo",
+    "Bash(git push origin WS-* *)": "git push origin WS-x L1-foo",
+    "Bash(git push -u origin WS-* *)": "git push -u origin WS-x L1-foo",
+    "Bash(git push -q origin WS-* *)": "git push -q origin WS-x L1-foo",
+    "Bash(git push origin worktree-* *)": "git push origin worktree-x L1-foo",
+    "Bash(git push -u origin worktree-* *)": "git push -u origin worktree-x L1-foo",
+    "Bash(git push -q origin worktree-* *)": "git push -q origin worktree-x L1-foo",
+    # Round-12 L1 push deny (leading options before lane ref) - l1-coordinator, l1-routing
+    "Bash(git push --* origin L1-*)": "git push --prune origin L1-x",
+    "Bash(git push -f origin L1-*)": "git push -f origin L1-x",
+    "Bash(git push -d origin L1-*)": "git push -d origin L1-x",
+    "Bash(git push --* origin L2-*)": "git push --prune origin L2-x",
+    "Bash(git push -f origin L2-*)": "git push -f origin L2-x",
+    "Bash(git push -d origin L2-*)": "git push -d origin L2-x",
+    "Bash(git push --* origin WS-*)": "git push --prune origin WS-x",
+    "Bash(git push -f origin WS-*)": "git push -f origin WS-x",
+    "Bash(git push -d origin WS-*)": "git push -d origin WS-x",
+    "Bash(git push --* origin worktree-*)": "git push --prune origin worktree-x",
+    "Bash(git push -f origin worktree-*)": "git push -f origin worktree-x",
+    "Bash(git push -d origin worktree-*)": "git push -d origin worktree-x",
+    # Round-12 L1 workflow deny (trailing args after lane ref) - l1-coordinator, l1-routing
+    "Bash(gh workflow run * --ref L1-* *)": "gh workflow run ci.yml --ref L1-x --job build",
+    "Bash(gh workflow run * --ref=L1-* *)": "gh workflow run ci.yml --ref=L1-x --job build",
+    "Bash(gh workflow run * --ref L2-* *)": "gh workflow run ci.yml --ref L2-x --job build",
+    "Bash(gh workflow run * --ref=L2-* *)": "gh workflow run ci.yml --ref=L2-x --job build",
+    "Bash(gh workflow run * --ref WS-* *)": "gh workflow run ci.yml --ref WS-x --job build",
+    "Bash(gh workflow run * --ref=WS-* *)": "gh workflow run ci.yml --ref=WS-x --job build",
+    "Bash(gh workflow run * --ref worktree-* *)": "gh workflow run ci.yml --ref worktree-x --job build",
+    "Bash(gh workflow run * --ref=worktree-* *)": "gh workflow run ci.yml --ref=worktree-x --job build",
+    # Round-12 L1 refspec deny (destination not a lane prefix) - l1-coordinator, l1-routing
+    "Bash(git push origin L1-*:refs/heads/develop*)": "git push origin L1-x:refs/heads/develop",
+    "Bash(git push origin L1-*:develop*)": "git push origin L1-x:develop",
+    "Bash(git push origin L1-*:refs/heads/feature*)": "git push origin L1-x:refs/heads/feature",
+    "Bash(git push origin L1-*:feature*)": "git push origin L1-x:feature",
+    "Bash(git push origin L1-*:refs/heads/release*)": "git push origin L1-x:refs/heads/release",
+    "Bash(git push origin L1-*:release*)": "git push origin L1-x:release",
+    "Bash(git push origin L1-*:refs/heads/hotfix*)": "git push origin L1-x:refs/heads/hotfix",
+    "Bash(git push origin L1-*:hotfix*)": "git push origin L1-x:hotfix",
+    "Bash(git push origin L2-*:refs/heads/develop*)": "git push origin L2-x:refs/heads/develop",
+    "Bash(git push origin L2-*:develop*)": "git push origin L2-x:develop",
+    "Bash(git push origin L2-*:refs/heads/feature*)": "git push origin L2-x:refs/heads/feature",
+    "Bash(git push origin L2-*:feature*)": "git push origin L2-x:feature",
+    "Bash(git push origin L2-*:refs/heads/release*)": "git push origin L2-x:refs/heads/release",
+    "Bash(git push origin L2-*:release*)": "git push origin L2-x:release",
+    "Bash(git push origin L2-*:refs/heads/hotfix*)": "git push origin L2-x:refs/heads/hotfix",
+    "Bash(git push origin L2-*:hotfix*)": "git push origin L2-x:hotfix",
+    "Bash(git push origin WS-*:refs/heads/develop*)": "git push origin WS-x:refs/heads/develop",
+    "Bash(git push origin WS-*:develop*)": "git push origin WS-x:develop",
+    "Bash(git push origin WS-*:refs/heads/feature*)": "git push origin WS-x:refs/heads/feature",
+    "Bash(git push origin WS-*:feature*)": "git push origin WS-x:feature",
+    "Bash(git push origin WS-*:refs/heads/release*)": "git push origin WS-x:refs/heads/release",
+    "Bash(git push origin WS-*:release*)": "git push origin WS-x:release",
+    "Bash(git push origin WS-*:refs/heads/hotfix*)": "git push origin WS-x:refs/heads/hotfix",
+    "Bash(git push origin WS-*:hotfix*)": "git push origin WS-x:hotfix",
+    "Bash(git push origin worktree-*:refs/heads/develop*)": "git push origin worktree-x:refs/heads/develop",
+    "Bash(git push origin worktree-*:develop*)": "git push origin worktree-x:develop",
+    "Bash(git push origin worktree-*:refs/heads/feature*)": "git push origin worktree-x:refs/heads/feature",
+    "Bash(git push origin worktree-*:feature*)": "git push origin worktree-x:feature",
+    "Bash(git push origin worktree-*:refs/heads/release*)": "git push origin worktree-x:refs/heads/release",
+    "Bash(git push origin worktree-*:release*)": "git push origin worktree-x:release",
+    "Bash(git push origin worktree-*:refs/heads/hotfix*)": "git push origin worktree-x:refs/heads/hotfix",
+    "Bash(git push origin worktree-*:hotfix*)": "git push origin worktree-x:hotfix",
+    "Bash(git push origin :develop*)": "git push origin :develop",
+    "Bash(git push origin :refs/heads/develop*)": "git push origin :refs/heads/develop",
+    "Bash(git push origin :feature*)": "git push origin :feature",
+    "Bash(git push origin :refs/heads/feature*)": "git push origin :refs/heads/feature",
+    "Bash(git push origin :release*)": "git push origin :release",
+    "Bash(git push origin :refs/heads/release*)": "git push origin :refs/heads/release",
+    "Bash(git push origin :hotfix*)": "git push origin :hotfix",
+    "Bash(git push origin :refs/heads/hotfix*)": "git push origin :refs/heads/hotfix",
+    "Bash(git push origin FETCH_HEAD:refs/heads/develop*)": "git push origin FETCH_HEAD:refs/heads/develop",
+    "Bash(git push origin FETCH_HEAD:refs/heads/feature*)": "git push origin FETCH_HEAD:refs/heads/feature",
+    "Bash(git push origin FETCH_HEAD:refs/heads/release*)": "git push origin FETCH_HEAD:refs/heads/release",
+    "Bash(git push origin FETCH_HEAD:refs/heads/hotfix*)": "git push origin FETCH_HEAD:refs/heads/hotfix",
+    "Bash(git push origin *:develop*)": "git push origin L1-x:develop",
+    "Bash(git push origin *:refs/heads/develop*)": "git push origin L1-x:refs/heads/develop",
+    "Bash(git push origin *:feature*)": "git push origin L1-x:feature",
+    "Bash(git push origin *:refs/heads/feature*)": "git push origin L1-x:refs/heads/feature",
+    "Bash(git push origin *:release*)": "git push origin L1-x:release",
+    "Bash(git push origin *:refs/heads/release*)": "git push origin L1-x:refs/heads/release",
+    "Bash(git push origin *:hotfix*)": "git push origin L1-x:hotfix",
+    "Bash(git push origin *:refs/heads/hotfix*)": "git push origin L1-x:refs/heads/hotfix",
 }
 
 # Leaf-only push/commit fences (bash_deny_leaf) with one command each that
@@ -2211,17 +2400,24 @@ class RenderTests(unittest.TestCase):
     def test_grant_sets_are_shared_not_copied(self):
         # One template per role name, rendered from shared grant sets so they
         # cannot drift: only the L1 roles carry the lane-push /
-        # workflow pre-grants (round 8: an explicit origin ref for push
-        # and an explicit --ref for dispatch - never the bare prefix
-        # grants), l1-routing extends them with exactly the
+        # workflow pre-grants (round 12: lane-prefix shaped - L1-*, L2-*, WS-*, worktree-*),
+        # l1-routing extends them with exactly the
         # apply.sh grant, l2-orchestrator carries exactly the narrower
         # own-prefix set (round 3, D-138 - never the L1 grants), and
         # every other role carries no pre-grant.
         profiles = {role: perms_of(load_profile(role))["allow"] for role in ROLES}
         base = profiles["l1-coordinator"]
         self.assertEqual(base, list(lp.COORDINATOR_ALLOW))
-        self.assertIn("Bash(gh workflow run * --ref *)", base)
-        self.assertIn("Bash(gh workflow run * --ref=*)", base)
+        # Verify the grant set contains lane-prefix shaped entries for each prefix
+        for p in ("L1-", "L2-", "WS-", "worktree-"):
+            self.assertIn("Bash(git push origin %s*)" % p, base)
+            self.assertIn("Bash(git push -u origin %s*)" % p, base)
+            self.assertIn("Bash(git push -q origin %s*)" % p, base)
+            self.assertIn("Bash(git push origin FETCH_HEAD:refs/heads/%s*)" % p, base)
+            self.assertIn("Bash(git push -q origin FETCH_HEAD:refs/heads/%s*)" % p, base)
+            self.assertIn("Bash(git push origin :%s*)" % p, base)
+            self.assertIn("Bash(gh workflow run * --ref %s*)" % p, base)
+            self.assertIn("Bash(gh workflow run * --ref=%s*)" % p, base)
         self.assertNotIn("Bash(git push:*)", base)
         self.assertNotIn("Bash(gh workflow run:*)", base)
         routing = profiles["l1-routing"]

@@ -195,6 +195,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_HARNESS_PATH = ROOT / "catalog" / "agent-harness.json"
 DEFAULT_OUT_DIR = ROOT / "configuration" / "launch-profiles"
 
+# Lane branch prefixes. There is NO registry source for lane prefixes today
+# (only tools/autoos_tokenrate.py's --branch-prefix CLI option); registry lane
+# prefixes: not yet recorded; add them here when they are. Do NOT include
+# agent/* (isolate sandbox branches are local-only).
+LANE_PREFIXES = ("L1-", "L2-", "WS-", "worktree-")
+
 # Launch identity -> harness role, MCP document stem, grant set.
 ROLES = {
     "l0-router": {"harness": "orchestrator", "mcp": "l2-orchestrator", "grants": "none"},
@@ -215,18 +221,37 @@ ROLES = {
 # see it - forms not matching an allow are not blocked, they fall to the
 # permission prompt (fail safe), so narrowing never breaks a legitimate
 # unusual push, it only stops pre-granting it).
-# The L1 grant is "any non-main ref on origin, including refspecs and
-# lane deletes": L1 coordinators legitimately push
-# `FETCH_HEAD:refs/heads/<lane>` and delete merged lane branches; main
-# in every spelling stays fenced and server-side branch protection
-# covers main (round 9 DECISION).
-COORDINATOR_ALLOW = (
-    "Bash(git push origin *)",
-    "Bash(git push -u origin *)",
-    "Bash(git push -q origin *)",
-    "Bash(gh workflow run * --ref *)",
-    "Bash(gh workflow run * --ref=*)",
-)
+# The L1 grant (round 12, SHAPE-ALLOW): one constant LANE_PREFIXES drives
+# both the allows and the L1 shape denies. For EACH prefix P:
+#   Bash(git push origin P*)                - same-name lane push
+#   Bash(git push -u origin P*)             - -u same-name lane push
+#   Bash(git push -q origin P*)             - -q same-name lane push
+#   Bash(git push origin FETCH_HEAD:refs/heads/P*) - coordinator fetch-and-push
+#   Bash(git push -q origin FETCH_HEAD:refs/heads/P*) - -q variant
+#   Bash(git push origin :P*)               - lane delete
+#   Bash(gh workflow run * --ref P*)        - dispatch with explicit ref
+#   Bash(gh workflow run * --ref=P*)        - --ref= spelling
+# AutoOS main has NO branch protection and no rulesets; these profiles are
+# the only fence against a push to main.
+def _l1_push_allow():
+    out = []
+    for p in LANE_PREFIXES:
+        out.append("Bash(git push origin %s*)" % p)
+        out.append("Bash(git push -u origin %s*)" % p)
+        out.append("Bash(git push -q origin %s*)" % p)
+        out.append("Bash(git push origin FETCH_HEAD:refs/heads/%s*)" % p)
+        out.append("Bash(git push -q origin FETCH_HEAD:refs/heads/%s*)" % p)
+        out.append("Bash(git push origin :%s*)" % p)
+    return tuple(out)
+
+def _l1_workflow_allow():
+    out = []
+    for p in LANE_PREFIXES:
+        out.append("Bash(gh workflow run * --ref %s*)" % p)
+        out.append("Bash(gh workflow run * --ref=%s*)" % p)
+    return tuple(out)
+
+COORDINATOR_ALLOW = _l1_push_allow() + _l1_workflow_allow()
 APPLY_ALLOW = "Bash(bash configuration/omniroute/apply.sh:*)"
 # L2 lane-branch prefix (round 3, D-138; tightened round 4, shaped round
 # 5): narrower than the L1 grant. Exactly one `L2-*` ref, same-name, no
@@ -251,6 +276,70 @@ L2_WORKFLOW_ALLOW = (
     "Bash(gh workflow run * --ref=L2-*)",
 )
 L2_ALLOW = L2_PUSH_ALLOW + L2_WORKFLOW_ALLOW
+
+# L1 shape denies (round 12, mirror L2 round 5 on L1 profiles): anything
+# after the single ref denies, and an L1 refspec whose destination is not
+# a lane prefix denies. These render ONLY into l1-coordinator and
+# l1-routing profiles - they cannot shadow anything the L1 roles need.
+# For gh workflow run, trailing args are handled consistently with the L2
+# rule: a space after the L1 ref means a second argument of any kind.
+def _l1_push_deny():
+    out = []
+    # Anything after the single ref: a second token of any kind (second
+    # refspec, flag, --atomic, --follow-tags, etc.)
+    for p in LANE_PREFIXES:
+        out.append("git push origin %s* *" % p)
+        out.append("git push -u origin %s* *" % p)
+        out.append("git push -q origin %s* *" % p)
+    # Leading options before the ref (mirror L2 round 5): any long option
+    # before the ref denies, and known short force/delete flags deny.
+    # -u is allowed (covered by allow globs).
+    for p in LANE_PREFIXES:
+        out.append("git push --* origin %s*" % p)
+        out.append("git push -f origin %s*" % p)
+        out.append("git push -d origin %s*" % p)
+    return tuple(out)
+
+def _l1_refspec_deny():
+    out = []
+    # L1 refspec whose destination is not a lane prefix:
+    # git push origin FETCH_HEAD:refs/heads/other
+    # git push origin L1-x:develop
+    # git push origin :develop
+    # etc.
+    # The L1 allow globs cover `:P*` where P is a lane prefix (for lane
+    # deletes) and `FETCH_HEAD:refs/heads/P*` where P is a lane prefix.
+    # We explicitly deny refspecs where the destination is a known
+    # non-lane prefix (develop, feature, release, hotfix, etc.) to ensure
+    # deny beats allow (defence in depth). We do NOT deny lane prefixes.
+    # The MAIN_FENCE covers :main, :heads/main, :HEAD - we don't repeat.
+    non_lane_dsts = ("develop*", "feature*", "release*", "hotfix*")
+    for p in LANE_PREFIXES:
+        for dst in non_lane_dsts:
+            # RefSpecs from lane src to non-lane dst: L1-x:develop
+            out.append("git push origin %s*:%s" % (p, dst))
+            out.append("git push origin %s*:refs/heads/%s" % (p, dst))
+        # Bare delete to non-lane: :develop, :feature, etc.
+        for dst in non_lane_dsts:
+            out.append("git push origin :%s" % dst)
+            out.append("git push origin :refs/heads/%s" % dst)
+    # Also catch FETCH_HEAD:refs/heads/<non-lane> and bare src:non-lane
+    for dst in non_lane_dsts:
+        out.append("git push origin FETCH_HEAD:refs/heads/%s" % dst)
+        out.append("git push origin *:%s" % dst)
+        out.append("git push origin *:refs/heads/%s" % dst)
+    return tuple(out)
+
+def _l1_workflow_deny():
+    out = []
+    for p in LANE_PREFIXES:
+        out.append("gh workflow run * --ref %s* *" % p)
+        out.append("gh workflow run * --ref=%s* *" % p)
+    return tuple(out)
+
+L1_PUSH_DENY = _l1_push_deny()
+L1_WORKFLOW_DENY = _l1_workflow_deny()
+L1_REFSPEC_DENY = _l1_refspec_deny()
 
 # L2 same-name-push fences (round 4, F1/F2) plus the single-ref shape
 # fences (round 5): the L2 allow entries above are whole-line globs, so
@@ -321,6 +410,12 @@ GRANT_SETS = {
 # rules give exactly three spellings that resolve to refs/heads/main
 # (main, heads/main, refs/heads/main), and all three are now fenced in
 # every position (bare, as src, as dst).
+# Round 12: AutoOS main has NO branch protection and no rulesets; these
+# profiles are the only fence against a push to main. Glob characters `*`,
+# `?`, `[` cannot be fenced in rule syntax (`*`/`?` are pattern characters
+# there) and only expand when a matching file exists in the cwd; these
+# profiles deny them explicitly. `<src>:HEAD` updates the remote's HEAD
+# target (main), so it is denied.
 MAIN_FENCE = (
     "Bash(*git push * main)",
     "Bash(*git push * main *)",
@@ -337,13 +432,19 @@ MAIN_FENCE = (
     "Bash(*git push * heads/main:*)",
     "Bash(*git push *:heads/main)",
     "Bash(*git push *:heads/main *)",
-    # :HEAD destinations (round 11)
+    # :HEAD destinations (round 11) - <src>:HEAD updates the remote's HEAD
+    # target (main), so it is denied.
     "Bash(*git push *:HEAD)",
     "Bash(*git push *:HEAD *)",
     "Bash(*git push *--force*)",
     "Bash(*git push *-f *)",
     "Bash(*git push *-f)",
     "Bash(*git push *--tags*)",
+    # Round 12: tag push denies on every role.
+    "Bash(*git push *refs/tags*)",
+    "Bash(*git push *--tags*)",
+    "Bash(*git push *--follow-tags*)",
+    "Bash(*git push *tag *)",
     # H2: push forms without the word `main` as a ref - denied on every
     # role. A bare `git push` pushes the checked-out branch, which may be
     # main; --all/--mirror push every ref, which includes main.
@@ -395,16 +496,22 @@ MAIN_FENCE = (
     # needs main at end of text and `* main *` needs a space after, so
     # neither matches, yet bash pushes main). Written with a Python
     # `\\` escape so the rendered JSON carries one escaped backslash.
-    # Residual limit, stated here and in spec 3.3: glob characters `?`,
-    # `[`, `*` cannot be fenced in rule syntax (`*`/`?` are pattern
-    # characters there) and only expand when a matching file exists in
-    # the cwd; server-side branch protection is load-bearing for them
-    # and for aliases/functions.
+    # Glob characters `*`, `?`, `[` cannot be fenced in rule syntax
+    # (`*`/`?` are pattern characters there) and only expand when a
+    # matching file exists in the cwd; AutoOS main has no branch
+    # protection - these profiles deny them explicitly.
     "Bash(*git push*\\*)",
     "Bash(*git push*{*)",
     "Bash(*git push*&*)",
     "Bash(*git push*>*)",
     "Bash(*git push*<*)",
+    # Round 12: glob characters `*`, `?`, `[` in a push command after
+    # `git push` - deny on every role (the rule syntax cannot express a
+    # literal `*`, so we deny the refs/heads/* and refs/* and
+    # *:refs/heads/* shapes explicitly and list the residual).
+    "Bash(*git push *refs/heads/[*?]*)",
+    "Bash(*git push *refs/[*?]*)",
+    "Bash(*git push *[*?]*:refs/heads/*)",
     # Round 8, no-ref / matching / @ exact shapes (spec 3.3): the L1
     # grant now requires an explicit origin ref (`git push origin *`
     # and the -u/-q spellings), so a push naming only a remote
@@ -578,6 +685,12 @@ def render_role(role, harness):
         # it needs the fence; every other profile's deny list is
         # byte-identical to before.
         deny.extend("Bash(%s)" % pattern for pattern in L2_PUSH_DENY)
+    if role in ("l1-coordinator", "l1-routing"):
+        # Round 12 (SHAPE-ALLOW): L1 shape denies mirroring L2 round 5.
+        # These render ONLY into l1-coordinator and l1-routing profiles.
+        deny.extend("Bash(%s)" % pattern for pattern in L1_PUSH_DENY)
+        deny.extend("Bash(%s)" % pattern for pattern in L1_WORKFLOW_DENY)
+        deny.extend("Bash(%s)" % pattern for pattern in L1_REFSPEC_DENY)
     deny.extend("Bash(%s)" % p for p in bash_secret_patterns(
         fences["bash_deny_all"], fences["read_deny_all"]))
     deny.extend("Read(%s)" % p for p in fences["read_deny_all"])
