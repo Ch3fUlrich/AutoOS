@@ -78,6 +78,38 @@ went from one hardcoded ref to the file's full ordered list plus the new-leg ass
   reviewer grants moved inside the free band so `policy.reviewers` keeps Haiku
   last, and the Gemini-cooldown tests now cool the two new free providers too,
   because their premise is "every leg of the route is cooling".
+### Added — `tools/claude-cli-lag.py`: the lag check that replaces the pin (CLIPIN / D-137, 2026-09-29)
+
+The operator superseded the Claude Code version-pin idea: every host runs the
+latest published release and the autoupdater stays on. What replaces a pin is
+something that *tells you* a host is behind, without ever touching it.
+
+- **`tools/claude-cli-lag.py`** (stdlib, Linux and Windows/WSL, read-only):
+  prints, per host, `claude --version`, the newest published release from the
+  npm registry (cached an hour in the git-ignored `logs/`; an unreachable
+  registry is `unknown`, never an error), the lag verdict, and the
+  autoupdater state from `DISABLE_AUTOUPDATER` in the environment or in the
+  `env` block of `~/.claude/settings.json` (`%USERPROFILE%\.claude\` on
+  Windows). Exit 0 up to date / ahead / unknown, exit 1 only on a confirmed lag;
+  a lagging host is flagged `lags - restart picks it up`, because that is when
+  the auto-update actually lands.
+- **A recommendation line, not a gate**, when the installed version differs
+  from the last one recorded: re-run the cheap spec behaviour checks
+  (ORCH-A1 §3.3 deny-over-allow, the HOOKS guard contracts) — both read
+  Claude Code's own permission precedence and hook payload shape, which a
+  release can change underneath a lane. The first run has nothing to compare
+  against, and an `unknown` version never overwrites the last known one.
+- **`docs/api-keys.md`**: the policy paragraph next to the Claude Code
+  gateway settings it reads. Nothing in the repo pins a Claude Code version and
+  nothing sets `DISABLE_AUTOUPDATER` (verified across catalog, lib, templates
+  and infra) — `claude-code` installs `@anthropic-ai/claude-code` unpinned.
+- **`tests/test_claude_cli_lag.py`**: fake version output and fake registry
+  JSON (lags / up-to-date / ahead / unknown), the cache TTL, offline fallbacks,
+  a corrupt cache and settings file, autoupdater detection from env and from a
+  generated `settings.json`, the Windows `%USERPROFILE%` path, the
+  version-change recommendation, the exit codes, and the state file's location
+  under the git-ignored `logs/`. Wired into `tests/linux/33-documentation.sh`
+  and `tests/run-tests.ps1`.
 
 ### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
 

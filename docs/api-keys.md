@@ -256,6 +256,37 @@ back in.
   allowlist). The `devin` API-key provider lists no models (broken upstream,
   issue #6142) — do not route on it.
 
+## Claude Code version lag (no pin)
+
+CLIPIN / D-137 (operator 2026-09-29) supersedes the pin idea: **no host pins
+Claude Code.** Every install comes from the catalog's unpinned
+`@anthropic-ai/claude-code` and the autoupdater stays on — nobody sets
+`DISABLE_AUTOUPDATER`, neither in the environment nor in the `env` block of
+`~/.claude/settings.json` (`%USERPROFILE%\.claude\settings.json` on Windows).
+Do not add a version to a catalog entry and do not add that key: an update
+reaches a running session only at restart, so a pin would freeze a host on a
+release its launch profiles were not written for.
+
+What replaces the pin is a read-only lag check ([tools/claude-cli-lag.py](../tools/claude-cli-lag.py),
+stdlib, Linux and Windows/WSL):
+
+    python3 tools/claude-cli-lag.py    # exit 0 up to date / ahead / unknown, 1 this host lags
+
+On the host it runs on, it prints `claude --version`, the newest published release (the npm
+registry, cached an hour in the git-ignored `logs/`, and `unknown` when offline
+— an unreachable registry is never an error), whether the host lags
+(`lags - restart picks it up`), and the autoupdater state with the variable or
+file that set it. When the installed version differs from the last one
+recorded, it adds one recommendation line — a recommendation, not a gate — to
+re-run the cheap spec behaviour checks: [ORCH-A1 §3.3, deny-over-allow](plans/2026-09-28-orch-a1-role-launch-profiles-spec.md)
+and [HOOKS §6, the guard contracts](plans/2026-09-28-agent-hooks-spec.md). Both
+depend on Claude Code's own permission precedence and hook payload shape, which
+a release can change underneath them.
+
+A WSL host that must inspect the *Windows* settings file names it explicitly
+(`--settings /mnt/c/Users/<profile>/.claude/settings.json`); the tool never
+guesses a profile path across `/mnt`.
+
 ## LiteLLM fallback `.env` (only if you use it)
 
 Copy `configuration/litellm/.env.example` → `.env`. Same keys as above
