@@ -563,7 +563,31 @@ fi
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
     assert_contains "$out" "git clone --local"
-    assert_contains "$out" "env: AUTOOS_AGENT_DEPTH, AUTOOS_AGENT_MAX_DEPTH, AUTOOS_AGENT_RUN_ID, OPENCODE_CONFIG_CONTENT, XDG_DATA_HOME"
+    # The env the child gets, named in the plan (FF1/FF1b, D-106). Sorted and
+    # padded by whatever the caller legitimately exports, so name the entries
+    # that must be there instead of one exact line nobody can reproduce.
+    missing=""
+    leaked=""
+    for want in OPENCODE_CONFIG_CONTENT XDG_DATA_HOME XDG_RUNTIME_DIR \
+                XDG_CONFIG_HOME \
+                GIT_TERMINAL_PROMPT GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+                GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM; do
+        if ! grep -q "env: [^\n]*${want}" <<<"$out"; then
+            missing="${missing}${want} "
+        fi
+    done
+    for banned in AUTOOS_KEYS_FILE PYTHONPATH LD_PRELOAD GIT_SSH_COMMAND; do
+        if grep -q "env: [^\n]*${banned}" <<<"$out"; then
+            leaked="${leaked}${banned} "
+        fi
+    done
+    # FF1c item 1: the plan prints names only, so the values are checked in
+    # tests/test_autoos_spawner.py — GitGlobalConfigFenceTests writes a fake
+    # ~/.gitconfig and a fake $XDG_CONFIG_HOME/git/config and runs a real
+    # `git config --get core.sshCommand` under the worker env, and
+    # ChildRuntimeDirTests asserts the private dirs are created 0700.
+    assert_eq "$missing" ""
+    assert_eq "$leaked" ""
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi
@@ -580,6 +604,13 @@ fi
 # temp files; nothing is spawned and no inbox outside the sandbox is read.
 if it "autoos_inbox: records, positions, late flags, the inbox verb, dispatch table (unit tests)"; then
     out="$(python3 tests/test_autoos_inbox.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# RESTART spec §1 (lane R2a): the state-card checker (tools/autoos_card.py) and
+# the `card check` verb. Fixtures are temp files; the checker is read-only, so
+# nothing here writes a card or reads a live run dir.
+if it "autoos_card: section order, line caps, header fields, the card check verb (unit tests)"; then
+    out="$(python3 tests/test_autoos_card.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
@@ -608,6 +639,12 @@ fi
 
 if it "resolver v2: track record and Beta success estimate (unit tests)"; then
     out="$(python3 tests/test_autoos_track.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# MEMGRAPH (operator D-128): the AutoOS memory-graph sync (tools/sync_memory_graph.py).
+# Pure stdlib, temp-dir fixtures only; no live graph is contacted.
+if it "sync_memory_graph: ledger-gated NDJSON emit, hub edges, merge-only load (unit tests)"; then
+    out="$(python3 tests/test_sync_memory_graph.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # tools/autoos_usage.py: the `usage` subcommand of autoos-agent.py reads the
@@ -674,6 +711,11 @@ fi
 # tools/probe-recall.py: multi-needle recall probe writes the overlay (routing v2 spec 3.1, 10).
 if it "probe-recall: multi-needle recall probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_recall.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/claude-cli-lag.py: version lag check, no pin (CLIPIN / D-137).
+if it "claude-cli-lag: host version vs the newest release and the autoupdater state (unit tests)"; then
+    out="$(python3 tests/test_claude_cli_lag.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # tools/autoos_report.py: BRIEF/REPORT protocol parser (routing v2 spec 5.7, 8.2).
@@ -752,14 +794,31 @@ def perms(n):
     return [(p["action"], p["resource"], p["effect"]) for p in a[n]["permissions"]]
 t1, t2, t3 = perms("t1-orchestrator"), perms("t2-worker"), perms("t3-reviewer")
 problems = []
-if t1[0] != ("subagent", "*", "deny") or t1[-1] != ("subagent", "t2-worker", "allow"):
+# KEYDENY3b: both spawn-gate spellings are fenced (v2's asserted `subagent`
+# action, the permission object's `task` key), each of them denying everything
+# first and then allowing exactly the one child — a leaf allows none.
+def gate(rules, child):
+    for action in ("subagent", "task"):
+        own = [(r, e) for a, r, e in rules if a == action]
+        if not own or own[0] != ("*", "deny"):
+            return False
+        if child is None and len(own) != 1:
+            return False
+        if child is not None and own[-1] != (child, "allow"):
+            return False
+    return True
+if not gate(t1, "t2-worker"):
     problems.append("t1")
-if t2[0] != ("subagent", "*", "deny") or t2[-1] != ("subagent", "t3-reviewer", "allow"):
+if not gate(t2, "t3-reviewer"):
     problems.append("t2")
-# The leaf's fences run past these seven, but the first seven are the shape
+if not gate(t3, None):
+    problems.append("t3-spawn-leaf")
+# The leaf's fences run past these eight, but the first eight are the shape
 # both sides agreed on; v2 names the shell action `shell` (a `bash` rule
 # matches nothing) and the full fence set is asserted below.
-if t3[:7] != [("subagent", "*", "deny"), ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"), ("grep", "*", "allow"), ("glob", "*", "allow"), ("shell", "*", "allow")]:
+if t3[:8] != [("subagent", "*", "deny"), ("task", "*", "deny"),
+              ("edit", "*", "deny"), ("write", "*", "deny"), ("read", "*", "allow"),
+              ("grep", "*", "allow"), ("glob", "*", "allow"), ("shell", "*", "allow")]:
     problems.append("t3-leaf")
 if a["t3-reviewer"]["mode"] != "subagent":
     problems.append("t3-mode")
@@ -793,11 +852,18 @@ fi
 # through the shell and overwrite a file through serena's create_text_file.
 # KEYDENY 2026-09-28: the same stanza allowed every `read`, so the read_deny_all
 # fences are asserted here too — as patterns and as a decision on real paths.
-if it "t3-reviewer fences the shell, read, serena and omnigraph writes"; then
+# KEYDENY3 2026-09-28: the fence stopped at the `read` tool. opencode v2.0.16
+# matches `grep`/`glob` against the search pattern and checks the searched path
+# only through `external_directory`, and an MCP rule can only name a tool
+# (resources is the literal ["*"]), so the same list now has to land on grep,
+# glob and external_directory, and every serena tool that can return file bytes
+# has to be off the allow list.
+if it "t3-reviewer fences the shell, read, grep, glob, serena and omnigraph writes"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io
 oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
-fences = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))["fences"]
+harness = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
+fences = harness["fences"]
 t3 = [(p["action"], p["resource"], p["effect"]) for p in oc["agents"]["t3-reviewer"]["permissions"]]
 problems = []
 if any(act == "bash" for act, _, _ in t3):
@@ -817,6 +883,16 @@ for pat in fences["bash_allow_all"]:
 for pat in fences["read_allow_all"]:
     if last("read", pat) != "allow":
         problems.append("read-allow:" + pat)
+# KEYDENY3: one deny list, three actions. grep/glob are matched against the
+# pattern the leaf passes, external_directory against the path it searches.
+for act in ("grep", "glob", "external_directory"):
+    for pat in fences["read_deny_all"]:
+        if last(act, pat) != "deny":
+            problems.append(act + ":" + pat)
+for act in ("grep", "glob"):
+    for pat in fences["read_allow_all"]:
+        if last(act, pat) != "allow":
+            problems.append(act + "-allow:" + pat)
 # KEYDENY: a fence is a decision over a path, not a list of names. Fixture
 # paths only — no real key file is opened, the deny is on the name.
 import fnmatch
@@ -833,6 +909,11 @@ for path in ("configuration/api-keys.yml",
         problems.append("read-open:" + path)
     if decide("shell", "cat " + path) != "deny":
         problems.append("shell-open:" + path)
+    # KEYDENY3: the same path decided as a search pattern (grep/glob) and as a
+    # searched directory (external_directory).
+    for act in ("grep", "glob", "external_directory"):
+        if decide(act, path) != "deny":
+            problems.append(act + "-open:" + path)
 # KEYDENY2: a shell rule matches the whole command line, so the substring allow
 # *api-keys.example* licensed the real key file the moment its name shared a
 # line with the template — and let a copy out under an *.example* path.
@@ -844,6 +925,9 @@ for command in ("cat configuration/api-keys.yml configuration/api-keys.example.y
 example = "configuration/api-keys.example.yml"
 if decide("read", example) != "allow":
     problems.append("read-denied-example")
+for act in ("grep", "glob"):
+    if decide(act, example) != "allow":
+        problems.append(act + "-denied-example")
 if decide("shell", "cat " + example) != "deny":
     problems.append("shell-cats-example")
 # A read allow is a path, not a substring: a backup named after the template
@@ -853,12 +937,28 @@ for path in ("/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"):
         problems.append("read-open-near-miss:" + path)
 if last("serena_*", "*") != "deny":
     problems.append("serena-writes-open")
-for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "autoos-agent_*"):
+for tool in ("omnigraph_mutate", "omnigraph_load", "omnigraph_branches_merge", "omnigraph_branches_delete", "playwright_browser_run_code_unsafe", "playwright_*", "context7_*", "autoos-agent_*"):
     if last(tool, "*") != "deny":
         problems.append(tool)
+# KEYDENY3b: a leaf must have no MCP door that reads a file by URL or path. The
+# deny is on the server pattern, so the check is a match, not a name lookup.
+for tool in ("playwright_browser_navigate", "context7_get_library_docs"):
+    if not any(e == "deny" and fnmatch.fnmatch(tool, a) for a, r, e in t3):
+        problems.append("mcp-reader-open:" + tool)
 allowed = [a for a, r, e in t3 if a.startswith("serena_") and e == "allow"]
 writers = ("create", "replace", "insert", "rename", "delete", "edit", "write", "execute")
 problems += ["serena-writer-allowed:" + a for a in allowed if any(w in a for w in writers)]
+# KEYDENY3: an MCP rule cannot name a path (v2.0.16 dispatches every MCP call as
+# {action:"<server>_<tool>", resources:["*"]}), so a serena tool that can return
+# file bytes has to be off the allow list outright. The list is the harness's,
+# never a copy — one edit moves the render and this assertion together.
+raw_readers = ["serena_" + t for t in harness["mcp_servers"]["serena"]["raw_content_tools"]]
+problems += ["serena-raw-reader-allowed:" + a for a in allowed if a in raw_readers]
+# And the tools that return names or diagnostics, never bytes, stay usable —
+# over-denying here is a defect too (a tool-less reviewer refuses the task).
+for keep in ("serena_get_symbols_overview", "serena_list_dir", "serena_find_file"):
+    if keep not in allowed:
+        problems.append("serena-name-only-denied:" + keep)
 if not allowed:
     problems.append("serena-read-tools-missing")
 print(" ".join(problems))

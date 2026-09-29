@@ -201,7 +201,7 @@ satisfies `as-rule-declared-is-not-live`:
 |---|---|
 | Which repository names exist? | `graphs_list` — every `graphId` the cluster exposes, alphabetically. Needs the cluster-scoped `graph_list` action; without it you get `403 ForbiddenError`. |
 | Which one is *this* repo? | The `graphId` equal to the repository folder name — then confirm with the row below. |
-| Am I actually connected to it? | `Project.repository` in the graph you are pinned to must equal this repo's `git remote get-url origin`. |
+| Am I actually connected to it? | The decision-keyed `whoami` query below must return exactly one row (`Project.repository` is declared in the .pg but not live, so it cannot be compared). |
 
 Both calls need the bearer token and nothing else: without `Authorization` the server
 answers **401**, and `/graphs` additionally needs the cluster-scoped `graph_list` grant or it
@@ -216,24 +216,21 @@ graphs from a project session. What you can do, in one cheap query, is prove the
 right:
 
 ```gq
-query whoami() { match { $p: Project } return { $p.slug, $p.repository } }
+query whoami() { match { $p: Project  $d: Decision  $d.slug = "autoos-adr-0006-launch-time-routing-resolver"  $d decidedIn $p } return { $p.slug, $d.slug } }
 ```
 
-If `repository` does not match your `origin`, the bridge is serving **another repository's
+If the query returns 0 rows (it must return exactly one, `autoos` + the ADR slug; `Project` has no `repository` property in the live schema, so it keys on a decision only this repo's graph holds), the bridge is serving **another repository's
 graph**, and every recall you are about to act on describes a different codebase. That is
-the `~/.claude.json` user-scope override CLAUDE.md documents at length — and until this
-property existed it had no cheap detector, because a graph that is merely *the wrong one*
-looks exactly like a graph that was wiped.
+the `~/.claude.json` user-scope override CLAUDE.md documents at length. A graph that is
+merely *the wrong one* looks exactly like a graph that was wiped, hence the check. It
+keys on `autoos-adr-0006-...`; if that ADR is ever renamed or the graph re-seeded the
+query returns 0 rows for the right graph too, so re-point it at another stable slug then.
+Verified live 2026-09-28 (returns `autoos` + the slug).
 
-**Backfill a graph whose `repository` is still null.** Only `agent-skills` is populated so
-far; run this once from each repo, in that repo's own session, since the bridge cannot
-reach another project's graph:
+**`Project.repository` backfill: do not run.** The property is declared in the .pg but the
+live schema never applied it (any query or update touching it is a type error), so there is
+nothing to backfill until a schema migration lands it.
 
-```gq
-query set_project_repository($slug: String, $repository: String) {
-  update Project set { repository: $repository } where slug = $slug
-}
-```
 
 - **Point your agent at its project graph**: set `OMNIGRAPH_GRAPH_ID=<repo>` for
   the omnigraph MCP bridge (a project-scoped `.mcp.json` env, or export it before

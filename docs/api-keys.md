@@ -61,7 +61,38 @@ which entry to fill in (`meta_api` is that case today).
 | `zen` | `opencode-zen` | free promo models + paid; paid legs need Zen balance |
 | `cheapinference` | `cheaperinference` | paid partner gateway (`ci_live_…` key); legs sit between free and paid in tier2/tier3, never in `*-clean` |
 | `free_ai` | `free-ai` | Free.ai self-hosted pool; 10 rpm, 30k tokens/day, may train on prompts — **never** in a `*-clean` route |
+| `morph` | `morph` | FREEKEYS-1 (D-132/D-141) 2026-09-28: **$10 vendor grant** (`tier: credit`, guard `monthly_cap_usd: 10`, warns at 80 %). Serves `morph-dsv4flash`, `morph-glm52-744b` (both tool-calling proven); `morph-v3-fast`/`-v3-large` answer but emit no tool_call, two other ids 400. No LiteLLM `.env` line — reached through the gateway |
+| `bazaarlink` | `bazaarlink` | FREEKEYS-1: free tier, catalog served under prefix **`bzl`** (`model_prefix`). 87 canonical ids listed, **1** answered (`deepseek/deepseek-v4-flash-0731free:free`), the rest HTTP 400 |
+| `navyai` | `navy` | FREEKEYS-1: connection registers and is active, catalog serves `navy/*`, but **no leg answered** (5x HTTP 400, 1x 403) → `available: false`. Entitlement is the operator's to fix |
+| `arcee` | `arcee-ai` | FREEKEYS-1: connection registers, **the catalog lists zero models for it** → nothing to probe, `available: false`. Keys for `arcee-ai/*` only appear via `openrouter`/`free-ai`/`together` resellers |
+| `bluesminds` | `bluesminds` | FREEKEYS-1: free tier, catalog prefix **`bm`**. 49 canonical ids (most are `claude-*`/`gpt-*` resale, denied by `policy.leg_rules` `deny-claude-paid-api`), **none answered** (400/410/transport) → `available: false` |
+| `agentrouter` | `agentrouter` | FREEKEYS-1: free tier, 13 ids of which 12 are `claude-*` (budget-held, D-102 — never probed here); the one non-Claude id `gpt-5.6-sol` answered 400 → `available: false` |
+| `novita_ai` | `novita` | FREEKEYS-1: free tier, 121 canonical ids, **every probe 403** (stopped at 3 consecutive) → `available: false`: the key authenticates at the connection level but the account has no model entitlement |
+| `scaleway` | `scaleway` | FREEKEYS-1: free tier (EU "🆓" pool), catalog prefix **`scw`**. 6 ids, **3 proven** (`qwen3-235b-a22b-instruct-2507`, `gpt-oss-120b`, `mistral-small-3.2-24b-instruct-2506`) |
+| `nebius` | `nebius` | FREEKEYS-1: free tier, 27 canonical ids, **3 proven** (`zai-org/GLM-5.1`, `/GLM-5.2`, `/GLM-5.3-Flash`); the Moonshot ids 404 (listed but not served) |
+| `deepinfra` | `deepinfra` | FREEKEYS-1: **$5 vendor grant** (`tier: credit`, `monthly_cap_usd: 5`, warns at 80 %). 235 canonical ids, **6/6 probed legs proven** (gemini-flash family, `DeepSeek-V4-Flash-0731`, `Ling-3.0-flash`) — cheapest first, prices still not on file |
+| `together_ai` | `together` | FREEKEYS-1: **$5 vendor grant** (`tier: credit`, `monthly_cap_usd: 5`, warns at 80 %). 277 canonical ids, **every probe 403** → `available: false` (the grant is not yet usable through this connection) |
 | `omniroute` | — | the **client** key apps use; not a provider |
+
+### What a `credit` grant does to routing
+
+FREEKEYS-1b (D-132/D-141): the guard on the `tier: credit` rows above is enforced,
+not just reported. `tools/autoos_usage.py credit_guards()` costs each grant from the
+gateway's recorded usage rows at registry prices, and the resolver's leg filter
+(`tools/autoos_resolver.py usable_legs`) drops every leg of a provider whose guard
+says `refuse` — at 100 % of `monthly_cap_usd`, reason
+`credit exhausted <provider> $x/$cap`. At the warn line (`monthly_warn_fraction`,
+80 % by default) the leg stays, and the plan's `explain` plus the daily usage report
+say `credit warn ...`.
+
+A `credit` model with no price on file is **not usable**: `price_in`/`price_out` of
+0 or missing means the grant cannot be costed at all, and an uncostable grant that
+bills as $0 is a $10 drain reported as free money, so the leg is refused with
+`credit leg unpriced <model>`. Neither `GET /v1/models` nor the model detail
+endpoint carries a pricing block for any of these ids (measured 2026-09-28), so
+today every credit leg is dropped until real prices are recorded. Free-tier models
+are untouched by both rules, and `registry.py check` rejects a row that keeps
+`credit_usd` while calling itself another tier.
 
 ## Where to get them
 
@@ -224,6 +255,37 @@ back in.
   providers; `--dry-run` misleadingly passes because it never checks the
   allowlist). The `devin` API-key provider lists no models (broken upstream,
   issue #6142) — do not route on it.
+
+## Claude Code version lag (no pin)
+
+CLIPIN / D-137 (operator 2026-09-29) supersedes the pin idea: **no host pins
+Claude Code.** Every install comes from the catalog's unpinned
+`@anthropic-ai/claude-code` and the autoupdater stays on — nobody sets
+`DISABLE_AUTOUPDATER`, neither in the environment nor in the `env` block of
+`~/.claude/settings.json` (`%USERPROFILE%\.claude\settings.json` on Windows).
+Do not add a version to a catalog entry and do not add that key: an update
+reaches a running session only at restart, so a pin would freeze a host on a
+release its launch profiles were not written for.
+
+What replaces the pin is a read-only lag check ([tools/claude-cli-lag.py](../tools/claude-cli-lag.py),
+stdlib, Linux and Windows/WSL):
+
+    python3 tools/claude-cli-lag.py    # exit 0 up to date / ahead / unknown, 1 this host lags
+
+On the host it runs on, it prints `claude --version`, the newest published release (the npm
+registry, cached an hour in the git-ignored `logs/`, and `unknown` when offline
+— an unreachable registry is never an error), whether the host lags
+(`lags - restart picks it up`), and the autoupdater state with the variable or
+file that set it. When the installed version differs from the last one
+recorded, it adds one recommendation line — a recommendation, not a gate — to
+re-run the cheap spec behaviour checks: [ORCH-A1 §3.3, deny-over-allow](plans/2026-09-28-orch-a1-role-launch-profiles-spec.md)
+and [HOOKS §6, the guard contracts](plans/2026-09-28-agent-hooks-spec.md). Both
+depend on Claude Code's own permission precedence and hook payload shape, which
+a release can change underneath them.
+
+A WSL host that must inspect the *Windows* settings file names it explicitly
+(`--settings /mnt/c/Users/<profile>/.claude/settings.json`); the tool never
+guesses a profile path across `/mnt`.
 
 ## LiteLLM fallback `.env` (only if you use it)
 

@@ -310,6 +310,14 @@ if it "agent harness: the generator's unit tests pass"; then
     fi
 fi
 
+if it "user-config fence: the render step stays in the home and refuses a lane (D-106)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_user_config_fence.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 if it "playwright lazy proxy: the stdio proxy's unit tests pass (fake backend, no docker)"; then
     if ! has_cmd python3; then
         skip "python3 not found"

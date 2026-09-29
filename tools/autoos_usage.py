@@ -185,15 +185,24 @@ def prices_from_registry(registry):
     contributor's $0.10 per 1M is 1e-07 here - so multiply by the token count
     and nothing else. A model with no price on file is simply absent, which the
     report shows as a 0 cost rather than a failure: the tokens stay counted.
+
+    0 is not a price (brief FREEKEYS-1b item 3, rev-freekeys1 finding 3): every
+    grant row shipped by FREEKEYS-1 carries `price_in`/`price_out` of 0, and a
+    table that reads those as $0/token reports a draining $10 grant as untouched
+    money. Dropping them here makes the same model count as `models_unpriced`,
+    which is the gap `autoos_resolver.credit_leg_priced` refuses a credit leg on.
     """
     prices = {}
     for model_id, model in (registry.get("models") or {}).items():
-        if isinstance(model, dict) and model.get("price_in") is not None \
-                and model.get("price_out") is not None:
-            try:
-                prices[model_id] = (float(model["price_in"]), float(model["price_out"]))
-            except (TypeError, ValueError):
-                pass
+        if not isinstance(model, dict):
+            continue
+        try:
+            price_in = float(model.get("price_in"))
+            price_out = float(model.get("price_out"))
+        except (TypeError, ValueError):
+            continue
+        if price_in > 0.0 and price_out > 0.0:
+            prices[model_id] = (price_in, price_out)
     return prices
 
 
@@ -247,6 +256,90 @@ def monthly_cap_usd(registry, provider=SPEND_PROVIDER):
         raise ValueError("providers.%s.monthly_cap_usd is missing or not a positive number"
                          % provider)
     return float(cap)
+
+
+def spend_warn_usd(registry, provider=SPEND_PROVIDER):
+    """The USD line at which a provider's spend guard WARNS (brief FREEKEYS-1,
+    D-132/D-141): `providers.<id>.monthly_warn_fraction` x its `monthly_cap_usd`.
+
+    A row that declares no fraction keeps the legacy DSGUARD line (SPEND_WARN_USD),
+    so the paid rows written before this field existed report exactly what they
+    reported before. ValueError when a fraction is declared on a row with no cap --
+    that pairing is what registry.py check already rejects, and reading it here
+    would silently warn at 0.0 on every call."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    fraction = entry.get("monthly_warn_fraction") if isinstance(entry, dict) else None
+    if fraction is None:
+        return float(SPEND_WARN_USD)
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction < 1:
+        raise ValueError("providers.%s.monthly_warn_fraction is not a fraction in (0, 1)"
+                         % provider)
+    return monthly_cap_usd(registry, provider) * float(fraction)
+
+
+def spend_guard(registry, provider, spend_usd):
+    """(state, note) for one provider's spend guard: "ok" below the warn line,
+    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at or
+    above `monthly_cap_usd` (100 %).
+
+    The refuse half is the same rule deepseek_call.py applies today (WS-DSCALL):
+    at or above the cap the call does not happen. This is the shared reading of
+    the pair so a `credit` provider's guard is data with a consumer, not a
+    comment; a caller that has no price on file for the provider's models still
+    sees 0 spend here, which is why the grant's own balance is what FREEKEYS-2
+    must check as well.
+    """
+    cap = monthly_cap_usd(registry, provider)
+    warn = spend_warn_usd(registry, provider)
+    if spend_usd >= cap:
+        return "refuse", ("%s spend $%.2f is at or above the $%.2f cap "
+                          "(providers.%s.monthly_cap_usd)" % (provider, spend_usd, cap, provider))
+    if spend_usd >= warn:
+        return "warn", ("%s spend $%.2f reached the $%.2f warn line "
+                        "(providers.%s.monthly_warn_fraction)" % (provider, spend_usd, warn, provider))
+    return "ok", ("%s spend $%.2f of a $%.2f cap" % (provider, spend_usd, cap))
+
+
+def credit_guard_providers(registry):
+    """The provider ids whose `tier` is `credit` -- the finite operator grants.
+
+    Read from the data, never a list of names, so a grant the operator funds gets
+    guarded the moment its row lands (and `registry.py check` already refuses a
+    `credit` row that cannot state its own cap)."""
+    return sorted(pid for pid, entry in ((registry or {}).get("providers") or {}).items()
+                  if isinstance(entry, dict) and entry.get("tier") == "credit")
+
+
+def credit_guards(registry, rows, since=None):
+    """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
+
+    This is the builder that feeds the resolver's leg filter (brief FREEKEYS-1b
+    items 2 and 4): one figure per grant, produced by `paid_spend` over the same
+    rows the report prints and judged by `spend_guard` against the provider's own
+    `monthly_cap_usd`, so what blocks a leg and what the ledger reports are never
+    two different numbers. `rows` are the gateway's call-log rows; a grant with no
+    rows of its own is at $0, and a grant whose models carry no price is reported
+    with `models_unpriced` above 0 -- which is exactly the state the resolver
+    refuses the leg for, because $0 here would otherwise read as untouched money.
+
+    Each guard is ``{"provider", "state", "spend_usd", "cap_usd", "warn_usd",
+    "models_unpriced", "note"}``, with `state` from `spend_guard`: `ok` below the
+    warn line, `warn` at it (80 % of the grant by default), `refuse` at the cap.
+    """
+    if since is None:
+        since = month_start(datetime.datetime.now(datetime.timezone.utc))
+    prices = prices_from_registry(registry)
+    out = {}
+    for provider in credit_guard_providers(registry):
+        spend = paid_spend(rows, prices, registry, since, provider=provider)
+        state, note = spend_guard(registry, provider, spend["spend_usd"])
+        out[provider] = {"provider": provider, "state": state,
+                         "spend_usd": spend["spend_usd"],
+                         "cap_usd": monthly_cap_usd(registry, provider),
+                         "warn_usd": spend_warn_usd(registry, provider),
+                         "models_unpriced": spend["models_unpriced"],
+                         "note": note}
+    return out
 
 
 def month_start(now):
@@ -305,10 +398,14 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
 
     spend = round(spend, 6)
     warnings = []
-    if spend >= SPEND_WARN_USD:
-        warnings.append("%s spend $%.2f since %s reached the %.0f USD cap"
+    # The warn line is the provider's own guard when it declares one (a credit
+    # grant warns at 80 % of what the operator funded); a row with no fraction
+    # keeps the legacy DSGUARD line, so deepseek reports exactly what it did.
+    warn_usd = spend_warn_usd(registry, provider)
+    if spend >= warn_usd:
+        warnings.append("%s spend $%.2f since %s reached the %.2f USD warn line"
                         % (SPEND_PROVIDER_LABEL, spend,
-                           since.strftime("%Y-%m-%dT%H:%M:%SZ"), SPEND_WARN_USD))
+                           since.strftime("%Y-%m-%dT%H:%M:%SZ"), warn_usd))
     if balance is not None and balance < BALANCE_FLOOR_USD:
         warnings.append("%s balance $%.2f is below the %.0f USD floor"
                         % (SPEND_PROVIDER_LABEL, balance, BALANCE_FLOOR_USD))
@@ -319,7 +416,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "spend_usd": spend,
-        "threshold_usd": SPEND_WARN_USD,
+        "threshold_usd": warn_usd,
         "balance_usd": balance,
         "balance_threshold_usd": BALANCE_FLOOR_USD,
         "models_unpriced": len(unpriced),
@@ -530,7 +627,11 @@ def totals(rows, prices=None):
 
 
 def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source=None,
-                 spend=None):
+                 spend=None, credit_guards=None):
+    """The `--json` shape. `credit_guards` is `credit_guards()` for the same rows,
+    so one fetch answers both the money spent and the grants that gate the next
+    call (brief FREEKEYS-1b item 2: the warn belongs in the daily usage line, not
+    only in the router's head)."""
     kept = [r for r in rows
             if not (row_timestamp(r) is not None and row_timestamp(r) < cutoff)]
     report = {
@@ -546,7 +647,36 @@ def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source
         report["cost"] = {"source": price_source, "models_unpriced": len(unpriced)}
     if spend is not None:
         report["paid_spend"] = spend
+    if credit_guards is not None:
+        report["credit_guards"] = credit_guards
     return report
+
+
+def render_credit_guards(guards):
+    """One line per `credit` grant, and only the states that need a reader.
+
+    `ok` prints nothing: a grant with money left is the normal case, and a report
+    that narrates it teaches nobody to ignore the section. `warn` names the
+    provider and the figure because that is the last line before the router stops
+    sending work there; `refuse` says the legs are already dropped, so a reader
+    who wonders why a cheap model was skipped has the answer on the same page.
+    """
+    lines = []
+    for provider in sorted(guards or {}):
+        guard = guards[provider]
+        if guard.get("state") == "warn":
+            lines.append("credit WARN %s $%.2f of a $%.2f grant (warn line $%.2f)"
+                         % (provider, guard["spend_usd"], guard["cap_usd"],
+                            guard["warn_usd"]))
+        elif guard.get("state") == "refuse":
+            lines.append("credit EXHAUSTED %s $%.2f of a $%.2f cap - its legs are "
+                         "dropped by the resolver until the month rolls over"
+                         % (provider, guard["spend_usd"], guard["cap_usd"]))
+        if guard.get("models_unpriced"):
+            lines.append("credit UNPRICED %s: %d model(s) billed with no price on "
+                         "file - the guard cannot see this spend"
+                         % (provider, guard["models_unpriced"]))
+    return lines
 
 
 def render_spend_text(spend):
@@ -597,6 +727,11 @@ def render_text(report, dims):
     spend = report.get("paid_spend")
     if spend is not None:
         lines.extend(render_spend_text(spend))
+    credit_lines = render_credit_guards(report.get("credit_guards"))
+    if credit_lines:
+        lines.append("")
+        lines.append("credit grants (a tier credit leg is dropped at its cap)")
+        lines.extend("  " + line for line in credit_lines)
     for dim in dims:
         lines.append("")
         lines.append(dim)
@@ -619,6 +754,27 @@ def render_text(report, dims):
     return "\n".join(lines)
 
 
+def render_lines(report, dims):
+    """One flat line per group of the FIRST --by dimension.
+
+    D-102 CLAUDEBUDGET (S2) item 3, operator 2026-09-28: the daily report to
+    routing-00 is one line per provider, so an orchestrator can paste it without
+    cutting a table out of terminal formatting. `key=value` pairs, never a column
+    layout -- the widths move with the longest provider name and nothing
+    downstream can grep a padded column.
+    """
+    dim = dims[0]
+    lines = []
+    for group in report["by"].get(dim, []):
+        cost = group.get("cost_in", 0.0) + group.get("cost_out", 0.0)
+        lines.append("%s=%s calls=%d ok=%d errors=%d tokens_in=%d "
+                     "tokens_out=%d cost_usd=%.4f"
+                     % (dim, group["key"], group["calls"], group["ok"],
+                        group["errors"], group["tokens_in"],
+                        group["tokens_out"], cost))
+    return "\n".join(lines)
+
+
 def main(argv=None, *, fetch=None, env=None, now=None):
     ap = argparse.ArgumentParser(
         prog="autoos-agent.py usage",
@@ -634,6 +790,12 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     ap.add_argument("--cost", action="store_true",
                     help="add estimated cost_in/cost_out (USD) per group, priced from "
                          "the registry's price_in/price_out")
+    ap.add_argument("--lines", action="store_true",
+                    help="one flat key=value line per group of the first --by "
+                         "dimension instead of tables (D-102: the daily "
+                         "per-provider report). Implies --cost, because a budget "
+                         "line with the cost missing reads the same as a free "
+                         "provider.")
     ap.add_argument("--registry", default=None,
                     help="price source for --cost and the paid-spend section "
                          "(default: catalog/ai-registry.json)")
@@ -705,18 +867,26 @@ def main(argv=None, *, fetch=None, env=None, now=None):
         print("autoos-usage: %s" % e, file=sys.stderr)
         return 3
 
-    priced = args.cost or spend_on
+    priced = args.cost or args.lines or spend_on
     registry = read_registry(args.registry) if priced else {}
     prices = prices_from_registry(registry)
     price_source = price_source_name(args.registry) if priced else None
     spend = paid_spend(rows, prices, registry, spend_cutoff, balance=balance,
                        price_source=price_source, complete=not truncated) if spend_on else None
+    # The same rows answer every grant the registry funds, so the report a reader
+    # uses to decide "is there money left" is the report the router reads to decide
+    # whether to send work there at all (brief FREEKEYS-1b item 2).
+    guarded = credit_guard_providers(registry)
+    guards = credit_guards(registry, rows, spend_cutoff) if guarded else None
+    show_cost = args.cost or args.lines
     report = build_report(rows, dims, cutoff, pages, truncated,
-                          prices=prices if args.cost else None,
-                          price_source=price_source if args.cost else None,
-                          spend=spend)
+                          prices=prices if show_cost else None,
+                          price_source=price_source if show_cost else None,
+                          spend=spend, credit_guards=guards)
     if args.json:
         print(json.dumps(report, indent=2))
+    elif args.lines:
+        print(render_lines(report, dims))
     else:
         print(render_text(report, dims))
     return 0

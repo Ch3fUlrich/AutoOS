@@ -22,6 +22,7 @@ Run directly, never through unittest discover:
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,7 +97,769 @@ class PauseStateTests(unittest.TestCase):
     def test_lesson_and_done_lines_that_quote_pause_are_not_a_pause(self):
         write_inbox(self.inbox,
                     "2026-09-26T14:00:00Z lesson: two PAUSE lines were ignored",
-                    "2026-09-26T14:01:00Z → done: PAUSE handled")
+                    "2026-09-26T14:01:00Z → done: PAUSE lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    # RESTART spec §0: the acknowledgement markers are one list, hb.ACK_MARKERS
+    # (the old `_NOT_AN_ORDER_RE` held only `lesson:` and `→ done`, so every
+    # other acknowledgement quoting a PAUSE read as a fresh order). One test per
+    # marker in use.
+
+    def test_marker_done_is_not_a_pause_order(self):
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → done: PAUSE lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_ack_is_not_a_pause_order(self):
+        # The fixture names the *marker*, so its order word is closed by a word from
+        # §0's narrow list — `noted` closed one until R2a6 removed it as vocabulary.
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z L1: → ack: PAUSE cleared")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_relaunched_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → relaunched: the session the PAUSE ended")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_operator_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → operator: PAUSE acknowledged, needs your call")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_marker_main_is_not_a_pause_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T14:01:00Z L1: → main: merged before the PAUSE was lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_plain_pause_with_no_marker_is_still_an_order(self):
+        write_inbox(self.inbox, "2026-09-26T14:01:00Z operator: PAUSE NOW")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    # R2a2 (the Sonnet review of R2a, MEDIUM): an acknowledgement marker matched
+    # *anywhere* in the line, so a real order that happened to name one was
+    # swallowed. Reproduced against the shipped code:
+    #
+    #     pause_state(<"… operator: PAUSE all lanes; nothing merges → main
+    #     until I say so">)["active"] == False
+    #
+    # A marker counts only at the head of the record body — the text after the
+    # leading ISO timestamp and, at most, after one speaker prefix.
+
+    def test_an_order_that_names_a_marker_mid_line_is_still_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z operator: PAUSE all lanes; nothing merges "
+                    "→ main until I say so")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+
+    def test_a_marker_at_the_head_is_not_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z → main: PAUSE acknowledged")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_marker_at_the_head_after_a_from_prefix_is_not_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z from L1-main: → done: PAUSE lifted")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_lesson_headed_line_that_quotes_a_pause_is_not_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z lesson: PAUSE was read as an order because "
+                    "→ done appeared mid-line")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    # One test per marker, head versus mid-sentence: the marker decides the line
+    # only where the inbox writers actually put it — at the head, after the
+    # timestamp and after at most one speaker prefix.
+
+    def test_every_marker_at_the_head_is_not_an_order(self):
+        for marker in hb.ACK_MARKERS:
+            head = marker if marker.endswith(":") else marker + ":"
+            for prefix in ("", "L1: ", "from L1-main: "):
+                write_inbox(self.inbox,
+                            "2026-09-28T10:00:00Z %s%s PAUSE acknowledged" % (prefix, head))
+                state = hb.pause_state(self.inbox)
+                self.assertFalse(state["active"], "%s%s: %s" % (prefix, head, state))
+
+    def test_every_marker_mid_sentence_keeps_the_order(self):
+        for marker in hb.ACK_MARKERS:
+            for prefix in ("", "operator: ", "from L0 (operator) "):
+                write_inbox(self.inbox,
+                            "2026-09-28T10:00:00Z %sPAUSE all lanes, %s when done"
+                            % (prefix, marker))
+                state = hb.pause_state(self.inbox)
+                self.assertTrue(state["active"], "%s…%s: %s" % (prefix, marker, state))
+
+    # The speaker-prefix shapes are derived read-only from the real inboxes
+    # (logs/handoff-sessions/20260925/inbox/*.md: `→ done:` 579x, `from L1-main`
+    # 254x with no colon, `from L1-main:` 79x, `from L0 (operator) PAUSE NOW` at
+    # L1-routing.md:126). Fixtures below are written by hand in those shapes.
+
+    def test_a_pause_after_a_bare_speaker_prefix_is_an_order(self):
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z operator: PAUSE all lanes now")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_pause_after_a_from_note_prefix_is_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z from L0 (operator) PAUSE NOW (repeat of 11:19:41Z)")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_pause_with_no_prefix_at_all_is_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z PAUSE (operator, via L0 router): the host reboots "
+                    "soon (RAM upgrade)")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_marker_counts_only_at_the_head_of_the_record_body(self):
+        # The filter fires on a marker at the head only, never mid-sentence.
+        self.assertTrue(hb._acknowledgement("lesson: PAUSE quoted"))
+        self.assertTrue(hb._acknowledgement("L1: lesson: PAUSE quoted"))
+        self.assertFalse(hb._acknowledgement("PAUSE, lesson: quoted"))
+
+    def test_ack_markers_are_the_one_list_the_pause_filter_uses(self):
+        # §0: one home. The head anchor is built from ACK_MARKERS, not restated.
+        self.assertIn(
+            "|".join(re.escape(m) for m in hb.ACK_MARKERS),
+            hb._MARKER_AT_HEAD_RE.pattern)
+        for marker in hb.ACK_MARKERS:
+            head = marker if marker.endswith(":") else marker + ":"
+            self.assertTrue(hb._acknowledgement("%s PAUSE acknowledged" % head), marker)
+            self.assertTrue(hb._acknowledgement("from L1-main: %s PAUSE acknowledged"
+                                                 % head), marker)
+
+    # R2a3 (the Muse review of R2a2) — three ways the head rule still mis-read
+    # a line, each reproduced against the shipped code before it was fixed:
+    # a marker matched as a bare prefix, a two-word speaker prefix not stripped,
+    # and a body head that was never normalised.
+
+    def test_a_marker_that_is_the_prefix_of_a_longer_word_is_an_order(self):
+        for text in ("→ mainline PAUSE all lanes",
+                     "→ maintenance: PAUSE every lane",
+                     "→ operators PAUSE the pack lane",
+                     "→ doneX PAUSE now",
+                     "→ acknowledged PAUSE now",
+                     "→ relaunching PAUSE now"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_head_marker_needs_a_colon_space_or_the_end_of_the_text(self):
+        # §0's boundary rule: the marker is a whole word, not a prefix.
+        self.assertTrue(hb._acknowledgement("→ main: merged before the PAUSE landed"))
+        self.assertTrue(hb._acknowledgement("→ done 12:00 PAUSE lifted"))
+        self.assertTrue(hb._acknowledgement("→ ack PAUSE lifted"))
+        self.assertTrue(hb._acknowledgement("lesson: the PAUSE was late"))
+        self.assertTrue(hb._acknowledgement("→ done"))
+        self.assertFalse(hb._acknowledgement("→ mainline PAUSE all lanes"))
+        self.assertFalse(hb._acknowledgement("→ doneX PAUSE now"))
+
+    def test_a_quoted_pause_after_a_two_word_speaker_is_not_an_order(self):
+        for text in ("operator on duty: → done: PAUSE lifted",
+                     "from L1-main relay (x): → done: PAUSE lifted",
+                     "from L0 (operator): → done 12:00 PAUSE lifted"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertFalse(state["active"], "%s: %s" % (text, state))
+
+    def test_a_pause_after_a_two_word_speaker_is_still_an_order(self):
+        for text in ("from L0 (operator): PAUSE NOW",
+                     "operator on duty: PAUSE every lane",
+                     "from L1-main relay (x): PAUSE the pack build"):
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_bare_first_word_without_a_colon_is_never_a_speaker(self):
+        self.assertFalse(hb._acknowledgement("notes → done: PAUSE lifted"))
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z notes → done: PAUSE lifted")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_from_prefix_is_bounded_by_its_colon_note_or_one_word(self):
+        # A clause after `from <name>` is the body, never more speaker words, so
+        # a marker that only appears mid-sentence keeps the line an order.
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z from L1-main PAUSE all lanes, → main when done")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_the_body_head_is_normalised_before_the_marker_check(self):
+        # Leading spaces, a BOM or a CR remnant made an ack read as an order.
+        for text in ("  → done: PAUSE lifted",
+                     "\ufeff→ done: PAUSE lifted",
+                     "\r→ done: PAUSE lifted",
+                     "\ufeff  → main: PAUSE lifted",
+                     "\r\n\t→ ack: PAUSE lifted"):
+            self.assertTrue(hb._acknowledgement(text), repr(text))
+
+    def test_a_bom_does_not_swallow_the_record_whole(self):
+        # Stripping the head must not lose an *order* either.
+        with io.open(self.inbox, "w", encoding="utf-8") as fh:
+            fh.write("\ufeff2026-09-28T10:00:00Z operator: PAUSE NOW\n")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertEqual(state["at"], "2026-09-28T10:00:00Z")
+    def test_a_crlf_inbox_line_is_still_an_ack(self):
+        with io.open(self.inbox, "w", encoding="utf-8", newline="") as fh:
+            fh.write("2026-09-28T10:00:00Z → done: PAUSE lifted\r\n"
+                     "2026-09-28T10:01:00Z → main: merged, PAUSE lifted\r\n")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    # R2a4 (the Muse review of R2a3, HIGH, safety): `(?:WORD\s+){0,2}WORD(\(note\))?\s*:`
+    # absorbs *any* short clause that ends in a colon, so an order whose first clause
+    # *is* the order became that order's own speaker prefix and its marker-headed
+    # remainder read as an acknowledgement — `PAUSE all lanes: → main is held` held
+    # nothing. A speaker prefix may therefore never name an order word (one list,
+    # `ORDER_WORDS`, beside `ACK_MARKERS`); the line is then not stripped and is an
+    # order. A lost order is the one unacceptable outcome, a spurious one is the safe
+    # direction. A speaker word must also look like a name, and the whole prefix is
+    # bounded, so prose that merely ends in a colon cannot pose as a speaker either.
+
+    def test_a_pause_clause_that_ends_in_a_colon_is_still_an_order(self):
+        for text in ("PAUSE all lanes: → main is held",
+                     "PAUSE lanes: → main is held until I say so",
+                     "PAUSE: → main is held"):
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_a_speaker_prefix_never_names_an_order_word(self):
+        for word in hb.ORDER_WORDS:
+            for clause in ("%s the lanes:" % word,
+                           "%s every lane right now:" % word,
+                           "from L0 %s:" % word):
+                text = "%s → main: merged while the PAUSE holds" % clause
+                self.assertFalse(hb._acknowledgement(text), text)
+                write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+                state = hb.pause_state(self.inbox)
+                self.assertTrue(state["active"], "%s: %s" % (text, state))
+
+    def test_an_order_word_is_rejected_in_any_case(self):
+        # ORDER_WORDS match case-insensitively: a lower-case clause is the same risk.
+        for clause in ("pause the pack lanes:", "Stop every lane now:", "freeze:"):
+            text = "%s → main: merged while the PAUSE holds" % clause
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_order_word_inside_the_note_rejects_the_prefix_too(self):
+        # The guard reads the whole prefix, its `(<note>)` included — a note that
+        # names an order word is the order talking, not a speaker parenthesising.
+        text = "from L0 (after the PAUSE): → main: merged, hold everything"
+        self.assertFalse(hb._acknowledgement(text), text)
+
+    def test_a_named_speaker_with_a_bounded_prefix_is_still_an_ack(self):
+        # The other side of the same rule: a real speaker names no order word, so
+        # these acknowledgements of a finished PAUSE must keep reading as acks.
+        for text in ("L1-main: → done: PAUSE lifted",
+                     "operator on duty: → done 12:00 PAUSE lifted"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_speaker_clause_that_reads_like_an_order_is_a_spurious_order(self):
+        # `hold on:` names HOLD, so the prefix is not trusted and the line is
+        # classified as an order — deliberate, and the accepted cost of the fix:
+        # ORDER_WORDS is wide on purpose because a *spurious* order only holds a
+        # lane (the operator RESUMEs, one heartbeat is wasted), while a *lost*
+        # PAUSE lets workers run on against a stop that was really given.
+        self.assertFalse(hb._acknowledgement("hold on: → main merged"))
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z hold on: → main merged, PAUSE lifted")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_speaker_word_must_look_like_a_name(self):
+        # letters, digits, - _ . — and not a bare count.
+        self.assertTrue(hb._acknowledgement(
+            "L1-routing.coordinator_x: → done: PAUSE lifted"))
+        for text in ("4 lanes: → main merged, PAUSE still on",
+                     "2026: → main merged, PAUSE still on",
+                     "state=held: → main merged, PAUSE still on",
+                     "L1/routing: → main merged, PAUSE still on",
+                     "[operator]: → main merged, PAUSE still on"):
+            self.assertFalse(hb._acknowledgement(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_speaker_prefix_is_bounded(self):
+        # The cap is what a *prefix* is; a long clause before a colon is prose.
+        long_clause = "from the coordinator who owns every lane in this batch:"
+        self.assertGreater(len(long_clause), hb._SPEAKER_PREFIX_MAX)
+        text = "%s → main: merged while the PAUSE holds" % long_clause
+        self.assertFalse(hb._acknowledgement(text), text)
+        # the real corpus's longest live speaker prefix stays well inside the cap
+        self.assertTrue(hb._acknowledgement(
+            "from L1-backlog (relaunch #3): → done: PAUSE lifted"))
+
+    def test_order_words_are_the_one_list_the_speaker_guard_uses(self):
+        # §0: one home, the same discipline as ACK_MARKERS — the guard is built from
+        # the list, never restated, and it covers the two words the filter keys on.
+        self.assertIn("|".join(hb.ORDER_WORDS), hb._ORDER_WORD_RE.pattern)
+        for word in ("PAUSE", "RESUME"):
+            self.assertIn(word, hb.ORDER_WORDS)
+        for word in hb.ORDER_WORDS:
+            self.assertIsNotNone(hb._ORDER_WORD_RE.search(word), word)
+            self.assertIsNotNone(hb._ORDER_WORD_RE.search(word.lower()), word)
+            self.assertIsNone(hb._ORDER_WORD_RE.search(word + "D"), word)
+    # R2a5 (the Sonnet review of R2a4, HIGH, safety): `pause_state` gated the PAUSE
+    # scan on `not _acknowledgement(text)` for the *whole record*, so an acknowledgement
+    # at the head swallowed a new order written later in the same line —
+    # `→ done: applied R2a4 fix. PAUSE all lanes until further notice` reported
+    # `active: False`. An acknowledgement now exempts an order word only while a
+    # closing word follows that word within 3 words (`→ done: PAUSE lifted`,
+    # `→ main: PAUSE acknowledged`); any other order word in the record is a fresh
+    # order. The asymmetry is the same as R2a4's: a lost order is unacceptable, a
+    # spurious one costs one heartbeat and a RESUME.
+
+    def test_an_order_after_an_acknowledgement_is_still_an_order(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z → done: applied R2a4 fix. "
+                    "PAUSE all lanes until further notice")
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertIn("PAUSE all lanes", state["text"])
+
+    def test_a_closed_order_word_in_an_acknowledgement_is_not_an_order(self):
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged",
+                     "L1-main: → done: PAUSE was cleared at 12:00",
+                     "from L0 (operator): → ack: PAUSE removed"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_acknowledgement_that_closes_one_pause_and_gives_another(self):
+        write_inbox(self.inbox,
+                    "2026-09-28T10:00:00Z → done: 12:00 noted; PAUSE all merges now")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_lesson_record_is_never_an_order_whatever_it_quotes(self):
+        # The one marker that exempts the whole record: a `lesson:` line reports on
+        # the code, it never addresses the run (the rule predates R2a5; kept).
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z lesson: PAUSE handling was wrong")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+        self.assertFalse(hb._gives_order("lesson: PAUSE handling was wrong"))
+
+    def test_a_stop_after_an_acknowledgement_is_an_order(self):
+        text = "→ main: merged. STOP all lanes"
+        self.assertTrue(hb._acknowledgement(text), text)
+        self.assertTrue(hb._gives_order(text), text)
+
+    def test_the_closing_word_must_follow_within_three_words(self):
+        self.assertFalse(hb._gives_order("→ done: PAUSE was lifted by the operator"))
+        self.assertFalse(hb._gives_order("→ done: PAUSE, cancelled"))
+        self.assertTrue(hb._gives_order("→ done: PAUSE is still holding every lane, "
+                                        "and was not lifted"))
+
+    def test_closing_words_are_the_one_list_the_exempt_check_uses(self):
+        # §0: one home beside ACK_MARKERS and ORDER_WORDS — the check is built from
+        # the list, never restated, and a closing word is a whole word.
+        self.assertIn("|".join(hb.CLOSING_WORDS), hb._CLOSING_WORD_RE.pattern)
+        for word in hb.CLOSING_WORDS:
+            self.assertIsNotNone(hb._CLOSING_WORD_RE.fullmatch(word), word)
+            self.assertIsNone(hb._CLOSING_WORD_RE.fullmatch(word + "NESS"), word)
+        for marker in hb.NEVER_ORDER_MARKERS:
+            self.assertIn(marker, hb.ACK_MARKERS, marker)
+
+    # R2a6 (the Muse review of R2a5, S1, safety): an acknowledgement still lost an order
+    # two ways. (1) `over`, `done` and `noted` are ordinary vocabulary in an order
+    # sentence, not closings — `PAUSE over the weekend` orders a stop and
+    # `PAUSE done by 18:00` orders a task, so a generic word in `CLOSING_WORDS`
+    # swallowed both. (2) A *negated* closing word closes nothing:
+    # `PAUSE was not lifted` reports a stop that is still holding. The asymmetry is
+    # unchanged — a spurious order costs one wasted heartbeat and a RESUME, a lost one
+    # lets workers run on against a stop the operator really gave.
+
+    def test_a_generic_word_never_closes_an_order(self):
+        for text in ("→ done: noted. PAUSE over the weekend",
+                     "→ done: PAUSE done by 18:00",
+                     "→ main: PAUSE noted for all lanes",
+                     "→ ack: PAUSE over the weekend, → main held"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_negated_closing_word_never_closes_an_order(self):
+        for text in ("→ done: PAUSE was not lifted",
+                     "→ done: PAUSE isn't cleared",
+                     "→ main: PAUSE never released",
+                     "→ ack: PAUSE unlifted",
+                     "→ done: PAUSE was not lifted, every lane still held",
+                     "→ operator: PAUSE won't be removed until I say so",
+                     "→ done: PAUSE cannot be lifted, all lanes held"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_genuine_closing_word_still_closes(self):
+        # The other side: narrowing the list must not turn a report into an order.
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged",
+                     "→ done: STOP cancelled",
+                     "→ ack: PAUSE ended"):
+            self.assertTrue(hb._acknowledgement(text), text)
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_closing_words_hold_no_generic_word(self):
+        # §0: the exemption is narrow by construction — a word that is plain
+        # vocabulary in an order sentence never sits in the list.
+        for word in ("over", "done", "noted"):
+            self.assertNotIn(word, hb.CLOSING_WORDS, word)
+        for word in ("lifted", "ended", "cancelled", "canceled", "removed", "released",
+                     "acknowledged", "acked", "cleared", "resolved"):
+            self.assertIn(word, hb.CLOSING_WORDS, word)
+
+    def test_negation_words_are_the_one_list_the_veto_uses(self):
+        # §0: one home beside the other three lists — the veto is built from
+        # NEGATION_WORDS, never restated, and it reads the negation of a contraction.
+        whole_words = [w for w in hb.NEGATION_WORDS if w != hb._NEGATION_CLITIC]
+        self.assertIn("|".join(whole_words), hb._NEGATION_RE.pattern)
+        for word in ("not", "cannot", "n't", "never", "no", "without"):
+            self.assertIn(word, hb.NEGATION_WORDS, word)
+        for word in ("not", "cannot", "never", "no", "without",
+                     "isn't", "wasn't", "won't", "couldn't"):
+            self.assertIsNotNone(hb._NEGATION_RE.search(word), word)
+        for word in ("note", "notebook", "amount", "nope", "none", "nevertheless"):
+            self.assertIsNone(hb._NEGATION_RE.search(word), word)
+
+    # R2a7 (the Sonnet review of R2a6, S1, two HIGHs, safety): (1) the RESUME half of
+    # `pause_state` was ungated — a bare `_RESUME_RE.search` — so a *reported* release,
+    # `→ done: applied the fix already; RESUME was never issued, still holding`, lifted a
+    # stop nobody lifted. A RESUME now counts only as an order under the same ack and
+    # negation rules a PAUSE is read by, and a negated release never counts. (2) A
+    # closing word closed an order even when the negation came *after* it —
+    # `PAUSE lifted but not confirmed` — because the window scan returned at the first
+    # closing word. A close now needs the whole window unnegated. The asymmetry is
+    # unchanged: a wrong veto costs one wasted heartbeat and a RESUME, a wrong
+    # exemption loses the stop itself.
+
+    def test_a_negation_after_the_closing_word_keeps_the_order_open(self):
+        for text in ("→ done: PAUSE lifted but not confirmed",
+                     "→ done: PAUSE lifted, not really",
+                     "→ ack: PAUSE cleared, unconfirmed by ops"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_closing_word_with_no_negation_in_the_window_still_closes(self):
+        for text in ("→ done: PAUSE lifted",
+                     "→ main: PAUSE acknowledged"):
+            self.assertFalse(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_resume_that_was_never_issued_does_not_lift_the_stop(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z → done: applied the fix already; "
+                    "RESUME was never issued, still holding")
+        self.assertTrue(hb.pause_state(self.inbox)["active"])
+
+    def test_a_plain_resume_after_a_pause_lifts_it(self):
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z operator: RESUME all lanes")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_an_acknowledged_resume_still_lifts_it(self):
+        # A closing word that reports a release *landing* does not undo it:
+        # `→ done: RESUME acknowledged` says the run was released, so it clears.
+        write_inbox(self.inbox,
+                    "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                    "2026-09-26T12:00:00Z L1: → done: RESUME acknowledged")
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+
+    def test_a_negated_or_undone_resume_never_lifts_the_stop(self):
+        for text in ("→ main: RESUME was not issued",
+                     "operator: no RESUME given yet",
+                     "operator: don't RESUME anything",
+                     "→ done: RESUME cancelled by the operator",
+                     "lesson: the RESUME line was written too early"):
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_un_shaped_word_vetoes_the_close_and_that_is_the_accepted_cost(self):
+        # The wide `un-` veto reads a word that merely starts with those letters as a
+        # negation: the real corpus's `→ done: freeze cleared (2/4 units, 6.73GB)` now
+        # reports an order still in force. Deliberate — the narrow reading that fixes it
+        # is the one that loses `PAUSE cleared, unconfirmed by ops`, and a held lane costs
+        # one heartbeat while a wrongly-released one is the lost order.
+        self.assertTrue(hb._gives_order("→ done: freeze cleared (2/4 units, 6.73GB)"))
+
+    def test_the_release_gate_shares_the_record_helpers_and_its_lists_are_derived(self):
+        # One home, not a second copy of it: the release reads the same head and
+        # negation helpers the stop does, and its exempt-closing list is a partition
+        # of §0's `CLOSING_WORDS` — no word joins or leaves the exemption by hand.
+        self.assertTrue(hb._resumes("operator: RESUME all lanes"))
+        self.assertFalse(hb._resumes("→ done: RESUME was never issued"))
+        self.assertEqual(set(hb.UNDOING_CLOSING_WORDS) & set(hb.REPORTING_CLOSING_WORDS), set())
+        self.assertEqual(set(hb.CLOSING_WORDS),
+                         set(hb.UNDOING_CLOSING_WORDS) | set(hb.REPORTING_CLOSING_WORDS))
+        self.assertIn("|".join(hb.UNDOING_CLOSING_WORDS), hb._UNDOING_CLOSING_RE.pattern)
+
+    # R2a8 (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7 made the *window*
+    # safe and the release *loose*, and both are still wrong. (1) A negation past the
+    # 3-word window closed the order anyway — `PAUSE lifted but it was never really
+    # confirmed by ops` — because the veto only ever looked at the window. The veto now
+    # spans the order word's whole sentence (`.` `;` `!` `?` and newline are the
+    # boundaries), so the negation is read wherever it stands in the sentence that made
+    # the claim, and a negation in a *different* sentence no longer reaches in.
+    # (2) `pause_state` lifted on any mention of a unnegated, un-undone RESUME, so
+    # `→ done: we should RESUME tomorrow`, `considering RESUME options`,
+    # `RESUME pending` and `discussed RESUME` each un-stopped a run the operator never
+    # released. The release is strict by construction now: an unmarked record lifts only
+    # when RESUME opens the payload or its sentence (the imperative — `RESUME all lanes`),
+    # an acknowledgement lifts only when its sentence says nothing but
+    # `RESUME acknowledged`/`RESUME acked` (punctuation and a time allowed), and a
+    # `lesson:` record lifts nothing. The asymmetry is unchanged and this is the side it
+    # points at: a refused release costs one wasted heartbeat and a re-issued RESUME, a
+    # release nobody gave is the lost stop.
+
+    def test_a_negation_anywhere_in_the_record_keeps_the_order_open(self):
+        for text in ("→ done: PAUSE lifted but it was never really confirmed by ops",
+                     "→ done: PAUSE lifted and the record is unconfirmed by ops",
+                     "→ main: PAUSE released, and ops never signed that off",
+                     "→ ack: PAUSE ended but that was not the operator's call"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_negation_in_another_claim_of_the_record_still_vetoes_the_close(self):
+        # R2a9 item 1 reverses what this test pinned at R2a8: the veto is the RECORD, not
+        # the sentence, so a `.` no longer bounds it — and neither can an abbreviation
+        # (`e.g.`) or a decimal escape a negation that stands anywhere in the payload.
+        for text in ("→ done: no merges today. PAUSE lifted",
+                     "→ main: no agreement was reached; PAUSE acknowledged",
+                     "→ done: ops saw no issue. PAUSE cleared at 12:00",
+                     "→ done: PAUSE lifted e.g. not confirmed by ops",
+                     "→ done: PAUSE released. Rates 3.5 GB/s, unconfirmed by ops",
+                     "→ ack: PAUSE cancelled e.g. by the reboot — never signed off"):
+            self.assertTrue(hb._gives_order(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_mention_of_resume_does_not_lift_the_stop(self):
+        # HIGH-2: every one of these matched a bare unnegated `RESUME` at R2a7.
+        for text in ("→ done: we should RESUME tomorrow",
+                     "→ done: considering RESUME options",
+                     "→ done: RESUME pending",
+                     "→ done: discussed RESUME",
+                     "→ main: RESUME still holding, ops to confirm",
+                     "noting that RESUME is due later",
+                     "operator: they may RESUME the run tomorrow",
+                     # R2a9 item 2: the head of *any* sentence is no longer a head — only
+                     # the head of the payload is, and a bare word only.
+                     "note the fix landed. RESUME every lane",
+                     "operator: work done. RESUME all lanes",
+                     'operator: "RESUME all lanes"',
+                     "operator: `RESUME`",
+                     "operator: (RESUME all lanes)",
+                     "operator: RESUME?",
+                     "RESUME tomorrow?",
+                     "noting e.g. RESUME is due",
+                     "operator: resume all lanes",
+                     "operator: resumed every lane"):
+            self.assertFalse(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_imperative_resume_still_lifts_the_stop(self):
+        # The other half of the strict rule: what the operator actually *orders*
+        # releases — the bare word RESUME at the head of the payload, after any speaker
+        # prefix (R2a9 item 2: no sentence has a second vote).
+        for text in ("operator: RESUME all lanes",
+                     "RESUME",
+                     "operator: RESUME",
+                     "from L0 (operator) RESUME now",
+                     "L1-routing: RESUME the pack lane"):
+            self.assertTrue(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_an_acknowledgement_lifts_only_on_a_bare_release_acknowledgement(self):
+        # Rule (b): the ack record lifts when its sentence says nothing but the
+        # acknowledgement — punctuation and a time are allowed, prose is not.
+        for text in ("→ done: RESUME acknowledged",
+                     "→ ack: RESUME acked",
+                     "L1: → done: RESUME acknowledged.",
+                     "→ done: RESUME acknowledged at 12:00",
+                     "→ main: RESUME acknowledged 2026-09-26T12:00:00Z"):
+            self.assertTrue(hb._resumes(text), text)
+            write_inbox(self.inbox,
+                        "2026-09-26T11:19:41Z operator: PAUSE NOW",
+                        "2026-09-26T12:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+        for text in ("→ done: RESUME acknowledged but ops still holding",
+                     "→ done: RESUME acknowledged by no one",
+                     "→ done: RESUME cancelled"):
+            self.assertFalse(hb._resumes(text), text)
+
+    def test_the_release_acknowledgement_words_are_derived_not_rehand_copied(self):
+        # §0 one home: the exact-ack words are a subset of the reporting partition, and
+        # the matcher is built from the list.
+        self.assertTrue(set(hb.RELEASE_ACK_WORDS) <= set(hb.REPORTING_CLOSING_WORDS))
+        self.assertIn("|".join(hb.RELEASE_ACK_WORDS), hb._RELEASE_ACK_RE.pattern)
+        for word in ("acknowledged", "acked"):
+            self.assertIn(word, hb.RELEASE_ACK_WORDS, word)
+
+    def test_a_stop_in_a_later_sentence_of_a_closed_pause_is_a_mention(self):
+        # The read-only probe R2a8's brief asked for: `→ main: PAUSE lifted. STOP all
+        # lanes`. `_gives_order` still reports it as an order (the PAUSE half of the
+        # record is closed, the STOP half is not), but R2a10 item 2 reads a STOP as a
+        # *stop* only in the imperative shape — the bare word at the head of the payload
+        # of an unmarked record — so this acknowledgement quoting one is an order that
+        # does not stop the run.
+        text = "→ main: PAUSE lifted. STOP all lanes"
+        self.assertTrue(hb._gives_order(text), text)
+        self.assertFalse(hb._gives_stop(text), text)
+        write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+        self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_genuine_imperative_stop_after_a_closed_pause_stops_the_run(self):
+        # The same corpus shape with the operator's own line after it: the STOP a record
+        # merely mentions is nothing next to the STOP the operator writes.
+        pause = "2026-09-28T10:00:00Z → main: PAUSE lifted. STOP all lanes"
+        stop = "2026-09-28T11:00:00Z operator: STOP all lanes"
+        write_inbox(self.inbox, pause)
+        self.assertFalse(hb.pause_state(self.inbox)["active"])
+        write_inbox(self.inbox, pause, stop)
+        state = hb.pause_state(self.inbox)
+        self.assertTrue(state["active"], state)
+        self.assertEqual(state["text"], stop.split(None, 1)[1])
+
+    # R2a9 item 3 (S1, safety) added the stop words to the class after `operator: STOP all
+    # lanes` reported `active: False` — a lost stop is the unacceptable direction. R2a10
+    # (S1, safety, the operator's decision) keeps every stop the operator actually wrote
+    # and takes back the vocabulary that came with reading them as wide as PAUSE:
+    # `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) …` became a hard stop, heartbeat
+    # exited 3, and `run`/`spawn` refused on three live inboxes. The class is
+    # `PAUSE_ORDER_WORDS` (PAUSE, STOP, HALT, ABORT — HOLD and FREEZE are capacity notes
+    # with their own lift wording); PAUSE keeps the wide R2a4–R2a9 rules and the other
+    # three stop only as the bare imperative at the head of an unmarked payload.
+    # `pause_state` reads that through `_gives_stop`; `_gives_order` is unchanged.
+
+    def test_a_bare_stop_order_activates_pause_state(self):
+        for text in ("operator: STOP all lanes",
+                     "operator: HALT the pack build",
+                     "operator: ABORT the run",
+                     "STOP everything now",
+                     "from L0 (operator) HALT the fleet"):
+            self.assertTrue(hb._gives_order(text), text)
+            self.assertTrue(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            state = hb.pause_state(self.inbox)
+            self.assertTrue(state["active"], "%s: %s" % (text, state))
+            self.assertEqual(state["text"], text)
+
+    def test_an_acknowledgement_never_carries_a_bare_stop(self):
+        # R2a10 item 2: a stop word inside an ack/lesson record is vocabulary, closed or
+        # not — and the negation veto of R2a9 can no longer turn such a mention back into
+        # a stop, because there was never a stop in it.
+        for text in ("→ done: STOP all lanes obeyed",
+                     "→ done: STOP cancelled",
+                     "→ main: HOLD lifted",
+                     "L1: → ack: HALT ended",
+                     "operator on duty: → done: ABORT was cleared at 12:00",
+                     "→ done: STOP was not cancelled",
+                     "→ main: HOLD lifted e.g. not confirmed by ops",
+                     "→ ack: HALT cancelled. Ops never signed it off",
+                     "lesson: STOP all lanes is the wording to avoid"):
+            self.assertFalse(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_stop_word_mentioned_in_a_note_is_not_an_order(self):
+        # R2a10 item 2, the other half: mid-record, lowercase, or quoted, a stop word
+        # reports on a stop instead of giving one. The MEM HOLD LIFTED note the operator
+        # measured on the real corpus is the case that set this round.
+        for text in ("fleet note: runs were stopped at 14:00",
+                     "fleet note: no STOP needed after all",
+                     "operator: `STOP`",
+                     'operator: "STOP all lanes"',
+                     "operator: (STOP all lanes)",
+                     "operator: stop all lanes",
+                     "from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) max 4 local units/workers",
+                     "from L1-main: HOLD lifted, MemAvailable recovered to 7.0G",
+                     "operator: STOPs are logged but not enforced"):
+            self.assertFalse(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_pause_still_reads_wide_where_a_stop_does_not(self):
+        # R2a10 item 2, last clause: PAUSE keeps its current (wider) rules unchanged — an
+        # unmarked record naming PAUSE anywhere stops the run, an ack exempts it only on
+        # an unnegated closing word, and the record-wide negation veto of R2a9 stands.
+        for text in ("fleet note: PAUSE every lane until ops says so",
+                     "→ main: PAUSE lifted e.g. not confirmed by ops",
+                     "from L1-main: note. PAUSE all lanes until further notice",
+                     "→ done: STOP all lanes obeyed. PAUSE every lane again"):
+            self.assertTrue(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertTrue(hb.pause_state(self.inbox)["active"], text)
+
+    def test_a_pause_class_order_lifts_only_to_a_strict_resume(self):
+        for word in ("PAUSE", "STOP", "HALT", "ABORT"):
+            write_inbox(self.inbox,
+                        "2026-09-28T10:00:00Z operator: %s all lanes" % word,
+                        "2026-09-28T11:00:00Z operator: RESUME all lanes")
+            self.assertFalse(hb.pause_state(self.inbox)["active"], word)
+            write_inbox(self.inbox,
+                        "2026-09-28T10:00:00Z operator: %s all lanes" % word,
+                        "2026-09-28T11:00:00Z → done: RESUME acknowledged")
+            self.assertFalse(hb.pause_state(self.inbox)["active"], word)
+            # a mention of the release keeps the stop (item 2), and a lower-case or
+            # quoted RESUME is no release at all
+            for release in ("→ done: considering RESUME options",
+                            'operator: "RESUME all lanes"',
+                            "operator: RESUME?"):
+                write_inbox(self.inbox,
+                            "2026-09-28T10:00:00Z operator: %s all lanes" % word,
+                            "2026-09-28T11:00:00Z %s" % release)
+                self.assertTrue(hb.pause_state(self.inbox)["active"], "%s / %s"
+                                % (word, release))
+
+    def test_freeze_hold_and_resume_are_not_pause_class_words(self):
+        # The boundary of the class: HOLD and FREEZE are capacity notes with their own
+        # lift wording and RESUME is the release, so none of them may activate a pause on
+        # its own — not even as the bare first word of the payload.
+        for text in ("operator: FREEZE the pack lane",
+                     "operator: RESUME all lanes",
+                     "operator: freeze every lane please",
+                     "operator: HOLD every merge",
+                     "from L0 (operator) HOLD every merge",
+                     "from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G)"):
+            self.assertFalse(hb._gives_stop(text), text)
+            write_inbox(self.inbox, "2026-09-28T10:00:00Z %s" % text)
+            self.assertFalse(hb.pause_state(self.inbox)["active"], text)
+
+    def test_pause_class_words_are_the_one_list_the_stop_filter_uses(self):
+        # §0: one home, as `ACK_MARKERS`, `ORDER_WORDS` and `CLOSING_WORDS` are. The list
+        # names the vocabulary and `_gives_stop` decides which shape of each word stops
+        # the run; it is a subset of the order words, so a stop is always an order.
+        # Case-sensitive and whole-word like PAUSE: `stop`, `PAUSED` and `HOLDs` are prose.
+        self.assertEqual(("PAUSE", "STOP", "HALT", "ABORT"), hb.PAUSE_ORDER_WORDS)
+        self.assertTrue(set(hb.PAUSE_ORDER_WORDS) <= set(hb.ORDER_WORDS))
+        self.assertIn("|".join(hb.PAUSE_ORDER_WORDS[1:]), hb._IMPERATIVE_STOP_RE.pattern)
+        for word in hb.PAUSE_ORDER_WORDS:
+            self.assertTrue(hb._gives_stop("operator: %s all lanes" % word), word)
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match(word.lower()), word.lower())
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match(word + "D"), word + "D")
+            self.assertIsNone(hb._IMPERATIVE_STOP_RE.match("`%s`" % word), word)
+        for word in ("HOLD", "FREEZE", "RESUME"):
+            self.assertNotIn(word, hb.PAUSE_ORDER_WORDS, word)
+
+    def test_a_body_with_no_timestamp_is_not_a_record(self):
+        # §0: a record opens with its ISO timestamp; a bare line (a
+        # continuation) is never scanned for an order, marker or no marker.
+        self.assertIsNone(hb.parse_inbox_line("PAUSE NOW"))
+        self.assertIsNone(hb.parse_inbox_line("→ done: PAUSE lifted"))
+        self.assertIsNone(hb.parse_inbox_line("2026-09-28T10:00:00Z"))
+        write_inbox(self.inbox, "PAUSE NOW", "→ done: PAUSE lifted")
         self.assertFalse(hb.pause_state(self.inbox)["active"])
 
     def test_session_start_is_the_first_transcript_timestamp(self):

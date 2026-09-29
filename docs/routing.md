@@ -94,6 +94,60 @@ behind `--since` says nothing, and one dropped with the record it rode on by
 `--max-records` is named in the cut line instead ("cut N earlier records and M
 malformed entries").
 
+State card: `autoos-agent.py card check <file>` (RESTART spec §1) validates the
+one card a successor resumes from, `<RUN>/status/<name>.card.md`, which that
+session writes and nothing else touches. It checks the header (`# card <name> —
+<UTC> | gen=<id> | context <n>k/<cap>k | last-event <position>`), the fixed
+section order (goal, state, next, threads, traps, operator) and each section's
+line cap, the 40-line total, the 200-char line limit, and that `last-event`
+parses as a position — read with `autoos_inbox`'s parser, never a second one. A
+`threads` line whose id matches the Q-id shape (`^[Qq][-:]?\d` — `Q-008` and
+`q-008`, not `QUOTE-2`) must carry `asked <time>`, since those
+lines are the pack's open questions (§3). Every problem prints on stdout with
+its line number, sorted by line; a file that cannot be read is a stderr notice.
+Exit 0 valid, 1 invalid, 2 unreadable. The rules live in `tools/autoos_card.py`;
+the acknowledgement markers the same spec §0 names one list are
+`autoos_heartbeat.ACK_MARKERS` (`lesson:`, `→ done`, `→ ack`, `→ relaunched`,
+`→ operator`, `→ main`), which is what keeps an acknowledgement of a finished
+order from reading as a new PAUSE — the filter counts a marker only at the head
+of a record, after its timestamp (and after any leading BOM, space or CR), and
+only as a whole marker: what follows it must be `:`, whitespace or the end of
+the text, so `→ mainline PAUSE all lanes` still stops the run while
+`→ main: merged` does not. At most one speaker prefix may stand in front of the
+marker — `<name>:` (up to 3 words, colon required), `from <name>` (colon
+optional) or `from <words> (<note>):` — a speaker word is name-shaped (letters,
+digits, `-`, `_`, `.`, no `:`, `→` or parentheses) and the whole prefix is at most
+40 characters, so a prefix cannot eat the marker it precedes and an order that only
+names a marker mid-sentence still stops the run. A prefix may also never name one of
+spec §0's other one-list rules, `autoos_heartbeat.ORDER_WORDS` (`PAUSE`, `RESUME`,
+`STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT`, case-insensitive): `PAUSE all lanes: → main
+is held` is an order wearing its own first clause as a speaker, not an acknowledgement
+(R2a4). The words that *stop the run* are the pause-class subset,
+`autoos_heartbeat.PAUSE_ORDER_WORDS` (`PAUSE`, `STOP`, `HALT`, `ABORT`): PAUSE is read anywhere in an
+unmarked record, while STOP, HALT and ABORT stop only as the bare word at the head of the payload
+(`operator: STOP all lanes`), and `HOLD` and `FREEZE` are outside the class — capacity words with their
+own lift wording (`MEM HOLD LIFTED`, `freeze cleared`), never a stop (R2a10). What an acknowledgement may
+then exempt — `autoos_heartbeat.CLOSING_WORDS` and its 3-word window, the
+`autoos_heartbeat.NEGATION_WORDS` veto over the record's whole payload, the `RELEASE_ACK_WORDS`
+half of the `REPORTING_CLOSING_WORDS`/`UNDOING_CLOSING_WORDS` partition, and the two record
+shapes a `RESUME` is allowed to lift through (the bare word at the head of the payload, or an
+acknowledgement that says nothing but the landing) — is
+RESTART spec §0's rule (`docs/plans/2026-09-28-restart-spec.md`), which is its one home
+and is not restated here; in code it is `autoos_heartbeat._gives_order` for a stop word
+and `_resumes` for a release, both reading `_ack_head`, `_payload_start`,
+`_record_is_negated` and `_order_word_is_closed`. So `→ done: PAUSE lifted` and
+`→ done: RESUME acknowledged`
+report what already happened, while `→ done: PAUSE lifted but not confirmed`,
+`→ done: PAUSE lifted but it was never really confirmed by ops`,
+`→ done: PAUSE lifted e.g. not confirmed by ops`,
+`→ done: noted. PAUSE over the weekend`,
+`→ done: applied the fix already; RESUME was never issued, still holding` and
+`→ done: we should RESUME tomorrow` are still in
+force (R2a5, the Sonnet review of R2a4; R2a6, the Muse review of R2a5; R2a7, the Sonnet
+review of R2a6; R2a8 and R2a9, the Muse reviews of R2a7 and R2a8) — and `lesson:` is the
+one marker that exempts a whole record, because a lesson reports on the code and never
+addresses the run.
+
 Attribution: every spawned run that reaches the gateway through a client able to stamp a request sends
 the header `x-omniroute-session-id: <tag>/<run-id>` (D-063; tag = env `AUTOOS_SESSION_TAG` when valid,
 else `<lane worktree basename>/<slugified title>`). Which clients can stamp it, and with what, is the
@@ -140,9 +194,13 @@ child's own spawns read that variable and store it as their `parent_run_id`, so 
 whose caller's id equals its own has no parent edge at all, and a cycle between two records still lists
 both rows). A
 record also keeps the host it ran on, the `logs/agents/<id>` run dir it was given
-(`AUTOOS_TASK_DIR`) and the resolver's whole `route_plan`, so a run stays auditable after the probes
+(`AUTOOS_TASK_DIR`), the resolver's whole `route_plan`, and the `scope` the client launch took
+(`{"path": "scoped"|"inherited"|"unscoped", "unit", "reason"}` — SCOPECLI-b, so `ps` says whether a
+canceller reaches this run through a cgroup or only through its process group), so a run stays
+auditable after the probes
 and cooldowns it was scored from have moved on; all of it passes `redact_record`, nested values
-included — dicts, lists, tuples, sets and frozensets alike.
+included — dicts, lists, tuples, sets and frozensets alike. The run prints the same fact as a
+`scope:` line beside its `writer:` line, and an unscoped POSIX launch warns on stderr first.
 
 The id may also be handed in rather than minted here (FLEETP0b, FLEETSPEC §5.1): `run --run-id <id>`
 takes a canonical id and refuses a shape that is not one with exit 2. That is how the MCP server's

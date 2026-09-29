@@ -80,14 +80,139 @@ code from state the session keeps small at every wave. Then the context cap drop
   record before it is still returned when it is after P in file order, and is flagged `(late)`.
 - **No parseable timestamp:** an inbox with records but no timestamp (another shape) makes every
   reader exit 1 with `no timestamped records in <file>`. It never reads as "no events".
-- **Acknowledgement markers:** one list, `tools/autoos_heartbeat.py` `_NOT_AN_ORDER_RE`. It holds
-  only `lesson:|→ done` today. Lane R2a extends it to the markers in use (`→ done`, `→ ack`,
-  `→ relaunched`, `→ operator`, `→ main`) plus the other line shapes that record the past rather than
-  ask for the future — a `ready` line, a pong, and an `info` line — with a test per shape. It is the
-  ONE "is this an order" answer, and each reader says which part of it it uses: §1 takes the subset
+- **Acknowledgement markers:** one list, `ACK_MARKERS` in `tools/autoos_heartbeat.py`
+  (`lesson:`, `→ done`, `→ ack`, `→ relaunched`, `→ operator`, `→ main`); the shipped
+  `_MARKER_AT_HEAD_RE` is built from it, never restated. Lane R2a extended the old
+  `lesson:|→ done` pair to the markers in use, with a test per marker.
+  **A marker counts only at the head of the record body, and only as a whole marker.**
+  The record body is the text after the leading ISO timestamp — a line with no timestamp
+  is not a record and is not scanned at all (same rule as above) — with any leading BOM,
+  space, tab or CR stripped first, at the line head for the timestamp and at the body head
+  for the marker check. **Boundary:** what follows the marker is `:`, whitespace or the end
+  of the text, so `→ mainline PAUSE all lanes`, `→ maintenance: PAUSE`, `→ operators PAUSE`
+  and `→ doneX PAUSE` are orders, while `→ main: merged` and `→ done 12:00 …` are
+  acknowledgements (R2a3 review, MEDIUM: a bare prefix match swallowed the first two).
+  **Speaker prefix:** at most one, and only what its own delimiter allows. A speaker word
+  looks like a name — letters, digits and `-`, `_`, `.`, with at least one letter, so a
+  bare count (`4 lanes: → main merged`) is prose — and it carries no `:`, no `→` and no
+  parentheses: a prefix always ends at its colon or at its `(<note>)`, and can never eat
+  the marker that follows it. The shapes: `<name>:` with
+  up to **3** words, colon required (a bare first word without a colon is never a speaker,
+  so `notes → done: PAUSE lifted` stays an order); `from <name>` with one word and the colon
+  optional (the real inboxes write `from <name>` 254 times with no colon); `from <words…>`
+  with any number of words **only** when the prefix is delimited by `(<note>)` or its own
+  `:`. So `operator on duty: → done: PAUSE lifted` and `from L1-main relay (x): → done: PAUSE
+  lifted` are acknowledgements (R2a3 review, LOW: a two-word speaker was not stripped, so a
+  quoted PAUSE read as a fresh stop), `from L0 (operator): → done 12:00 PAUSE lifted` is one,
+  and `from L0 (operator): PAUSE NOW` is an order. **Order words:** one list, `ORDER_WORDS`
+  in `tools/autoos_heartbeat.py` (`PAUSE`, `RESUME`, `STOP`, `HOLD`, `FREEZE`, `HALT`,
+  `ABORT`), and a speaker prefix may never name one (case-insensitive, whole word, its
+  `(<note>)` included) nor run past **40 characters** — otherwise an order wears its own
+  first clause as its speaker and a marker after the colon silently un-stops the run, so
+  `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and `PAUSE: → main …` are all
+  orders (R2a4, the Muse review of R2a3: a lost order is the one unacceptable outcome; the
+  wide list costs a spurious order at worst, and `hold on: → main merged` is one).
+  **The pause-class subset — `PAUSE_ORDER_WORDS` in `tools/autoos_heartbeat.py`
+  (`PAUSE`, `STOP`, `HALT`, `ABORT`) — is the vocabulary `pause_state` reads, and
+  `_gives_stop` is its filter** (R2a9 item 3, closing the probe R2a8 recorded: `operator:
+  STOP all lanes` was a record `_gives_order` called an order and `pause_state` reported
+  `active: False`, because its filter was the PAUSE word alone — a lost stop, the one
+  unacceptable direction). Case-sensitive and whole-word like PAUSE itself, so `stop`,
+  `PAUSED` and `HOLDs` are prose, and a subset of `ORDER_WORDS`, so every stop is a word
+  the exemption rules already clear. **R2a10 (S1, safety) splits the class by shape:** PAUSE
+  keeps the wide rules above (an unmarked record names it anywhere), while STOP, HALT and
+  ABORT stop the run only as the bare word at the head of the payload of an unmarked record
+  — the same strict head `_resumes` requires of a release — so `→ done: STOP all lanes
+  obeyed`, `fleet note: runs were stopped at 14:00`, `no STOP needed` mid-note and
+  `` operator: `STOP` `` are mentions, not orders. HOLD and FREEZE are outside the class:
+  they are capacity words with their own lift wording, and the real corpus paid for R2a9's
+  wide read at once — `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze
+  rule …` became a hard stop, heartbeat exited 3 and `run`/`spawn` refused on three live
+  inboxes. RESUME is the release, so it can never be a stop.
+  **An acknowledgement then exempts only an order word its own record closes — one
+  more list, `CLOSING_WORDS` in `tools/autoos_heartbeat.py` (`lifted`, `ended`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `cleared`,
+  `resolved`), which must follow the order word within 3 words while *the record's payload
+  stays unnegated*: the fourth one-list rule, `NEGATION_WORDS`
+  (`not`, `cannot`, `n't`, `never`, `no`, `without`, and `un-` on any word of the payload),
+  vetoes a close wherever the record puts it — before the closing word, after it, or on
+  it — so `→ done: PAUSE lifted`
+  reports a stop that ended while `→ done: applied the fix. PAUSE
+  all lanes until further notice`, `→ done: noted. PAUSE over the weekend`,
+  `→ done: PAUSE was not lifted` and `→ done: PAUSE lifted but not confirmed` are all
+  orders still in force (R2a5, the Sonnet review of R2a4: gating the record whole on the
+  marker lost that order; R2a6, the Muse review of R2a5: the generic words `over`, `done`,
+  `noted` were vocabulary inside order sentences, and a negated closing word states the
+  opposite of a close; R2a7, the Sonnet review of R2a6: the window scan stopped at the
+  first closing word, so a negation that came *after* it — `lifted but not confirmed`,
+  `cleared, unconfirmed by ops` — closed a stop nobody confirmed lifted; R2a8, the Muse
+  review of R2a7: the veto itself stopped at the 3-word window, so
+  `PAUSE lifted but it was never really confirmed by ops` — the negation five words out —
+  closed it too. What bounds the veto now is the **record's payload** — everything after
+  the speaker prefix and, in an acknowledgement, after the marker (R2a9 item 1: the
+  sentence splitter is gone, because a splitter reads an abbreviation (`e.g.`) and a
+  decimal (`3.5`) as a sentence break, and each of those was a way for a negation to
+  escape the veto — `→ done: PAUSE lifted e.g. not confirmed by ops` cut at the second `.`
+  and closed a stop the record itself says was never confirmed, and
+  `→ done: no merges today. PAUSE lifted` let a negation that belongs to another claim of
+  the same record close it). One structure, not one more heuristic: the payload is the
+  unit for both halves of the filter, the veto and the release head. An
+  `un-`-shaped word that is only vocabulary (`units`, `until`) still vetoes a close, and
+  now reaches further than one sentence: measured over the real corpus that is **1** record
+  reclassified by the widened veto (`→ done: combined FLEETSPEC review came back NOT
+  READY …`, whose close R2a8's sentence cut had exempted) and **30** records reclassified
+  by the pause-class filter — the fleet's own `MEM HOLD` / `CHEAP-WORKER HOLD` / `ON HOLD`
+  notes — of which the two rules together flip **3** inboxes, one from inactive to
+  active: `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze rule
+  applies again: max 4 local units/workers fleet-wide …` reads as a stop whose `LIFTED`
+  the `units` in its next sentence vetoes. That is the spurious direction, which this
+  rule is allowed to cost, never a lost order — but it is a cost measured on live inboxes,
+  and it is recorded here rather than glossed. **R2a10 paid that bill:** the operator
+  declined a stop class that halts three live inboxes on a memory note, narrowed the class
+  to PAUSE + imperative STOP/HALT/ABORT, and the scan re-ran — **0** real records are a bare
+  imperative stop, so `pause_state` is back to the R2a8 baseline exactly (3 active:
+  `L1-backlog.md`, `L1-main.md`, `L1-routing.md`, same winning records), with the
+  `MEM HOLD LIFTED` note inactive in all ten. A *release* word is read
+  **strictly** — not the stop rule loosened, but a rule of its own, because the asymmetry
+  points the other way here: a refused release costs one wasted heartbeat and a re-issued
+  `RESUME`, a release nobody gave is the lost stop (R2a8's HIGH: R2a7 gated `RESUME` the
+  way a `PAUSE` is gated, so any *mention* of an unnegated, un-undone `RESUME` lifted a
+  stop — `→ done: we should RESUME tomorrow`, `considering RESUME options`,
+  `RESUME pending`, `discussed RESUME`). Exactly two shapes lift, and both refuse a
+  payload that carries a `?` (a question about a release is not one) or a negation
+  anywhere in it, by the same record veto. (a) A record **with no**
+  acknowledgement marker whose payload opens **directly** with the bare word `RESUME` —
+  the imperative the operator writes (`operator: RESUME all lanes`,
+  `from L0 (operator) RESUME now`) — followed by no *undoing* close within 3 words. There
+  is one head now, the payload's, and it wears no punctuation of its own: the
+  sentence-head path R2a8 also accepted is gone (`note the fix landed. RESUME every lane`
+  and `noting e.g. RESUME is due` order nothing), and so is a quoted or asked word
+  (`operator: "RESUME all lanes"`, ``operator: `RESUME` `` `operator: (RESUME all lanes)`,
+  `operator: RESUME?`, `RESUME tomorrow?`, lowercase `operator: resume all lanes`).
+  (b) An acknowledgement whose
+  payload says nothing but the landing: `RESUME` plus a `RELEASE_ACK_WORDS` word
+  (`acknowledged`, `acked` — the release half of the reporting partition, named once),
+  optionally followed by punctuation or a time (`→ done: RESUME acknowledged at 12:00`),
+  and by no prose (`→ done: RESUME acknowledged but ops still holding` lifts nothing).
+  For the partition, `CLOSING_WORDS` divides in two, derived rather than hand-copied:
+  `REPORTING_CLOSING_WORDS` (`acknowledged`, `acked`, `cleared`, `resolved`) report a
+  release landing, so `→ done: RESUME acknowledged` lifts a stop, while
+  `UNDOING_CLOSING_WORDS` (the rest) undo one, so `→ done: RESUME cancelled` leaves the
+  stop in force — and a negated release does too, which is the shape R2a7's HIGH found:
+  `→ done: applied the fix already; RESUME was never issued, still holding`
+  (R2a7, HIGH: `pause_state` matched a bare `RESUME` ungated). Everything else that
+  mentions `RESUME` lifts nothing.
+  And `lesson:`
+  is the one marker that exempts a whole record because a lesson reports on the code,
+  never to the run.** Elsewhere in the line a marker is
+  vocabulary: `operator: PAUSE all lanes; nothing merges → main until I say so` is still an
+  order (R2a review, MEDIUM). It is the ONE "is this an order" answer for the marker half, and each
+  reader says which part of it it uses: §1 takes the subset
   that closes something for staleness, §3 cites it for readies, §7 takes the whole list for
   archivability — with the one exception §7 states, that a `ready` line is not archivable until it is
-  closed, because §3 is still waiting to read it.
+  closed, because §3 is still waiting to read it. A `ready`, pong or `info` line is not an order but
+  is not in this list either: it answers no one, so §1 says it never makes a card stale and §7 owns
+  the exception above.
 - **Inbox lock:** every write and every rotation of `<RUN>/inbox/<name>.md` takes `flock` on
   `<RUN>/inbox/<name>.lock` — one lock, two modes. `append_inbox_line` holds it **shared** and only
   for the write (several appenders may hold it at once; the file is opened `a`, one complete line each).
@@ -146,6 +271,9 @@ the run dir. A new run starts a new card, which is seeded from the old one's `go
 | traps | 8 | things a successor would get wrong, each with an evidence pointer |
 | operator | 4 | operator-only steps, verbatim |
 
+- A section's cap counts **content lines**: the `## <name>` heading and blank lines are not
+  content. The 40-line total counts every line of the file — headings and blanks included — and
+  it is the total that binds.
 - Every line is at most 200 characters (measured: today's status files break this, 31 of 105 lines
   in one). So a successor writes a fresh card and does not convert the old status file.
 - The card is updated every wave with a small edit. R-coord-06 changes from "at cap: rewrite
@@ -194,10 +322,11 @@ printed. The order is:
    - **Open questions** are NOT inferred from inbox text. Measured: real answers are free text
      ("Q-008 (a) -> REDACTMERGE queued", "answers Q-001/Q-003"), and mentions of an id are not
      questions, so no pattern classifies them (Sonnet v3 review). The source of truth is the card:
-     every open question is a `threads` line whose id starts with `Q` (`Q-008 | routing-00 | asked
+     every open question is a `threads` line whose id matches the Q-id shape `^[Qq][-:]?\d` — `Q-008`
+     and `q-008`, not `QUOTE-2` (`Q-008 | routing-00 | asked
      22:33Z | default a`). The session closes it by deleting the line when the answer arrives. The
-     pack prints those lines under the snapshot's `open questions` heading, and `card check` rejects a
-     `Q` thread without an `asked <time>` field.
+     pack prints those lines under the snapshot's `open questions` heading, and `card check` rejects
+     a Q-id thread without an `asked <time>` field.
 3. **Memory:** stub `memory: not wired (MEMSPEC)`.
 4. **Role brief:** `<RUN>/briefs/<name>.md`, verbatim.
 5. **State card:** verbatim.
@@ -340,8 +469,9 @@ and the writer that produces it enforces the budget. A limit no code checks is p
 - **Inbox rotation:** new verb `autoos-agent.py inbox rotate <name>|--file PATH`.
   - Trigger: the inbox file exceeds 50 KB, or its first record is from an earlier UTC month than today.
   - **Archivable** — this is what "acknowledged" means, and position alone is not enough of it. A
-    record moves only if either: (a) it is **not an order**, by the whole §0 `_NOT_AN_ORDER_RE` list
-    R2a extends — §0 names the shapes, and such a line records what already happened, so nothing
+    record moves only if either: (a) it is **not an order**, by the whole §0 not-an-order answer —
+    the `ACK_MARKERS` list R2a extends, plus the `ready`, pong and `info` shapes §0 names — and such a
+    line records what already happened, so nothing
     downstream waits on it; or (b) it **is** an order and a later `→ done:` line **names it**.
     Anything else is an open order and stays live **whatever its position**. (why: with position as
     the only test, an unrelated `→ done:` that happened to follow a PAUSE archived the PAUSE and the
@@ -465,7 +595,7 @@ ours; the other two are, and both are cut per role, not per model.
 | lane | scope | files (one writer each) |
 |---|---|---|
 | R1 inbox | §0 module + `inbox`; the §0 inbox lock on the append side (`append_inbox_line`, shared); replace `main()`'s dispatch fallthrough (`cmd_list … else cmd_run`) with an explicit verb table so later verbs cannot fall into `run` | tools/autoos_inbox.py (new), tools/autoos-agent.py (dispatch + inbox verb), tests |
-| R2a card | `card check` + extend `_NOT_AN_ORDER_RE` (the ready/pong/info shapes too, §7); `card check` takes a path so it also caps `status/<name>.md` until R6 retires it | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
+| R2a card | `card check` + the `ACK_MARKERS` list (R2a2: head-anchored, see §0) — the one not-an-order answer, extended from `_NOT_AN_ORDER_RE`, and §7's ready/pong/info shapes are named as non-orders there too; `card check` takes a path so it also caps `status/<name>.md` until R6 retires it | tools/autoos-agent.py, tools/autoos_heartbeat.py, tests |
 | R2b stale | heartbeat `card: stale`: `heartbeat_state` param, JSON key tuple, MCP twin | tools/autoos-agent.py, tools/autoos_agent_mcp.py, tests |
 | R2c handoff cap | §7 `l1_handoff.py` budget (refuse over 5k, name the section), line dedupe, no embedded status file | .agents/skills/unattended-orchestration/l1_handoff.py, tests |
 | R8 rotate | §7 `inbox rotate` verb: archivable = non-order (§0 list) or named by a later `→ done:` at a **greater line number** (full stamp, or a short stamp only while it is unique among open records; `#<n>` = §0's ordinal), **plus §7's `ready` exception** (a `ready` line is archivable only once §7's closing rule has closed it, and rotate counts an unclosed one in the `no covering done` total), the two `kept N:` counts, exclusive §0 lock + re-read, tmp/`fsync`/rename swap, §0's 30 s rotate / 10 s appender timeouts, heartbeat hook (≤1/hour/inbox), archive read rules; plus §0's `inbox append` verb (calls `append_inbox_line`, so the shared lock keeps one implementation, joining the existing `ready` caller) and the test grepping tracked skill/brief files for a bare `>> …/inbox/` — shell recipes only | tools/autoos_inbox.py, tools/autoos-agent.py, tests |
@@ -496,7 +626,7 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 |---|---|
 | blobs store raw inbox/brief text | §6 Redaction through autoos_redact; R7 after REDACTMERGE |
 | opus row also matches fable | §5 router D-044: the row is the orchestrator's cap, row stays shared, both 350k |
-| `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it, test per marker |
+| `_NOT_AN_ORDER_RE` is only `lesson:\|→ done` | §0 R2a extends it (as `ACK_MARKERS`), test per marker; R2a2 counts a marker only at the record head |
 | torn appends by concurrent writers | §0 last line without newline ignored; malformed reported |
 | R2/R5 over 3 items | R2a/R2b, R5a/R5b |
 | canonical JSON undefined | §6 pinned serialization + id test |

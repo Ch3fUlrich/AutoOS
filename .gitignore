@@ -62,6 +62,9 @@ configuration/launch-profiles/*.settings.json
 # Untracked is not enough — the next `git add -A` after a run sweeps it in.
 output/cao/
 .cao-leases/
+# Memory-graph sync ledger (tools/sync_memory_graph.py --mark): machine state,
+# must never be committed or a re-run would skip records the graph never got.
+.state/graph-loaded.txt
 .claude/settings.local.json
 .claude/lane-mcp.local.json
 # Installer-created junctions into .agents/skills (one per skill, guarded by

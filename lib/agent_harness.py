@@ -33,6 +33,29 @@ MANAGED_AGENT_KEYS = ("description", "mode", "model", "permission", "tools")
 
 SPAWNER = "autoos-agent"  # tools/autoos_agent_mcp.py: only spawning roles may list it
 
+# The spellings of the spawn gate, measured against opencode v2.0.16's own
+# bundle: its rename map is {bash: "shell", task: "subagent", apply_patch:
+# "patch"}; the `permission` OBJECT declares the tool-name keys (read, edit,
+# glob, grep, list, bash, task, external_directory, webfetch, lsp, doom_loop,
+# skill — `task` annotated "Deprecated alias for subagent", `subagent` reaching
+# the schema only through its catch-all record), while the rule LIST the tier
+# agents write asserts the canonical action `subagent`. Which side honours the
+# alias is not something to bet a fence on: opencode.jsonc:115 records that a
+# `bash` rule matches nothing in v2, so a name is only proven by the spelling
+# that matches. The render therefore emits BOTH with the same verdict — the
+# canonical one is the fence, the alias is insurance against the version that
+# still reads it. A leaf that can spawn hands its work to a child carrying none
+# of the leaf's read fence, and that is the whole hole. (KEYDENY3b)
+SPAWN_GATES = ("task", "subagent")
+
+# The MCP servers a leaf role may list. A leaf's MCP rule can only name the
+# tool, never the resource, so a server whose tools read by URL or path cannot
+# be path-fenced for it: playwright opens file:// and any URL, context7 fetches
+# remote docs by id/topic, and a filesystem-style server reads any path. serena
+# stays because every tool of it that returns file bytes is denied by name
+# (KEYDENY3), and graphify answers from the graph. (KEYDENY3b)
+LEAF_ALLOWED_MCP = frozenset({"serena", "graphify"})
+
 
 def load_harness(path):
     with open(path, encoding="utf-8") as handle:
@@ -88,6 +111,26 @@ def validate(harness):
         problems.append(
             "mcp_servers.serena.memory_tools must be exactly the 6 memory tools"
         )
+    # Also exact: the leaf agents' deny list is derived from it, and a dropped
+    # entry here un-fences a tool that can hand a leaf a key file's bytes
+    # (KEYDENY3). The set is the pinned serena agent's own: read_file and
+    # search_for_pattern return content, and the four symbol tools do so
+    # through their include_body parameter. get_symbols_overview, list_dir,
+    # find_file and the diagnostics tools return names or messages, never a
+    # file's bytes, so they stay out of the fence.
+    raw_content_tools = serena.get("raw_content_tools")
+    if set(raw_content_tools or []) != {
+        "read_file",
+        "search_for_pattern",
+        "find_symbol",
+        "find_declaration",
+        "find_implementations",
+        "find_referencing_symbols",
+    } or not isinstance(raw_content_tools, list):
+        problems.append(
+            "mcp_servers.serena.raw_content_tools must be exactly the 6 tools "
+            "that can return file content"
+        )
 
     roles = harness.get("roles")
     roles = roles if isinstance(roles, dict) else {}
@@ -134,6 +177,13 @@ def validate(harness):
                     problems.append("roles.%s.mcp references unknown server %s" % (name, server))
             if role.get("spawn") is not True and SPAWNER in mcp:
                 problems.append("roles.%s cannot spawn but lists the %s MCP server" % (name, SPAWNER))
+            if role.get("leaf") is True:
+                off_list = sorted(s for s in mcp if s not in LEAF_ALLOWED_MCP)
+                if off_list:
+                    problems.append(
+                        "roles.%s is a leaf and may only list %s; it lists %s"
+                        % (name, ",".join(sorted(LEAF_ALLOWED_MCP)), ",".join(off_list))
+                    )
         if role.get("leaf") is True and role.get("spawn") is not False:
             problems.append("roles.%s is a leaf and must have spawn: false" % name)
         if role.get("spawn") is True:
@@ -191,7 +241,7 @@ def _unexpected_type(user):
     if permission is not None and not isinstance(permission, dict):
         return "permission is not an object"
     if isinstance(permission, dict):
-        for key in ("bash", "read"):
+        for key in ("bash", "read", "grep", "glob", "external_directory"):
             if key in permission and not isinstance(permission[key], (str, dict)):
                 return "permission.%s is neither a string nor an object" % key
     if "instructions" in user and not isinstance(user["instructions"], list):
@@ -333,6 +383,41 @@ def desired_opencode(user, harness, repo_root, skills_source):
         list(fences["read_deny_all"]),
         list(fences["read_allow_all"]),
     )
+    # KEYDENY3: the read fence fenced one tool, and opencode matches a
+    # *different* resource per action (v2.0.16). `grep` and `glob` are asserted
+    # against the search pattern the agent passed, not the files it searches, so
+    # here they fence a search whose pattern names a key file; the searched path
+    # is only checked through `external_directory` (FileAccess.authorizeExternal),
+    # which sees a path — that is where the same list fences a leaf grepping an
+    # absolute key file outside the project. All three carry the identical deny
+    # list so one catalog edit moves all of them.
+    # KEYDENY3b, what this fence is NOT: because grep/glob is matched against the
+    # pattern, `grep "sk-" .` inside a checkout that holds configuration/
+    # api-keys.yml matches nothing in the deny list and runs — the pattern fence
+    # stops a search *named* after a key file, never a search *through* one. The
+    # guarantee that actually holds is upstream of the config: a spawned tier runs
+    # only in an --isolate clone (tools/autoos-agent.py ISOLATE_TIERS — tiers 2 and
+    # 3, plus any role whose catalog `leaf: true` flag is set, are refused in
+    # place), and `git clone --local` materialises committed files only, so a
+    # git-ignored secret cannot be present in the directory it greps. Asserted by
+    # tests/test_autoos_spawner.py (the clone carries no ignored file, an
+    # in-place spawned tier is refused, and the MCP spawn forces the clone).
+    # What KEYDENY3g closed: KEYDENY3b left tier 2 in place, and that was the
+    # whole hole — a spawning tier in the caller's checkout has the same pattern
+    # gap for itself, and the native subagent it launches inherits that cwd,
+    # because the gate lives in the CLI, which opencode's own spawn does not pass
+    # through. The directory now answers it for every spawned tier.
+    for action in ("grep", "glob"):
+        permission[action] = _rebuild_read(
+            permission.get(action),
+            list(fences["read_deny_all"]),
+            list(fences["read_allow_all"]),
+        )
+    permission["external_directory"] = _rebuild_read(
+        permission.get("external_directory"),
+        list(fences["read_deny_all"]),
+        [],
+    )
 
     instructions = list(doc.get("instructions") or [])
     # No source means no paths: joining "" would append "some-skill/SKILL.md",
@@ -362,6 +447,8 @@ def desired_opencode(user, harness, repo_root, skills_source):
 
     agent = doc.setdefault("agent", {})
     servers = list((harness.get("mcp_servers") or {}).keys())
+    serena = (harness.get("mcp_servers") or {}).get("serena") or {}
+    serena_raw_content_tools = list(serena.get("raw_content_tools") or [])
     for name, role in harness["roles"].items():
         existing = agent.get(name)
         existing = existing if isinstance(existing, dict) else {}
@@ -370,11 +457,23 @@ def desired_opencode(user, harness, repo_root, skills_source):
         block["mode"] = role["opencode"]["mode"]
         block["model"] = role["opencode"]["model"]
         block["permission"] = {
-            "task": "allow" if role.get("spawn") else "deny",
-            "bash": _role_bash(role, fences),
+            # KEYDENY3b: every gate spelling, not just the one opencode's
+            # object-form schema names — see SPAWN_GATES.
+            gate: ("allow" if role.get("spawn") else "deny") for gate in SPAWN_GATES
         }
+        block["permission"]["bash"] = _role_bash(role, fences)
         role_mcp = set(role.get("mcp") or [])
         tools = {"%s*" % server: False for server in servers if server not in role_mcp}
+        if role.get("leaf") and "serena" in role_mcp:
+            # KEYDENY3: an MCP tool's rule can only name the tool — v2.0.16
+            # dispatches every MCP call as
+            # Permission.assert({action:"<server>_<tool>", resources:["*"]}) —
+            # so a tool that can return a file's bytes cannot be fenced by path
+            # for a leaf and goes whole; the leaf keeps the path-fenced Read
+            # tool. A spawning role keeps it: denying there would cost it every
+            # file read, not just the fenced ones.
+            for tool in serena_raw_content_tools:
+                tools["serena_%s" % tool] = False
         if tools:
             block["tools"] = tools
         agent[name] = block
@@ -530,9 +629,96 @@ def _backup_and_write(path, text, stamp=None):
     return True
 
 
+# FF1 (D-106): a lane sandbox (`.../AutoOS-lanes/<lane>/logs/sandboxes/<run>`) is
+# a throwaway clone a spawned worker edits. Rendering a USER-level config from
+# one bakes paths that are deleted with it into ~/.config/opencode, ~/.openhands,
+# ~/.claude.json — the next session there reads instructions and fences pointing
+# at a directory that no longer exists. So: refuse, and say what to run instead.
+# A non-user target (the tests, a staged directory) is not the hazard and stays
+# allowed, so the fence cannot break a rendering that never reaches a home dir.
+LANE_PATH_MARKERS = ("/AutoOS-lanes/", "/logs/sandboxes/")
+
+
+def case_insensitive_paths():
+    """True where one directory opens under two spellings.
+
+    Windows and macOS format volumes are case-insensitive by default, so
+    `autoos-lanes` and `AutoOS-lanes` reach the same lane there. On a
+    case-sensitive filesystem they are two directories and the fence must not
+    invent a lane out of a name.
+    """
+    return os.name == "nt" or sys.platform == "darwin"
+
+
+def _norm(path, fold=False):
+    """Absolute, slash-separated, links and `..` resolved — the path as the
+    operating system opens it, not as it was typed (FF1b item 5).
+
+    `os.path.abspath` folds `..` lexically and never follows a symlink, so a lane
+    reached through a link (or through a link and back up) read as an ordinary
+    checkout and the fence let the render through.
+    """
+    norm = os.path.realpath(os.path.abspath(str(path)))
+    norm = norm.replace(os.sep, "/").replace("\\", "/")
+    if fold:
+        norm = os.path.normcase(norm).casefold()
+    return norm
+
+
+def is_lane_checkout(path, fold=None):
+    """True when `path` is a checkout that is going away with its sandbox.
+
+    `fold` overrides the platform's case rule (the suite runs on a
+    case-sensitive host and has to be able to prove the Windows/macOS branch).
+    """
+    fold = case_insensitive_paths() if fold is None else fold
+    # The text as given is always judged. It is resolved too — a symlink or a
+    # `..` that walks through one reaches the same directory the OS would open —
+    # unless it is an absolute path on the *other* platform, which would resolve
+    # against this one's cwd and mark every argument a lane from a lane checkout.
+    given = str(path).replace(os.sep, "/").replace("\\", "/")
+    foreign_abs = (len(given) > 2 and given[1] == ":") if os.sep == "/" \
+        else given.startswith("/")
+    forms = [given if not fold else given.casefold()]
+    if not foreign_abs:
+        forms.append(_norm(path, fold))
+    markers = [m if not fold else m.casefold() for m in LANE_PATH_MARKERS]
+    return any(marker in form.rstrip("/") + "/"
+               for form in forms for marker in markers)
+
+
+def is_user_level_target(path, fold=None):
+    """True when `path` sits under a home directory the child agents read from."""
+    fold = case_insensitive_paths() if fold is None else fold
+    target = _norm(path, fold)
+    homes = [os.path.expanduser("~"), os.environ.get("XDG_CONFIG_HOME"),
+             os.environ.get("XDG_DATA_HOME"), os.environ.get("XDG_STATE_HOME")]
+    for home in homes:
+        if not home:
+            continue
+        base = _norm(home, fold)
+        if target == base or target.startswith(base + "/"):
+            return True
+    return False
+
+
+def user_config_fence(repo_root, target, fold=None):
+    """(ok, reason): a user-level config must not be rendered from a lane."""
+    if is_lane_checkout(repo_root, fold) and is_user_level_target(target, fold):
+        return False, ("refusing to write %s into a home directory from the lane "
+                       "sandbox checkout %s — run the installer from the real "
+                       "checkout instead" % (_norm(target, fold),
+                                             _norm(repo_root, fold)))
+    return True, ""
+
+
 def cmd_opencode(args):
     harness = load_harness(args.harness)
     config_path = args.config
+    ok, reason = user_config_fence(args.repo_root, config_path)
+    if not ok:
+        print("agent-harness opencode: refused, %s" % reason)
+        return 1
     existed = os.path.exists(config_path)
     if existed:
         # utf-8-sig: a BOM written by an editor must not make the file "invalid".
@@ -744,6 +930,10 @@ def _settings_status(settings_path, enable, dry_run):
 
 def cmd_openhands(args):
     harness = load_harness(args.harness)
+    ok, reason = user_config_fence(args.repo_root, args.openhands_dir)
+    if not ok:
+        print("agent-harness openhands: refused, %s" % reason)
+        return 1
     roles = harness.get("roles") or {}
     contract_ref = _join(args.repo_root, harness["rules"]["leaf_contract"])
     enable = bool((roles.get("orchestrator") or {}).get("spawn"))

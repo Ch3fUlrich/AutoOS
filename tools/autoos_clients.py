@@ -87,6 +87,55 @@ AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
 # and runs a shell command unattended in 25 s with bypass_permissions.
 QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
 
+# KEYDENY3g item 3: a leaf that can spawn hands its work to a child carrying none
+# of the leaf's fences, so every client gets an answer — either the spawner
+# renders that CLI's own deny, or the client row says `subagents: False` and the
+# CLI is documented as having nothing to deny. opencode is neither: its gate is
+# the config overlay (spawn_gate_rules), not an argv flag.
+# Flag names verified against each CLI's --help on this host 2026-09-28:
+#   claude  --disallowedTools, --disallowed-tools <tools...>
+#   qoder   --disallowed-tools <tool>
+#   qwen    --exclude-tools  (array)
+# The *values* are tool-name patterns, and a pattern that names no tool denies
+# nothing rather than erroring, so each CLI's known spellings all go in: an extra
+# spelling is inert, a missing one is the gap.
+LEAF_SPAWN_DENY = {
+    "claude": ("--disallowed-tools", "Task", "Agent"),
+    "qoder": ("--disallowed-tools", "Agent", "Task"),
+    "qwen": ("--exclude-tools", "task", "agent", "subagent"),
+}
+
+
+def leaf_spawn_deny(client: "Client") -> tuple:
+    """The argv that denies this client's sub-agent spawn, () when it has none."""
+    return LEAF_SPAWN_DENY.get(client.name, ())
+
+
+def leaf_deny_argv(client: "Client") -> list:
+    """The rendered deny argv, per the flag's arity (KEYDENY3 Sonnet HIGH/MED).
+
+    The table stores one flag plus the tool names; each CLI reads them with a
+    different arity, and read wrong the gate denies one tool (or none) while
+    the rest lands in the prompt:
+      qoder  --disallowed-tools <tool> binds ONE value per occurrence, so the
+             flag repeats; `--` then separates the options from the query, as
+             qodercli's help instructs ("use -p or -- to separate from query").
+      claude --disallowed-tools <tools...> is variadic and takes everything up
+             to the next flag - the trailing prompt included - so the list is
+             terminated with `--` before the positional.
+      qwen   --exclude-tools is a parsed array; `-p task` already follows it.
+    """
+    entry = leaf_spawn_deny(client)
+    if not entry:
+        return []
+    flag, tools = entry[0], list(entry[1:])
+    if client.name == "qoder":
+        return [v for tool in tools for v in (flag, tool)] + ["--"]
+    if client.name == "claude":
+        return [flag] + tools + ["--"]
+    return list(entry)
+
+
 # --- carrying the run's gateway headers per client (FLEETP0 review item 4) ----
 # `omniroute run` itself has no header option (`omniroute run --help`: port,
 # remote/base-url, context, provider, model, profile, token/api-key[-env],
@@ -128,13 +177,17 @@ def gemini_custom_headers(headers: dict | None) -> str:
 
 def build_command(client: Client, task: str, combo: str | None, level: str,
                   model: str | None = None, joinable: str | None = None,
-                  headers: dict | None = None) -> list:
+                  headers: dict | None = None, deny_spawn: bool = False) -> list:
     """The argv for one headless task. opencode is built by autoos-agent.py itself.
+
+    `deny_spawn` is the leaf gate: it only ever applies to a run that wears a leaf
+    role, because tier 1 and tier 2 are the tiers that must be able to spawn.
 
     `headers` are the run's gateway request headers; only a client that can put
     them on a request uses them (gateway_header_args, gemini_custom_headers).
     """
     mode = client.modes.get(level, [])
+    deny = leaf_deny_argv(client) if deny_spawn else []
     if client.name == "claude":
         if joinable:
             # No user-scope MCP servers: user-scope graphify started one docker
@@ -142,26 +195,61 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
             # variadic - --name after it keeps the prompt from being read as a path.
             return (["claude", "--bg", "--remote-control", joinable, "--strict-mcp-config",
                      "--mcp-config", '{"mcpServers":{}}', "--name", joinable] + mode +
-                    ([] if not model else ["--model", model]) + [task])
-        return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + [task]
+                    ([] if not model else ["--model", model]) + deny + [task])
+        return ["claude", "-p"] + mode + ([] if not model else ["--model", model]) + deny + [task]
     if client.name == "codex":
-        inner = ["exec"] + mode + ["--skip-git-repo-check", task]
+        inner = ["exec"] + mode + ["--skip-git-repo-check"] + deny + [task]
     elif client.name == "qoder":
-        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + [task]
+        return ["qodercli", "-p"] + mode + ["--model", model or QODER_DEFAULT_MODEL] + deny + [task]
     elif client.name == "agy":
         # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
         # "--model" as the -p prompt when -p comes first, so the model goes
         # BEFORE -p. Working form measured: `agy --model <m> -p <task>`.
-        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p", task]
+        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p"] + deny + [task]
     elif client.name == "gemini":
         # Headless gemini exits 55 in a folder it does not trust (live
         # 2026-09-25); --skip-trust trusts the spawn cwd for this session only.
-        inner = ["--skip-trust"] + mode + ["-p", task]
+        inner = ["--skip-trust"] + mode + deny + ["-p", task]
     else:  # qwen
-        inner = mode + ["-p", task]
+        inner = mode + deny + ["-p", task]
     return (["omniroute", "run", client.name, "--model", model or combo,
              "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--"] +
             gateway_header_args(client, headers) + inner)
+
+
+# CLAUDEBUDGET-h item 2 (Muse#high on 4fc082b..d1eb9c8, findings 2+4): ONE table
+# naming how each client receives the model that answers it, written against
+# build_command above — and, for opencode, against autoos-agent.py's build_plan,
+# the only place its argv is built. The last-mile Claude gate prices through it,
+# so it prices what the process is actually handed instead of one literal
+# `--model` token, and a client it cannot read is refused rather than assumed
+# free. Kinds:
+#   ("flag", NAME)     argv `NAME <value>` or `NAME=<value>` — the string the
+#                      client's own parser reads (`agy` takes it BEFORE -p,
+#                      `qodercli` after, `omniroute run` before the `--`)
+#   ("route",)         the gateway combo the run resolves to legs through
+#                      (gateway clients only: an own-account client never
+#                      receives it)
+#   ("config", NAME)   the launch config: "agent" is the tier agent's own model in
+#                      opencode.jsonc, "overlay" the OPENCODE_CONFIG_CONTENT
+#                      document build_plan injects into the child env, which the
+#                      client merges LAST and so overrides both the file and argv
+#   ("registry", KEY)  the `clients` row this host resolves for the client before
+#                      it builds anything (`effective_spawn_model` reads it ahead
+#                      of the adapter constant)
+# A client with no row here is unpriceable, and under a budget unpriceable is a
+# refusal. A row must exist for every client in CLIENTS — the test that says so
+# is what keeps this table from drifting out of build_command.
+MODEL_INPUT = {
+    "opencode": (("flag", "--model"), ("config", "overlay"), ("config", "agent"),
+                 ("route",)),
+    "claude":   (("flag", "--model"), ("registry", "default_model")),
+    "agy":      (("flag", "--model"), ("registry", "default_model")),
+    "qoder":    (("flag", "--model"), ("registry", "default_model")),
+    "codex":    (("flag", "--model"), ("route",)),
+    "gemini":   (("flag", "--model"), ("route",)),
+    "qwen":     (("flag", "--model"), ("route",)),
+}
 
 
 def signin_state(client: Client, env: dict | None = None) -> tuple:
