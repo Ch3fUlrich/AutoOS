@@ -15807,6 +15807,113 @@ class VerdictLineTests(unittest.TestCase):
                 "and then it died.\n")
         self.assertIsNone(self.verdict(text))
 
+    # VERDICTFENCE: the fence scan measured two bugs — a ` ```' that is not a
+    # fence at all, and an unclosed fence that swallows the deliverable.
+    DIFF_FENCE = (
+        "diff --git a/docs/AGENTS.md b/docs/AGENTS.md\n"
+        "@@ -10,6 +10,7 @@\n"
+        " before\n"
+        " ```\n"
+        "+fence inside the diffed file\n"
+        " after\n")
+
+    def test_a_fence_line_inside_a_git_diff_does_not_hide_the_verdict(self):
+        # Measured (run 20260929-061040-review-familyfence-a8a66-22ed12): the
+        # reviewer ran `git diff`, one context line of that diff was ' ```' — a
+        # fence inside the DIFFED file, prefixed by the diff's own space — the
+        # scan took it for an opener, found no closer, and so skipped the
+        # reviewer's own verdict 450 lines later. Graded failed/no-verdict.
+        filler = "Thinking about the diff and the ref snapshot.\n" * 450
+        self.assertEqual(self.verdict(self.DIFF_FENCE + filler + "VERDICT: READY\n"),
+                         "READY")
+
+    def test_a_verdict_inside_a_closed_fence_stays_ignored(self):
+        # The protection that must survive: a real, CLOSED block is the
+        # contract pasted back at us, not a decision.
+        text = ("checked the diff\n"
+                "```\n"
+                "VERDICT: ready\n"
+                "```\n"
+                "and then it died with no verdict.\n")
+        self.assertIsNone(self.verdict(text))
+
+    def test_an_unclosed_fence_hides_what_follows_it(self):
+        # VERDICTFENCE-R2 (a): the round-1 rescan is removed — an opener the
+        # transcript never closes fails CLOSED. A cut paste makes the fence
+        # PAIRING ambiguous (content fences shift it), so what follows cannot
+        # be trusted to sit outside a block.
+        self.assertIsNone(self.verdict("```text\nVERDICT: fix-first\n"))
+
+    # VERDICTFENCE-R2 (a..c): the cross-family review (Muse) measured three
+    # forgeries the round-1 rescan performed. Exact texts, exact verdicts.
+    def test_a_paste_cut_mid_fence_forges_no_verdict(self):
+        # B1: a reviewer that pasted a file (its own fences included) and
+        # crashed leaves the paste's VERDICT standing between a looked-like
+        # closer and the crash's opener. The pairing is ambiguous there and
+        # the fail-closed scan must read NO verdict, not the paste's.
+        self.assertIsNone(self.verdict(
+            "```\nchecking worker output\n```\nVERDICT: READY\n```\n"))
+
+    def test_a_trailing_unclosed_fence_does_not_overwrite_an_earlier_verdict(self):
+        # B2: the real verdict came first; everything after the unclosed
+        # opener is a paste that never ended. The rescan re-read it unfenced
+        # and `ready` overwrote `fix-first`.
+        self.assertEqual(self.verdict(
+            "VERDICT: fix-first\nsome notes\n```\nVERDICT: ready\n"),
+            "fix-first")
+
+    def test_a_tilde_does_not_close_a_backtick_fence(self):
+        # B3: per CommonMark a closing fence is the opener's OWN character, at
+        # least as long. '~~~' is content inside a ``` block, the block is
+        # still open at EOF, and the verdict inside it is not the reviewer's.
+        self.assertIsNone(self.verdict("```\ncode\n~~~\nVERDICT: ready\n"))
+
+    def test_a_long_fence_ignores_a_short_closer(self):
+        # Same rule by length: ' ```' cannot close ' ````'. The block stays
+        # open through both verdicts and the scan ends inside it.
+        self.assertIsNone(self.verdict(
+            "````\nVERDICT: fix-first\n```\nand then\nVERDICT: ready\n"))
+
+    def test_hunk_body_lines_are_neither_fences_nor_verdicts(self):
+        # VERDICTFENCE-R2 (b): the diff itself is the safe, deterministic read.
+        # Lines inside a hunk body (counted from the @@ header's b/d) toggle no
+        # fence and state no verdict — the diffed file's fences and verdicts
+        # are that FILE's text, not the reviewer's.
+        diff = ("diff --git a/x b/x\n"
+                "index 1234567..89abcde 100644\n"
+                "--- a/x\n"
+                "+++ b/x\n"
+                "@@ -1,4 +1,3 @@\n"
+                " VERDICT: ready\n"
+                "-VERDICT: ready\n"
+                "+ VERDICT: ready\n"
+                "- VERDICT: fix-first\n"
+                " context tail\n")
+        self.assertIsNone(self.verdict(diff))
+        # and the hunk-awareness must not swallow the reviewer's OWN verdict
+        # stated after the hunk ends:
+        self.assertEqual(self.verdict(diff + "VERDICT: not ready\n"),
+                         "not ready")
+
+    def test_a_blank_line_in_a_hunk_counts_as_stripped_context(self):
+        # VERDICTFENCE-3: a terminal/transcript trailing-whitespace strip
+        # leaves a blank context line with NO leading space. While the header's
+        # counts remain it is still hunk content and consumes one from both
+        # sides; ending the hunk on it would scan the rest of the body as
+        # reviewer text.
+        self.assertIsNone(self.verdict("@@ -1,3 +1,3 @@\n a\n\n VERDICT: READY\n"))
+        # and once the counts are consumed the next line IS reviewer text again:
+        self.assertEqual(self.verdict("@@ -1,2 +1,2 @@\n a\n\nVERDICT: fix-first\n"),
+                         "fix-first")
+
+    def test_a_fence_deeper_than_markdowns_indent_is_content(self):
+        # Markdown opens a fence at up to 3 spaces of indent; deeper is content,
+        # and must not flip the scan in and back out of a block.
+        text = ("    ```\n"
+                "VERDICT: ready\n"
+                "    ```\n")
+        self.assertEqual(self.verdict(text), "ready")
+
     def test_the_last_valid_line_wins(self):
         text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"
         self.assertEqual(self.verdict(text), "fix-first")

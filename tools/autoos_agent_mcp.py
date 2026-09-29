@@ -868,6 +868,42 @@ _VERDICT_SCAN_BYTES = 2 * 1024 * 1024
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# A fence opener, at markdown's own indentation: up to 3 spaces of leading
+# space and then three or more ` or ~. A closing fence is the opener's OWN
+# character, at least as long, and nothing but whitespace after it (CommonMark
+# — `~~~` does not close a ``` block and ' ```' does not close ' ````').
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+
+# A unified-diff hunk header; the b/d line counts decide how far the hunk body
+# reaches. Inside that body nothing is markdown: a fence line is a fence in
+# the DIFFED FILE and a VERDICT line is that file's text, not the reviewer's
+# (VERDICTFENCE-R2 (b); it is what saves the measured git-diff case without
+# the unsafe rescan).
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def _verdict_value(stripped: str) -> str | None:
+    """The verdict word a single transcript line states, or None.
+
+    SB-A2 (D-103) item D, the per-line half: a `>`-quoted line is someone else's
+    text, a line carrying `<` or `|` is template syntax (the brief echoed back),
+    and a value that is not the bare word is a reviewer *talking* — `VERDICT:
+    ready, but the ref snapshot is never read` must not grade as ready. One
+    trailing punctuation mark is tolerated: `VERDICT: fix-first.` means fix-first.
+    """
+    if stripped.startswith(">") or "<" in stripped or "|" in stripped:
+        return None
+    m = _VERDICT_LINE_RE.match(stripped)
+    if not m:
+        return None
+    value = m.group(1).strip().strip("*_` ").strip()
+    if not value:
+        return None
+    if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+        return value
+    return None
+
 
 def review_verdict(text: str) -> str | None:
     """The verdict a reviewer stated in its own transcript, or None.
@@ -877,36 +913,78 @@ def review_verdict(text: str) -> str | None:
     has to be read. The LAST verdict wins — a reviewer that changed its mind said
     so.
 
-    SB-A2 (D-103) item D tightened what counts. Rejected: a value that is not the
-    bare word (the same escape SPAWNFIX3c closed for REPORT headings — `VERDICT:
-    <ready|fix-first|NOT READY>` is the brief quoted back, and any line carrying
-    `<` or `|` is template syntax, not a decision); a line inside a fenced code
-    block (the reviewer pasted the contract at us); and a `>`-quoted line (someone
-    else's text). A single trailing punctuation mark is tolerated — a reviewer that
-    writes `VERDICT: fix-first.` means fix-first.
+    SB-A2 (D-103) item D tightened what counts (see `_verdict_value`). VERDICTFENCE
+    R2 replaced the round-1 rescan, which the cross-family review measured forging
+    three verdicts: a fence still open at the END of the text now fails CLOSED —
+    the transcript was cut mid-block, and a paste's own fence lines make the
+    pairing ambiguous, so nothing from the first fence marker on is trusted (the
+    round-1 "re-read the tail unfenced" is exactly how `VERDICT: READY` got
+    harvested out of a crashed reviewer's paste). What makes the measured git-diff
+    case safe deterministically is (b): a hunk body, counted from its `@@` header,
+    is the diffed file's text and toggles no fence and states no verdict; fences
+    follow CommonMark (c): same character, at least as long, whitespace-only
+    closer; `>`-quotes and template lines stay rejected and the last verdict
+    outside fences and hunks still wins (d).
+
+    Follow-up (R-orch-16): verdicts should come only from reviewer-owned model
+    turns of a structured transcript, not from scraping this raw stdout — not
+    built here.
     """
-    found = None
-    in_fence = False
-    for line in (text or "").splitlines():
-        stripped = _ANSI_RE.sub("", line).strip()
+    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
+    found = None               # last verdict outside fences and hunks
+    found_before_fence = None  # ...and before the text's first fence marker
+    fence = None               # (char, length) while a block is open
+    first_marker = None
+    hunk = None                # (old, new) lines left in the active hunk body
+    for i, raw in enumerate(raws):
+        if hunk is not None:
+            old, new = hunk
+            if old <= 0 and new <= 0:
+                hunk = None
+            elif raw.startswith(" "):
+                hunk = (old - 1, new - 1)
+                continue
+            elif raw.startswith("-"):
+                hunk = (old - 1, new)
+                continue
+            elif raw.startswith("+"):
+                hunk = (old, new - 1)
+                continue
+            elif raw.startswith("\\"):
+                continue  # "\ No newline at end of file" counts toward neither
+            elif raw == "":
+                # a blank context line that lost its single leading space to a
+                # trailing-whitespace strip is still hunk content
+                hunk = (old - 1, new - 1)
+                continue
+            else:
+                hunk = None
+        if fence is not None:
+            m = _FENCE_CLOSE_RE.match(raw)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if raw.startswith(("diff --git", "index ", "---", "+++")):
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
+            continue
+        m = _FENCE_OPEN_RE.match(raw)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            if first_marker is None:
+                first_marker = i
+            continue
+        stripped = raw.strip()
         if not stripped:
             continue
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
-            continue
-        if in_fence or stripped.startswith(">"):
-            continue
-        if "<" in stripped or "|" in stripped:
-            continue
-        m = _VERDICT_LINE_RE.match(stripped)
-        if not m:
-            continue
-        value = m.group(1).strip().strip("*_` ").strip()
-        if not value:
-            continue
-        if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+        value = _verdict_value(stripped)
+        if value:
             found = value
-    return found
+            if first_marker is None:
+                found_before_fence = value
+    return found_before_fence if fence is not None else found
 
 
 def _review_requested(req: dict, argv: list) -> bool:
