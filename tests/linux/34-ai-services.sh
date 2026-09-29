@@ -5485,6 +5485,11 @@ fi
 # the resolved VALUE is asserted, while notices/deprecations/errors must name
 # the FIELD and never a value or the URL.
 
+if it "gwkey: python unit tests for tools/autoos_gateway_key.py"; then
+    out="$(python3 tests/test_autoos_gateway_key.py 2>&1)" && pass || fail "$(printf '%s
+' "$out" | tail -n 20)"
+fi
+
 if it "gwkey: new local field omniroute_<host> resolves"; then
     d="$(mktemp -d)"
     printf 'omniroute_testhost: sk-test-local\n' >"$d/keys.yml"

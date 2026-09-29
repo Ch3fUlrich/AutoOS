@@ -784,7 +784,7 @@ fi
 live_ids=""
 # Resolve the client key using the new gateway-named field logic
 _client_key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
-if command -v python3 >/dev/null && [[ -n "$_client_key" ]]; then
+if command -v python3 >/dev/null; then
     live_ids="$(curl -sf -m 10 -H "Authorization: Bearer $_client_key" \
         "$GATEWAY/v1/models" 2>/dev/null |
         python3 -c 'import json,sys
