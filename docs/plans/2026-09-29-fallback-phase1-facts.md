@@ -10,3 +10,11 @@ reading only; the live fidelity measurement (section 3) is still to run.
 | default/small model aliasing | Not answered. Needs a live probe of which model ids the harness sends. | Open |
 
 Next: run the section 3 task on harness-on-gateway and opencode, needing a gateway key on the coding VM (never in a commit).
+
+## Measuring the harness needs an operator-approved permission rule
+
+The auto-mode classifier refused two shapes of the measured `claude -p` run on the local gateway:
+first with `--dangerously-skip-permissions` ("Create Unsafe Agents"), then with
+`--permission-mode default`, `--allowedTools Read,Edit,Skill`, `--strict-mcp-config`, a scratch worktree
+and a systemd scope ("Auto-Mode Bypass"). The probe is `tools/fallback-phase1-probe.py` (committed, never run).
+Running it is an operator step: either a Bash permission rule for it or the operator runs it.
