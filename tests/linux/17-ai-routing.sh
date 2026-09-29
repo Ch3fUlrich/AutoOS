@@ -2398,10 +2398,18 @@ combos = {c["name"]: c["models"]
 # known_drops is deliberately hardcoded, NOT derived from GATEWAY_ONLY in
 # tools/sync-router-tiers.py: the test must stay an independent second
 # opinion - deriving it would make tool and test agree by construction.
+# namespace translates the OTHER difference between the two files: combos.json
+# is rendered through each provider's gateway `model_prefix` (scaleway's models
+# are served as `scw/*`, FREEKEYS-1), while LiteLLM addresses them by provider
+# name. Same independence rule as known_drops: pinned here, not read from
+# catalog/ai-registry.json, or the file that writes the ref and the file that
+# checks the mirror would agree by construction.
+namespace = {"scw": "scaleway"}
 transport = {"opencode-zen": "openai", "cheaperinference": "openai",
              "free-ai": "openai"}
 def litellm_model(ref):
     prov, model = ref.split("/", 1)
+    prov = namespace.get(prov, prov)
     return "%s/%s" % (transport.get(prov, prov), model)
 known_drops = {"agy/gemini-3.7-flash-medium",
                "agy/claude-opus-4-6-thinking"}

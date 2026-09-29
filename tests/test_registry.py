@@ -145,6 +145,50 @@ class ResolveLegTests(unittest.TestCase):
         self.assertIn("mistral/not-a-model", str(ctx.exception))
 
 
+class RegistryRefTests(unittest.TestCase):
+    """registry_ref() is gateway_ref()'s inverse (FREEKEYS-2e). combos.json
+    carries the RENDERED refs, so a consumer that reads that file and resolves a
+    provider out of it (`sync-router-tiers.py --combos`, which writes config.yaml)
+    sees `scw/*` - scaleway's declared model_prefix - and resolves nothing: the
+    leg silently loses its LiteLLM transport and its env key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_a_gateway_namespace_comes_back_to_its_provider(self):
+        self.assertEqual(
+            registry.registry_ref("scw/mistral-small-3.2-24b-instruct-2506", self.reg),
+            "scaleway/mistral-small-3.2-24b-instruct-2506")
+
+    def test_a_provider_id_namespace_is_left_alone(self):
+        self.assertEqual(
+            registry.registry_ref("nebius/zai-org/GLM-5.2", self.reg),
+            "nebius/zai-org/GLM-5.2")
+
+    def test_an_unknown_namespace_is_left_alone(self):
+        # Inventing a provider for a ref the registry does not know would hide a
+        # malformed render; rule 1 reports it instead.
+        self.assertEqual(registry.registry_ref("ghost/x", self.reg), "ghost/x")
+
+    def test_every_rendered_combo_ref_lands_on_a_real_provider(self):
+        """The property over the shipped files: after the inverse rewrite, every
+        namespace in combos.json is a provider id or a provider's omniroute_id
+        (`gemini/*`, google_ai_studio's gateway id, which resolve_leg accepts as
+        is), so both render paths resolve the same transport for the same leg."""
+        combos = json.loads((ROOT / "configuration" / "omniroute" / "combos.json")
+                            .read_text(encoding="utf-8"))
+        known = set(registry._section(self.reg, "providers"))
+        known |= {p.get("omniroute_id") for p in
+                  registry._section(self.reg, "providers").values()
+                  if isinstance(p, dict) and p.get("omniroute_id")}
+        unresolved = sorted({ref.split("/", 1)[0]
+                             for c in combos["combos"] for ref in c["models"]
+                             if registry.registry_ref(ref, self.reg).split("/", 1)[0]
+                             not in known})
+        self.assertEqual(unresolved, [])
+
+
 class GatewayRefTests(unittest.TestCase):
     """AGYID: gateway_ref() is the one translation point between a registry leg
     and the id the OmniRoute catalog actually serves. A provider that declares

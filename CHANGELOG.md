@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
+
+CI 36506339556's bash suite went red on three cases the lane's filtered pytest runs never
+touched. One root shape behind all of them: FREEKEYS-1 registered scaleway with
+`model_prefix: scw`, so `combos.json` — rendered through `gateway_ref()` — spells those legs
+`scw/*` while `routes.<id>.legs` and `config.yaml` spell them `scaleway/*`.
+
+- **Code** (`tools/registry.py`, `tools/sync-router-tiers.py`): `sync-router-tiers.py --combos`
+  is the documented escape hatch onto the rendered file's own leg order, and it read those
+  `scw/*` refs as if they were provider ids — resolving no transport and no env key, so the
+  mirror came out `model: scw/... , api_key: os.environ/SCW_API_KEY`: a LiteLLM provider that
+  does not exist and an env var nothing sets. New `registry_ref()`, the inverse of
+  `gateway_ref()`, rewrites a declared `model_prefix` back onto its provider id (only when
+  exactly one provider declares it and it is not itself a provider id; an unknown or ambiguous
+  namespace is returned unchanged rather than invented). `combos_refs()` runs every ref
+  through it. `test_explicit_combos_override_still_works` was the failing test; a focused
+  `RegistryRefTests` and a `combos_refs` case pin the rewrite.
+- **Test pinned the old spelling** (`tests/linux/17-ai-routing.sh`, "free-only litellm groups
+  mirror combos minus gateway-only legs"): its hardcoded LiteLLM string builder knew no
+  gateway namespace, so every `scw/*` leg read as drift against the correct `scaleway/*`
+  mirror. The mapping is pinned in the test as an independent second opinion — deliberately
+  not read from the registry, same rule as `known_drops`.
+- **Test pinned the old legs** (`tests/linux/34-ai-services.sh` + its `run-tests.ps1` twin,
+  "apply: one run registers a provider…"): it asserted the first run writes
+  `--models free-ai/qwen7b` — t3-driver-free-only's single leg before FREEKEYS-2 put the
+  scaleway and nebius free grants ahead of the stopgap. The apply order itself (register →
+  refresh catalog → write combos) was and is correct in one pass. The check is now the whole
+  ordered model list read from `combos.json`, so it fails if ANY leg goes missing, and keeps a
+  separate assertion that the freshly registered provider's leg is in the first write.
+
+No check was weakened: the mirror test gained its namespace translation, and the apply test
+went from one hardcoded ref to the file's full ordered list plus the new-leg assertion.
+
 ### Added — combos ordered free → credit → paid, spend guard on every plan (FREEKEYS-2 / 2b, 2026-09-28)
 
 - **Band order** (`catalog/ai-registry.json`): every agentic tier route now lists

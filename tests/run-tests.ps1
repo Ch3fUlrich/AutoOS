@@ -9148,8 +9148,9 @@ Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and w
         # without it every combo is written unvalidated and this proves nothing.
         [IO.File]::WriteAllText((Join-Path $d 'keys.yml'),
             "free_ai: not-a-real-key-123`nomniroute: not-a-real-client-key`n")
-        $refs = @((Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
-            ConvertFrom-Json).combos.models) | Sort-Object -Unique
+        $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
+            ConvertFrom-Json
+        $refs = @($doc.combos.models) | Sort-Object -Unique
         $fresh = @($refs | Where-Object { $_ -like 'free-ai/*' })
         $base = @($refs | Where-Object { $fresh -notcontains $_ })
         $null = New-Item -ItemType Directory -Path (Join-Path $d 'gw\v1')
@@ -9166,9 +9167,19 @@ Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and w
         Assert-True ($out -like '*  + free-ai enumerated*') "refresh step: $out"
         Assert-True ($out -notlike '*catalog does not know free-ai*') "leg dropped: $out"
         Assert-True ($out -notlike '*could not read /v1/models*') "catalog never read: $out"
-        Assert-Equal (@($calls | Where-Object {
-            $_ -eq 'combo create t3-driver-free-only --strategy priority --models free-ai/qwen7b' }).Count) 1 `
+        # The whole combo read from the file apply reads, not a hardcoded leg
+        # list: FREEKEYS-2 put scaleway's and nebius' free grants in front of
+        # free-ai's stopgap, so the old single-leg expectation pinned one tier's
+        # pre-FREEKEYS legs. Fails if ANY leg goes missing, not only if free-ai does.
+        $want = @($doc.combos | Where-Object { $_.name -eq 't3-driver-free-only' })[0]
+        $expect = 'combo create t3-driver-free-only --strategy {0} --models {1}' -f `
+            $want.strategy, ($want.models -join ',')
+        Assert-Equal (@($calls | Where-Object { $_ -eq $expect }).Count) 1 `
             "first-run combos: $($calls -join ' | ')"
+        Assert-Equal (@($calls | Where-Object {
+            $_ -like 'combo create t3-driver-free-only *' -and
+            $_ -like '*--models *free-ai/qwen7b*' }).Count) 1 `
+            "the new leg in the first combo write: $($calls -join ' | ')"
         $enumAt = -1; $comboAt = -1
         for ($i = 0; $i -lt $calls.Count; $i++) {
             if ($enumAt -lt 0 -and $calls[$i] -eq 'models free-ai') { $enumAt = $i }
