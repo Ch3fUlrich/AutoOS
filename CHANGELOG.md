@@ -5,6 +5,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a `run` started from a shell launches its client in a scope too (SCOPECLI, 2026-09-29)
+
+SB-A2 item A gave a worker a cgroup so a cancel could follow a `setsid()` child, but only
+on the MCP path: `run_job` wraps the whole `autoos-agent.py run …` in
+`systemd-run --user --scope`. A `run` started straight from a shell reached `run_client`
+unscoped, so its client led nothing but a new session — no cgroup at all, and
+`systemctl --user stop` had no unit to stop, leaving only the group kill that a
+`setsid()` grandchild escapes.
+
+- **`tools/autoos-agent.py`**: `run_client`'s POSIX branch wraps the launch in
+  `worker_scope_launch()` when **both** gates hold: `scope_supported()` says a user
+  manager is reachable, and `in_worker_scope()` says no worker scope is already around
+  this process. `in_worker_scope()` reads the unit out of `/proc/self/cgroup` through
+  `self_cgroup()`, one small read so a test can hand it a synthetic cgroup. The second
+  gate is load-bearing: `systemd-run --scope` does not nest — the new scope lands as a
+  sibling under `app.slice` (measured on this host) — so an MCP-spawned run that scoped
+  its own client would move it out of the outer cgroup, and the MCP `cancel`, which stops
+  the outer scope by name, would stop reaching it. Windows and a host without a user
+  manager run exactly the code they ran before.
+- **Unit name**: `cli_scope_unit()` → `autoos-worker-cli-<run id>-a<attempt>.scope`, or
+  `…-cli-pid<pid>-a<attempt>…` where the run has no id. `cli-` keeps it out of the runner's
+  own `autoos-worker-<run id>.scope` name space, and the attempt number matters because the
+  fallthrough loop re-starts the client: a reused unit name is a `systemd-run` failure, not
+  a no-op. One line on the spawner's own stderr names the unit and the command that stops it,
+  since a shell user is the only canceller such a run has.
+- **Unchanged by construction** (measured, not assumed): `--scope` keeps the child's pid,
+  its process group and both pipes, so `start_new_session`, the group reap, the capture
+  pump and `record_attempt_group()` see the shape they saw unscoped, and the client's exit
+  code propagates through the wrapper (7 in, 7 out).
+- **Tests** (`tests/test_autoos_spawner.py`, `CliScopeLaunchTests`): the scoped argv
+  (`systemd-run --user --scope --unit autoos-worker-cli-<id>-a2 --collect`), the inner
+  `env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS` with the bus address given to
+  systemd-run only (SCOPEBUS), no nesting when a worker scope already holds us, unchanged
+  argv/env with no user manager, `in_worker_scope()` against cgroup v1 and v2 lines, a
+  delegated sub-cgroup and near-miss names, and an end-to-end case that mocks no launcher:
+  a real client reads its OWN `/proc/self/cgroup` and names the unit (it skips where the
+  host has no reachable user manager; it passes against the real one here).
+- **Residual, stated**: where the probe says yes and the launch still fails (a user
+  manager that dies mid-run), the run exits with `systemd-run`'s code and the client never
+  starts — there is no silent fall back to an unscoped launch. The alternative is worse: a
+  run cannot tell `systemd-run`'s rc 1 from the client's own, so any fallback would be
+  guesswork, and the thing it guessed past is exactly the uncancellable run this closes. The
+  failure is loud: the stderr line names the unit the run tried to use. One cached probe
+  (`python -c pass` in a scope) runs per process, as it already does on the MCP path.
+- **Coupled test fixed in the same act** (`WinshimClientResolutionTests`):
+  `test_on_posix_a_resolvable_client_still_runs` asserted `argv[0] == <shim>`, which is only
+  true on a host that cannot scope. It now asserts the resolved file is in the argv and the
+  bare name is not — the WINSHIM fact — so it holds in both launch shapes.
+
 ### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
 
 CI 36506339556's bash suite went red on three cases the lane's filtered pytest runs never

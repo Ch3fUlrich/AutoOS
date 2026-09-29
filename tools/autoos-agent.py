@@ -5750,6 +5750,33 @@ def scope_unit_is_worker_scope(unit) -> bool:
             and bool(re.fullmatch(r"[A-Za-z0-9_.-]+", unit)))
 
 
+def self_cgroup() -> str:
+    """This process's own `/proc/self/cgroup`, or "" where it cannot be read.
+
+    Separate from `in_worker_scope()` so a test can hand it a synthetic cgroup —
+    the suite itself runs inside a worker scope in a lane sandbox, and a process
+    cannot leave the cgroup it was started in.
+    """
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def in_worker_scope() -> bool:
+    """Does this process already run inside an `autoos-worker-*.scope` cgroup?
+
+    SCOPECLI's second gate. `systemd-run --user --scope` does not nest: the new
+    scope lands as a SIBLING under `app.slice` (measured on the host), so a client
+    scoped from inside a worker scope would LEAVE that cgroup — and MCP `cancel`
+    stops the outer scope by name, so it would no longer reach the client. A run
+    started straight from a shell is outside every scope and is the only one that
+    needs a scope of its own.
+    """
+    return bool(re.search(r"(?:^|/)%s" % re.escape(WORKER_SCOPE_PREFIX), self_cgroup()))
+
+
 def worker_scope_argv(unit, cmd) -> list:
     """`systemd-run --user --scope` around `cmd`: the whole subtree joins the cgroup."""
     return (["systemd-run", "--user", "--scope",
@@ -6007,6 +6034,20 @@ def resolve_client_executable(cmd) -> list:
     return argv
 
 
+def cli_scope_unit(run_id, attempt) -> str:
+    """The transient scope unit a `run` started from a shell launches its client in.
+
+    SCOPECLI: a shell run has no runner-private record, so it needs a unit name
+    nothing else owns. `cli-` keeps it clear of the runner's own
+    `autoos-worker-<run-id>.scope`, and the attempt number matters because the
+    fallthrough loop re-starts the client in a new scope each time — a reused unit
+    name is a `systemd-run` failure, not a no-op. A run with no id (a plain
+    `run …` from a terminal) is named by its own pid, which is unique per process.
+    """
+    return scope_unit_name("cli-%s-a%s" % (run_id or "pid%d" % os.getpid(),
+                                           attempt or 1))
+
+
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
                run_id=None, attempt=None) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
@@ -6016,6 +6057,16 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     SCOPE this process was launched inside (SB-A2 item A), which is a cgroup and
     holds a setsid() child anyway. Nothing here writes a file for `cancel` to
     read: the worker shares the uid of every path it could be given.
+
+    SCOPECLI: where this process is NOT already in such a scope — a `run` started
+    straight from a shell — there was no cgroup at all, and one is made here,
+    around the client only. Both gates matter: `scope_supported()` says a user
+    manager is reachable (else the launch would fail and the run with it), and
+    `in_worker_scope()` says nothing outer already holds this subtree, because a
+    nested scope is a sibling, not a child, and would move the client out of the
+    scope the MCP `cancel` stops. One line on our stderr names the unit and the
+    command that stops it. Windows and a host without a user manager are exactly
+    the code that ran before.
 
     `run_id`/`attempt` (SB-B merge): the client's NEW group is re-recorded in the
     runner-private kill store on every launch, so a `cancel` that falls back to the
@@ -6068,7 +6119,19 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         pgid = None  # Windows reaps with `taskkill /T`, which walks the tree
     else:
-        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        argv, launch_env = cmd, env
+        if scope_supported() and not in_worker_scope():
+            # SCOPECLI: a `run` started from a shell is the one launch nobody
+            # scoped — the runner wraps the whole CLI only on the MCP path, so this
+            # client led a bare session whose subtree no `systemctl --user stop`
+            # could reach. `systemd-run --scope` keeps the pid, the group and both
+            # pipes (measured), so the reap, the wait and the capture below are
+            # unchanged; only the cgroup is new.
+            unit = cli_scope_unit(run_id, attempt)
+            print("autoos-agent: client runs in scope %s "
+                  "(stop: systemctl --user stop %s)" % (unit, unit), file=sys.stderr)
+            argv, launch_env = worker_scope_launch(unit, cmd, env)
+        proc = subprocess.Popen(argv, cwd=cwd, env=launch_env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=pipe if separate_err else merge,
                                 start_new_session=True)
         pgid = proc.pid  # start_new_session makes the client its own group leader
