@@ -5,6 +5,7 @@ Every boundary of the bucket table is pinned here, plus every effort row, the
 ladder clamp and the max_tokens floors. The module is pure: it imports from any
 cwd once `tools/` is on sys.path, which is the first thing this file does.
 """
+import copy
 import json
 import re
 import sys
@@ -4660,8 +4661,20 @@ class CreditGuardCommittedRegistryTests(unittest.TestCase):
 
     The google/* and inclusionAI/Ling deepinfra rows carry NO listed vendor
     price (checked 2026-09 against deepinfra.com), so they must keep being
-    refused with the one clear line; the three rows whose per-1M prices the
-    operator's table records are priced and must carry no refusal."""
+    refused; the three rows whose per-1M prices the operator's table records
+    (deepseek-ai/DeepSeek-V4-Flash-0731 and both morph rows) are priced and must
+    carry no price refusal.
+
+    Two things gate a credit leg and this class keeps them apart, because a test
+    that cannot tell them apart proves nothing about the price one: the
+    resolver's per-leg ``credit leg unpriced <model>`` line, and the registry's
+    own ``routes.<id>.unavailable_legs`` entry, which short-circuits BEFORE any
+    price check (usable_legs skips the leg with a bare ``unavailable``). On the
+    shipped registry every credit leg carries the second gate, so the price line
+    is proven here on an in-memory copy with the availability entry deleted --
+    which is precisely the state the follow-up change produces when it un-gates
+    a leg and re-renders combos.json.
+    """
 
     UNPRICED = ("google/gemini-2.5-flash", "google/gemini-3.5-flash",
                 "google/gemini-3.7-flash", "google/gemini-3.1-flash-lite",
@@ -4674,14 +4687,22 @@ class CreditGuardCommittedRegistryTests(unittest.TestCase):
                 / "catalog" / "ai-registry.json")
         self.registry = json.loads(path.read_text(encoding="utf-8"))
 
-    def skipped(self, route_id):
-        route = self.registry["routes"][route_id]
+    def skipped(self, route_id, registry=None):
+        registry = self.registry if registry is None else registry
+        route = registry["routes"][route_id]
         _kept, skipped, _notes = r.usable_legs(
             route, {"kind": "implement", "privacy": "public"},
             {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
-            self.registry, {}, credit_guards={})
+            registry, {}, credit_guards={})
         return skipped
+
+    def ungated(self, route_id, leg):
+        """A copy of the committed registry with `leg`'s availability entry
+        deleted from `route_id`, so the resolver reaches its price check."""
+        registry = copy.deepcopy(self.registry)
+        del registry["routes"][route_id]["unavailable_legs"][leg]
+        return registry
 
     def test_credit_leg_priced_verdicts_on_the_committed_rows(self):
         for model_id in self.PRICED:
@@ -4690,11 +4711,19 @@ class CreditGuardCommittedRegistryTests(unittest.TestCase):
             self.assertFalse(r.credit_leg_priced(model_id, self.registry), model_id)
 
     def test_an_unpriced_deepinfra_leg_is_refused_with_one_clear_line(self):
-        skipped = self.skipped("t3-driver")
-        self.assertIn(
-            "credit leg unpriced google/gemini-3.7-flash",
-            skipped.get("deepinfra/google/gemini-3.7-flash", []),
-            skipped)
+        # The guard's own words, one line, naming the model it cannot cost.
+        # D-153: an unpriced credit leg must never be routed as priced credit.
+        registry = self.ungated("t3-driver", "deepinfra/google/gemini-3.7-flash")
+        kept, _skipped, _notes = r.usable_legs(
+            registry["routes"]["t3-driver"],
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            registry, {}, credit_guards={})
+        self.assertNotIn(("deepinfra", "google/gemini-3.7-flash"), kept)
+        reasons = self.skipped("t3-driver", registry)[
+            "deepinfra/google/gemini-3.7-flash"]
+        self.assertEqual(reasons, ["credit leg unpriced google/gemini-3.7-flash"],
+                         reasons)
 
     def test_a_priced_morph_leg_gets_no_unpriced_refusal(self):
         for route_id, leg in (("t1-orchestrator", "morph/morph-dsv4flash"),
@@ -4705,3 +4734,28 @@ class CreditGuardCommittedRegistryTests(unittest.TestCase):
                 self.assertEqual(
                     [x for x in reasons if x.startswith("credit leg unpriced")],
                     [], "%s on %s: %s" % (leg, route_id, reasons))
+
+    def test_every_credit_leg_of_the_shipped_registry_is_refused(self):
+        """Fail-closed as shipped (D-153): no credit-tier leg is served today.
+
+        Sweeps by the property that makes a leg risky -- its provider's
+        ``tier: credit`` -- not by the ids this lane happened to price, so a
+        credit leg added later without a price and without a gate fails here.
+        """
+        providers = self.registry["providers"]
+        checked = 0
+        for route_id, route in sorted(self.registry["routes"].items()):
+            for leg in route.get("legs") or []:
+                provider_id, model_id = r.resolve_leg(leg, self.registry)
+                if providers.get(provider_id, {}).get("tier") != "credit":
+                    continue
+                checked += 1
+                reasons = self.skipped(route_id).get(leg)
+                self.assertIsNotNone(
+                    reasons, "%s on %s is served as a credit leg" % (leg, route_id))
+                self.assertTrue(
+                    any(x.startswith("credit leg unpriced") or x.startswith("unavailable")
+                        for x in reasons),
+                    "%s on %s: %s" % (leg, route_id, reasons))
+        self.assertGreater(checked, 0, "the sweep found no credit leg to check")
+
