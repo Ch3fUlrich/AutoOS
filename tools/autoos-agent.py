@@ -5764,6 +5764,25 @@ def self_cgroup() -> str:
         return ""
 
 
+# The one shape of "this spawner's scope, wherever in the cgroup tree it sits": a
+# path SEGMENT that starts with the worker prefix and ends `.scope`. A delegated
+# sub-cgroup (`…/autoos-worker-x.scope/1000`) is still inside it, so the search
+# finds the segment rather than anchoring at the end of the line.
+WORKER_SCOPE_UNIT_RE = re.compile(
+    r"(?:^|/)(" + re.escape(WORKER_SCOPE_PREFIX) + r"[^/\s]+\.scope)")
+
+
+def worker_scope_unit_from_cgroup(text) -> str | None:
+    """The `autoos-worker-*.scope` unit holding the cgroup `text` names, or None.
+
+    SCOPECLI-b (c): `0::/init.scope` — the shape a WSL session and a plain
+    terminal both show — is NOT a worker scope and must not be read as one, or the
+    second gate below would refuse to scope a run that never had a cgroup.
+    """
+    found = WORKER_SCOPE_UNIT_RE.search(text or "")
+    return found.group(1) if found else None
+
+
 def in_worker_scope() -> bool:
     """Does this process already run inside an `autoos-worker-*.scope` cgroup?
 
@@ -5774,7 +5793,7 @@ def in_worker_scope() -> bool:
     started straight from a shell is outside every scope and is the only one that
     needs a scope of its own.
     """
-    return bool(re.search(r"(?:^|/)%s" % re.escape(WORKER_SCOPE_PREFIX), self_cgroup()))
+    return worker_scope_unit_from_cgroup(self_cgroup()) is not None
 
 
 def worker_scope_argv(unit, cmd) -> list:
@@ -5816,25 +5835,48 @@ def scope_bus_env(src: dict | None = None) -> dict:
     return {n: src[n] for n in SCOPE_BUS_ENV if src.get(n)}
 
 
-_SCOPE_SUPPORTED: bool | None = None
+_SCOPE_UNSUPPORTED: str | None = None
+
+# What a `unscoped` record says when the gate was decided somewhere a reason was
+# never computed for — an empty reason beside "UNSCOPED" is the silence this
+# whole mechanism exists to end.
+SCOPE_REASON_UNSUPPORTED = "systemd-run --user is not usable here"
+SCOPE_REASON_WINDOWS = "windows"
+
+# SCOPECLI-b (b): the fallback is allowed on POSIX, but never quiet. A host with
+# no user manager kills a run through its process group, which a `setsid()` child
+# escapes, so whoever meant to be able to cancel this run has to find out now.
+SCOPE_WARNING = ("autoos-agent: WARNING client runs UNSCOPED (%s): "
+                 "cancel falls back to the process-group kill")
+
+
+def scope_unsupported_reason(force: bool = False) -> str:
+    """Why this host cannot LAUNCH a `systemd-run --user --scope`; "" when it can.
+
+    SCOPECLI-b (a): the same fact `scope_supported()` answers, in the words the
+    record and the log carry. One probe, one cache, one home: the bool is this
+    function's projection, so a record can never claim a reason the gate did not
+    hit. Cached — the probe starts a real scope — and `force=True` re-probes,
+    because the unit tests change PATH under it.
+    """
+    global _SCOPE_UNSUPPORTED
+    if _SCOPE_UNSUPPORTED is None or force:
+        _SCOPE_UNSUPPORTED = _probe_scope()
+    return _SCOPE_UNSUPPORTED
 
 
 def scope_supported(force: bool = False) -> bool:
     """Can this host launch (not merely contain) a `systemd-run --user --scope`?
 
-    Cached, and probed by launching the real thing to a no-op command: a container
-    can ship both binaries and have no user manager, and a worker that never
-    started is worse than a worker in the fallback. `force=True` re-probes — the
-    unit tests change PATH under it.
+    A container can ship both binaries and have no user manager, and a worker that
+    never started is worse than a worker in the fallback, so the answer comes from
+    launching the real thing to a no-op command.
     """
-    global _SCOPE_SUPPORTED
-    if _SCOPE_SUPPORTED is None or force:
-        _SCOPE_SUPPORTED = _probe_scope()
-    return _SCOPE_SUPPORTED
+    return not scope_unsupported_reason(force)
 
 
-def _probe_scope() -> bool:
-    """Launch a real scope around a no-op and see whether it works.
+def _probe_scope() -> str:
+    """Launch a real scope around a no-op and say why it cannot work here ("" = ok).
 
     The site below is audited as an exception on purpose: `systemd-run` reaches
     the user manager over the session bus, and the bus address
@@ -5842,23 +5884,70 @@ def _probe_scope() -> bool:
     ``worker_env`` strips for a client. A probe that scrubbed them would report
     "no scope here" on a host that has one, and every worker would take the
     fallback whose kill cannot follow a `setsid()` child.
+
+    The order is the order a reader can act on: no mechanism at all (Windows), a
+    missing binary, no address to talk to, and only then a manager that is
+    reachable in name but refuses the launch.
     """
     if os.name == "nt":
-        return False
-    if not (shutil.which("systemd-run") and shutil.which("systemctl")):
-        return False
+        return SCOPE_REASON_WINDOWS
+    if not shutil.which("systemd-run"):
+        return "no systemd-run"
+    if not shutil.which("systemctl"):
+        return "no systemctl"
     if not os.environ.get("XDG_RUNTIME_DIR"):
-        return False
+        return "no user manager / XDG_RUNTIME_DIR"
     argv = worker_scope_argv(scope_unit_name("probe-%d" % os.getpid()),
                              [sys.executable, "-c", "pass"])
     try:
         # the probe keeps the caller's session-bus address, which the worker scrub
         # drops on purpose; it runs `python -c pass` and nothing else. subprocess-audit: ok
-        return subprocess.call(argv, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=30) == 0
+        return "" if subprocess.call(argv, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, timeout=30) == 0 \
+            else "user manager unreachable"
     except (OSError, subprocess.SubprocessError):
-        return False
+        return "user manager unreachable"
+
+
+def scope_decision(run_id=None, attempt=None) -> dict:
+    """Which launch path a client started here would take: the record's `scope`.
+
+    `{"path": "scoped"|"inherited"|"unscoped", "unit": <unit or None>,
+    "reason": <why>}` — one dict, decided once, read by `run_client` to choose the
+    launch and by the worker registry record, the `ps` row and the run's `scope:`
+    line to say what happened. `inherited` names the OUTER unit read out of this
+    process's own cgroup, which is what a canceller stops; `run_id`/`attempt` only
+    name the unit a `scoped` launch creates, so a fallthrough re-run's fresh id
+    never overstates the cgroup that actually holds it.
+
+    Runner-private by rule (R-orch-17): this goes in the worker registry record and
+    the spawner's own output, never into `job.json`, the file the worker shares its
+    uid with.
+    """
+    if os.name == "nt":
+        return {"path": "unscoped", "unit": None, "reason": SCOPE_REASON_WINDOWS}
+    outer = worker_scope_unit_from_cgroup(self_cgroup())
+    if outer:
+        return {"path": "inherited", "unit": outer, "reason": "already inside " + outer}
+    if not scope_supported():
+        return {"path": "unscoped", "unit": None,
+                "reason": scope_unsupported_reason() or SCOPE_REASON_UNSUPPORTED}
+    return {"path": "scoped", "unit": cli_scope_unit(run_id, attempt), "reason": ""}
+
+
+def scope_line(scope: dict) -> str:
+    """The one line a reader of the run sees beside `writer:`: which path it took.
+
+    A `scoped`/`inherited` run states the unit — the name `systemctl --user stop`
+    takes; an `unscoped` one states the reason, because the reason is the whole
+    warning.
+    """
+    unit = scope.get("unit")
+    if unit:
+        return "scope: %s unit=%s" % (scope.get("path"), unit)
+    return "scope: %s (%s)" % (scope.get("path") or "unscoped",
+                               scope.get("reason") or SCOPE_REASON_UNSUPPORTED)
 
 
 def _systemctl(*args):
@@ -5964,19 +6053,28 @@ class ClientExit(int):
     classified on this copy alone. It is None (no split was made, so nothing may
     be demanded of a channel that was never read) and "" (the channel was read
     and said nothing) are different answers, and that difference is the rule.
+
+    `.scope` is the launch path this client actually took, as `scope_decision`
+    framed it (SCOPECLI-b): who ever cancels this run — or reads `ps` the morning
+    after — learns from it whether a cgroup holds the subtree or only the
+    process-group kill does. None for an exit object this spawner did not produce
+    (a test's own stub, a run that never launched).
     """
     tail = ""
     refusal = None
     raw_tail = ""
     raw_err = None
+    scope = None
 
     def __new__(cls, rc: int, tail: str = "", refusal: str | None = None,
-                raw_tail: str = "", raw_err: str | None = None):
+                raw_tail: str = "", raw_err: str | None = None,
+                scope: dict | None = None):
         obj = super().__new__(cls, rc)
         obj.tail = tail
         obj.refusal = refusal
         obj.raw_tail = raw_tail
         obj.raw_err = raw_err
+        obj.scope = scope
         return obj
 
 
@@ -6060,13 +6158,20 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
 
     SCOPECLI: where this process is NOT already in such a scope — a `run` started
     straight from a shell — there was no cgroup at all, and one is made here,
-    around the client only. Both gates matter: `scope_supported()` says a user
-    manager is reachable (else the launch would fail and the run with it), and
-    `in_worker_scope()` says nothing outer already holds this subtree, because a
-    nested scope is a sibling, not a child, and would move the client out of the
-    scope the MCP `cancel` stops. One line on our stderr names the unit and the
-    command that stops it. Windows and a host without a user manager are exactly
-    the code that ran before.
+    around the client only. `scope_decision()` weighs both gates: a user manager
+    must be reachable (`scope_supported()`, else the launch would fail and the run
+    with it) and nothing outer may already hold this subtree
+    (`in_worker_scope()`), because a nested scope is a sibling, not a child, and
+    would move the client out of the scope the MCP `cancel` stops. One line on our
+    stderr names the unit and the command that stops it. Windows and a host
+    without a user manager are exactly the code that ran before.
+
+    SCOPECLI-b: which of those three paths was taken is `scope_decision()`'s dict,
+    decided before the launch and returned on `ClientExit.scope` — the caller
+    writes it to the worker registry record and the run's `scope:` line, so
+    neither `ps` nor the log can show a run whose kill channel is a guess. A
+    POSIX run that ends up UNSCOPED says so out loud on our stderr first: the
+    group kill that is all a canceller has there cannot follow a `setsid()` child.
 
     `run_id`/`attempt` (SB-B merge): the client's NEW group is re-recorded in the
     runner-private kill store on every launch, so a `cancel` that falls back to the
@@ -6113,6 +6218,10 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # second pipe-reader is not worth the platform risk for a classification that
     # only the POSIX fallthrough acts on.
     separate_err = capture and os.name != "nt"
+    # SCOPECLI-b: ONE decision, made here, serves the launch below and the record
+    # and the log line the caller prints — a run that said "scoped" while it
+    # launched bare is the exact defect this task closes.
+    scope = scope_decision(run_id, attempt)
     if os.name == "nt":
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=merge,
@@ -6120,17 +6229,21 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
         pgid = None  # Windows reaps with `taskkill /T`, which walks the tree
     else:
         argv, launch_env = cmd, env
-        if scope_supported() and not in_worker_scope():
+        if scope["path"] == "scoped":
             # SCOPECLI: a `run` started from a shell is the one launch nobody
             # scoped — the runner wraps the whole CLI only on the MCP path, so this
             # client led a bare session whose subtree no `systemctl --user stop`
             # could reach. `systemd-run --scope` keeps the pid, the group and both
             # pipes (measured), so the reap, the wait and the capture below are
             # unchanged; only the cgroup is new.
-            unit = cli_scope_unit(run_id, attempt)
+            unit = scope["unit"]
             print("autoos-agent: client runs in scope %s "
                   "(stop: systemctl --user stop %s)" % (unit, unit), file=sys.stderr)
             argv, launch_env = worker_scope_launch(unit, cmd, env)
+        elif scope["path"] == "unscoped":
+            # SCOPECLI-b (b): the fallback is legal, the silence was not — say what
+            # is missing and what cancel is therefore reduced to.
+            print(SCOPE_WARNING % scope["reason"], file=sys.stderr)
         proc = subprocess.Popen(argv, cwd=cwd, env=launch_env, stdin=subprocess.DEVNULL,
                                 stdout=pipe, stderr=pipe if separate_err else merge,
                                 start_new_session=True)
@@ -6205,7 +6318,8 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     return ClientExit(rc, tail.decode("utf-8", "replace"),
                       found[0] if found else None,
                       raw_tail.decode("utf-8", "replace"),
-                      raw_err.decode("utf-8", "replace") if separate_err else None)
+                      raw_err.decode("utf-8", "replace") if separate_err else None,
+                      scope=scope)
 
 
 # --- the host-wide worker registry (`ps`) ---------------------------------
@@ -6364,7 +6478,7 @@ def _write_worker_record(path: str, record: dict) -> None:
     os.replace(tmp, path)
 
 
-def _worker_record_start(plan: dict, args, directory: str):
+def _worker_record_start(plan: dict, args, directory: str, attempt=None):
     """Write the live record; return (id, record) for the ended rewrite.
 
     FLEETSPEC P0: the record's id IS the run id the plan minted (it used to be a
@@ -6373,6 +6487,12 @@ def _worker_record_start(plan: dict, args, directory: str):
     spawner was itself spawned with (None at top level): the spawn tree a console
     reads. ``host`` and the full ``route_plan`` are for the record only - the
     host is a git-ignored file, never a committed fixture.
+
+    SCOPECLI-b: ``scope`` says which launch path this attempt takes — scoped, the
+    outer unit it inherits, or unscoped with the reason — live, from the moment the
+    record exists, so `ps` on a run in progress already tells an operator whether
+    `cancel` reaches a cgroup or only a process group. The same function `run_client`
+    launches from, so the record cannot disagree with the child.
     """
     wid = plan.get("run_id") or mint_run_id(args.title or None, args.task or "")
     pid = os.getpid()
@@ -6396,6 +6516,7 @@ def _worker_record_start(plan: dict, args, directory: str):
         "parent_run_id": parent,
         "host": socket.gethostname(),
         "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
+        "scope": scope_decision(plan.get("run_id"), attempt),
         "route_plan": route.get("route_plan")})
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
@@ -6510,6 +6631,9 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
                      "title": record.get("title") or "", "task": record.get("task_head") or "",
                      "cwd": record.get("cwd") or "", "sandbox": record.get("sandbox") or "",
                      "parent_run_id": record.get("parent_run_id") or None,
+                     # SCOPECLI-b: null on a record written before the path was
+                     # stated — `ps` says so rather than inventing one.
+                     "scope": record.get("scope"),
                      "started": record.get("started"), "ended": record.get("ended"),
                      "rc": record.get("rc"), "depth": record.get("depth")})
     rows.sort(key=lambda r: (r.get("started") or "", r.get("id") or ""))
@@ -6942,6 +7066,12 @@ def cmd_run(args, cfg: dict) -> int:
     # mid-flight score, so it is never captured and never stop-checked or
     # WIP-committed - exactly as before WIPfix. CAPTURE_CLIENTS keeps its own.
     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+    # SCOPECLI-b: the launch path the attempt that finished last took, for the
+    # `scope:` line under the `writer:` one. It comes from the same
+    # `scope_decision()` that chose the launch — taken from the worker record
+    # before the client starts, so a run in progress already says it, and from the
+    # exit object after, so what is printed is what ran.
+    scope_rec = None
     while True:
         # CLAUDEBUDGET-g item A: the authority. Checked on every plan this run is
         # about to launch, here and not only at the dry-run branch above, because a
@@ -6980,9 +7110,11 @@ def cmd_run(args, cfg: dict) -> int:
         try:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
-            worker_id, worker_rec = _worker_record_start(plan, args, workers)
+            worker_id, worker_rec = _worker_record_start(plan, args, workers,
+                                                         attempt=fallthroughs + 1)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
+        scope_rec = (worker_rec or {}).get("scope") or scope_rec
         if worker_id is not None:
             # The record is the thing every count reads, so the placeholder this
             # run claimed the slot with has done its job (SPAWNFIX item 2). It is
@@ -7001,6 +7133,7 @@ def cmd_run(args, cfg: dict) -> int:
                                 # attempt re-records its group in the runner-private
                                 # store `cancel` kills from.
                                 run_id=plan.get("run_id"), attempt=fallthroughs + 1)
+            scope_rec = getattr(run_rc, "scope", None) or scope_rec
         except ClientMissing as exc:
             # WINSHIM: gone between the pre-check and this attempt (a fallthrough
             # re-run can be hours later, or the PATH moved). The spawner's own 3,
@@ -7219,6 +7352,12 @@ def cmd_run(args, cfg: dict) -> int:
             # shell has no record and mints one here for nothing to read.
             if read_kill_record(plan.get("run_id")) is not None:
                 write_kill_record(plan.get("run_id"), {"writer": writer})
+        # SCOPECLI-b: WHO wrote it is only half of what a reader of this log can
+        # act on — WHERE it ran decides whether a cancel can reach it at all. Said
+        # only when a launch was actually decided, so a run refused before the
+        # first attempt has no line claiming a path it never took.
+        if scope_rec is not None:
+            print(scope_line(scope_rec))
     # Nothing that runs after here occupies the free leg: whatever is left of the
     # summary is bookkeeping, and a placeholder with no run behind it would make
     # the next spawner wait for nothing.

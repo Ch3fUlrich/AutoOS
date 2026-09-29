@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
+
+L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
+no `autoos-worker-*` unit existed, and **nothing said so** — not `ps`, not the run log. A reader
+could not tell a host that has no scope mechanism from one whose scope failed to start, and the two
+need different cancellers: a scope is a cgroup and reaches a `setsid()` child, the fallback is a
+process-group kill that cannot.
+
+- **`tools/autoos-agent.py`**: `scope_decision()` frames one dict —
+  `{"path": "scoped"|"inherited"|"unscoped", "unit": <unit or null>, "reason": <why>}` — and it is
+  the only place the three paths are weighed. `run_client` launches from it (the two gates moved
+  there verbatim), `_worker_record_start()` writes it into the live worker registry record so
+  `ps`/`ps --json` say it *during* the run, `_worker_record_end()` carries it through the rewrite,
+  and `cmd_run` prints `scope:` beside the `writer:` line. `inherited` names the outer unit read
+  out of `/proc/self/cgroup` — what a canceller actually stops — not the id `run` was handed, which
+  a fallthrough re-run re-mints. Nothing is written into `job.json`: the worker shares its uid with
+  that file, so this stays in the runner-private records (R-orch-17).
+- **The fallback is loud (POSIX)**: `SCOPE_WARNING` puts one line on the spawner's stderr —
+  `autoos-agent: WARNING client runs UNSCOPED (<reason>): cancel falls back to the
+  process-group kill`. Windows is not shouted at; it has no scope to miss.
+- **Reasons, not silence**: `_probe_scope()` answers with the reason it hit (`""` = supported) —
+  `windows`, `no systemd-run`, `no systemctl`, `no user manager / XDG_RUNTIME_DIR`, `user manager
+  unreachable` — and `scope_unsupported_reason()` caches that one string while `scope_supported()`
+  became its bool projection. The gate and the record can no longer disagree, because there is only
+  one probe behind both.
+- **WSL / `0::/init.scope` (c)**: `worker_scope_unit_from_cgroup()` is the single reader of a
+  cgroup line for both `in_worker_scope()` and the inherited unit name, and it matches a *path
+  segment* shaped `autoos-worker-*….scope`. `0::/init.scope` is the session's own cgroup and
+  yields nothing, so a run there with a reachable user manager still gets a scope; the probe never
+  consulted the cgroup at all, so it rejects nothing either.
+- **Tests** (`tests/test_autoos_spawner.py`, new `ScopeRecordTests` + `CliScopeLaunchTests`): each
+  path value with its reason, each probe reason against a faked PATH/env/launch, the exact warning
+  line, Windows quiet, the registry record carrying `scope` at start and at end and `list_workers`
+  row-ing it (a pre-SCOPECLI-b record lists with `scope: null` rather than a guess), a full
+  `cmd_run` asserting `scope:` beside `writer:`, and the cgroup table with the synthetic
+  `0::/init.scope` line. `test_a_host_with_no_user_manager_is_unchanged` asserted the fallback was
+  *silent* (`err == ""`) — that silence was the defect, so it became
+  `test_a_host_with_no_user_manager_launches_the_same_argv_and_says_so` and now asserts the warning
+  while keeping the unchanged argv/env assertions.
+
 ### Fixed — a `run` started from a shell launches its client in a scope too (SCOPECLI, 2026-09-29)
 
 SB-A2 item A gave a worker a cgroup so a cancel could follow a `setsid()` child, but only
