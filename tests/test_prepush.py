@@ -845,6 +845,45 @@ class HookInstallTests(RepoFixture):
         self.assertFalse((self.hooks_dir() / "pre-push").exists())
         self.assertIn("prepush", out.lower())
 
+    def test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it(self):
+        # NB1: `installed` into `.git/hooks` is a lie when the operator set
+        # core.hooksPath — git reads the other directory and the lane pushes untested
+        # while believing it is gated. hooks_dir asks git itself (`rev-parse --git-path
+        # hooks`), so the shim lands where the next push looks: proved by a push that
+        # the gate really refuses from a directory outside the git dir.
+        hooks = self.tmp / "hooks-outside-the-git-dir"
+        hooks.mkdir()
+        run_git("config", "core.hooksPath", str(hooks), cwd=self.repo)
+        origin = self.tmp / "origin.git"
+        run_git("init", "-q", "--bare", str(origin))
+        self.place_gate_tool()
+        self.suite_is_green()
+        self.set_plan({})
+        run_git("add", "-A", cwd=self.repo)
+        run_git("commit", "-q", "-m", "stubs and gate", cwd=self.repo)
+        out = self.install()
+        self.assertIn(str(hooks), out, "the installer named some other hooks dir")
+        self.assertTrue((hooks / "pre-push").is_file())
+        self.assertFalse((self.repo / ".git" / "hooks" / "pre-push").exists(),
+                         "the gate was written where core.hooksPath says git must not look")
+        self.move_main_ahead()
+        proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin),
+                               "HEAD:refs/heads/lane"], capture_output=True, text=True)
+        combined = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0, combined)
+        self.assertIn("R-coord-01", combined)
+
+    def test_a_relative_core_hooksPath_is_resolved_against_the_checkout(self):
+        # git takes a relative hooksPath against the top level, and `--git-path` hands
+        # back that same relative string: joining it to anything but the checkout the
+        # caller named would install somewhere git never reads.
+        run_git("config", "core.hooksPath", "my-hooks", cwd=self.repo)
+        self.place_gate_tool()
+        out = self.install()
+        hook = self.repo / "my-hooks" / "pre-push"
+        self.assertTrue(hook.is_file(), out)
+        self.assertIn(str(hook), out)
+
     def test_check_reports_without_installing(self):
         self.place_gate_tool()
         rc, out = self.hook_only(extra=("--check",))
