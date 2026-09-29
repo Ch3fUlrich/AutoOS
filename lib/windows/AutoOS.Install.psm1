@@ -50,6 +50,8 @@ function Test-AutoOSLocalGateway {
     } catch {
         return $false
     }
+    # A relative or host-less URI (e.g. 'not-a-url') has no Host: non-local, like Python and bash.
+    if ([string]::IsNullOrEmpty($gwHost)) { return $false }
     $gwHost = $gwHost.Trim('[',']').ToLowerInvariant()
     $gwHost -in @('127.0.0.1','localhost','::1')
 }

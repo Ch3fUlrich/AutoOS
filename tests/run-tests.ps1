@@ -6923,10 +6923,7 @@ Test-Case 'gwkey: explicit URL classification matches WS-OMNIREMOTE table' {
             $failures += "$($tc.Desc): got $result, expected $($tc.Expected) for '$($tc.Url)'"
         }
     }
-    if ($failures.Count -gt 0) {
-        $failures -join "`n" | Write-Error
-    }
-    Pass
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
 }
 
 Test-Case 'gwkey: start-stack.ps1 parity with module function' {
@@ -6941,25 +6938,18 @@ Test-Case 'gwkey: start-stack.ps1 parity with module function' {
     $moduleResults = @{}
     foreach ($u in $testUrls) { $moduleResults[$u] = (Test-AutoOSLocalGateway -Url $u) }
 
-    # Load start-stack.ps1's copy by dot-sourcing it in a child scope
+    # Extract start-stack.ps1's own copy through the AST (the script itself is never run).
     $startStackPath = Join-Path $Root 'configuration\start-stack.ps1'
-    $scriptBlock = [ScriptBlock]::Create((Get-Content -Raw -LiteralPath $startStackPath))
-    $child = [PowerShell]::Create().AddScript('$func = Get-Command Test-AutoOSLocalGateway -CommandType Function; $func.ScriptBlock')
-    $child.AddArgument($testUrls).AddScript('param($urls) $results = @{}; foreach ($u in $urls) { $results[$u] = (& $func -Url $u) }; $results').Invoke()
-    if ($child.HadErrors) { throw ($child.Streams.Error | ForEach-Object ToString) -join "`n" }
-    $startStackResults = $child.ReturnValue
-    $child.Dispose()
-
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($startStackPath, [ref]$null, [ref]$null)
+    $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true)
+    Assert-True ($null -ne $fn) 'start-stack.ps1 has no Test-AutoOSLocalGateway'
+    $copy = $fn.Body.GetScriptBlock()
     $failures = @()
     foreach ($u in $testUrls) {
-        if ($moduleResults[$u] -ne $startStackResults[$u]) {
-            $failures += "Mismatch for '$u': module=$($moduleResults[$u]) start-stack=$($startStackResults[$u])"
-        }
+        $other = & $copy -Url $u
+        if ($moduleResults[$u] -ne $other) { $failures += "mismatch for '$u': module=$($moduleResults[$u]) start-stack=$other" }
     }
-    if ($failures.Count -gt 0) {
-        $failures -join "`n" | Write-Error
-    }
-    Pass
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
 }
 
 Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
