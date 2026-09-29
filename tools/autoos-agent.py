@@ -5669,7 +5669,8 @@ def worker_scope_launch(unit, cmd, child_env: dict) -> tuple:
     "Failed to connect to bus: No medium found" (f51fc25).
     """
     env = dict(child_env)
-    strip = ["env"]
+    # absolute, from the caller's PATH: the scrubbed PATH must not pick the binary
+    strip = [shutil.which("env") or "/usr/bin/env"]
     for name in SCOPE_BUS_ENV:
         strip += ["-u", name]
         if os.environ.get(name):

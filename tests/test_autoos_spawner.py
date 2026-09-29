@@ -1322,7 +1322,9 @@ class McpToolTests(unittest.TestCase):
                                               "AUTOOS_KEYS_FILE": "/x/api-keys.yml",
                                               "OPENAI_API_KEY": "sk-secret",
                                               "AWS_SECRET_ACCESS_KEY": "aws-secret",
-                                              "XDG_RUNTIME_DIR": "/run/user/4242"}):
+                                              "XDG_RUNTIME_DIR": "/run/user/4242",
+                                              "DBUS_SESSION_BUS_ADDRESS":
+                                                  "unix:path=/run/user/4242/bus"}):
                 self.assertEqual(mcp_server.run_job(path), 0)
         argv = box["argv"]
         bus_only_for_systemd_run = ()
@@ -1333,17 +1335,20 @@ class McpToolTests(unittest.TestCase):
             argv = argv[argv.index("--") + 1:]
             # SCOPEBUS: systemd-run gets the bus address, `env -u` drops it
             # before the CLI child starts.
-            strip = ["env", "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS"]
-            self.assertEqual(argv[:len(strip)], strip, argv)
-            argv = argv[len(strip):]
-            bus_only_for_systemd_run = ("XDG_RUNTIME_DIR",)
+            bus = mcp_server.agent.SCOPE_BUS_ENV
+            strip = [a for n in bus for a in ("-u", n)]
+            self.assertTrue(os.path.isabs(argv[0]), argv)
+            self.assertEqual(argv[1:1 + len(strip)], strip, argv)
+            argv = argv[1 + len(strip):]
+            bus_only_for_systemd_run = bus
         self.assertEqual(argv, [sys.executable, mcp_server.AGENT, "--version"])
         self.assertNotIn("AUTOOS_WORKER_PGRP", box["env"], box["env"])
         self.assertEqual(path, box["env"]["AUTOOS_TASK_DIR"])
         for name in ("PATH", "HOME"):
             self.assertIn(name, box["env"], name)
         for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "AUTOOS_KEYS_FILE",
-                     "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "XDG_RUNTIME_DIR"):
+                     "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "XDG_RUNTIME_DIR",
+                     "DBUS_SESSION_BUS_ADDRESS"):
             if name in bus_only_for_systemd_run:
                 continue
             self.assertNotIn(name, box["env"], "%s reached the CLI child" % name)
@@ -14373,13 +14378,15 @@ class CancelChannelTests(unittest.TestCase):
                                  ["systemd-run", "--user", "--scope", "--unit",
                                   "autoos-worker-%s" % run_id, "--collect"], seen["cmd"])
                 self.assertEqual(seen["cmd"][6:],
-                                 ["--", "env", "-u", "XDG_RUNTIME_DIR",
-                                  "-u", "DBUS_SESSION_BUS_ADDRESS",
-                                  sys.executable, str(mcp_server.AGENT),
-                                  "run", "--dry-run", "t"], seen["cmd"])
+                                 ["--", shutil.which("env") or "/usr/bin/env"]
+                                 + [a for n in mcp_server.agent.SCOPE_BUS_ENV
+                                    for a in ("-u", n)]
+                                 + [sys.executable, str(mcp_server.AGENT),
+                                    "run", "--dry-run", "t"], seen["cmd"])
+                self.assertTrue(os.path.isabs(seen["cmd"][7]), seen["cmd"])
                 # SCOPEBUS: systemd-run itself needs the caller's user bus; the
                 # scrubbed child env has none ("Failed to connect to bus").
-                for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+                for name in mcp_server.agent.SCOPE_BUS_ENV:
                     if os.environ.get(name):
                         self.assertEqual(seen["env"].get(name), os.environ[name], name)
             else:
