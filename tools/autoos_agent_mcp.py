@@ -722,6 +722,21 @@ def run_job(path: str) -> int:
     job.pop("group", None)  # retired channel: SB-A3 item C
     _write_json(os.path.join(path, "job.json"), job)
     write_kill_record(run_id, agent.group_record())
+    try:
+        # WINSHIM: the same resolution every other launch site uses, applied after
+        # the scope wrapper is chosen so `systemd-run` stays the argv[0] it is
+        # started by and the program behind its `--` is the resolved file.
+        cmd = agent.resolve_client_executable(cmd)
+    except agent.ClientMissing as exc:
+        # This runner is detached: no caller is left to read a raised exception, so
+        # the reason goes into the log `result` reads and the run fails with the
+        # spawner's own missing-program code rather than a traceback.
+        message = "autoos-agent: %s" % exc
+        with io.open(os.path.join(path, "output.log"), "ab") as out:
+            out.write((message + "\n").encode("utf-8", "replace"))
+        _write_exit(path, {"rc": 3, "ended": time.time()})
+        print(message, file=sys.stderr)
+        return 3
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
         # at this run dir; the CLI forwards its own chosen env onward, so the

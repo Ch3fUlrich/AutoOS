@@ -15276,5 +15276,226 @@ class RunnerPrivateRecordTests(unittest.TestCase):
         self.assertEqual(st["state"], "cancel-failed", st)
 
 
+class WinshimClientResolutionTests(unittest.TestCase):
+    """WINSHIM (reported by Workstation-AutoOS): a launch must start the file
+    `shutil.which()` resolved, not the bare name subprocess cannot exec.
+
+    On Windows a client installed as a `.cmd`/`.ps1` shim is on PATH, so the
+    spawner's own which() pre-check called it installed, while CreateProcess
+    appends only `.exe`: `Popen(["opencode", ...])` raised FileNotFoundError
+    [WinError 2] and the run died in a traceback. One helper resolves the
+    program at every launch site; a program that resolves to nothing is named,
+    with the PATH that was searched, instead of traced back.
+    """
+
+    # An obviously fake Windows shim path (no username in it, AGENTS.md §1).
+    SHIM = r"C:\\npm\\opencode.CMD"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_run_client_starts_the_resolved_shim_not_the_bare_name(self):
+        popen = mock.MagicMock()
+        popen.return_value.wait.return_value = 0
+        popen.return_value.pid = 4242
+        with mock.patch.object(self.agent.shutil, "which",
+                               return_value=self.SHIM), \
+                mock.patch.object(self.agent.os, "name", "nt"), \
+                mock.patch.object(self.agent.subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                  0x0800, create=True), \
+                mock.patch.object(self.agent.subprocess, "Popen", popen), \
+                mock.patch.object(self.agent, "_terminate_group"):
+            rc = self.agent.run_client(["opencode", "run", "the task"], ".",
+                                       dict(os.environ))
+        self.assertEqual(int(rc), 0)
+        argv = popen.call_args[0][0]
+        self.assertEqual(argv[0], self.SHIM,
+                         "the resolved full path is what Popen must start")
+        self.assertEqual(argv[1:], ["run", "the task"], "the rest of argv is untouched")
+
+    def test_a_client_that_resolves_to_nothing_is_named_not_traced_back(self):
+        with mock.patch.object(self.agent.shutil, "which", return_value=None), \
+                mock.patch.object(self.agent.subprocess, "Popen") as popen:
+            with self.assertRaises(self.agent.ClientMissing) as caught:
+                self.agent.run_client(["opencode", "run", "t"], ".", dict(os.environ))
+        popen.assert_not_called()
+        msg = str(caught.exception)
+        self.assertIn("not installed: opencode", msg)
+        self.assertIn("PATH", msg)
+
+    @unittest.skipIf(os.name == "nt", "a POSIX PATH shim with a mode bit")
+    def test_on_posix_a_resolvable_client_still_runs(self):
+        # Nothing about a working POSIX launch changes: the child is the same
+        # file execvp would have found, and it still runs and streams.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        shim = os.path.join(d, "opencode")
+        with open(shim, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho shim-ran\n")
+        os.chmod(shim, 0o755)
+        real = subprocess.Popen
+        seen = {}
+
+        def spy(argv, *a, **kw):
+            seen["argv"] = list(argv)
+            return real(argv, *a, **kw)
+
+        with mock.patch.dict(os.environ,
+                             {"PATH": d + os.pathsep + os.environ.get("PATH", "")}), \
+                mock.patch.object(self.agent.subprocess, "Popen", side_effect=spy), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = self.agent.run_client(["opencode", "run", "t"], d, dict(os.environ),
+                                       capture=True)
+        self.assertEqual(seen["argv"][0], shim, seen["argv"])
+        self.assertEqual(int(rc), 0, rc.tail)
+        self.assertIn("shim-ran", rc.tail)
+
+    def test_an_absolute_program_is_started_as_it_was_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = self.agent.run_client([sys.executable, "-c", "raise SystemExit(0)"],
+                                       tmp, dict(os.environ))
+        self.assertEqual(int(rc), 0)
+
+    def test_the_scope_wrapper_is_kept_and_the_program_inside_it_is_resolved(self):
+        # The POSIX cancel channel is the scope: `systemd-run --user --scope ...
+        # -- <client>` is started by its own name, and the client hides after the
+        # wrapper's `--`. Resolving argv[0] here would break the cgroup wrapping.
+        unit = self.agent.scope_unit_name("20260929-012826-winshim-f36ac1")
+        cmd = self.agent.worker_scope_argv(unit, ["opencode", "run", "t"])
+        self.assertEqual(cmd[:1], ["systemd-run"], cmd)
+        with mock.patch.object(self.agent.shutil, "which",
+                               return_value="/usr/bin/opencode"):
+            out = self.agent.resolve_client_executable(cmd)
+        self.assertEqual(out[0], "systemd-run",
+                         "the wrapper is still launched by name, so the scope still works")
+        self.assertEqual(out[out.index("--") + 1:], ["/usr/bin/opencode", "run", "t"],
+                         "the client inside the wrapper is the resolved file")
+
+    def test_cmd_run_refuses_a_missing_client_with_the_clear_message(self):
+        agent = load_agent()
+        allow_in_place(self, agent)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
+        agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        fake_plan = {
+            "agent": "t2-worker", "client": "qoder",
+            "model": "qwen/qwen3.8-flash",
+            "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                    "--model", "qwen/qwen3.8-flash", "do the thing"], "env": {},
+            "route": {"combo": "qoder-model", "reason": "test",
+                      "privacy": "public", "review": False, "tier": 2,
+                      "card": None},
+            "depth": (1, 3), "free": False, "sandbox": None,
+            "run_id": "20260929-012826-winshim-f36ac1",
+            "cwd": os.getcwd(),
+        }
+        ns = argparse.Namespace(
+            client="qoder", task="do the thing", free=False, dry_run=False,
+            card=None, clean=False, tier=2, joinable=False, lean=False,
+            isolate=False, auto=False, title=None, model=None,
+            free_model=None, max_depth=None, plan=None, allow_training=False)
+        err = io.StringIO()
+        with mock.patch.object(agent, "build_plan", return_value=fake_plan), \
+                mock.patch.object(agent, "run_client") as run_client, \
+                mock.patch.object(agent.clients, "record_probe"), \
+                mock.patch.object(agent.clients, "signin_state",
+                                  return_value=(None, "")), \
+                mock.patch.object(agent.shutil, "which", return_value=None):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                rc = agent.cmd_run(ns, {})
+        printed = err.getvalue()
+        self.assertNotEqual(rc, 0, printed)
+        self.assertIn("not installed: qodercli", printed)
+        self.assertIn("PATH", printed)
+        run_client.assert_not_called()
+        self.assertNotIn("Traceback", printed)
+
+
+class WinshimMcpJobTests(unittest.TestCase):
+    """WINSHIM: the MCP runner's detached `run` is a launch site too, and it must
+    resolve through the same helper without disturbing its scope wrapper."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",)}
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.agent = mcp_server.agent
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def make_run(self, run_id, argv):
+        path = os.path.join(self.tmp, "agents", run_id)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": run_id, "request": {}, "task": "t", "argv": argv,
+            "cwd": str(ROOT), "route": {}, "started": time.time()})
+        return path
+
+    def resolved(self, name):
+        # Fake host: every program lives under a bin dir, under its own name.
+        return "/opt/bin/" + os.path.basename(name)
+
+    def test_run_job_starts_the_resolved_program(self):
+        path = self.make_run("20260929-012826-winshim-a1b2c3", ["--version"])
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"] = list(argv)
+            return 0
+
+        with mock.patch.object(self.agent.shutil, "which", side_effect=self.resolved), \
+                mock.patch.object(self.agent, "scope_supported", lambda: False), \
+                mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            self.assertEqual(mcp_server.run_job(path), 0)
+        self.assertEqual(box["argv"],
+                         [self.resolved(sys.executable), mcp_server.AGENT, "--version"],
+                         "the runner started the file which() resolved")
+
+    def test_run_job_keeps_the_scope_wrapper_and_resolves_inside_it(self):
+        path = self.make_run("20260929-012826-winshim-d4e5f6", ["--version"])
+        box = {}
+
+        def fake_call(argv, **kw):
+            box["argv"] = list(argv)
+            return 0
+
+        with mock.patch.object(self.agent.shutil, "which", side_effect=self.resolved), \
+                mock.patch.object(self.agent, "scope_supported", lambda: True), \
+                mock.patch.object(mcp_server.subprocess, "call", fake_call):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mcp_server.run_job(path), 0)
+        argv = box["argv"]
+        self.assertEqual(argv[:1], ["systemd-run"], argv)
+        self.assertEqual(argv[argv.index("--") + 1:],
+                         [self.resolved(sys.executable), mcp_server.AGENT, "--version"],
+                         argv)
+
+    def test_a_program_that_resolves_to_nothing_fails_the_run_cleanly(self):
+        run_id = "20260929-012826-winshim-789abc"
+        path = self.make_run(run_id, ["--version"])
+        with mock.patch.object(self.agent.shutil, "which", return_value=None), \
+                mock.patch.object(self.agent, "scope_supported", lambda: False), \
+                mock.patch.object(mcp_server.subprocess, "call",
+                                  return_value=0) as call:
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = mcp_server.run_job(path)
+        self.assertNotEqual(rc, 0)
+        call.assert_not_called()
+        tail = mcp_server._read_tail(path)
+        self.assertIn("not installed", tail)
+        self.assertNotIn("Traceback", tail)
+        self.assertEqual(mcp_server.status(run_id)["state"], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()
