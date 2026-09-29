@@ -6952,6 +6952,50 @@ Test-Case 'gwkey: start-stack.ps1 parity with module function' {
     Assert-True ($failures.Count -eq 0) ($failures -join '; ')
 }
 
+Test-Case 'gwkey: start-stack.ps1 host-name and field choice match the module' {
+    # start-stack.ps1 is standalone (it imports no module), so it carries its own copy of the
+    # whole gateway-key rule. Extract every copied function through the AST, define them only
+    # inside a child scope (the module's versions stay untouched), and compare host name,
+    # normalisation and field choice with the module over a URL x host-source matrix.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true))
+    Assert-Equal $defs.Count $names.Count 'start-stack.ps1 no longer carries every gateway-key function'
+    $defsText = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd, $argList) . ([ScriptBlock]::Create($text)); & $cmd @argList }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwpar_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $yml = Join-Path $d 'host.yml'
+        [IO.File]::WriteAllText($yml, "host_name: server`n")
+        $failures = @()
+        foreach ($raw in 'Work-Station.corp.example.com', 'LAPTOP', 'a b-c') {
+            $m = ConvertTo-AutoOSHostName $raw; $c = & $inCopy $defsText 'ConvertTo-AutoOSHostName' @($raw)
+            if ($m -ne $c) { $failures += "normalise '$raw': module=$m start-stack=$c" }
+        }
+        foreach ($url in '', 'http://127.0.0.1:20128', 'https://gw.example.com') {
+            foreach ($src in 'env', 'file', 'hostname') {
+                if ($url) { $env:AUTOOS_OMNIROUTE_URL = $url } else { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue }
+                Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+                $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+                if ($src -eq 'env') { $env:AUTOOS_HOST_NAME = 'Work-Station' }
+                if ($src -eq 'file') { $env:AUTOOS_HOST_CONFIG = $yml }
+                foreach ($fn in 'Get-AutoOSHostName', 'Get-AutoOSClientKeyField') {
+                    $m = & $fn 6>$null; $c = & $inCopy $defsText $fn @() 6>$null
+                    if ($m -ne $c) { $failures += "$fn url='$url' host=$src : module=$m start-stack=$c" }
+                }
+            }
+        }
+        Assert-Equal $failures.Count 0 ($failures -join '; ')
+    } finally {
+        foreach ($k in @{ URL = 'AUTOOS_OMNIROUTE_URL'; HOSTN = 'AUTOOS_HOST_NAME'; CFG = 'AUTOOS_HOST_CONFIG' }.GetEnumerator()) {
+            if ($null -ne $saved[$k.Key]) { Set-Item -Path "Env:$($k.Value)" -Value $saved[$k.Key] } else { Remove-Item -Path "Env:$($k.Value)" -ErrorAction SilentlyContinue }
+        }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
     $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
     $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
