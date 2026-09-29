@@ -5,6 +5,842 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the gateway namespace leaked into the LiteLLM mirror (FREEKEYS-2e, 2026-09-29)
+
+CI 36506339556's bash suite went red on three cases the lane's filtered pytest runs never
+touched. One root shape behind all of them: FREEKEYS-1 registered scaleway with
+`model_prefix: scw`, so `combos.json` — rendered through `gateway_ref()` — spells those legs
+`scw/*` while `routes.<id>.legs` and `config.yaml` spell them `scaleway/*`.
+
+- **Code** (`tools/registry.py`, `tools/sync-router-tiers.py`): `sync-router-tiers.py --combos`
+  is the documented escape hatch onto the rendered file's own leg order, and it read those
+  `scw/*` refs as if they were provider ids — resolving no transport and no env key, so the
+  mirror came out `model: scw/... , api_key: os.environ/SCW_API_KEY`: a LiteLLM provider that
+  does not exist and an env var nothing sets. New `registry_ref()`, the inverse of
+  `gateway_ref()`, rewrites a declared `model_prefix` back onto its provider id (only when
+  exactly one provider declares it and it is not itself a provider id; an unknown or ambiguous
+  namespace is returned unchanged rather than invented). `combos_refs()` runs every ref
+  through it. `test_explicit_combos_override_still_works` was the failing test; a focused
+  `RegistryRefTests` and a `combos_refs` case pin the rewrite.
+- **Test pinned the old spelling** (`tests/linux/17-ai-routing.sh`, "free-only litellm groups
+  mirror combos minus gateway-only legs"): its hardcoded LiteLLM string builder knew no
+  gateway namespace, so every `scw/*` leg read as drift against the correct `scaleway/*`
+  mirror. The mapping is pinned in the test as an independent second opinion — deliberately
+  not read from the registry, same rule as `known_drops`.
+- **Test pinned the old legs** (`tests/linux/34-ai-services.sh` + its `run-tests.ps1` twin,
+  "apply: one run registers a provider…"): it asserted the first run writes
+  `--models free-ai/qwen7b` — t3-driver-free-only's single leg before FREEKEYS-2 put the
+  scaleway and nebius free grants ahead of the stopgap. The apply order itself (register →
+  refresh catalog → write combos) was and is correct in one pass. The check is now the whole
+  ordered model list read from `combos.json`, so it fails if ANY leg goes missing, and keeps a
+  separate assertion that the freshly registered provider's leg is in the first write.
+
+No check was weakened: the mirror test gained its namespace translation, and the apply test
+went from one hardcoded ref to the file's full ordered list plus the new-leg assertion.
+
+### Added — combos ordered free → credit → paid, spend guard on every plan (FREEKEYS-2 / 2b, 2026-09-28)
+
+- **Band order** (`catalog/ai-registry.json`): every agentic tier route now lists
+  its legs by what they cost — the probe-passed free grants first, the `credit`
+  grants last and gated, the paid legs between the free band and the credit tail.
+  A combo that leads with a paid leg spends operator money before it spends a
+  grant, and an OmniRoute `priority` fall-through on a 429 lands on the *next
+  provider*, so the leg order is the redundancy. The reset-aware cooldown handling
+  the route `$comment`s cite (§18) is untouched.
+- **DeepSeek stays V4.1 only** (the L1-routing DECISION on FREEKEYS-2's open
+  question): the free bazaarlink `deepseek-v4-flash-0731` grant is V4 weights, so
+  it enters no combo and the per-leg allow drafted for it is withdrawn — the
+  blanket `deny-deepseek` governs. Its measured model/provider rows stay, and the
+  rows' `$comment` says they route nowhere until the operator lifts the rule.
+  `DeepseekV41OnlyDecisionTests` pins all of that.
+- **Unpriced credit legs are documented fallbacks only**: `morph` ($10) and
+  `deepinfra` ($5) grants carry no per-token price, so the resolver refuses them
+  fail-closed and each combo marks them `available: false` with the gate that
+  lifts it (a real price on the model row). An unpriced grant renders as a free
+  leg and would drain with nothing in the ledger to show it.
+- **Spend guard wired in** (`tools/autoos-agent.py`, `tools/autoos_agent_mcp.py`):
+  `plan_credit_guards()` reads this month's spend per `credit` provider through
+  `autoos_usage.credit_guards` — the same reader the `usage` report prints — and
+  passes it to `autoos_resolver.plan` from `run`, `route` and the MCP `route`
+  tool (MCP `spawn` inherits it: it builds a `run` argv and preflights it). One
+  gateway read per process; a read that fails refuses every credit leg rather
+  than assuming $0 spent, and the note carries only the exception *type*, never
+  its message (no host or path can reach the plan text).
+- **New tests**: `ComboCrossProviderTests` (≥2 distinct usable providers and ≥3
+  usable legs per agentic route; credit legs last and gated; no new free leg in a
+  `-clean` route) and `ComboFallthroughTests` (a fake gateway `priority` walk: a
+  429 on the head lands on another provider, two provider failures still leave a
+  third, and the fall-through lands on a leg an agentic card can use).
+- **Red → green**: seven tests the reorder broke were resolved by decision, not
+  by deletion — the T2FREE stopgap is now asserted over the *live* legs (a gated
+  leg renders nothing), MUSEAPI's "meta heads t1-orchestrator" became "the paid
+  leg follows the free band" with the two paid routes still pinned to it, the two
+  reviewer grants moved inside the free band so `policy.reviewers` keeps Haiku
+  last, and the Gemini-cooldown tests now cool the two new free providers too,
+  because their premise is "every leg of the route is cooling".
+### Added — `tools/claude-cli-lag.py`: the lag check that replaces the pin (CLIPIN / D-137, 2026-09-29)
+
+The operator superseded the Claude Code version-pin idea: every host runs the
+latest published release and the autoupdater stays on. What replaces a pin is
+something that *tells you* a host is behind, without ever touching it.
+
+- **`tools/claude-cli-lag.py`** (stdlib, Linux and Windows/WSL, read-only):
+  prints, per host, `claude --version`, the newest published release from the
+  npm registry (cached an hour in the git-ignored `logs/`; an unreachable
+  registry is `unknown`, never an error), the lag verdict, and the
+  autoupdater state from `DISABLE_AUTOUPDATER` in the environment or in the
+  `env` block of `~/.claude/settings.json` (`%USERPROFILE%\.claude\` on
+  Windows). Exit 0 up to date / ahead / unknown, exit 1 only on a confirmed lag;
+  a lagging host is flagged `lags - restart picks it up`, because that is when
+  the auto-update actually lands.
+- **A recommendation line, not a gate**, when the installed version differs
+  from the last one recorded: re-run the cheap spec behaviour checks
+  (ORCH-A1 §3.3 deny-over-allow, the HOOKS guard contracts) — both read
+  Claude Code's own permission precedence and hook payload shape, which a
+  release can change underneath a lane. The first run has nothing to compare
+  against, and an `unknown` version never overwrites the last known one.
+- **`docs/api-keys.md`**: the policy paragraph next to the Claude Code
+  gateway settings it reads. Nothing in the repo pins a Claude Code version and
+  nothing sets `DISABLE_AUTOUPDATER` (verified across catalog, lib, templates
+  and infra) — `claude-code` installs `@anthropic-ai/claude-code` unpinned.
+- **`tests/test_claude_cli_lag.py`**: fake version output and fake registry
+  JSON (lags / up-to-date / ahead / unknown), the cache TTL, offline fallbacks,
+  a corrupt cache and settings file, autoupdater detection from env and from a
+  generated `settings.json`, the Windows `%USERPROFILE%` path, the
+  version-change recommendation, the exit codes, and the state file's location
+  under the git-ignored `logs/`. Wired into `tests/linux/33-documentation.sh`
+  and `tests/run-tests.ps1`.
+
+### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
+
+SB-A2 took the group out of `pgrp.json` and wrote it into `job.json` — but
+`job.json` lives in the run dir, which `run_job` exports to the worker as
+`AUTOOS_TASK_DIR`, and the worker is the same uid as the file. `cancel` then read
+`job["scope"]` and `job["group"]` verbatim, so the process being cancelled could
+still aim the killer at any `--user` unit, at another run's scope, or at any
+process group.
+
+- **`tools/autoos-agent.py`**: `worker_scope_unit(run_id)` derives the unit name
+  `autoos-worker-<run id>.scope` and raises for anything that is not a run id
+  (`is_killable_run_id` / `KILL_RUN_ID_RE`, 64-char cap); `stop_scope()`
+  re-validates the name it is handed (`scope_unit_is_worker_scope`: prefix,
+  `.scope` suffix, unit-safe charset, length) and refuses — with no `systemctl`
+  call — anything else, so the guard lives in the killer, not only at the call
+  site.
+- **`tools/autoos_agent_mcp.py`**: `cancel` never reads a scope from a file. It
+  derives it from the run id it was given and refuses a `job.json` that claims a
+  different run. The fallback group record moved out of the task dir into a
+  runner-private store, `$(state dir)/kill/<run id>.json` (dir 0700, file 0600,
+  atomic write, `kill_store_dir`/`write_kill_record`); `spawn` and `run_job`
+  write it, `cancel` reads only it, and `job.json` carries no `group` any more —
+  its `scope` field stays as information only.
+- **Residual, stated**: a same-uid worker that goes looking can still find the
+  kill store through `AUTOOS_STATE_DIR`; a file cannot be hidden from the uid that
+  owns it. The scope path — derived, no file involved — is the primary and is what
+  a host with a user manager uses.
+- **Tests** (`tests/test_autoos_spawner.py`, `CancelDerivesKillTargetTests`): a
+  rewritten `job.json` scope (`foo.service`, another run's scope) does not change
+  what `cancel` stops; `stop_scope` refuses every non-worker-scope name; a
+  malformed run id is refused at both levels; the group kill reads only the
+  private record (an edited `job.json` group kills nothing); the store is not
+  under `AUTOOS_TASK_DIR`, is not named in the worker env, and is 0700/0600.
+### Fixed — Claude-family spelling escape, wrapper-only peer origin, orchestrator-only shared checkout, deepseek-flash priced (SB-C2, 2026-09-28)
+
+Four items from the SB-C2 brief, all red-then-green against HEAD:
+
+- **deny-claude-paid-api spelling escape (HIGH)** (`catalog/ai-registry.json`):
+  the rule matched only `*/claude-*`, so a third-party leg named by its family
+  word alone — `openrouter/anthropic/opus-5`, `bluesminds/sonnet-5`,
+  `free-ai/haiku-4-5`, `zen/fable-5` — escaped it and was usable the moment the
+  budget gate said yes. Added `deny-claude-family-{opus,sonnet,haiku,fable}`
+  (`*/*<word>*`, the CLAUDE_MODEL_MARKERS the gate itself reads) and
+  `deny-anthropic-paid` (`anthropic/*`; `anthropic` is not one of the two seat
+  rows, `cc/*` and `antigravity/*`, whose allows precede every family deny).
+  Placed after the seats, before every provider wildcard allow, so first-match-
+  wins still allows a seat leg and a family deny can never be outranked. A
+  registry sweep confirmed no *non-Claude* model/leg name carries opus/sonnet/
+  haiku/fable, so no carve-out was needed (pinned by
+  `test_no_registered_non_claude_name_carries_a_family_word`).
+- **classify_origin wrapper-only `from=` (MED)** (`tools/skill-rules.py`): R-worker-11
+  read `from=` anywhere in the text, so a compaction request could be dressed as
+  a peer by quoting the marker in its own body. Only a `from=` attribute on a
+  *leading* `<cross-session-message …>` wrapper tag counts now; quoted text, code
+  spans and body `from=` are ignored. Documented residual (stated in the rule
+  docstring): a real peer message that arrives without the wrapper reads as
+  harness-compaction — the safe miss, since complying is the correct action for a
+  self-managed context anyway. The fixture carries all three SB-C2 cases.
+- **SPAWNISO override is orchestrator-only (MED)** (`tools/autoos_agent_mcp.py`):
+  `allow_shared_checkout` was SB-C's writer escape hatch, but a leaf cannot spawn
+  at all (KEYDENY3), so it made the shared-worktree hole explicit. The MCP spawn
+  now refuses `allow_shared_checkout=True` unless the card's role is `orchestrate`,
+  and records an accepted override as `shared_checkout_override` on the run's route.
+- **deepseek-flash priced and resolvable (REGISTRY GAP, L1-main)**: the D-102 gate
+  refused `deepseek-flash` by bare name as unpriceable, though it is the allowed
+  paid bulk leg under DSGUARD's $25 cap. Added `price_source` to
+  `models.deepseek-flash` citing the numbers it already carries — `price_in 3e-07 /
+  price_out 1.2e-06 / price_cache_read 6e-09`, reused from `models.deepseek-v4-flash`
+  (the retired llm-models.json sibling) and the exact prices `autoos_usage`/
+  `deepseek_call.check_cap` bill — no invented number. The gate's unknown-combo
+  branch now reads a priced registry model row (bare name and the `deepseek-v4-flash`
+  alias, with `omniroute/…#effort` normalised) instead of refusing; an anthropic-
+  family row still reads as Claude, and a string with no row at all still fails
+  closed. `tools/registry.py` exempted `price_source` from rule 5 so its dated
+  attribution passes the check.
+
+### Fixed — spawn isolation, compaction rule, and the zen Claude leg hole (SB-C, 2026-09-28)
+
+Three items from the SB-C brief:
+
+- **SPAWNISO** (`tools/autoos_agent_mcp.py`): KEYDENY3 forced tiers 2-3 and every
+  leaf role into an isolated clone, but a tier-1 *write* role still ran in the
+  caller's checkout — and `role=implement, complexity=hard` routes UP to tier 1
+  (`routing.select_combo`'s public-strong bucket). A write-role card now defaults
+  to `isolate`, and one that explicitly asks for `isolate=False` while `cwd` is the
+  caller's own worktree is refused unless the call names `allow_shared_checkout=True`.
+  The MCP tool's `isolate` default became `None` (absent = the default applies) so a
+  caller that never mentions it is not read as asking to run in place. Read-only
+  roles (review, orchestrate) still run in place.
+- **COMPACTRULE** (D-146): `.agents/skills/unattended-orchestration/SKILL.md` gains
+  `R-worker-11` — a "summarise, no tools" ask carrying no cross-session `from=` is
+  the agent's own harness compacting it, so it should comply or hand off before the
+  cap; only a `from=` line can be a peer. `classify_origin()` in
+  `tools/skill-rules.py` decides it, pinned by `tests/fixtures/skill-rules-compaction.jsonl`
+  (both verdicts must appear in the fixture).
+- **ZENCLAUDE** (`catalog/ai-registry.json`, found by FREEKEYS-1): `leg_rules`
+  matched `allow-opencode-zen-client-bound` (`opencode-zen/*`) before
+  `deny-claude-paid-api` (`*/claude-*`), so a Claude leg spelled under zen was never
+  denied by the leg rules. Measured live, not latent: with `AUTOOS_CLAUDE_FINAL`
+  declared (the gate the leg rules are supposed to sit under), the resolver returned
+  `opencode-zen/claude-sonnet-5` as a usable leg; without the declaration the Claude
+  budget held it, so only that first half was open. `deny-claude-paid-api` now
+  precedes every provider wildcard allow, with the two free Claude seats
+  (`cc/*`, `antigravity/*`) moved up with it so they keep matching first. Sweeping
+  every leg the registry names: no committed verdict changed
+  (`tests/test_autoos_resolver.py ZenClaudeLegRulesTests`).
+
+### Changed — `agent-skills` is a tombstone on Windows too; its installer no longer clones (SPEC-OMNI A7, D-066, 2026-09-28)
+
+A7 retired `agent-skills` on Linux and macOS and left Windows live — its entry
+cloned a second repository and its installer did the MCP wiring. This lane
+finishes the retirement on Windows. The native Windows twins
+(`agent-skill-links`, `omnigraph-client`) are deliberately *not* added (D-066:
+the Windows path is frozen to fixes), so the four `mcp-*` components are the
+only successors the catalog names there. What `Install-AutoOSAgentSkills`
+additionally did on Windows (the project-scope `omnigraph`/`autoos-agent` pins,
+the Antigravity MCP merge, the user-scope skill links) now has no catalog
+caller: it is reachable only from tests, and its Windows successor is the parked
+w1 lane. Known, accepted under D-066. Leftovers deliberately kept (a frozen
+path gets fixes only): the unreachable `agent-skills` probe in
+`AutoOS.Detect.psm1` and the function itself as a test fixture.
+
+- **`catalog/windows.json`**: `agent-skills` is `"tombstone": true` with the
+  note *its work moved to the mcp-\* components* and `replaced_by` naming the
+  four ids that took it (`mcp-graphify`, `mcp-serena`, `mcp-playwright`,
+  `mcp-context7` — the only successors this platform ships; naming
+  `agent-skill-links`/`omnigraph-client` would promise work Windows does not
+  have). `postInstall`, `prompt`, `requires` and `profiles` go with the live
+  row.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` no longer
+  clones `Documents\Code\agent-skills` (nor pulls it): the servers it wires are
+  declared by this checkout's own `.mcp.json`, so the project-scope pins now
+  read `$script:RepoRoot`. `Write-AutoOSOmnigraphReadiness`'s parameter is
+  renamed `-AgentSkillsDir` → `-RepoRoot` to match. The MCP wiring, the
+  `omnigraph`/`autoos-agent` project pins, the Antigravity config merge and the
+  repo/user skill links are unchanged, as is the retargeting of links into the
+  retired clone (a machine that ran the old installer keeps its checkout — this
+  never deletes it). The function is now reachable only from tests: no catalog
+  entry carries it as `postInstall`.
+- **Tests**: `tests/linux/18-mcp-wiring.sh`'s tombstone case becomes
+  per-platform (Windows expects the four-successor set) and validates
+  `catalog/windows.json`; a new case proves the Windows installer names no clone
+  URL, runs no `git clone`/`pull` and writes nothing into the retired path.
+  `tests/run-tests.ps1` gains the matching pwsh cases (`agent-skills is never
+  cloned`, asserted on the installer body and the whole module; and the Windows
+  catalog entry carries the flag, the note and exactly the four successors with
+  no installer hooks).
+- **`docs/catalog.md`**: the `replaced_by` example now shows both shapes and says
+  why Windows names four.
+- **Open, recorded rather than hidden**: with the row retired, the
+  `omnigraph_url` prompt in `catalog/windows.json` is owned by no component, so
+  a Windows run never asks it and `Set-AutoOSAntigravityMcp` falls back to
+  `localhost:8080`. Fixing that belongs to the parked w1 lane (which adds the
+  Windows `omnigraph-client` twin), not to this frozen-path lane.
+
+Verified: `bash tests/run-tests.sh --filter catalog` 69 passed / 0 failed;
+`AUTOOS_TEST_PARTS=18 bash tests/run-tests.sh --filter agent-skills` 21 passed /
+0 failed, and the schema case validates `catalog/windows.json`. pwsh 7.6 on this
+Linux host ran too: `-Filter agent-skills` 23 passed / 2 failed and
+`-Filter catalog,tombstone` 319 passed / 2 failed — all four failures reproduce
+at the branch point, so none is new (two backup-record cases, the Linux-only
+`powershell`-on-PATH `--CheckCatalog` case, and an unrelated usb case). The real
+gate is still one `powershell -File tests\run-tests.ps1` on a Windows
+workstation, where the Windows PowerShell 5.1 code paths these cases cover
+actually run.
+
+### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
+
+Policy decision (L1-routing): a worker spawned at tier 2 or 3 runs in an isolated
+clone; only tier 1 (`role=orchestrate`, the operator's own session) may run in
+place. KEYDENY3b refused tier 3 and deliberately left tier 2 in the caller's
+checkout, recording the hole it left — a t2 running in place has the same
+pattern-fence gap for itself, and the native `t3-reviewer` it launches inherits
+that cwd and carries none of the fences. The directory, not the pattern, is what
+closes it.
+
+- **`tools/autoos-agent.py`**: `LEAF_TIERS = (3,)` is now `ISOLATE_TIERS = (2, 3)`,
+  and `leaf_isolation_refusal(tier, isolate, client, leaf=)` keys on the role's
+  `leaf` flag **or** the isolated tier, never on the tier number alone — a
+  `role=review` card is a leaf at any tier. The flag is read from
+  `catalog/agent-harness.json` (`harness_role_is_leaf` / `role_for_run`), so there
+  is one home for it. An in-place spawned tier exits 2 with the reason and the fix
+  named; a `--dry-run` only announces it. The qoder-writes force (the plan sets
+  `--isolate` itself) is what keeps that run legal, and the verdict is computed
+  after `build_plan` for exactly that reason.
+- **`tools/autoos_agent_mcp.py`**: `build_argv` calls the same shared helper — no
+  second rule table to drift — and **forces** `isolate` for a spawned tier rather
+  than refusing, because its caller is a headless agent that cannot retype a flag
+  and the alternative is a job that reports itself started and then exits 2. The
+  force is reported as `route.forced_isolate` in the spawn answer.
+- **`tools/autoos-agent.py` (item 7)**: an `--isolate` clone was forked from
+  `ROOT` — the checkout the *script* lives in — so an MCP isolated spawn cloned
+  the MCP server's own repo at its HEAD and every sandbox started on the wrong
+  branch while the worker ran elsewhere. New `isolate_source(cwd)` forks from the
+  caller's `git rev-parse --show-toplevel` (falling back to `ROOT` when the cwd is
+  not a repository), the containment prompt names that source, and the `--dry-run`
+  clone line prints it.
+- **`tools/autoos_clients.py`**: no client may leave a leaf able to spawn
+  silently. `LEAF_SPAWN_DENY` renders each CLI's own deny for a leaf run —
+  `claude`/`qoder` `--disallowed-tools`, `qwen` `--exclude-tools` (flag names
+  verified against each `--help` on this host; the values are tool-name patterns,
+  so every known spelling goes in and an unknown one is inert rather than an
+  error). `gemini`, `codex` and `agy` carry no gate and their rows already say
+  `subagents: False`; opencode's gate stays the config overlay. `opencode.jsonc`'s
+  agent blocks are unchanged.
+- **Tests**: `LeafIsolationMandatoryTests` re-pinned for tiers 2 and 3 plus the
+  leaf-flag keying; `McpIsolateForceTests`, `IsolateSourceTests` (a two-head repo:
+  a worktree on branch X yields a sandbox whose HEAD is X's, never the server's)
+  and `ClientSpawnGateTests` are new; `FixtureSpawnGateObjectTests` pins the
+  `{task, subagent, bash}` permission object against the checked-in fixture, and
+  `IgnoredKeyFilesTests` proves with git's own answers that
+  `configuration/api-keys.yml` and `.env*` are ignored and none of them tracked.
+  Tests of unrelated exit codes call `allow_in_place`, which neutralises only the
+  isolation gate; the two agy signin probes moved to `--tier 1` for the same
+  reason.
+- **Skill/docs**: `.agents/skills/unattended-orchestration` now shows `--isolate`
+  on every spawned-tier example and states the rule; so does `autoos-agent.py`'s
+  own usage block; `lib/agent_harness.py`'s fence comment records the hole as
+  closed.
+- **Open, recorded rather than hidden**: opencode 2.0.16's canonical action names
+  are `shell` / `subagent` / `patch` (its rename map is
+  `{bash: "shell", task: "subagent", apply_patch: "patch"}`) and `Config.Info`
+  declares `permissions` (ordered rules), not the `permission` map the harness
+  writes — the map is the legacy shape the normaliser still accepts, and the
+  spawner's overlay carries the ordered-rule form. A tier-1 run in place still has
+  the pattern hole for itself; that is the operator's own session, in a lane the
+  operator is watching.
+
+### Fixed — the stop class is PAUSE plus the imperative STOP/HALT/ABORT; HOLD and FREEZE stay capacity notes (RESTART R2a10, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a9 open #1, S1, safety): R2a9 widened
+  the pause class to stop *vocabulary* with PAUSE's wide rules, and the live corpus paid at
+  once — `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G) … max 4 local units/workers`, a
+  released memory-capacity note, read as a hard stop: heartbeat exited 3 and `run`/`spawn`
+  refused on three live inboxes. A false stop that halts the fleet is not acceptable, so the
+  class is now `PAUSE_ORDER_WORDS` = PAUSE, STOP, HALT, ABORT (HOLD and FREEZE out) and
+  `_gives_stop` splits it by **shape**, symmetric with the strict release: PAUSE keeps the
+  R2a4–R2a9 wide read unchanged, the other three stop only when the bare uppercase word is
+  the first word of an unmarked payload — `→ done: STOP all lanes obeyed`,
+  `fleet note: runs were stopped at 14:00`, `no STOP needed` mid-note and
+  ``operator: `STOP` `` are mentions. The record-wide negation veto and the bare-leading
+  `RESUME` release are untouched. Re-scanned over the ten real inboxes: **0** records are a
+  bare imperative stop, and `pause_state` is back to the R2a8 baseline exactly — 3 active
+  (`L1-backlog.md`, `L1-main.md`, `L1-routing.md`) with the same winning records, the
+  `MEM HOLD LIFTED` note inactive everywhere.
+
+### Fixed — the veto is the record, the release is a bare leading RESUME, and STOP/HOLD/HALT/ABORT stop the run (RESTART R2a9, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (this repo's own R2a8, S1, safety, FIX-FIRST): R2a8
+  replaced one heuristic with another. It split the record into sentences and let both the
+  negation veto and the release ride that split — and a splitter reads an abbreviation
+  (`e.g.`) and a decimal (`3.5`) as a sentence break, which is a way for a negation to
+  escape the veto, and for a *mention* to earn a head. The decision is to stop
+  sentence-splitting and make both sides strict by construction. **(1) The veto is the
+  record.** `_sentence_span` is gone; `_record_is_negated` reads the whole **payload**
+  (everything after the speaker prefix and, in an acknowledgement, after the marker —
+  `_ack_head`/`_payload_start` stay the one home of that split), so a `NEGATION_WORDS` word
+  anywhere in it closes nothing: `→ done: PAUSE lifted e.g. not confirmed by ops`,
+  `→ done: no merges today. PAUSE lifted` and
+  `→ main: no agreement was reached; PAUSE acknowledged` all report a stop still in force.
+  No word joined `NEGATION_WORDS`; the round's point is the structure again.
+  **(2) The release is a bare leading RESUME.** `_resumes`' shape (a) no longer accepts the
+  first word of *any* sentence — the payload must open **directly** with the uppercase word,
+  with no quote, backtick or parenthesis in front of it (`operator: "RESUME all lanes"`,
+  ``operator: `RESUME` ``), no `?` anywhere in the payload (`operator: RESUME?`,
+  `RESUME tomorrow?`), no negation, and no *undoing* close within the window; shape (b)
+  stays the acknowledgement that says nothing but `RESUME acknowledged`/`acked` plus
+  punctuation or a time. So `note the fix landed. RESUME every lane`,
+  `operator: work done. RESUME all lanes` and `noting e.g. RESUME is due` order nothing,
+  while `operator: RESUME all lanes` and `→ done: RESUME acknowledged` still lift.
+  **(3) STOP, HOLD, HALT and ABORT are PAUSE-class.** `PAUSE_ORDER_WORDS` is the filter
+  `pause_state` reads (through `_gives_order(text, _PAUSE_ORDER_RE)` — the same exemption,
+  one narrower list), closing R2a8's recorded probe: `operator: STOP all lanes` reported
+  `active: False` while `_gives_order` called it an order. `FREEZE` stays out of the class
+  and `RESUME` never joins it. Both sides read `_ack_head`, `_record_is_negated` and
+  `_order_word_is_closed`; no second copy of the rule.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2238
+  records** — the corpus is live and grew during the run — 927 acknowledgements, 187
+  quoting an order word, 8 quoting `PAUSE`, 0 quoting
+  an uppercase `RESUME`): **0** records change `_resumes` (the release half moves nobody —
+  the corpus has never written an imperative `RESUME`), **1** changes `_gives_order`
+  (`→ done: combined FLEETSPEC review came back NOT READY …`, whose close R2a8's sentence
+  cut had exempted), and **30** change class as *stop* records under (3) — 25 unmarked
+  fleet notes and 5 acknowledgements. `pause_state` goes from **3 active to 4**:
+  `L2-general.md` flips inactive → active and `L1-backlog.md`/`L1-routing.md` change their
+  winning record, in all three cases to the same line —
+  `from L1-main: MEM HOLD LIFTED (MemAvailable 7.0G). The normal freeze rule applies
+  again: max 4 local units/workers fleet-wide …`. It wins because an **unmarked** record
+  never gets its closing word read at all (R2a4's wide reading, unchanged here), so a
+  `MEM HOLD`/`CHEAP-WORKER HOLD`/`ON HOLD` capacity note now reads as a hard stop that its
+  own `LIFTED` cannot end. That is the spurious direction the asymmetry allows — one wasted
+  heartbeat and a `RESUME`, never a lost order — but it is a cost measured on live inboxes,
+  so it is recorded as an open item rather than glossed.
+- **Docs:** RESTART spec §0 holds the rule (the payload-wide veto, the bare-head release,
+  `PAUSE_ORDER_WORDS`, the measured cost); `docs/routing.md` cites §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_payload_start`/`_record_is_negated` instead of
+  restating it.
+
+### Fixed — the release is strict by construction and the negation veto spans the sentence (RESTART R2a8, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a7, S1, safety, FIX-FIRST): R2a7
+  widened the negation veto to the whole *window* and gated the RESUME half like a PAUSE —
+  both were still wide enough to lose a stop. **(1) The veto outran its window.**
+  `→ done: PAUSE lifted but it was never really confirmed by ops` closed the stop because
+  the negation sat five words out, past `_CLOSING_WINDOW`. The unit is now the **sentence**:
+  `_sentence_span` splits on `.` `;` `!` `?` and newline, and `_order_word_is_negated` reads
+  it whole, so a sentence that keeps talking after its closing word cannot close the order
+  (`PAUSE lifted and the record is unconfirmed by ops`,
+  `PAUSE released, and ops never signed that off`, `PAUSE ended but that was not the
+  operator's call` all stay in force). The same rule is what makes the veto *narrower* where
+  a negation belongs to a different claim: `→ done: no merges today. PAUSE lifted` and
+  `→ main: nothing was agreed; PAUSE acknowledged` close — the negation never reaches in
+  across a sentence boundary. No word joined `NEGATION_WORDS`; the round's point is that the
+  structure, not the vocabulary, carries this.
+  **(2) A mention of RESUME lifted the stop.** R2a7's gate vetoed a *negated* and an
+  *undone* RESUME, so `→ done: we should RESUME tomorrow`, `→ done: considering RESUME
+  options`, `→ done: RESUME pending` and `→ done: discussed RESUME` each un-stopped a run
+  nobody released. `_resumes` is now strict by construction and counts exactly two shapes:
+  **(a)** a record with **no** acknowledgement marker, where `RESUME` is the first word of
+  its payload or of its sentence — the imperative the operator writes (`operator: RESUME all
+  lanes`, `from L0 (operator) RESUME now`, `work done. RESUME every lane`) — unnegated in
+  that sentence and un-undone within the window; **(b)** an acknowledgement whose sentence
+  says nothing but the landing — `RESUME` plus a `RELEASE_ACK_WORDS` word (`acknowledged`,
+  `acked`, the release half of `REPORTING_CLOSING_WORDS`, named once and asserted as a
+  subset), optionally followed by punctuation or a time (`→ done: RESUME acknowledged at
+  12:00`), and by no prose (`→ done: RESUME acknowledged but ops still holding` lifts
+  nothing). `lesson:` lifts nothing, as before. Both shapes read the shared `_ack_head`
+  (the marker *and* where the payload starts), `_sentence_span`, `_order_word_is_negated`
+  and `_order_word_is_closed` — the rule has one home, no second copy.
+- **Recorded, not redesigned (the brief's follow-up probe):** `→ main: PAUSE lifted. STOP
+  all lanes` — `_gives_order` reports the record as an active order (the closed PAUSE half
+  does not exempt the open STOP half), and `pause_state` therefore calls the inbox active
+  *through* the PAUSE word in it. `pause_state`'s filter is `_PAUSE_RE` alone, so a bare
+  `operator: STOP all lanes` — or `HOLD every merge` — reports `active: False` while
+  `_gives_order` says it is an order. Both are pinned by tests as the exact behaviour.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2220
+  records**, 921 acknowledgements, 186 quoting an order word, 8 quoting `PAUSE`, **0 quoting
+  `RESUME`**): **0** records change `_gives_order`, **0** change `_resumes`, and
+  `pause_state` is identical on all 10 files (**3 active** both ways). The corpus is again
+  no evidence for either fix — it has never written a RESUME line and its PAUSE lines are
+  short, so the release half and the far-flung negation are covered only by the unit tests.
+- **Docs:** RESTART spec §0 holds the rule (sentence-span veto, the two release shapes, the
+  derived `RELEASE_ACK_WORDS` subset); `docs/routing.md` and the docstrings cite §0 and
+  `_gives_order`/`_resumes`/`_ack_head`/`_sentence_span` instead of restating it.
+
+### Fixed — a RESUME is gated the way a PAUSE is, and a negation anywhere in the closing window keeps the order open (RESTART R2a7, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a6, S1, safety): two HIGHs,
+  both in the direction that loses a stop. **(1) The ungated RESUME.** `pause_state`
+  gated its PAUSE half on the R2a5/R2a6 ack rules but took its RESUME half on a bare
+  `_RESUME_RE.search`, so
+  `→ done: applied the fix already; RESUME was never issued, still holding` written after
+  `→ done: PAUSE all lanes until further notice` reported `active: False` — a release
+  nobody gave. A RESUME now counts only where it is itself an order, through the same
+  `_ack_marker` / `_order_word_is_negated` / `_order_word_is_closed` helpers the PAUSE
+  half uses (`_resumes`), never a second copy of the rule. Two readings of that window
+  differ, each toward holding the stop: a negation vetoes a *release* in every record
+  shape (`operator: no RESUME given yet` clears nothing), where for a stop word it vetoes
+  only the close (`PAUSE NOW, no launches` stays a hard stop); and `CLOSING_WORDS` is
+  partitioned, derived rather than hand-copied, into `REPORTING_CLOSING_WORDS`
+  (`acknowledged`, `acked`, `cleared`, `resolved`), which report a release landing so
+  `→ done: RESUME acknowledged` still clears, and `UNDOING_CLOSING_WORDS` (the rest),
+  which undo one so `→ done: RESUME cancelled` holds. A `lesson:` record releases nothing.
+  **(2) The close that outran its own negation.** `_order_word_is_closed` returned at the
+  first closing word, so a negation standing *after* it closed the order anyway:
+  `PAUSE lifted but not confirmed`, `PAUSE lifted, not really` and
+  `PAUSE cleared, unconfirmed by ops` all reported a stop that ended. The veto now reads
+  the whole `_CLOSING_WINDOW` on either side of the order word before any close is
+  accepted, and `un-` is a prefix negation on any word of the window — R2a6's
+  `_NEGATED_CLOSING_RE` (which only caught `un-` on a closing word itself) is now
+  `_NEGATION_PREFIX_RE`. So `→ done: PAUSE lifted, not because the operator forgot`,
+  which R2a6 documented as closed, is deliberately an order still in force: an `un-` or
+  `no`-shaped word that is only vocabulary can veto a close and hold a lane one heartbeat
+  longer, and a spurious order remains the accepted cost while a lost one is not.
+- **Measured over the real corpus** (`logs/handoff-sessions/{20260924,20260925}/inbox`,
+  read-only, HEAD's classifier and the working copy in one pass over 10 files / **2036
+  records**, 864 of them acknowledgements, 161 quoting an order word, 7 carrying `PAUSE`,
+  **0 carrying `RESUME`**): pause-order records **7 before and 7 after**, `pause_state`
+  identical on all 10 files (**3 active** both ways), **0 records reclassified by the
+  RESUME gate**. Exactly one record changes `_gives_order` verdict at all —
+  `→ done: freeze cleared (2/4 units, 6.73GB)` — because `units` wears the `un-` prefix;
+  it names no `PAUSE`, so no inbox flips. The corpus is again no evidence for either fix:
+  it never writes a RESUME line, so the release half is covered only by the unit tests.
+- **Docs:** RESTART spec §0 is the one home for the rule (window, veto, stop/release
+  partition); `docs/routing.md` and the docstrings point at it and at
+  `_gives_order`/`_resumes` instead of restating it, and §0's "whichever of the two comes
+  first decides" sentence is replaced by the whole-window rule it describes.
+
+### Fixed — no generic closing words and no negated close, so an acknowledgement stops swallowing live orders (RESTART R2a6, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a5, S1, safety): R2a5's
+  exemption was still wide enough to lose an order two ways. **(1) Generic words.**
+  `over`, `done` and `noted` sat in `CLOSING_WORDS` and they are ordinary vocabulary
+  *inside* an order sentence, so `→ done: noted. PAUSE over the weekend`,
+  `→ done: PAUSE done by 18:00` and `→ main: PAUSE noted for all lanes` each read as
+  the report of a stop that never ended. The list now holds only words that state one
+  thing — that the order is over (`lifted`, `ended`, `cancelled`, `canceled`, `removed`,
+  `released`, `acknowledged`, `acked`, `cleared`, `resolved`). **(2) Negation.** A
+  closing word with a negation in front of it says the opposite:
+  `→ done: PAUSE was not lifted`, `→ done: PAUSE isn't cleared` and
+  `→ main: PAUSE never released` report a stop still holding, yet all three were
+  exempted. The new §0 list `NEGATION_WORDS` (`not`, `cannot`, `n't`, `never`, `no`,
+  `without`)
+  vetoes a close when one of its words stands between the order word and the closing
+  word, `n't` matching at the end of the word it hangs on (so `won't` is caught too),
+  and `_NEGATED_CLOSING_RE` vetoes the prefix shape (`PAUSE unlifted`). `cannot` is on
+  the list because the shape was found while spot-checking the veto —
+  `→ done: PAUSE cannot be lifted` negates the close and spelled it as one word, so the
+  five words the brief named would have left that order lost.
+  `_order_word_is_closed` returns on the first word that decides either way, so a real
+  close ahead of a later negation still closes (`PAUSE lifted, not because …`).
+  Asymmetry unchanged (R2a4/R2a5): a veto past a genuine close costs a **spurious**
+  order — one wasted heartbeat and a RESUME — a lost one lets workers run against a
+  stop the operator gave.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1987 records**, 846 of them acknowledgements and 52 of those quoting an
+  order word): pause-order records **7 before and 7 after**, **0 PAUSE-bearing records
+  changed classification**, and `pause_state` identical on all 7 files (the three
+  active files' winning texts exactly 80 chars, truncated as specified). The corpus is
+  again silent on the defect — exactly one record flips verdict at all, a `→ done:` ack
+  whose *HOLD* was closed by `noted` alone, and it is not a PAUSE line, so it moves no
+  lane. The words the corpus really closes with are `lifted` (2), `cleared` (1) and
+  `noted` (1); two acks carry a negation inside the 3-word window and both were already
+  orders. Fixtures carry what the corpus has not (AGENTS.md §5).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the narrowed
+  `CLOSING_WORDS`, names `NEGATION_WORDS` as §0's fourth one-list rule and the veto in
+  one sentence; `docs/routing.md` cites the same two lists; the `CLOSING_WORDS`,
+  `_order_word_is_closed`, `_gives_order` and `pause_state` docstrings say what the
+  filter now does.
+- **Tests** (red before the code: 4 failed, 87 passed in `tests/test_autoos_heartbeat.py`
+  against `git show HEAD:` of the module — the four generic-word and negation shapes,
+  and the list-membership guard, each failing on the reproduced defect):
+  `→ done: noted. PAUSE over the weekend` / `PAUSE done by 18:00` /
+  `PAUSE noted for all lanes` / `→ ack: PAUSE over the weekend, → main held` → order;
+  `PAUSE was not lifted` / `isn't cleared` / `never released` / `unlifted` /
+  `won't be removed until I say so` / `cannot be lifted` → order; the three genuine
+  closes the brief names (`PAUSE lifted`, `PAUSE acknowledged`, `STOP cancelled`) plus
+  `PAUSE ended` → report;
+  the list guards (no generic word in `CLOSING_WORDS`, `_NEGATION_RE` built from
+  `NEGATION_WORDS`, `note`/`notebook`/`amount`/`nope`/`none`/`nevertheless` not read as
+  negations). Two
+  pre-existing fixtures that had relied on the struck words (`→ ack: PAUSE noted`,
+  `→ ack: PAUSE over`) now write a kept closing word, so each still tests the shape it
+  names. `tests/test_autoos_heartbeat.py` 86 → 91; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 215 passed.
+
+### Fixed — an acknowledgement exempts only the order word it closes, so an order after an ack is still an order (RESTART R2a5, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a4, HIGH, safety):
+  `pause_state` gated the PAUSE scan on `not _acknowledgement(text)` for the **whole
+  record**, so one acknowledgement at the head swallowed every order word that came
+  after it in the same line —
+  `2026-09-28T10:00:00Z → done: applied R2a4 fix. PAUSE all lanes until further notice`
+  reported `active: False`, a hard stop that held nothing — and `parse_inbox_line`'s
+  docstring claimed the reply was still scanned for PAUSE when it was not. An
+  acknowledgement now absorbs an order word **only where a closing word follows it
+  within 3 words**: the new `CLOSING_WORDS` list (`lifted`, `ended`, `over`,
+  `cancelled`, `canceled`, `removed`, `released`, `acknowledged`, `acked`, `noted`,
+  `done`, `cleared`, `resolved`) sits beside `ACK_MARKERS` and `ORDER_WORDS` as §0's
+  third one-list rule, matched case-insensitively and as a whole word after trimming
+  the punctuation a writer sticks beside it (`PAUSE, lifted`). So `→ done: PAUSE
+  lifted` and `→ main: PAUSE acknowledged` stay reports, while `→ main: merged. STOP
+  all lanes` and `→ done: 12:00 noted; PAUSE all merges now` are fresh orders; the
+  gate is `_gives_order`, which keeps the R2a4 reading of an unmarked record (any
+  `ORDER_WORDS` word is an order). `lesson:` is the one marker that exempts a whole
+  record — a lesson reports on the code and never addresses the run, a rule that
+  predates this lane and is now pinned by a test. Same asymmetry as R2a4: an order
+  word whose closing word sits past the 3-word window is a **spurious** order (one
+  wasted heartbeat, then a RESUME), never a lost one.
+- **Measured over the real corpus** (`logs/handoff-sessions/20260925/inbox`, read-only,
+  both classifiers in memory — the HEAD copy and the working copy — in one pass over
+  7 files / **1954 records**, 832 of them acknowledgements): pause-order records
+  **4 before and 4 after**, **0 records changed classification**, and `pause_state`
+  identical on all 7 files — the three active files' winning texts exactly 80 chars,
+  truncated as specified. The corpus had no ack record that both quoted a PAUSE and
+  left an order word unclosed, which is why every earlier lane shipped green over it
+  (AGENTS.md §5: the fixtures carry the case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `CLOSING_WORDS` list and the 3-word window in one sentence; `docs/routing.md` cites
+  the same window instead of the whole-record exemption; the `ACK_MARKERS`,
+  `parse_inbox_line` and `pause_state` docstrings say what the filter now does.
+- **Tests** (red before the code: 7 failed, 54 passed in `PauseStateTests` against
+  `git show HEAD:` of the module — the reproduced defect failing on the assertion,
+  `False is not true : {'active': False, …}`): the Sonnet line → order, the four
+  closed shapes → report, `→ done: 12:00 noted; PAUSE all merges now` → order,
+  `lesson: PAUSE handling was wrong` → report, `→ main: merged. STOP all lanes` →
+  order, the window itself (`PAUSE was lifted by the operator` closed, `PAUSE is still
+  holding every lane, and was not lifted` an order), and the §0 one-home guard that
+  `_CLOSING_WORD_RE` is built from `CLOSING_WORDS` and that every
+  `NEVER_ORDER_MARKERS` entry is a real marker. Six pre-existing marker fixtures that
+  had relied on the whole-record exemption (`→ done: PAUSE handled`,
+  `→ operator: PAUSE needs your call`, …) now write a closed order word, so each still
+  tests the marker it names.
+  `tests/test_autoos_heartbeat.py` 79 → 86; the brief's subset
+  (`card` + `inbox` + `heartbeat` + `suite_wiring`) is 210 passed.
+
+### Fixed — a speaker prefix never names an order word, so a PAUSE clause is never the speaker (RESTART R2a4, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a3, HIGH, safety): the
+  speaker shape `(?:WORD\s+){0,2}WORD(\(<note\))?\s*:` absorbs *any* short clause that
+  ends in a colon, and an order that opens a record usually opens with its order
+  word — so `PAUSE all lanes: → main is held`, `PAUSE lanes: → main …` and
+  `PAUSE: → main …` stripped `PAUSE …` as the *speaker*, found `→ main` at the head of
+  what was left, and reported `active: False`: the stop that was really given held
+  nothing. A prefix may now never name one of the new `ORDER_WORDS` (`PAUSE`,
+  `RESUME`, `STOP`, `HOLD`, `FREEZE`, `HALT`, `ABORT` — case-insensitive, whole word,
+  read over the whole match including its `(<note>)`), and a rejected prefix strips
+  nothing (`_speaker_prefix` returns the split index or None, `_acknowledgement` asks
+  it instead of matching the regex directly). Two tightenings close the same door from
+  the other side: a speaker word must look like a name (letters, digits and `-`, `_`,
+  `.`, at least one letter — a bare count like `4 lanes:` is prose, and a token with
+  any other punctuation no longer poses as a name), and the whole prefix is bounded at
+  `_SPEAKER_PREFIX_MAX = 40` characters, past which a clause before a colon is a
+  sentence. The wide, case-insensitive list is the deliberate asymmetry: over-ruling a
+  prefix costs a spurious order — `hold on: → main merged` is classified as one, and
+  `UN-HOLD:` blocks its own prefix — which only holds a lane until a RESUME, one
+  wasted heartbeat; under-ruling one lets workers run against the operator's stop.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, both classifiers in memory from `git show HEAD:` so nothing was copied or
+  written; one pass over 7 files / **1913 records**, 816 acks before and after, 12 of
+  them resting on a speaker prefix over 3 shapes: `from L1-backlog:` ×10,
+  `from L1-routing:` ×1, `from L1-backlog (relaunch #3)` ×1 — the inboxes are live and
+  grew from 1896 records at the first census to 1913 at this pass, so the pair of
+  classifiers is always read in the same pass):
+  **0 records changed classification, 4 orders before and 4 after, 3 marker-headed
+  PAUSE mentions before and after, and `pause_state` identical on all 7 files** — each
+  active file's winning text exactly 80 chars, i.e. truncated as specified. The risk
+  class is counted rather than assumed: **5** records open with a colon-terminated
+  clause that names an order word (`PAUSE (operator, via L0 router): the host reboots
+  soon …`, `from L1-main HOLD Q-001 (L0 routing-00): …`, `from L0 (operator) A8
+  UN-HOLD: …`) and **0** of them have a marker after that colon — so today's writers
+  never produced the losing shape and every one of these was already an order, which is
+  why R2a3 shipped green while the bug sat in it (AGENTS.md §5: the fixtures carry the
+  case the corpus has not).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 states the
+  `ORDER_WORDS` list next to `ACK_MARKERS`, the name-shaped speaker word and the
+  40-character bound; `docs/routing.md` cites the same three constraints instead of the
+  old character-exclusion clause alone.
+- **Tests** (red before the code: 8 failed, 195 passed):
+  `tests/test_autoos_heartbeat.py` 70 → 79 — the three `PAUSE …: → main …` lines →
+  order (the reproduced defect, failing on the assertion, not on a missing symbol),
+  one case per `ORDER_WORDS` word in three prefix shapes and the same words
+  lower-cased, an order word inside the `(<note>)` rejecting the prefix, the brief's
+  two named acks (`L1-main: → done: PAUSE lifted`,
+  `operator on duty: → done 12:00 PAUSE lifted`) still acks, `hold on:` documented as
+  the accepted spurious order, the name shape (`L1-routing.coordinator_x:` ack against
+  `4 lanes:`, `2026:`, `state=held:`, `L1/routing:`, `[operator]:` as orders), the
+  bound (a 55-char clause rejected, the corpus's 30-char prefix kept), and the §0
+  one-home guard that `_ORDER_WORD_RE` is built from `ORDER_WORDS` and covers PAUSE and
+  RESUME as whole words. Green: **203 passed** over `test_autoos_card.py
+  test_autoos_inbox.py test_autoos_heartbeat.py test_suite_wiring.py` (194 at the
+  branch point), 746 passed + 124 subtests over `test_autoos_report.py
+  test_autoos_spawner.py test_agent_harness.py test_autoos_track.py` (unchanged).
+
+### Fixed — an ack marker needs a boundary, a speaker may be 3 words, the body head is normalised (RESTART R2a3, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Muse review of R2a2, 1 MEDIUM + 3 LOWs,
+  safety): the head-anchored marker still matched as a bare *prefix*, so
+  `→ mainline PAUSE all lanes`, `→ maintenance: PAUSE` (both start with `→ main`)
+  and `→ operators` / `→ doneX` were swallowed as acknowledgements of a stop that
+  was never taken. `_MARKER_AT_HEAD_RE` now requires a boundary — `:`, whitespace
+  or the end of the text (`(?=[:\s]|$)`) — while `→ main: merged` and
+  `→ done 12:00 …` stay acks. A speaker prefix of more than one word
+  (`operator on duty: → done: PAUSE lifted`, `from L1-main relay (x): → done: …`)
+  was not stripped, so a PAUSE quoted inside an ack read as a fresh order and
+  paused a running lane: `_SPEAKER_PREFIX_RE` takes up to 3 words for the colon-
+  required `<name>:` shape and any words for `from <name>` **only** when its own
+  `(<note>)` or `:` delimits it, still at most one prefix. A speaker word excludes
+  `:`, `→` and parentheses, so a prefix can never eat the marker after it and a
+  bare first word without a colon is never a speaker. `_acknowledgement` strips a
+  BOM, spaces, tabs and CR remnants at the body head (a `  → done: PAUSE lifted`
+  or a BOM-headed line read as an order), `parse_inbox_line` strips them at the
+  line head so a BOM does not silently drop the record — an *order* lost is as
+  unsafe as an ack missed — and a line with no timestamp is no record at all
+  (§0), so it is never scanned.
+- **Measured over the real corpus again** (`logs/handoff-sessions/20260925/inbox`,
+  read-only, 1878 records, 7 of them naming PAUSE): **4 orders before and 4 after,
+  3 marker-headed PAUSE mentions before and after, 0 records parsed or classified
+  differently**, and `pause_state` agrees on every one of the 7 files. The census
+  says why: 799 records are acknowledgements under the new rules, but **0** open
+  with a marker-as-prefix (the `→ mainline` class), **0** carry a BOM/space/CR at
+  the head and **0** files use CRLF — all three defects were latent, reachable only
+  from writers the corpus has not produced yet, which is exactly the case a fixture
+  suite has to cover (AGENTS.md §5: a fix with no test that failed before it
+  proves nothing).
+- **Docs** (R-orch-11, wording moves with the rule): spec §0 now states the
+  prefix grammar exactly as implemented — boundary rule, colon optional only for
+  the `from` form, up to 3 words for `<name>:`, the speaker-word character class,
+  the head normalisation and the no-timestamp rule; `docs/routing.md` cites the
+  same shapes instead of the old three-item list.
+- **Tests** (red before the code: 5 failed): `tests/test_autoos_heartbeat.py`
+  60 → 70 — boundary pairs per marker (`→ mainline` order vs `→ main: merged`
+  ack, `→ operators` vs `→ operator:`, `→ doneX` vs `→ done 12:00`), both
+  two-word speaker shapes as acks and the same prefixes carrying a bare PAUSE as
+  orders, `from L0 (operator): → done 12:00 PAUSE lifted` ack vs
+  `from L0 (operator): PAUSE NOW` order, a bounded `from` prefix that keeps a
+  mid-sentence marker an order, a bare word without a colon never a speaker, the
+  head normalisation (space/BOM/CR/CRLF file/BOM'd order) and the no-timestamp
+  record. Green: 194 passed over `test_autoos_card.py test_autoos_inbox.py
+  test_autoos_heartbeat.py test_suite_wiring.py` (184 at the branch point), 746
+  passed over `test_autoos_report.py test_autoos_spawner.py
+  test_agent_harness.py test_autoos_track.py`.
+
+### Fixed — a marker counts only at the head of a record, so a PAUSE naming one still stops the run (RESTART R2a2, 2026-09-28)
+
+- **`tools/autoos_heartbeat.py`** (the Sonnet review of R2a, MEDIUM, safety): the
+  pause filter matched the §0 markers *anywhere* in the line, so
+  `2026-09-28T10:00:00Z operator: PAUSE all lanes; nothing merges → main until I
+  say so` — a real hard stop — read as `active: False`. A marker now counts only
+  at the head of the record body: the text after the leading ISO timestamp and,
+  at most, after one speaker prefix. `_NOT_AN_ORDER_RE` is gone; `_acknowledgement(body)`
+  combines `_MARKER_AT_HEAD_RE` and `_SPEAKER_PREFIX_RE`, both built from
+  `ACK_MARKERS` (a guard test pins them to that one list, §0). The prefix shapes
+  are read off the real inboxes (`logs/handoff-sessions/20260925/inbox`,
+  read-only: `→ done:` 579 times, `from <name>` 254 with no colon against 79
+  with, `from L0 (operator) PAUSE NOW` at L1-routing.md:126), so the `from` form
+  takes its colon optionally and a bare `<name>` needs it — otherwise an ordinary
+  first word reads as a speaker.
+- **Measured over that real corpus** (1796 timestamped records, 805 opening with
+  a marker, 7 naming PAUSE): the scan classified **4 orders before and 4 after,
+  no line changed** — today's inboxes contain no order that names a marker, which
+  is why R2a's marker tests passed while the bug shipped. Requiring the colon on
+  the `from` form gives the same 4, so the optionality costs nothing today and
+  covers the 254 no-colon lines later. The fixtures are hand-written in those
+  shapes; no inbox was copied into the repository (AGENTS.md §1).
+- **`tools/autoos_card.py`** (the Muse review of R2a, LOW): the open-question
+  rule was `thread_id.startswith("Q")` — it flagged a `QUOTE-2` lane and missed a
+  lowercase `q-008`. The shape is `^[Qq][-:]?\d` (`_Q_ID_RE`), so `Q-008`, `q-008`,
+  `Q008` and `Q:008` need an `asked <time>` field and `QUOTE-2`/`Query-1`/`Q&A`
+  do not. Wording moved with the rule (R-orch-11): `card check`'s CLI help,
+  `docs/routing.md`, spec §3.
+- **`docs/plans/2026-09-28-restart-spec.md`** (two LOWs): §1 now states the
+  counting rule the checker implements — a section's cap counts content lines
+  (headings and blank lines are not content) while the 40-line total counts every
+  line, and the total binds; §0 names `ACK_MARKERS` as the one list instead of the
+  removed `_NOT_AN_ORDER_RE` and states the head-anchored rule.
+- **Tests** (red before the code: 6 failed — 3 heartbeat, 3 card):
+  `tests/test_autoos_heartbeat.py` 50 → 60 (the reproduced line → active True, the
+  `→ main:` / `from L1-main: → done:` / `lesson:` heads → not orders, one case per
+  marker at the head and mid-sentence, one per speaker-prefix shape);
+  `tests/test_autoos_card.py` 64 → 67. Green: 184 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py
+  test_suite_wiring.py` (171 at the branch point).
+
+### Added — `card check`: the state-card checker, and the §0 marker list completed (RESTART R2a, 2026-09-28)
+
+- **`tools/autoos_card.py`** (new, stdlib, read-only): the §1 shape of
+  `<RUN>/status/<name>.card.md` as one table — `SECTIONS` (goal 3, state 6,
+  next 3, threads 12, traps 8, operator 4), `MAX_TOTAL_LINES = 40`,
+  `MAX_LINE_CHARS = 200`. `check_card(text)` returns `Problem(line, text)` for
+  every violation and `check_file(path)` reads it; nothing is written, so the
+  check is safe to run twice (AGENTS.md §4). `last-event` parses through
+  `autoos_inbox.parse_position` — §0 keeps one position parser and this module
+  deliberately does not own a second one.
+- **Two numbers §1 left open, now settled** (a successor has to write to them,
+  so they are in the module docstring, not implied): a section's cap counts its
+  **content lines** — a heading line and blank lines are not content — while
+  every line in the file counts toward the 40. The caps therefore overflow the
+  total on purpose (36 content + 6 headings + the header = 43): the total is
+  what binds a real card. And an old `references/state-file.md` heading
+  (`## Decisions + why`) is a *problem*, not a synonym — §1 says a successor
+  writes a fresh card rather than converting the status file. `## Goal (…)` and
+  `## traps: what bit us` do resolve to their sections, so a note on a heading
+  is free.
+- **§3's one card rule**: a `threads` line whose id starts with `Q` must carry
+  an `asked <time>` field, because the pack's `open questions` section prints
+  those lines and nothing else knows an id was asked about.
+- **`autoos-agent.py card check <file>`** (parser + dispatch tables, same pair
+  `inbox` uses): problems on stdout, one per line, each with its line number;
+  the reason a file cannot be read on stderr. Exit 0 valid, 1 invalid, 2
+  unreadable. **No MCP twin**: `inbox`, `ready` and `review-status` have none
+  either — only the spawning/routing surface is mirrored in
+  `tools/autoos_agent_mcp.py`, so this stays a CLI verb (open: below).
+- **`tools/autoos_heartbeat.py`**: the §0 acknowledgement-marker list was
+  `lesson:|→ done` only, so an acknowledgement that quotes the word PAUSE —
+  `→ main: merged before the PAUSE landed` — reads as a fresh order to stop. The
+  markers in use are now one named list, `ACK_MARKERS` = `lesson:`, `→ done`,
+  `→ ack`, `→ relaunched`, `→ operator`, `→ main`, and `_NOT_AN_ORDER_RE` is
+  built from it (a guard test pins the regex to the list, so §1 and §3 can cite
+  it without restating it).
+- **`tests/test_autoos_card.py`** (new, 64 tests) and marker tests in
+  `tests/test_autoos_heartbeat.py` (45 → 50). Red before the code: 5 marker
+  tests failed (`→ ack`, `→ relaunched`, `→ operator`, `→ main`; `→ done`
+  already passed) and the card suite could not import. Green: 166 passed over
+  `test_autoos_card.py test_autoos_inbox.py test_autoos_heartbeat.py`, and
+  `test_autoos_spawner.py test_suite_wiring.py test_agent_harness.py
+  test_skill_rules.py` 696 passed / 0 failed. Wired into both harnesses
+  (`tests/linux/33-documentation.sh`, `tests/run-tests.ps1`).
+- **Not here**: heartbeat's `card: stale` (lane R2b, needs the `card` parameter
+  in `heartbeat_state`, `cmd_heartbeat --json` and the MCP twin) and `pack` /
+  `relaunch-line` (R3+).
+### Fixed — a load cannot emit an unvalidated edge, and D-88 is D-088 (memlink round 2, D-140, 2026-09-28)
+
+A cross-family review of `2c27a24` returned NOT READY on the D-140
+Task→Decision edges; this closes all six items test-first in
+`tests/test_sync_memory_graph.py` (28 → 47 tests).
+
+- **`--load` without `--known-slugs` emitted unvalidated edges** (HIGH):
+  `main` now refuses (clear stderr, rc 1, nothing marked) when the emitted
+  batch carries an edge-only Implements/Supersedes record and no known-slug set
+  was passed — an unresolved citation would create a dangling edge. Plain dump
+  mode still defaults to no filtering. The module Usage now shows how to build
+  the slug list (an omnigraph query of Decision slugs written to a file). An
+  `HTTPError`/`URLError` from the load endpoint becomes a named message and a
+  non-zero exit, never a traceback, and the ledger stays untouched.
+- **A bare `D-NNN` was not zero-padded** (HIGH): `D-88` and `routing-d-88` both
+  normalise to `routing-d-088`. A test documents the design fact behind the
+  review's "two ledgers" worry: this repo's D-NNN ids ARE the router's routing
+  decision numbers — one number space — so the two spellings name one decision.
+- **An edge batch could be marked on an empty-tables response** (MED):
+  `load_confirmed` returns False when the response has no per-table detail and
+  the batch carried an edge-only record (no `@key` — a retry would duplicate);
+  a node-only batch keeps the prior permissive behavior.
+- **`Supersedes` read across a sentence break** (MED): the citation must sit in
+  the same clause as the supersede/replace verb (the window is cut at `.`, `;`
+  or a newline), so a later sentence's citation is not read as a replacement.
+  A data-driven test uses fixture text, not the module's DECISIONS constants.
+- **Duplicate ledger keys from colliding task titles** (LOW): `records()` now
+  emits each ledger key once. `--known-slugs` rejects an empty value, a missing
+  value, and a value starting with `--` (so `--known-slugs --load` cannot
+  swallow `--load`); `-`, a file and `=VALUE` are covered, and a test pins node
+  lines before edge lines in the `--load` body.
+
+Known limitation (not fixed): a Task's board row is its slug source, so editing
+a row's wording mints a new slug and leaves the old slug's Implements edges
+behind (stale-edge churn); the module docstring records it.
+
 ### Fixed — the runtime-dir fence stopped at the leaf, and the fallthrough re-run provisioned nothing (FF1 Sonnet LOWs, D-106)
 
 Sonnet's final pass over `6bdeca5..f6d2885` closed READY with two LOWs, both the
@@ -525,6 +1361,40 @@ allowed every `read`, carries the `read_deny_all` patterns as denies.
   are gone (`bash_allow_all` is empty; `*.env.example*` had the identical abuse), a leaf reads
   the template with the read tool, and the read allow is narrowed to the exact suffix
   `*configuration/api-keys.example.yml`, which also denies `/tmp/api-keys.example.yml.bak`.
+- KEYDENY3 (2026-09-28, same lane): the fence covered the **`read` tool only**, and opencode
+  v2.0.16 matches a *different* resource per action — a `grep`/`glob` rule is matched against the
+  search **pattern**, the searched **path** is checked only by `external_directory`, and an MCP
+  rule can name the **tool** and nothing else (every MCP call is asserted as
+  `{action:"<server>_<tool>", resources:["*"]}`). So a leaf could still pull the key bytes with
+  `grep`, with `serena_read_file`, or with a symbol tool's `include_body`. The same
+  `read_deny_all` / `read_allow_all` lists now also render as `grep`, `glob` and
+  `external_directory` maps, and the new `mcp_servers.serena.raw_content_tools` (serena 1.7.0:
+  `read_file`, `search_for_pattern`, and `find_symbol` / `find_declaration` /
+  `find_implementations` / `find_referencing_symbols` through `include_body`) is denied to every
+  leaf role in the render and dropped from `t3-reviewer`'s serena allow list. Name-only tools
+  (`get_symbols_overview`, `list_dir`, `find_file`, diagnostics) stay; spawning roles keep the
+  readers, because there is no path scoping and denying them there would cost every file read.
+- KEYDENY3b (2026-09-28, same lane): three holes left in that fence. **(1) the spawn gate was
+  denied in one spelling only** — v2.0.16's rename map is `{bash: shell, task: subagent,
+  apply_patch: patch}`, the `permission` object declares the alias key `task` ("Deprecated alias
+  for subagent") and the rule lists assert the action `subagent`; a leaf that can spawn hands its
+  work to a child that carries none of its read fences. `SPAWN_GATES` now renders both verdicts
+  from one `role.spawn`, `opencode.jsonc`'s tier agents carry both rules, and every opencode run
+  re-asserts them in its own overlay (which merges last), so a drifted checkout cannot re-open it.
+  **(2) `grep "sk-" .` inside a working checkout reads `configuration/api-keys.yml` straight
+  through the pattern fence**, so the guarantee moved to the directory: `--isolate` is mandatory
+  for a leaf (`LEAF_TIERS`, tier 3 — the catalog's `leaf: true` roles and `t3-reviewer`; the run
+  is refused with rc 2 before anything starts, a `--dry-run` announces the refusal), the clone
+  step is one function whose containment is now tested (a temp repo with an ignored fake key:
+  the clone carries no ignored, no untracked file), and no client is exempt from isolating, so
+  no leaf had to lose grep/glob. Tier 2 stays allowed in place — it is a spawning role and the
+  documented lane flow — and its residual pattern hole, including the native child it can launch
+  into that cwd, is written down rather than claimed closed. **(3) a leaf could list `context7`**,
+  and an MCP rule can never scope a resource, so `LEAF_ALLOWED_MCP` pins the leaf set to
+  `serena` + `graphify` in code, `check` refuses a leaf that lists anything else, `context7` is
+  out of the leaf roles and their vendored profiles, and `t3-reviewer` denies `playwright_*` and
+  `context7_*` whole (`browser_navigate` takes a `file://` path — `run_code_unsafe` was never the
+  only door).
 ### Fixed — the risk classifier's six silent `normal`s (RISKTIER-a2, 2026-09-28)
 
 - **Cross-family review of RISKTIER-a (Muse xhigh on `d7fa2c8`), and every finding

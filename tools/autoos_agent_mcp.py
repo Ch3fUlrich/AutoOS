@@ -14,7 +14,20 @@ canonical run id (tools/autoos-agent.py mint_run_id) handed to the run as
 child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
     job.json     the request, the canonical run id, the autoos-agent.py argv
-                 (which carries that id as --run-id), pid, route, start time
+                 (which carries that id as --run-id), pid, route, start time, and
+                 the systemd scope unit the worker was launched in — as
+                 information only. SB-A3 (D-103) item C: this file sits in the
+                 directory the runner exports to the worker as AUTOOS_TASK_DIR,
+                 and the worker is the same uid as it, so nothing in here is a
+                 channel `cancel` takes orders from. `cancel` DERIVES the scope
+                 name from the run id (tools/autoos-agent.py
+                 `worker_scope_unit`) and reads the fallback group record from the
+                 runner-private kill store (`kill_store_dir`); a job.json that
+                 names another scope, another group, or another run kills nothing
+    kill/<id>.json  NOT in the run dir: <state dir>/kill/, a sibling of this
+                   tree. The runner's own process group and its leader start
+                   time, 0600, written by the runner alone — the record the
+                   fallback group kill uses where there is no user manager
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
@@ -26,7 +39,9 @@ child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
 
 A run's `state` uses the A2A task lifecycle (spec 6.2/9, TASK_STATES):
 submitted (job.json has no pid yet) -> working -> completed | failed | canceled
-(A2A spelling, one l); a spawn this server refuses answers "rejected" instead.
+(A2A spelling, one l); a spawn this server refuses answers "rejected" instead,
+and a cancel that delivered no kill answers "cancel-failed" (SB-A4) rather than
+claiming a stop it could not make.
 A working run with a question.json and no answer.json yet is input_required
 (the spec 9 ask-back: a worker blocked on a decision) and carries the question
 text; respond(run_id, text) answers it and the run works on.
@@ -60,7 +75,6 @@ import io
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -82,7 +96,7 @@ _CHILDREN = {}  # pid -> Popen of runners this server started; poll() reaps them
 # this server reports. input_required is the ask-back question file (D2b);
 # rejected is what spawn() answers a refused request with.
 TASK_STATES = ("submitted", "working", "input_required", "completed", "failed",
-               "canceled", "rejected")
+               "canceled", "cancel-failed", "rejected")
 
 
 def _load_agent_cli():
@@ -109,6 +123,33 @@ agent = _load_agent_cli()
 
 def state_root() -> str:
     return os.path.join(clients.state_dir(), "agents")
+
+
+def kill_store_dir() -> str:
+    """The runner-private store — one implementation, in the spawner.
+
+    SB-B merge: the process that launches the client is the process that knows its
+    process group, and the fallthrough loop re-launches it, so the record has to be
+    writable from inside `run_client` too. Two copies of a store is two places a
+    killer's answer can come from, so this server reads and writes the spawner's.
+    Its rules — the directory is not `AUTOOS_TASK_DIR`, 0700 with 0600 files, the
+    decided-at-spawn fields immutable and the group replaceable, and the stated
+    residual that a same-uid worker can still find it — are in
+    `autoos-agent.kill_store_dir`.
+    """
+    return agent.kill_store_dir()
+
+
+def kill_store_path(run_id: str) -> str:
+    return agent.kill_store_path(run_id)
+
+
+def write_kill_record(run_id: str, record: dict) -> bool:
+    return agent.write_kill_record(run_id, record)
+
+
+def read_kill_record(run_id: str):
+    return agent.read_kill_record(run_id)
 
 
 def _read_json(path: str):
@@ -186,7 +227,8 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
         result = agent.route_plan_for(card, brief, agent.ROOT,
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
                                       registry, overlay, track_record, client_state,
-                                      overlay_missing_at=overlay_missing_at)
+                                      overlay_missing_at=overlay_missing_at,
+                                      credit_guards=agent.plan_credit_guards(registry))
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:
@@ -289,12 +331,48 @@ def context_info(transcript: str | None = None) -> dict:
     return data
 
 
-def build_argv(req: dict, run_id: str | None = None) -> tuple:
+def is_write_role(req: dict) -> bool:
+    """Whether this request's card writes — SB-C's rule, answered by the ONE
+    predicate in the spawner (`agent.is_write_role`).
+
+    Kept as a request adapter only: this server holds a spawn request (`card`
+    under a key, and it may still be the caller's text), the spawner holds the
+    rule. The two entry points used to carry their own copy of that rule and
+    drifted apart on the first card dialect that disagreed — a v2 `kind` card is a
+    reader to one and a writer to the other, and a tier-1 write run is exactly the
+    case where "which copy answered" decides whether it edits your checkout. The
+    semantics are unchanged from SB-C's: any role outside the read-only pair is a
+    writer, and a card that names nothing takes the registry's default
+    (`implement`), because `role=implement, complexity=hard` routes UP to tier 1
+    (routing.select_combo's public-strong bucket), so the tier-1 leg is not always
+    the orchestrator.
+    """
+    return agent.is_write_role(req.get("card"))
+
+
+def worktree_of(path: str) -> str:
+    """The worktree `path` sits in, realpath'd — its git toplevel, or the
+    directory itself when it is not a repository (so a temp dir never compares
+    equal to the caller's tree).
+
+    Deliberately not `agent.isolate_source`: that falls back to the spawner's own
+    checkout for a non-repo path, which would read "somewhere else" as "my tree"."""
+    try:
+        top = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return os.path.realpath(path)
+    return os.path.realpath(top or path)
+
+
+def build_argv(req: dict, run_id: str | None = None,
+               cwd: str | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
 
     `run_id` is the canonical id this server minted for the run (FLEETP0b): it
     goes to the CLI as `--run-id`, so the run dir named here and the record,
-    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1)."""
+    branch and child env the CLI names are one id, not two (FLEETSPEC §5.1).
+    `cwd` is where the run would start: only the tier-1 write-role rule needs it."""
     client = req.get("client") or "opencode"
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
@@ -311,21 +389,85 @@ def build_argv(req: dict, run_id: str | None = None) -> tuple:
     if tier is not None:
         argv += ["--tier", str(int(tier))]
         route = {"combo": None, "reason": "explicit-tier"}
+        run_tier, gate_card = int(tier), None
     else:
         card = routing.normalize(card or {})
         combo, reason = routing.select_combo(card, bool(req.get("allow_training")))
         route = {"combo": combo, "reason": reason}
         argv += ["--card", ",".join("%s=%s" % kv for kv in sorted(card.items()))]
+        run_tier, gate_card = agent._tier_for_route(combo), card
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # KEYDENY3g item 2: a spawned tier never runs in the caller's checkout. The
+    # verdict is the CLI's own helper (leaf_isolation_refusal) — no second rule
+    # table here, so the two cannot drift. A caller that asked for no isolation
+    # is not refused but *forced*, because its caller is a headless agent that
+    # cannot fix a flag interactively, and the alternative is a job that reports
+    # as started and then exits 2.
+    if not req.get("isolate") and agent.leaf_isolation_refusal(
+            run_tier, False, client, leaf=agent.role_is_leaf(run_tier, gate_card)):
+        # SB-B merge: the tier-1 write-role leg is NOT passed through this call.
+        # `card=` would force isolation here and main's SB-C block below would
+        # then see an isolated request and never record its own `default_isolate`,
+        # and a request that asked to stand in the caller's worktree would never
+        # reach its refusal. The two legs cannot drift on WHO is a writer, because
+        # both read the one `agent.is_write_role`; this call keeps its own job —
+        # the spawned tiers and the leaf roles — and the write-role leg below owns
+        # the tier-1 answer, including the refusal.
+        req = dict(req, isolate=True)
+        route["forced_isolate"] = True
+    # SB-C item 1 (SPAWNISO): KEYDENY3 keys on the spawned tiers and the leaf
+    # flag, so the tier-1 WRITE role was still allowed to stand in the caller's
+    # own checkout — and it edits the one tree that holds the git-ignored key
+    # files (configuration/api-keys.yml, .env*). So a write role gets a clone by
+    # default, and one that explicitly asked not to is refused while it points at
+    # the caller's own worktree. The refusal, not a silent force, because asking
+    # for no isolation is a statement the caller may have a reason for — and the
+    # override flag is where it says so.
+    # SB-C2 item 3 (SPAWNISO explicit): the override flag was reachable by any
+    # tier-1 caller, and a card's role is the caller's own text. Only the
+    # orchestrator runs shared checkouts — leaves cannot spawn at all (KEYDENY3),
+    # and a tier-1 WRITE card that names the flag is refused, so the escape
+    # hatch exists only for the role that has no other tree to work in. The
+    # acceptance is recorded in the run's route (shared_checkout_override).
+    if req.get("allow_shared_checkout"):
+        if (card or {}).get("role") != "orchestrate":
+            raise ValueError(
+                "allow_shared_checkout is orchestrator-only: the card's role is "
+                "%r, not orchestrate. A write-role spawn gets a clone "
+                "(isolate, the default); leaves cannot spawn at all (KEYDENY3), "
+                "so only the tier-1 orchestrator names a shared checkout."
+                % ((card or {}).get("role") or "implement"))
+        route["shared_checkout_override"] = True
+    if run_tier == 1 and not req.get("isolate") and is_write_role(req):
+        where = cwd or req.get("cwd")
+        if (req.get("isolate") is False and where
+                and worktree_of(where) == worktree_of(os.getcwd())):
+            raise ValueError(
+                "a write-role card at tier 1 cannot run in the caller's own "
+                "worktree (%s): it edits the checkout this server sits in, where "
+                "the git-ignored key files live. Ask for isolate (the default "
+                "when you ask for nothing); the allow_shared_checkout override "
+                "is orchestrator-only (SB-C2) and never releases this." % where)
+        elif req.get("isolate") is not False:
+            # Nothing was said for a writer: give it a clone, as a spawned tier
+            # gets one. An explicit False against ANOTHER tree is honoured —
+            # this rule is about the caller's own checkout, not about where a
+            # run happens to start.
+            req = dict(req, isolate=True)
+            route["default_isolate"] = True
     if req.get("max_depth") is not None:
         try:
             req = dict(req, max_depth=int(req["max_depth"]))  # JSON callers send "2"
         except (TypeError, ValueError):
             raise ValueError("max_depth must be an integer, got %r" % req["max_depth"])
     clients.child_depth(os.environ, req.get("max_depth"))  # raises DepthError past the budget
-    for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable"):
+    for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable",
+                 # MODEFLIP opt-out (SB-B review 2): a spawn that means the chmod
+                 # names it here, and the runner records the same fact in the
+                 # private record below.
+                 "allow_mode_only"):
         if req.get(flag):
             argv.append("--" + flag.replace("_", "-"))
     for opt in ("model", "title", "max_depth"):
@@ -444,7 +586,7 @@ def spawn(req: dict) -> dict:
         # with, and nothing is created before that says yes.
         run_id = agent.mint_run_id(req.get("title"), req.get("task") or "")
         try:
-            argv, route = build_argv(req, run_id)
+            argv, route = build_argv(req, run_id, cwd=cwd)
         except (ValueError, clients.DepthError) as exc:
             return _refused(str(exc))
         if budget_note is not None:
@@ -481,6 +623,24 @@ def spawn(req: dict) -> dict:
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
+    # SB-A4: the run's decided-at-spawn record, written before the child exists so
+    # a run that dies instantly still has one, and written to the private store
+    # because `mode` says whether this run's output gets graded as a review. The
+    # scope name is derived from the run id, exactly as `cancel` will derive it —
+    # this field is a record of what was asked for, never an order to a killer.
+    try:
+        scope_unit = agent.worker_scope_unit(run_id)
+    except ValueError:
+        scope_unit = None
+    write_kill_record(run_id, {
+        "mode": "review" if _review_requested(req, argv) else "write",
+        "scope": scope_unit,
+        "dry_run": "--dry-run" in argv,
+        # MODEFLIP opt-out (SB-B review 2): decided at spawn and recorded here, in
+        # the runner-private record, because the run's MODEFLIP verdict reads it.
+        # job.json is the worker's own directory — an opt-out a worker could write
+        # into the file it is graded from is not an opt-out, it is an escape.
+        "allow_mode_only": bool(req.get("allow_mode_only")) or None})
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats
@@ -489,8 +649,20 @@ def spawn(req: dict) -> dict:
                             # to the runner and the gate inside its CLI.
                             cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True,
-                            env=agent.spawner_child_env(extra=budget_env))
+                            # SCOPEBUS: the runner launches the worker scope,
+                            # so it alone gets the user bus back.
+                            env=agent.spawner_child_env(extra=budget_env,
+                                                        scope_bus=True))
     job["pid"] = proc.pid
+    # SB-A2 (D-103) item B: the runner leads a session of its own, so its pid IS
+    # its pgid, and its leader start time is only certainly THIS process the
+    # instant after the fork. `cancel` refuses to signal a group whose leader has
+    # a different start time — the number the kernel recycled is someone else's.
+    # SB-A3 (D-103) item C: that record goes to the private store, not to
+    # job.json, because the worker owns job.json's directory and can rewrite what
+    # a killer reads out of it. The runner re-records its own group in run_job.
+    write_kill_record(run_id, {"pgid": proc.pid,
+                               "start": agent.proc_start_time(proc.pid)})
     _CHILDREN[proc.pid] = proc
     _write_json(os.path.join(path, "job.json"), job)
     return {"id": run_id, "state": "working", "route": route, "dir": path}
@@ -525,8 +697,51 @@ def _write_fallback(path: str) -> None:
 
 
 def run_job(path: str) -> int:
-    """The detached runner: one autoos-agent.py run, output and exit code on disk."""
+    """The detached runner: one autoos-agent.py run, output and exit code on disk.
+
+    SB-A2 (D-103) item A: where the host has a user manager, the worker is
+    launched inside a transient systemd SCOPE named for its run id. `cancel`
+    derives that name from the run id and stops it — a cgroup is not escapable by
+    `setsid()`, and a name read from a file the worker owns is an order the worker
+    can give (SB-A3, D-103 item C). The unit name is still written to job.json, as
+    information for whoever reads a run dir.
+
+    Where there is no user manager (a container, a CI runner, the test suite) the
+    run starts unwrapped and `cancel` falls back to the verified process-group
+    kill, taken from the private kill record written below — never from job.json.
+    The residual of that fallback (a worker that leaves the group, and a same-uid
+    worker that finds the kill store) is stated in
+    `autoos-agent.kill_verified_groups` and `kill_store_dir`, not hidden here.
+    """
+    run_id = os.path.basename(os.path.normpath(path))
     job = _read_json(os.path.join(path, "job.json"))
+    cmd = [sys.executable, AGENT] + job["argv"]
+    env = agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path})
+    try:
+        # WINSHIM: the same resolution every other launch site uses, applied to
+        # the CLI command before any scope wrapper goes around it.
+        cmd = agent.resolve_client_executable(cmd)
+    except agent.ClientMissing as exc:
+        # This runner is detached: no caller is left to read a raised exception, so
+        # the reason goes into the log `result` reads and the run fails with the
+        # spawner's own missing-program code rather than a traceback.
+        message = "autoos-agent: %s" % exc
+        with io.open(os.path.join(path, "output.log"), "ab") as out:
+            out.write((message + "\n").encode("utf-8", "replace"))
+        _write_exit(path, {"rc": 3, "ended": time.time()})
+        print(message, file=sys.stderr)
+        return 3
+    if agent.scope_supported():
+        # derived from the run id, and identical to what `cancel` will derive;
+        # job.json keeps it only so a human reading the dir sees the unit.
+        job["scope"] = agent.scope_unit_name(run_id)
+        # SCOPEBUS: systemd-run needs the user bus the scrubbed env lacks.
+        cmd, env = agent.worker_scope_launch(job["scope"], cmd, env)
+    else:
+        job.pop("scope", None)
+    job.pop("group", None)  # retired channel: SB-A3 item C
+    _write_json(os.path.join(path, "job.json"), job)
+    write_kill_record(run_id, agent.group_record())
     with io.open(os.path.join(path, "output.log"), "ab") as out:
         # AUTOOS_TASK_DIR points the worker's ask-back helper (tools/autoos-ask.py)
         # at this run dir; the CLI forwards its own chosen env onward, so the
@@ -534,8 +749,9 @@ def run_job(path: str) -> int:
         # FF1b item 6: this used to be `dict(os.environ, ...)`. The detached
         # runner above already got a scrubbed env, so this is the same scrub run
         # a second time rather than a copy of the caller's tokens.
-        rc = subprocess.call([sys.executable, AGENT] + job["argv"], cwd=job["cwd"],
-                             env=agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path}),
+        # SB-A2 (D-103) item A: AUTOOS_WORKER_PGRP is gone with the file it named.
+        # The runner's group and the scope unit are recorded above, by the runner.
+        rc = subprocess.call(cmd, cwd=job["cwd"], env=env,
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
     _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
     _write_fallback(path)
@@ -567,6 +783,19 @@ def _alive(pid) -> bool:
         return False
 
 
+def _read_tail(path: str, limit: int = _TAIL_BYTES) -> str:
+    """The last ``limit`` bytes of the run's output.log, or ""."""
+    log_path = os.path.join(path, "output.log")
+    try:
+        with io.open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - limit))
+            return fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     """Parse the tail of output.log for QUESTION/REPORT blocks.
 
@@ -576,14 +805,8 @@ def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     ``_state()`` can report it as ``input_required`` with ``detail="ended"``
     and ``respond()`` can refuse an already-exited worker.
     """
-    log_path = os.path.join(path, "output.log")
-    try:
-        with io.open(log_path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - _TAIL_BYTES))
-            tail = fh.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _read_tail(path)
+    if not tail:
         return {}
 
     result = {}
@@ -625,6 +848,102 @@ def _stdout_channel(path: str, ex: dict | None = None) -> dict:
     return result
 
 
+# The verdict line a review run's brief asks for, anchored at the line start so a
+# sentence that merely mentions a verdict does not read as one. The decoration it
+# tolerates is what a markdown-speaking reviewer wraps a real decision in (a
+# heading, a bullet, bold on the word `VERDICT`); the VALUE has to be the word
+# alone (see `review_verdict`).
+_VERDICT_LINE_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(\S.*)$")
+
+# SB-A2 (D-103) item D: the words a verdict is. A line that opens with one and
+# then says something else (`VERDICT: ready, but the ref snapshot is never read`)
+# is a reviewer *talking*, and grading it as `ready` merges the very review that
+# said fix-first.
+_VERDICT_WORDS = ("ready", "fix-first", "not-ready")
+
+# The verdict scan reads the transcript up to a bound — a reviewer's verdict can
+# sit a hundred KB before the closing noise, so a tail is not the deliverable.
+_VERDICT_SCAN_BYTES = 2 * 1024 * 1024
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def review_verdict(text: str) -> str | None:
+    """The verdict a reviewer stated in its own transcript, or None.
+
+    SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code says whether
+    a process ran, and a review run's deliverable is its verdict, so the transcript
+    has to be read. The LAST verdict wins — a reviewer that changed its mind said
+    so.
+
+    SB-A2 (D-103) item D tightened what counts. Rejected: a value that is not the
+    bare word (the same escape SPAWNFIX3c closed for REPORT headings — `VERDICT:
+    <ready|fix-first|NOT READY>` is the brief quoted back, and any line carrying
+    `<` or `|` is template syntax, not a decision); a line inside a fenced code
+    block (the reviewer pasted the contract at us); and a `>`-quoted line (someone
+    else's text). A single trailing punctuation mark is tolerated — a reviewer that
+    writes `VERDICT: fix-first.` means fix-first.
+    """
+    found = None
+    in_fence = False
+    for line in (text or "").splitlines():
+        stripped = _ANSI_RE.sub("", line).strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence or stripped.startswith(">"):
+            continue
+        if "<" in stripped or "|" in stripped:
+            continue
+        m = _VERDICT_LINE_RE.match(stripped)
+        if not m:
+            continue
+        value = m.group(1).strip().strip("*_` ").strip()
+        if not value:
+            continue
+        if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+            found = value
+    return found
+
+
+def _review_requested(req: dict, argv: list) -> bool:
+    """True when the CALLER asked for a review — decided here, at spawn, from the
+    request this server was handed and the argv it built (both shapes a caller can
+    send: a card dict, or the `k=v,...` text the CLI takes).
+
+    SB-A4 (D-103, item C) moved this out of `_state`: it used to run on the way
+    back out, reading `job.json`, which lives in AUTOOS_TASK_DIR and is the
+    worker's own file. A writer that rewrote its job.json to read as a tier-3
+    reviewer had its `VERDICT: ready` recovered into `completed`, which is a
+    decision about the run's MODE taken from the run's own writable record. The
+    answer is written once into the runner-private record here and read from
+    there; nothing re-decides it later.
+    """
+    card = req.get("card")
+    if isinstance(card, str):
+        try:
+            card = routing.parse_card(card)
+        except (ValueError, KeyError, TypeError):
+            card = {}
+    if isinstance(card, dict) and card.get("role") == "review":
+        return True
+    if isinstance(card, dict) and card.get("kind") == "review":
+        return True
+    if str(req.get("tier") or "") == "3":
+        return True
+    argv = [str(a) for a in (argv or [])]
+    for i, arg in enumerate(argv[:-1]):
+        following = argv[i + 1]
+        if arg == "--tier" and following == "3":
+            return True
+        if arg == "--card" and ("role=review" in following or "kind=review" in following):
+            return True
+    return False
+
+
 def _state(path: str) -> dict:
     # Spec 9: `state` is the A2A lifecycle name, `detail` the pre-A2A value
     # (starting/running/done/cancelled/lost) - the rename loses nothing. A pid
@@ -634,11 +953,19 @@ def _state(path: str) -> dict:
     # (the worker is blocked on a decision); answered or withdrawn, it is
     # working again.
     job = _read_json(os.path.join(path, "job.json")) or {}
+    run_id = os.path.basename(os.path.normpath(path))
+    # SB-A4: the run's own record, from the store the worker was not given. The
+    # directory name is the run's identity (job.json's `id` is a copy a worker can
+    # rewrite), and `mode`/`dry_run` are the runner's spawn-time decisions.
+    record = read_kill_record(run_id) or {}
     ex = _read_json(os.path.join(path, "exit.json"))
     question = None
     report = None
     if ex is not None:
-        if ex.get("cancelled"):
+        if ex.get("cancel-failed"):
+            # SB-A4 item 3: `cancel` marked a run canceled it had not stopped.
+            state, detail = "cancel-failed", "cancel-failed"
+        elif ex.get("cancelled"):
             state, detail = "canceled", "cancelled"
         elif ex.get("rc") == 0:
             state, detail = "completed", "done"
@@ -656,6 +983,8 @@ def _state(path: str) -> dict:
 
     # stdout channel: detect QUESTION/REPORT in output.log for workers
     # that cannot use the ask-back helper (e.g. qoder).
+    recovered = None
+    note = None
     if ex is not None and not ex.get("cancelled"):
         channel = _stdout_channel(path, ex)
         report = channel.get("report")
@@ -663,14 +992,40 @@ def _state(path: str) -> dict:
             state, detail, question = "input_required", "ended", channel["question"]
         elif report and report.get("status") == "failed" and state == "completed":
             state, detail = "failed", "reported-failed"
+        if (state != "input_required" and detail != "reported-failed"
+                and record.get("mode") == "review" and not record.get("dry_run")):
+            # SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW): the exit code
+            # never saw the verdict. A reviewer that stated one and then died was
+            # thrown away as incomplete; a reviewer that exited 0 having said
+            # nothing was counted as done and never re-routed.
+            verdict = review_verdict(_read_tail(path, _VERDICT_SCAN_BYTES))
+            if verdict is not None:
+                recovered = verdict
+                if state == "failed" and report is None:
+                    state, detail = "completed", "verdict-recovered"
+                    note = ("verdict recovered, no REPORT: the reviewer died (rc %s) "
+                            "after it stated its verdict, so the work is kept"
+                            % ex.get("rc"))
+            elif state == "completed":
+                state, detail = "failed", "no-verdict"
+                note = "no verdict: a review run that stated none did not review"
 
-    out = {"id": job.get("id"), "state": state, "detail": detail,
+    out = {"id": run_id, "state": state, "detail": detail,
            "client": (job.get("request") or {}).get("client") or "opencode",
            "route": job.get("route"), "started": job.get("started"), "task": (job.get("task") or "")[:120]}
     if question is not None:
         out["question"] = question
+    if record.get("writer"):
+        # RUNMODEL (D-103): who actually served the run, resolved by the run
+        # itself and handed over in the record the worker cannot rewrite. A
+        # report about a run that omits this leaves the reader to guess.
+        out["writer"] = record["writer"]
     if report is not None:
         out["report"] = report
+    if recovered is not None:
+        out["verdict"] = recovered
+    if note is not None:
+        out["note"] = note
     if ex is not None:
         out["rc"] = ex.get("rc")
         out["secs"] = round((ex.get("ended") or time.time()) - (job.get("started") or 0))
@@ -726,6 +1081,21 @@ def respond(run_id: str, text: str) -> dict:
     return _state(path)
 
 
+def _kill_landed(report: dict) -> bool:
+    """Did this cancel actually stop anything?
+
+    SB-A4 item 3 (honest state): a scope that was already inactive was not killed
+    by us, and a group whose leader start time did not match was skipped, so
+    neither counts. Without one of them, `cancel` must not report `canceled`.
+    """
+    scope = report.get("scope") or {}
+    if report.get("taskkill"):
+        return True  # the nt path is a direct pid kill; nothing else to consult
+    if scope.get("stopped") and scope.get("was_active"):
+        return True
+    return any(group.get("action") == "killed" for group in report.get("groups") or [])
+
+
 def cancel(run_id: str) -> dict:
     try:
         path = _run_dir(run_id)
@@ -736,16 +1106,60 @@ def cancel(run_id: str) -> dict:
     if st["state"] not in ("working", "input_required"):
         return dict(st, note="not working; nothing to cancel")
     job = _read_json(os.path.join(path, "job.json"))
+    # SB-A4 item 1: SB-A3 refused to kill anything when the record in the run dir
+    # CLAIMED to be another run. That is not immunity — job.json sits in
+    # AUTOOS_TASK_DIR and the worker owns it, so one rewrite of its `id` made the
+    # cancel a no-op: a run could dodge being stopped by renaming itself. Nothing
+    # here reads it for a target any more: the scope is derived from the run_id
+    # argument and the group comes from the runner's private record, so what
+    # job.json claims about its own identity changes nothing.
     if not _write_exit(path, {"cancelled": True, "rc": None, "ended": time.time()}):
         return dict(_state(path), note="finished before the cancel landed")
     if os.name == "nt":
+        # RESIDUAL, stated: Windows has no private record (write_kill_record is
+        # POSIX only), so this path still reads a pid out of the worker's file.
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(job["pid"])], capture_output=True)
+        report = {"taskkill": True}
     else:
+        # SB-A2 (D-103) items A and B, as closed by SB-A3 (item C). The scope is
+        # the worker's cgroup, so stopping it reaches the client and any grandchild
+        # that `setsid()`ed out of a process group. Its name is DERIVED from the
+        # run id — never read from job.json, which lives in AUTOOS_TASK_DIR and is
+        # the worker's own file: SB-A's pgrp.json and SB-A2's job.json `scope`/
+        # `group` were both orders the cancelled process could write. The group
+        # kill still runs, from the private kill record: the runner itself sits
+        # outside the scope (it is the one that launched systemd-run), and its
+        # leader start time is verified before anything is signalled. Whatever was
+        # refused is reported back, so a run this cancel could not stop says so
+        # instead of looking reaped.
+        report = {}
         try:
-            os.killpg(int(job["pid"]), signal.SIGTERM)  # the runner leads its own session
-        except OSError:
-            pass
-    return _state(path)
+            unit = agent.worker_scope_unit(run_id)
+        except ValueError as exc:
+            report["scope"] = {"unit": None, "stopped": False, "refused": True,
+                               "reason": str(exc)}
+        else:
+            report["scope"] = agent.stop_scope(unit)
+        record = read_kill_record(run_id)
+        if record is None:
+            report["groups"] = []
+            report["kill_record"] = ("no runner kill record: only the scope can be "
+                                     "stopped, an unverified pgid is never signalled")
+        else:
+            group = {"pgid": record.get("pgid"), "start": record.get("start")}
+            report["groups"] = agent.kill_verified_groups([group])
+    if _kill_landed(report):
+        return dict(_state(path), cancel=report)
+    # We own exit.json (the O_EXCL write above won the race), so this is ours to
+    # amend: the run is marked as a cancel that delivered nothing, and a later
+    # `status()` reads the same honest state.
+    _write_json(os.path.join(path, "exit.json"),
+                {"cancelled": True, "cancel-failed": True, "rc": None,
+                 "ended": time.time()})
+    return dict(_state(path), cancel=report,
+                error="cancel delivered no kill: %s" % json.dumps(
+                    {"scope": report.get("scope"), "groups": report.get("groups"),
+                     "kill_record": report.get("kill_record")}))
 
 
 def serve() -> None:
@@ -761,18 +1175,36 @@ def serve() -> None:
 
     @app.tool(name="spawn")
     def _spawn(task: str, client: str = "opencode", card: dict | None = None,
-               tier: int | None = None, model: str | None = None, isolate: bool = False,
+               tier: int | None = None, model: str | None = None,
+               isolate: bool | None = None,
                lean: bool | None = None, free: bool = False, allow_training: bool = False,
                joinable: bool = False, max_depth: int | None = None, title: str | None = None,
                cwd: str | None = None, dry_run: bool = False,
+               allow_shared_checkout: bool = False,
+               allow_mode_only: bool = False,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
         ctx: 128k|1m, privacy: public|sensitive, spend: free-ok|credit}; omitted fields
         take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
-        isolate: private git clone on its own branch. lean: no serena/playwright
-        (default on for role=review). Refused past the depth budget, and for
+        isolate: private git clone on its own branch, forked from `cwd`'s repo and
+        HEAD. It is FORCED for every spawned tier (2 and 3) and for a role that
+        wears a leaf (`leaf: true` in catalog/agent-harness.json — role=review or
+        a trivial card), because grep/glob is fenced on the search *pattern* and
+        cannot see a git-ignored key file sitting in the caller's checkout; the
+        clone holds committed files only. It is the DEFAULT for a write-role card
+        at tier 1 too (SB-C: `role=implement, complexity=hard` routes to tier 1),
+        and asking for `isolate=False` there is refused while `cwd` is the caller's
+        own worktree — only `role=orchestrate` runs in place (SB-C2:
+        `allow_shared_checkout=True` is orchestrator-only too — a write-role
+        card passing it is refused, and an accepted override is recorded as
+        `shared_checkout_override` on the route). lean: no serena/playwright
+        (default on for role=review). `allow_mode_only=True` accepts a sandbox
+        whose only diff is a file mode (100644 <-> 100755) — the MODEFLIP refusal
+        is what a checkout artifact looks like, so say it when the chmod IS the
+        task; it is recorded in the runner's private record at spawn, never in
+        the worker's job.json. Refused past the depth budget, and for
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
         inert there; it only waives the privacy check on an explicit --model).
@@ -786,6 +1218,8 @@ def serve() -> None:
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
                       "max_depth": max_depth, "title": title, "cwd": cwd, "dry_run": dry_run,
+                      "allow_shared_checkout": allow_shared_checkout,
+                      "allow_mode_only": allow_mode_only,
                       "claude_reason": claude_reason})
 
     @app.tool(name="status")
@@ -801,8 +1235,14 @@ def serve() -> None:
 
     @app.tool(name="cancel")
     def _cancel(run_id: str) -> dict:
-        """Stop a working or input_required agent (SIGTERM to its process
-        group)."""
+        """Stop a working or input_required agent: it stops the systemd scope the
+        worker was launched in (SIGTERM, then SIGKILL to every process in the
+        cgroup) and kills the runner's process group, whose leader start time is
+        verified first. Where no user manager is reachable only the verified
+        group kill runs. Reports what it refused to kill. The scope unit is DERIVED
+        from the run id and the group record comes from the runner's private kill
+        store; job.json, which the cancelled worker owns, aims nothing. A run this
+        could not stop reports the state "cancel-failed", never "canceled"."""
         return cancel(run_id)
 
     @app.tool(name="respond")

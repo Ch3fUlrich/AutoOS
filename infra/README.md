@@ -13,7 +13,7 @@ The agent-skills repository is **retired**; AutoOS is now the single home for th
 
 ## Provenance
 
-- **Source repo**: [Ch3fUlrich/agent-skills](https://github.com/Ch3fUlrich/agent-skills)
+- **Source repo**: retired `agent-skills` repo (history; its content now lives in this repository)
 - **Import commit**: cfb4fc6
 - **Import date**: 2026-09-27
 - **Import method**: `git archive` (export-ignored paths dropped)

@@ -50,6 +50,16 @@ def harness_data():
         return json.load(handle)
 
 
+def module_gates():
+    """The config keys that gate a spawn, as the generator spells them (KEYDENY3b)."""
+    return list(load_module().SPAWN_GATES)
+
+
+def module_leaf_allowed_mcp():
+    """The MCP servers a leaf role may list, pinned in code (KEYDENY3b)."""
+    return set(load_module().LEAF_ALLOWED_MCP)
+
+
 # The files a spawned leaf must never see. Fixture paths only — no real key
 # file is opened by this suite, the fence is decided on the name alone.
 KEY_PATHS = [
@@ -123,6 +133,21 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("leaf-reviewer", result.stdout)
             self.assertIn("autoos-agent", result.stdout)
+
+    def test_check_fails_when_a_leaf_role_gets_a_file_reader_server(self):
+        # KEYDENY3b item 3: the pin is enforced by `check`, not only by the
+        # test below, so an edit to the catalog cannot quietly hand a leaf a
+        # server whose tools read by URL or path. playwright is the case in
+        # point — browser_navigate takes file:// and no path fence reaches it.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["mcp"] = ["serena", "graphify", "playwright"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertIn("playwright", result.stdout)
 
     def test_check_requires_the_bash_allow_all_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,6 +480,80 @@ class OpencodeMergeTests(unittest.TestCase):
                 self.assertFalse(fnmatch.fnmatch("cat " + path, pattern),
                                  "bash_allow_all %s matches cat of %s" % (pattern, path))
 
+    def test_grep_glob_and_external_directory_carry_the_read_fence(self):
+        # KEYDENY3: read_deny_all fenced the `read` tool and nothing else, while
+        # opencode v2.0.16 asserts a *different* resource per action — the grep
+        # and glob tools call Permission.assert({action:"grep"|"glob",
+        # resources:[<the search pattern>]}) and check the searched path only
+        # through the `external_directory` action (FileAccess.authorizeExternal).
+        # So the fence list has to land on three more maps: as the pattern for
+        # grep/glob (a leaf grepping for "api-keys" is stopped), and as the path
+        # for external_directory (a leaf grepping /home/x/.config/autoos/... is
+        # stopped at the path). Decided on the rendered map; no key file opened.
+        fences = harness_data()["fences"]
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for pattern in fences["read_deny_all"]:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(doc["permission"][action][pattern], "deny",
+                                     "%s %s" % (action, pattern))
+            for pattern in fences["read_allow_all"]:
+                for action in ("grep", "glob"):
+                    self.assertEqual(doc["permission"][action][pattern], "allow",
+                                     "%s %s" % (action, pattern))
+            for path in KEY_PATHS:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(fence_verdict(doc["permission"][action], path),
+                                     "deny", "%s may reach %s" % (action, path))
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(doc["permission"]["grep"], path),
+                                 "deny", path)
+            for action in ("grep", "glob"):
+                self.assertEqual(fence_verdict(doc["permission"][action], KEY_EXAMPLE),
+                                 "allow", "%s is denied the example" % action)
+
+    def test_a_leaf_is_denied_every_serena_tool_that_returns_file_bytes(self):
+        # KEYDENY3: an MCP tool's permission rule can only name the tool — the
+        # MCP dispatcher asserts {action:"<server>_<tool>", resources:["*"]}
+        # (v2.0.16), so there is no path to fence and the whole tool must go.
+        # The catalog lists which serena tools carry raw file bytes: read_file
+        # and search_for_pattern by design, find_symbol/find_declaration/
+        # find_implementations/find_referencing_symbols through their
+        # include_body parameter (serena 1.7.0, tools/symbol_tools.py). A leaf
+        # keeps the path-fenced Read tool and the name-only tools (overview,
+        # list_dir, find_file, diagnostics). Spawning roles keep them: they are
+        # the trusted sessions, and denying here would cost the orchestrator
+        # every file read, not just the fenced ones.
+        harness = harness_data()
+        readers = harness["mcp_servers"]["serena"]["raw_content_tools"]
+        self.assertTrue(readers)
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                tools = doc["agent"][name].get("tools", {})
+                for tool in readers:
+                    key = "serena_" + tool
+                    if role["leaf"] and "serena" in role["mcp"]:
+                        self.assertEqual(tools.get(key), False,
+                                         "%s may use %s" % (name, key))
+                    else:
+                        self.assertNotIn(key, tools,
+                                         "%s is denied %s without cause" % (name, key))
+
+    def test_check_requires_the_serena_raw_content_tool_set(self):
+        # Same reasoning as the memory_tools pin: the render derives its leaf
+        # deny list from this field, so a typo silently un-fences a reader.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["mcp_servers"]["serena"]["raw_content_tools"] = ["read_file"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("raw_content_tools", result.stdout)
+
     def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
@@ -476,6 +575,55 @@ class OpencodeMergeTests(unittest.TestCase):
             for name, role in harness["roles"].items():
                 expected = "allow" if role["spawn"] else "deny"
                 self.assertEqual(doc["agent"][name]["permission"]["task"], expected, name)
+
+    def test_a_leaf_is_denied_the_spawn_gate_in_both_spellings(self):
+        # KEYDENY3b item 1: the render emits every spelling of the spawn gate,
+        # with one verdict. v2.0.16's rename map is {bash: "shell", task:
+        # "subagent"}, so `subagent` is the canonical action and `task` the
+        # legacy tool name — which is also what the `permission` OBJECT declares
+        # ("Deprecated alias for subagent"), while the rule lists the tier agents
+        # write assert the action. Which spelling a given build honours is not a
+        # thing to bet a fence on (opencode.jsonc:115: a `bash` rule matches
+        # nothing), so the render does not choose: it denies both. A leaf that
+        # can spawn hands the task to a child that carries none of its read
+        # fence — that child can open configuration/api-keys.yml and put the key
+        # in its answer.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                permission = doc["agent"][name]["permission"]
+                expected = "allow" if role["spawn"] else "deny"
+                for gate in module_gates():
+                    self.assertEqual(permission.get(gate), expected,
+                                     "%s.%s" % (name, gate))
+
+    def test_no_leaf_role_enables_a_server_that_reads_files_by_url_or_path(self):
+        # KEYDENY3b item 3: a fence is only as good as the tools it covers, and
+        # an MCP server is a whole bag of tools the path fences cannot reach (a
+        # leaf's MCP rule can only name the tool, never the resource — KEYDENY3).
+        # playwright opens file:// and any URL; context7 fetches remote docs by
+        # id/topic; a filesystem server reads any path. So the leaf set is pinned
+        # in code: serena (whose every raw-content tool is denied by name below)
+        # and graphify (graph answers only). Anything else a leaf could list is
+        # a defect, whoever added it.
+        harness = harness_data()
+        allowed = module_leaf_allowed_mcp()
+        leaves = [name for name, role in harness["roles"].items() if role["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            listed = set(harness["roles"][name]["mcp"])
+            self.assertTrue(listed <= allowed,
+                            "%s enables %s" % (name, sorted(listed - allowed)))
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name in leaves:
+                tools = doc["agent"][name]["tools"]
+                for server in ("playwright", "context7", "omnigraph", "autoos-agent"):
+                    self.assertEqual(tools.get("%s*" % server), False,
+                                     "%s may reach %s" % (name, server))
 
     def test_stale_top_level_leaf_denies_are_removed_but_user_verdicts_survive(self):
         # A config written by the old generator carries leaf denies at top
@@ -1083,6 +1231,68 @@ class OpenhandsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("would install", result.stdout)
             self.assertFalse(openhands_dir.exists())
+
+
+class FixtureSpawnGateObjectTests(unittest.TestCase):
+    """KEYDENY3g item 5: the checked-in expected document is the permission
+    object the render produces — {task, subagent, bash} and one verdict each."""
+
+    def test_the_fixture_names_every_spawn_gate_spelling(self):
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        for name, role in harness_data()["roles"].items():
+            permission = doc["agent"][name]["permission"]
+            self.assertTrue(set(module_gates()) <= set(permission), name)
+            self.assertIn("bash", permission, name)
+            expected = "allow" if role["spawn"] else "deny"
+            for gate in module_gates():
+                self.assertEqual(permission[gate], expected, "%s.%s" % (name, gate))
+
+    def test_the_render_and_the_fixture_agree_on_the_leaf_gate(self):
+        # The fixture is not a fossil: what the generator renders for a leaf is
+        # what the file says, or the drift is caught here rather than in a run.
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        harness = harness_data()
+        leaves = [n for n, r in harness["roles"].items() if r["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            self.assertEqual(doc["agent"][name]["permission"]["subagent"], "deny")
+            self.assertEqual(doc["agent"][name]["permission"]["task"], "deny")
+
+
+class IgnoredKeyFilesTests(unittest.TestCase):
+    """KEYDENY3g item 6: the premise every isolation rule rests on, checked with
+    git's own two answers — the key file is ignored, and nothing like it is
+    tracked. Fakes only; no real key file is opened by this suite."""
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", str(ROOT)] + list(args),
+                              capture_output=True, text=True)
+
+    def test_the_key_file_and_env_patterns_are_git_ignored(self):
+        for path in ("configuration/api-keys.yml", ".env", ".env.local",
+                     ".env.production"):
+            checked = self._git("check-ignore", "-q", "--no-index", path)
+            self.assertEqual(checked.returncode, 0,
+                             "%s is not ignored: %s" % (path, checked.stderr))
+
+    def test_no_key_file_is_tracked(self):
+        listed = self._git("ls-files", "-z")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        tracked = [p for p in listed.stdout.split("\0") if p]
+        offenders = [p for p in tracked
+                     if fnmatch.fnmatch(p, "configuration/api-keys.yml")
+                     or fnmatch.fnmatch(p, "*/.env") or fnmatch.fnmatch(p, "*/.env.*")
+                     or fnmatch.fnmatch(p, ".env") or fnmatch.fnmatch(p, ".env.*")]
+        # .env.example and the api-keys template are the sanctioned opposites.
+        offenders = [p for p in offenders if not p.endswith(".example")]
+        self.assertEqual(offenders, [], offenders)
+
+    def test_the_template_opposites_are_tracked(self):
+        # The ignore rule is a secret rule, not a rule that hides the templates
+        # an operator is meant to copy.
+        for path in ("configuration/api-keys.example.yml",
+                     "configuration/herdr-sessions/.env.example"):
+            self.assertEqual(self._git("ls-files", path).stdout.strip(), path)
 
 
 if __name__ == "__main__":

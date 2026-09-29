@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import autoos_resolver as r  # noqa: E402
+import autoos_usage as usage  # noqa: E402  (the spend guard's one reader of the cap trio)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
 # A full canonical ladder, so a rung the rule wants is always present unless a
@@ -2655,6 +2656,14 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "google_ai_studio": "2026-09-28T12:00:37Z",
         "antigravity": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
+        # FREEKEYS-2 (D-141 item 3) put the two probe-passed free grants in the
+        # free band of every tier route, so the premise these two tests state —
+        # "every leg of the t2-worker routes is cooling" — now has to cool them
+        # too, or the route really is servable and the test would be asserting a
+        # falsehood. Both return later than google_ai_studio, so the "earliest
+        # return is the retry" limb still has teeth.
+        "scaleway": "2026-09-28T15:00:00Z",
+        "nebius": "2026-09-28T16:00:00Z",
     }
 
     def real_registry(self):
@@ -2751,7 +2760,21 @@ class MetaApiResolverTests(unittest.TestCase):
         legs, _skipped, _notes = r.usable_legs(
             self.registry["routes"]["t1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
-        self.assertEqual(legs[0], ("meta_api", "muse-spark-1.3-contributor"))
+        # FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid, so the
+        # paid contributor leg is no longer the first leg a public card sees — it is
+        # still the leg the route *serves* the writer on, and everything ahead of it
+        # must be free, which is the whole point of the reorder.
+        self.assertIn(("meta_api", "muse-spark-1.3-contributor"), legs)
+        head = [leg for leg in legs if leg[0] == "meta_api"][0]
+        self.assertGreater(legs.index(head), 0, legs)
+        for leg in legs[:legs.index(head)]:
+            self.assertEqual(self.registry["providers"][leg[0]]["tier"], "free", leg)
+        for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
+            paid, _s, _n = r.usable_legs(
+                self.registry["routes"][paid_route], card,
+                {"need_tokens": 1000}, self.state(), self.registry, {})
+            self.assertEqual(paid[0], ("meta_api", "muse-spark-1.3-contributor"),
+                             paid_route)
 
     def test_no_clean_route_serves_the_contributor_leg(self):
         card = {"kind": "review", "privacy": "sensitive"}
@@ -3975,6 +3998,218 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         self.assertTrue(r.claude_budget_of(self.registry)["on"])
 
 
+
+class ZenClaudeLegRulesTests(unittest.TestCase):
+    """SB-C item 3 (the hole FREEKEYS-1 found): a provider wildcard allow must
+    not re-open a Claude leg that ``deny-claude-paid-api`` denies.
+
+    ``allow-opencode-zen-client-bound`` (match ``opencode-zen/*``) sat ABOVE
+    ``deny-claude-paid-api`` (match ``*/claude-*``) and matched first, so a
+    Claude leg spelled under zen was never denied by the leg rules — and the leg
+    rules are the only Claude filter that still applies once the budget gate
+    says yes (a declared final, or the budget off). The rule list is the real
+    catalog/ai-registry.json; only the legs are synthetic (an unknown provider is
+    a dead route, so a bare new spelling would not reach the rule filter).
+    """
+
+    ZEN_CLAUDE = "opencode-zen/claude-sonnet-5"
+    ZEN_FREE = "opencode-zen/muse-spark-1.3-contributor-free"
+
+    def registry(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "catalog" / "ai-registry.json")
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        registry["models"]["claude-sonnet-5"] = {
+            "id": "claude-sonnet-5", "family": "anthropic", "tier": "paid",
+            "tool_calls": "proven",
+            "context_usable": {"tokens": 200000, "source": "default"}}
+        registry["routes"]["r-zen-claude"] = {
+            "id": "r-zen-claude", "class": "frontier",
+            "legs": [self.ZEN_CLAUDE, self.ZEN_FREE]}
+        registry["policy"]["claude_budget"] = {
+            "mode": "budget", "weekly_share_left": 0.10, "budget_below": 0.25,
+            "source": "test SB-C"}
+        return registry
+
+    def features(self):
+        return {"need_tokens": 1000}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def legs(self, card, registry, env, route_id="r-zen-claude"):
+        kept, skipped, _ = r.usable_legs(registry["routes"][route_id], card,
+                                        self.features(), self.state(),
+                                        registry, {}, "opencode", None, env)
+        return kept, skipped
+
+    # --- the committed verdict, rules only ----------------------------------
+
+    def test_a_claude_leg_under_the_zen_wildcard_is_denied(self):
+        registry = self.registry()
+        rule = registry_tool.leg_rule_for(self.ZEN_CLAUDE, registry)
+        self.assertIsNotNone(rule, self.ZEN_CLAUDE)
+        self.assertFalse(rule["allow"],
+                         "matched %s: the zen wildcard re-opens Claude" % rule["id"])
+        self.assertTrue(registry_tool.leg_denied(self.ZEN_CLAUDE, registry))
+
+    def test_a_declared_final_does_not_reopen_a_claude_leg_under_zen(self):
+        """The budget gate says yes (the orchestrator declared the final), and
+        the leg rules must still say no: a zen Claude leg is a paid API."""
+        registry = self.registry()
+        env = {"AUTOOS_CLAUDE_FINAL": "L1-routing@deadbeef"}
+        _kept, skipped = self.legs({"kind": "final", "privacy": "public"},
+                                   registry, env)
+        self.assertNotIn(("zen", "claude-sonnet-5"), _kept)
+        reasons = " ".join(skipped[self.ZEN_CLAUDE])
+        self.assertIn("leg_rules", reasons)
+        self.assertNotIn("claude_budget", reasons)
+
+    def test_without_a_declaration_the_budget_holds_it_too(self):
+        """Latent half of the same hole: with the budget ON and nothing
+        declared, the leg is held by the budget — so the leg-rule hole only
+        shows through when the gate allows Claude. Pinned so a future reader
+        knows which layer closed it first."""
+        registry = self.registry()
+        _kept, skipped = self.legs({"kind": "final", "privacy": "public"},
+                                   registry, {})
+        reasons = " ".join(skipped[self.ZEN_CLAUDE])
+        self.assertIn("claude_budget", reasons)
+
+    # --- what must NOT change ----------------------------------------------
+
+    def test_non_claude_zen_legs_stay_allowed(self):
+        registry = self.registry()
+        for leg in [self.ZEN_FREE, "opencode-zen/deepseek-v4.1-flash",
+                    "opencode-zen/glm-5.2"]:
+            rule = registry_tool.leg_rule_for(leg, registry)
+            self.assertIsNotNone(rule, leg)
+            self.assertTrue(rule["allow"], "%s denied by %s" % (leg, rule["id"]))
+
+    def test_the_two_free_claude_seats_keep_their_allow(self):
+        """The reorder moves the paid-API deny up, never onto a seat that is
+        Claude by contract: the subscription seat and the free sign-in."""
+        registry = self.registry()
+        for leg, seat in [("cc/claude-opus-4-6", "allow-claude-code-subscription"),
+                          ("antigravity/claude-opus-4-6-thinking",
+                           "allow-antigravity-signin")]:
+            rule = registry_tool.leg_rule_for(leg, registry)
+            self.assertEqual((rule or {}).get("id"), seat, leg)
+
+    def test_the_claude_deny_precedes_every_provider_wildcard_allow(self):
+        """Structural: the deny is only as strong as its position, so no
+        wildcard provider allow except the named free seats may match first."""
+        rules = self.registry()["policy"]["leg_rules"]
+        ids = [rule["id"] for rule in rules]
+        deny = ids.index("deny-claude-paid-api")
+        seats = {"allow-claude-code-subscription", "allow-antigravity-signin"}
+        for rule in rules[:deny]:
+            if rule["allow"] is True and rule["match"].endswith("/*"):
+                self.assertIn(rule["id"], seats,
+                              "%s re-opens Claude before deny-claude-paid-api"
+                              % rule["id"])
+
+class ComboFallthroughTests(unittest.TestCase):
+    """FREEKEYS-2 (brief item 4): a forced 429 on a combo's head leg must land
+    the request on a DIFFERENT provider, and it must land on a leg an agentic
+    card can actually use.
+
+    The fall-through itself is OmniRoute's `priority` combo strategy — the
+    gateway walks the combo's model list and retries the next entry on a 429, so
+    the spawner never reacts to one (tools/autoos_routing.py). That makes the
+    *rendered combo list* the thing under test: an ordered leg list whose
+    neighbours share one provider is a combo that 429s into the same 429. No
+    gateway is called here — `fake_priority_walk` mirrors the documented strategy
+    against a status table this test supplies.
+    """
+
+    ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker",
+              "t2-worker-free-only", "t3-driver", "t3-driver-free-only")
+
+    @classmethod
+    def setUpClass(cls):
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            cls.reg = json.load(fh)
+        cls.combos = {c["name"]: c
+                      for c in registry_tool.render_omniroute(cls.reg)["combos"]}
+
+    def leg_for_ref(self, route_id, ref):
+        """The registry leg that rendered to this combo ref (a gateway ref is the
+        leg's model_prefix rewritten, so map back through the route's own legs)."""
+        for leg in self.reg["routes"][route_id]["legs"]:
+            if registry_tool.gateway_ref(leg, self.reg) == ref:
+                return leg
+        raise AssertionError("%s renders %s from no leg" % (route_id, ref))
+
+    @staticmethod
+    def fake_priority_walk(models, statuses):
+        """OmniRoute's priority strategy: try each model in order and take the
+        first that does not answer 429. None when every leg failed."""
+        for ref in models:
+            if statuses.get(ref.split("/", 1)[0], 200) != 429:
+                return ref
+        return None
+
+    def test_a_429_on_the_head_falls_through_to_another_provider(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            head = combo["models"][0]
+            chosen = self.fake_priority_walk(
+                combo["models"], {head.split("/", 1)[0]: 429})
+            self.assertIsNotNone(chosen, "%s: every leg 429s" % route_id)
+            self.assertNotEqual(chosen.split("/", 1)[0], head.split("/", 1)[0],
+                                "%s: the fall-through stayed on %s"
+                                % (route_id, head.split("/", 1)[0]))
+
+    def test_two_consecutive_provider_failures_still_leave_a_third(self):
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            prefixes = []
+            for ref in combo["models"]:
+                prefix = ref.split("/", 1)[0]
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
+            self.assertGreaterEqual(len(prefixes), 3,
+                                    "%s: %s has no third provider to fall to"
+                                    % (route_id, combo["models"]))
+            statuses = {prefix: 429 for prefix in prefixes[:2]}
+            chosen = self.fake_priority_walk(combo["models"], statuses)
+            self.assertIsNotNone(chosen, route_id)
+            self.assertNotIn(chosen.split("/", 1)[0], statuses, route_id)
+
+    def test_the_fall_through_lands_on_a_leg_an_agentic_card_can_use(self):
+        # A combo that falls through to a leg whose tool_calls is unproven (or to
+        # an unpriced credit leg, or to one whose window is smaller than the
+        # context the route declares) falls to a leg the resolver refuses to plan
+        # or cannot carry the card at all, so an agentic run landing there has no
+        # answer behind the fallback. The context half is the resolver's own
+        # promise check, `route_leg_context_fits` -- named, not restated here
+        # (FREEKEYS-2c, rev-freekeys2 finding 2).
+        for route_id in self.ROUTES:
+            combo = self.combos[route_id]
+            route = self.reg["routes"][route_id]
+            usable = []
+            for ref in combo["models"]:
+                leg = self.leg_for_ref(route_id, ref)
+                provider_id, model_id = registry_tool.resolve_leg(leg, self.reg)
+                model = self.reg["models"][model_id]
+                if model.get("tool_calls") != "proven":
+                    continue
+                if (self.reg["providers"][provider_id] or {}).get("tier") == "credit":
+                    try:
+                        if not (float(model.get("price_in")) > 0.0
+                                and float(model.get("price_out")) > 0.0):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                if not r.route_leg_context_fits(leg, route, self.reg):
+                    continue
+                usable.append(ref)
+            self.assertGreaterEqual(
+                len(usable), 2, "%s: only %s of %s is usable by an agentic card"
+                % (route_id, usable, combo["models"]))
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -4268,4 +4503,153 @@ class ClaudeBudgetGateTests(unittest.TestCase):
                                    env={})
         self.assertEqual(skipped["cc/claude-opus-4-6"],
                          ["claude_budget: cc/claude-opus-4-6 held for finals"])
+
+
+class CreditGuardLegFilterTests(unittest.TestCase):
+    """FREEKEYS-1b (items 2-4): the spend guard on a `credit` provider BLOCKS a
+    leg instead of only reporting one.
+
+    The two halves the reviewer named as missing (rev-freekeys1 findings 2 and 3)
+    are both pinned here. `refuse` (100 % of the operator's grant) drops the leg
+    through `usable_legs`, so a route whose only leg is a drained grant is removed
+    by `filter_routes` exactly as an unavailable leg is; `warn` (80 % by default)
+    keeps the leg and says so in the plan's `explain`. And a `credit` model with
+    no price on file is refused outright: an unpriced grant would bill $0 to
+    `paid_spend` and read as an untouched $10 while it drains, which is the
+    fail-open the guard must not ship with. Free-tier legs are untouched by all
+    of this -- they cost nothing measured and the guard is about money.
+
+    The spend is NOT hand-written here: it is `autoos_usage.paid_spend` over
+    recorded usage rows at real registry prices, so the number the resolver acts
+    on is the number the usage report prints (one reader, one figure).
+    """
+
+    CAP = 10.0
+    NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    SINCE = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+
+    def registry(self):
+        return {
+            "providers": {
+                "morph": {"id": "morph", "tier": "credit", "model_prefix": "morph",
+                          "credit_usd": self.CAP, "monthly_cap_usd": self.CAP,
+                          "monthly_warn_fraction": 0.8, "trains_on_prompts": False},
+                "groq": {"id": "groq", "tier": "free", "trains_on_prompts": False},
+            },
+            "models": {
+                "morph-priced": {"id": "morph-priced", "tool_calls": "proven",
+                                 "context_usable": {"tokens": 100000, "source": "default"},
+                                 "price_in": 1e-06, "price_out": 1e-06},
+                "morph-unpriced": {"id": "morph-unpriced", "tool_calls": "proven",
+                                   "context_usable": {"tokens": 100000, "source": "default"},
+                                   "price_in": 0, "price_out": 0},
+                "groq-free": {"id": "groq-free", "tool_calls": "proven",
+                              "context_usable": {"tokens": 100000, "source": "default"}},
+            },
+            "routes": {
+                "r-credit": {"id": "r-credit",
+                             "legs": ["morph/morph-priced", "morph/morph-unpriced",
+                                      "groq/groq-free"]},
+                "r-only-credit": {"id": "r-only-credit",
+                                  "legs": ["morph/morph-priced"]},
+            },
+            "policy": {"leg_rules": []},
+        }
+
+    def card(self):
+        return {"kind": "implement", "privacy": "public"}
+
+    def feats(self):
+        return {"need_tokens": 10}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def rows(self, tokens_in, tokens_out):
+        """Recorded usage rows for the priced leg, in the gateway's call-log shape."""
+        return [{"timestamp": self.NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "morph", "model": "morph-priced",
+                 "tokens": {"in": tokens_in, "out": tokens_out}}]
+
+    def guards(self, tokens_in, tokens_out):
+        """The resolver-facing guard map, built by the usage module from real rows."""
+        return usage.credit_guards(self.registry(),
+                                   self.rows(tokens_in, tokens_out), self.SINCE)
+
+    def legs(self, guards=None, warns=None):
+        reg = self.registry()
+        return r.usable_legs(reg["routes"]["r-credit"], self.card(), self.feats(),
+                             self.state(), reg, {}, credit_guards=guards,
+                             credit_warns=warns)
+
+    # --- refuse: the guard blocks ------------------------------------------
+
+    def test_a_drained_grant_drops_the_leg_at_the_cap(self):
+        # 5M in + 5M out at 1e-06/token is exactly the $10 grant.
+        guards = self.guards(5_000_000, 5_000_000)
+        self.assertEqual(guards["morph"]["state"], "refuse")
+        _kept, skipped, _notes = self.legs(guards)
+        self.assertEqual(skipped["morph/morph-priced"],
+                         ["credit exhausted morph $%.2f/$%.2f" % (self.CAP, self.CAP)])
+
+    def test_a_drained_grant_removes_the_route_that_has_only_it(self):
+        """Blocking, not reporting: the lone-leg route loses its survivorship."""
+        reg = self.registry()
+        survivors, removed = r.filter_routes(self.card(), self.feats(), self.state(),
+                                             reg, {},
+                                             credit_guards=self.guards(5_000_000,
+                                                                       5_000_000))
+        self.assertNotIn("r-only-credit", survivors)
+        self.assertIn("credit exhausted morph", removed["r-only-credit"][0])
+
+    def test_the_free_leg_survives_a_drained_credit_grant(self):
+        """FT fall-through preserved: the guard removes a leg, never a whole route
+        that still has capacity that costs nothing."""
+        _kept, skipped, _notes = self.legs(self.guards(5_000_000, 5_000_000))
+        self.assertNotIn("groq/groq-free", skipped)
+
+    # --- warn: the leg stays, the plan says so ------------------------------
+
+    def test_at_eighty_percent_the_leg_is_kept_and_warned(self):
+        warns = []
+        guards = self.guards(4_000_000, 4_000_000)  # $8 of $10
+        self.assertEqual(guards["morph"]["state"], "warn")
+        kept, skipped, _notes = self.legs(guards, warns)
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertNotIn("morph/morph-priced", skipped)
+        self.assertEqual(warns, ["credit warn morph $8.00/$10.00"])
+
+    def test_below_the_warn_line_nothing_is_said_and_nothing_is_dropped(self):
+        warns = []
+        guards = self.guards(1_000_000, 1_000_000)  # $2 of $10
+        kept, _skipped, _notes = self.legs(guards, warns)
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertEqual(warns, [])
+
+    # --- fail closed when there is no price on file -------------------------
+
+    def test_an_unpriced_credit_leg_is_dropped_with_no_spend_data(self):
+        """No `credit_guards` passed at all still refuses the unpriced leg: the
+        missing number is the reason to refuse, not a licence to assume free."""
+        _kept, skipped, _notes = self.legs(None)
+        self.assertEqual(skipped["morph/morph-unpriced"],
+                         ["credit leg unpriced morph-unpriced"])
+
+    def test_an_unpriced_credit_leg_is_dropped_even_when_spend_is_zero(self):
+        _kept, skipped, _notes = self.legs(self.guards(0, 0))
+        self.assertEqual(skipped["morph/morph-unpriced"],
+                         ["credit leg unpriced morph-unpriced"])
+
+    def test_a_free_leg_needs_no_price(self):
+        """The unpriced rule is about a finite grant; a free tier costs nothing
+        whether or not anyone recorded a number."""
+        _kept, skipped, _notes = self.legs(None)
+        self.assertNotIn("groq/groq-free", skipped)
+
+    def test_the_priced_credit_leg_is_usable_when_the_grant_is_intact(self):
+        """The guard must not refuse what it has money left for, or the whole
+        tier reads as dead data."""
+        kept, _skipped, _notes = self.legs(self.guards(1_000_000, 1_000_000))
+        self.assertIn(("morph", "morph-priced"), kept)
+
 

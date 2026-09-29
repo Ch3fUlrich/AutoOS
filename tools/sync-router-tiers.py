@@ -238,17 +238,22 @@ def locate_blocks(lines):
     return blocks
 
 
-def _gateway_legs(route, registry):
-    """tools/registry.py's gateway_legs(route, registry), imported lazily:
-    registry.py loads THIS module by path (see its _load_sync_router_tiers),
-    so a module-level import would be circular. The drop rules
-    (unavailable/denied/client_bound) have one home - registry.py - and this
-    tool reuses them rather than copying them."""
+def _registry_module():
+    """tools/registry.py, imported lazily: registry.py loads THIS module by path
+    (see its _load_sync_router_tiers), so a module-level import would be
+    circular."""
     tools_dir = str(Path(__file__).resolve().parent)
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
-    from registry import gateway_legs  # noqa: E402
-    return gateway_legs(route, registry)
+    import registry  # noqa: E402
+    return registry
+
+
+def _gateway_legs(route, registry):
+    """tools/registry.py's gateway_legs(route, registry). The drop rules
+    (unavailable/denied/client_bound) have one home - registry.py - and this
+    tool reuses them rather than copying them."""
+    return _registry_module().gateway_legs(route, registry)
 
 
 def litellm_servable_refs(route, registry):
@@ -298,15 +303,28 @@ def managed_tiers(registry):
     )
 
 
-def combos_refs(combos_path, tiers=None):
+def combos_refs(combos_path, tiers=None, registry=None):
     """Ordered model refs per tier, read from combos.json.
+
+    Each ref is put back through tools/registry.py's registry_ref() before it is
+    used, because combos.json holds `gateway_ref()`'s OUTPUT - the namespace the
+    live gateway serves (`scw/qwen3-...`, scaleway's declared `model_prefix`) -
+    while a LiteLLM block needs the leg's PROVIDER (`scaleway/qwen3-...`, the
+    spelling `routes.<id>.legs` uses and the key into litellm_prefix/api_base/
+    litellm_env). Without that step a `scw/...` ref resolves to no provider at
+    all and mirrors as `model: scw/... , api_key: os.environ/SCW_API_KEY`: a
+    transport LiteLLM has no provider for and an env var nothing sets
+    (FREEKEYS-2e, sync-router-tiers unit test). `registry=None` (no registry to
+    consult) leaves the refs as read.
 
     Legs whose provider is gateway-only (OAuth/subscription bridges with no
     LiteLLM transport and no env key) are dropped: mirroring them would emit
     unset os.environ/* vars and break whole-group validation at startup —
     the META_API_KEY lesson. Docs rule 1 calls this set out ("minus the
     legs LiteLLM cannot address"); the suite test pins the dropped set so
-    nothing else ever goes missing silently.
+    nothing else ever goes missing silently. The drop runs after the rewrite and
+    names both spellings (`antigravity` and its prefix `agy`), so a gateway-only
+    leg cannot leak in either direction.
 
     `tiers=None` (the default) derives the set the same way the registry
     default does: every combo name whose gateway-only-filtered model list is
@@ -322,8 +340,11 @@ def combos_refs(combos_path, tiers=None):
     for combo in data.get("combos", []):
         name = combo.get("name")
         if name:
+            refs = list(combo.get("models", []))
+            if registry is not None:
+                refs = [_registry_module().registry_ref(m, registry) for m in refs]
             by_name[name] = [
-                m for m in combo.get("models", [])
+                m for m in refs
                 if m.split("/", 1)[0] not in GATEWAY_ONLY
             ]
     if tiers is None:
@@ -537,7 +558,18 @@ def main(argv=None):
         # Populate the module maps Leg reads, from the registry.
         global PROVIDER_PREFIX, API_BASE, ENV_KEY
         PROVIDER_PREFIX, API_BASE, ENV_KEY = provider_maps(registry_path)
-        combos = combos_refs(combos_path) if combos_path is not None else registry_refs(registry_path)
+        if combos_path is not None:
+            # The explicit override still needs the registry: combos.json's refs
+            # are gateway spellings, and only a provider row says which LiteLLM
+            # transport they belong to (see combos_refs).
+            try:
+                registry_doc = json.loads(
+                    registry_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ConfigError(f"cannot read {registry_path}: {exc}") from exc
+            combos = combos_refs(combos_path, registry=registry_doc)
+        else:
+            combos = registry_refs(registry_path)
         original = config_path.read_text(encoding="utf-8")
         updated, changed = rewrite(original, combos)
     except (OSError, ConfigError) as exc:

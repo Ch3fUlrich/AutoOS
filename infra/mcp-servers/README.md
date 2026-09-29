@@ -10,11 +10,11 @@ quoted here had no measurement behind it and its supporting doc was retired.
 Runs on your own hardware with Docker + uv + Node.js. The memory layer is
 **Omnigraph** (typed graph + vector + full-text) backed by MinIO — no OpenAI key
 required. There is **no fallback memory**: the stack requires Omnigraph (Mem0 was removed —
-[ADR 0003](https://github.com/Ch3fUlrich/agent-skills/blob/main/docs/decisions/0003-remove-mem0-fallback.md); [ADR 0001](https://github.com/Ch3fUlrich/agent-skills/blob/main/docs/decisions/0001-omnigraph-over-mem0.md)
-are why Omnigraph in the first place; archived in retired agent-skills repo).
+ADR 0003 and ADR 0001 explain why Omnigraph is the memory store; both are history in the
+retired agent-skills repo).
 For the authoritative overview
 see [`../../docs/architecture.md`](../../docs/architecture.md); for the memory
-protocol see [structured-memory skill](https://github.com/Ch3fUlrich/agent-skills/blob/main/skills/structured-memory/SKILL.md) (archived in retired agent-skills repo).
+protocol see [structured-memory skill](../../.agents/skills/structured-memory/SKILL.md).
 
 ## Quick Start
 
@@ -264,7 +264,7 @@ graphify install once and be done.
 
 While Serena includes basic local memory capabilities, **Omnigraph is the designated single source of truth for all cross-session memory in this stack.**
 
-1. **Structure:** memory is written as typed nodes (`Decision`/`Rule`/`Preference`/`Convention`/`Component`/`Task`) that are queryable and reviewable, not free-text blobs — see the [structured-memory skill](https://github.com/Ch3fUlrich/agent-skills/blob/main/skills/structured-memory/SKILL.md) (archived in retired agent-skills repo).
+1. **Structure:** memory is written as typed nodes (`Decision`/`Rule`/`Preference`/`Convention`/`Component`/`Task`) that are queryable and reviewable, not free-text blobs — see the [structured-memory skill](../../.agents/skills/structured-memory/SKILL.md).
 2. **Project Isolation:** each repo gets its **own** graph, pinned per-agent via `OMNIGRAPH_GRAPH_ID`, so a bad write in one project cannot touch another.
 3. **Retrieval:** graph traversal + vector + full-text in one engine, with a local Ollama embedder (no cloud key).
 

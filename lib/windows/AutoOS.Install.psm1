@@ -1160,7 +1160,7 @@ function Write-AutoOSOmnigraphReadiness {
         respectively - none of which say which of the three it was. AutoOS does
         not build or start that stack; it reports what is not ready yet.
     #>
-    param([Parameter(Mandatory)][string]$AgentSkillsDir)
+    param([Parameter(Mandatory)][string]$RepoRoot)
 
     if (-not (Get-Command 'docker' -ErrorAction SilentlyContinue)) {
         Write-AutoOSLine 'docker is not installed - omnigraph runs as a container.' -Level warn
@@ -1171,13 +1171,13 @@ function Write-AutoOSOmnigraphReadiness {
     $images = (& docker images --format '{{.Repository}}:{{.Tag}}' 2>&1 | Out-String)
     if ($images -notmatch 'omnigraph-mcp:latest') {
         Write-AutoOSLine 'omnigraph-mcp:latest is not built. Build it with:' -Level warn
-        Write-AutoOSLine "    docker build -t omnigraph-mcp:latest $AgentSkillsDir\infra\mcp-servers\servers\omnigraph-mcp" -Level muted
+        Write-AutoOSLine "    docker build -t omnigraph-mcp:latest $RepoRoot\infra\mcp-servers\servers\omnigraph-mcp" -Level muted
         $ready = $false
     }
     $nets = (& docker network ls --format '{{.Name}}' 2>&1 | Out-String)
     if ($nets -notmatch 'mcp-server') {
         Write-AutoOSLine 'no mcp-server Docker network - the graph server stack is not up.' -Level warn
-        Write-AutoOSLine "    docker compose -f $AgentSkillsDir\infra\mcp-servers\docker-compose.client.yml up -d" -Level muted
+        Write-AutoOSLine "    docker compose -f $RepoRoot\infra\mcp-servers\docker-compose.client.yml up -d" -Level muted
         $ready = $false
     }
     $envFileToken = Select-String -Path (Join-Path $env:USERPROFILE '.autoos-omnigraph.env') -Pattern '^OMNIGRAPH_TOKEN=.' -Quiet -ErrorAction SilentlyContinue
@@ -1320,7 +1320,7 @@ function Set-AutoOSOmnigraphEnv {
 function Install-AutoOSAgentSkills {
     <#
       .SYNOPSIS
-        Clone agent-skills and wire its MCP servers into Claude Code for real.
+        Wire the MCP servers into Claude Code and Antigravity, and link the skills.
 
       .DESCRIPTION
         graphify and omnigraph are wired in opposite ways, and getting it the
@@ -1333,23 +1333,14 @@ function Install-AutoOSAgentSkills {
                       A user-scope `omnigraph` silently WINS over the project one
                       and answers from the wrong graph, so this never creates one
                       and says so when it finds one.
-    #>
-    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-    $codeRoot = Join-Path $myDocs 'Code'
-    if (Test-Path (Join-Path $myDocs 'code')) {
-        $codeRoot = Join-Path $myDocs 'code'
-    }
-    $dest = Join-Path $codeRoot 'agent-skills'
-    if (-not $script:DryRun -and -not (Test-Path $codeRoot)) {
-        New-Item -ItemType Directory -Path $codeRoot -Force | Out-Null
-    }
-    if (Test-Path $dest) {
-        Invoke-AutoOSProcess -FilePath 'git' -Arguments @('-C', $dest, 'pull', '--ff-only') | Out-Null
-    } else {
-        Invoke-AutoOSProcess -FilePath 'git' -Arguments @(
-            'clone', 'https://github.com/Ch3fUlrich/agent-skills.git', $dest) | Out-Null
-    }
 
+        It used to clone a second repository into Documents\code\agent-skills to
+        get those declarations and its skill links from. It does not: the servers
+        this wires are declared by this checkout's own .mcp.json, so one less
+        copy of what AutoOS already ships, and the checkout is read from the
+        tree the caller is in. A machine that ran this installer before keeps its
+        old Documents\code\agent-skills untouched - this never deletes it.
+    #>
     $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
     $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
     Write-AutoOSLine "Omnigraph base URL: $baseUrl" -Level info
@@ -1367,12 +1358,14 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine 'per-repo one and answers from the wrong graph. Remove it with:' -Level warn
         Write-AutoOSLine '    claude mcp remove omnigraph --scope user' -Level muted
     }
-    $projectMcp = Join-Path $dest '.mcp.json'
+    # Approved from the checkout that declares it, which is this one: pointing
+    # these at any other tree approves a server nobody runs.
+    $projectMcp = Join-Path $script:RepoRoot '.mcp.json'
     if (Test-Path $projectMcp) {
         Write-AutoOSLine "omnigraph is declared per-repo in $projectMcp" -Level muted
-        Enable-AutoOSProjectMcpServer -RepoPath $dest -Name 'omnigraph'
+        Enable-AutoOSProjectMcpServer -RepoPath $script:RepoRoot -Name 'omnigraph'
     } else {
-        Write-AutoOSLine "no .mcp.json in $dest - nothing to pin omnigraph to." -Level warn
+        Write-AutoOSLine "no .mcp.json in $script:RepoRoot - nothing to pin omnigraph to." -Level warn
     }
     # The agent spawner is declared in this repo's own .mcp.json.
     if (Test-Path (Join-Path $script:RepoRoot '.mcp.json')) {
@@ -1383,7 +1376,7 @@ function Install-AutoOSAgentSkills {
 
     # Antigravity (~/.gemini/config/skills) and Claude Code (~/.claude/skills) are
     # linked by Sync-AutoOSAgentSkillTargets below, from Get-AutoOSSkillsSource -
-    # never from this clone, which is kept for its MCP infra only (WS-SKILLWIN).
+    # never from a clone (WS-SKILLWIN).
 
     # Repo skills into project .claude/skills (Claude Code reads only that dir).
     # Junctions, created at install time (never committed - see .gitignore), so a
@@ -1420,7 +1413,7 @@ function Install-AutoOSAgentSkills {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
         return
     }
-    if (Write-AutoOSOmnigraphReadiness -AgentSkillsDir $dest) {
+    if (Write-AutoOSOmnigraphReadiness -RepoRoot $script:RepoRoot) {
         Write-AutoOSLine 'omnigraph prerequisites are all present.' -Level ok
     }
     Write-AutoOSLine 'Restart Claude Code and Antigravity - MCP servers are only read at session start.' -Level info

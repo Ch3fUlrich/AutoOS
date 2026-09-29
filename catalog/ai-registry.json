@@ -291,6 +291,7 @@
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
+      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) — reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 6e-09). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number — not an invented price.",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -470,7 +471,7 @@
       "tool_calls": "unproven"
     },
     "gpt-oss-120b": {
-      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run.",
+      "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run. FREEKEYS-1b (2026-09-28, item 1 confirmation): the reused row is NOT `tool_calls: proven` - it is `unproven`, and the proven verdict lives only in the gitignored leg-scoped overlay (`logs/routing/measured.json`), so a host without that overlay falls through every leg pointing here on an agentic card, scaleway's `scw/gpt-oss-120b` (FREEKEYS-1) included. A fresh probe is what makes it true in the tracked data.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -1239,6 +1240,244 @@
       "price_out": 0.0,
       "reasoning": false,
       "tool_calls": "unproven"
+    },
+    "deepseek/deepseek-v4-flash-0731free:free": {
+      "id": "deepseek/deepseek-v4-flash-0731free:free",
+      "display_name": "bzl/deepseek/deepseek-v4-flash-0731free:free",
+      "family": "deepseek",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'bzl/deepseek/deepseek-v4-flash-0731free:free', which is why providers.bazaarlink.model_prefix is 'bzl'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedbazaarlink. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-2b DECISION (operator rule 'DeepSeek only V4.1 Flash'): these are V4 weights (v4-flash-0731), so this row stays registered and measured, but it routes NOWHERE - no combo carries it and policy.leg_rules carries no per-leg allow for it, so the blanket `deny-deepseek` refuses any attempt to pin it."
+    },
+    "google/gemini-2.5-flash": {
+      "id": "google/gemini-2.5-flash",
+      "display_name": "deepinfra/google/gemini-2.5-flash",
+      "family": "google",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/google/gemini-2.5-flash', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "google/gemini-3.5-flash": {
+      "id": "google/gemini-3.5-flash",
+      "display_name": "deepinfra/google/gemini-3.5-flash",
+      "family": "google",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/google/gemini-3.5-flash', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "google/gemini-3.7-flash": {
+      "id": "google/gemini-3.7-flash",
+      "display_name": "deepinfra/google/gemini-3.7-flash",
+      "family": "google",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/google/gemini-3.7-flash', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "deepseek-ai/DeepSeek-V4-Flash-0731": {
+      "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "display_name": "deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731",
+      "family": "deepseek",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "inclusionAI/Ling-3.0-flash": {
+      "id": "inclusionAI/Ling-3.0-flash",
+      "display_name": "deepinfra/inclusionAI/Ling-3.0-flash",
+      "family": "inclusionai",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/inclusionAI/Ling-3.0-flash', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "google/gemini-3.1-flash-lite": {
+      "id": "google/gemini-3.1-flash-lite",
+      "display_name": "deepinfra/google/gemini-3.1-flash-lite",
+      "family": "google",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/google/gemini-3.1-flash-lite', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "morph-dsv4flash": {
+      "id": "morph-dsv4flash",
+      "display_name": "DeepSeek V4 Flash (Morph)",
+      "family": "deepseek",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-dsv4flash', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "morph-glm52-744b": {
+      "id": "morph-glm52-744b",
+      "display_name": "GLM-5.2 744B (Morph)",
+      "family": "zhipu",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-glm52-744b', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "zai-org/GLM-5.1": {
+      "id": "zai-org/GLM-5.1",
+      "display_name": "nebius/zai-org/GLM-5.1",
+      "family": "zhipu",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'nebius/zai-org/GLM-5.1', which is why providers.nebius.model_prefix is 'nebius'. context_advertised/output_max are what the gateway's own GET /v1/models row reportednebius. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "zai-org/GLM-5.2": {
+      "id": "zai-org/GLM-5.2",
+      "display_name": "nebius/zai-org/GLM-5.2",
+      "family": "zhipu",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'nebius/zai-org/GLM-5.2', which is why providers.nebius.model_prefix is 'nebius'. context_advertised/output_max are what the gateway's own GET /v1/models row reportednebius. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "zai-org/GLM-5.3-Flash": {
+      "id": "zai-org/GLM-5.3-Flash",
+      "display_name": "nebius/zai-org/GLM-5.3-Flash",
+      "family": "zhipu",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'nebius/zai-org/GLM-5.3-Flash', which is why providers.nebius.model_prefix is 'nebius'. context_advertised/output_max are what the gateway's own GET /v1/models row reportednebius. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "qwen3-235b-a22b-instruct-2507": {
+      "id": "qwen3-235b-a22b-instruct-2507",
+      "display_name": "scw/Qwen3 235B A22B (1M free tok 🆓)",
+      "family": "qwen",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'scw/qwen3-235b-a22b-instruct-2507', which is why providers.scaleway.model_prefix is 'scw'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedscaleway. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "mistral-small-3.2-24b-instruct-2506": {
+      "id": "mistral-small-3.2-24b-instruct-2506",
+      "display_name": "scw/Mistral Small 3.2 (🆓 EU)",
+      "family": "mistral",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'scw/mistral-small-3.2-24b-instruct-2506', which is why providers.scaleway.model_prefix is 'scw'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedscaleway. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
     }
   },
   "policy": {
@@ -1937,10 +2176,66 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
+        "id": "allow-claude-code-subscription",
+        "match": "cc/*",
+        "allow": true,
+        "reason": "Claude Code subscription seat, not a paid API. Moved up with deny-claude-paid-api (SB-C): the two Claude seats that are Claude by contract must match before the paid-API deny, no other provider wildcard may",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "allow-antigravity-signin",
+        "match": "antigravity/*",
+        "allow": true,
+        "reason": "agy free sign-in, not a paid API. Moved up with deny-claude-paid-api (SB-C) for the same reason as cc/*: it serves Claude-legitimately on a free seat",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C 2026-09-28 reorder"
+      },
+      {
+        "id": "deny-claude-paid-api",
+        "match": "*/claude-*",
+        "allow": false,
+        "reason": "no Claude models through a paid API (too expensive). First before every provider wildcard allow on purpose (SB-C, found by FREEKEYS-1): 'opencode-zen/*' sat above this rule and matched first, so opencode-zen/claude-* was never denied by the leg rules and was usable the moment the Claude budget gate said yes (a declared final, or budget off). A leg_rule is only as strong as its position",
+        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); SB-C item 3 2026-09-28, tests/test_autoos_resolver.py ZenClaudeLegRulesTests"
+      },
+      {
+        "id": "deny-claude-family-opus",
+        "match": "*/*opus*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude': deny-claude-paid-api (*/claude-*) only binds the claude-* prefix, and the gateway serves the same models under bare family names (opus, sonnet, haiku, fable) - the CLAUDE_MODEL_MARKERS the budget gate itself reads. Placed with deny-claude-paid-api, before every provider wildcard allow and after the cc/* and antigravity/* subscription seats, so a seat leg still matches its allow first",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-sonnet",
+        "match": "*/*sonnet*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): a third-party sonnet leg is a Claude spend no */claude-* pattern can see",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-haiku",
+        "match": "*/*haiku*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): a third-party haiku leg is a Claude spend no */claude-* pattern can see",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-claude-family-fable",
+        "match": "*/*fable*",
+        "allow": false,
+        "reason": "Claude family by name even when the spelling omits 'claude' (see deny-claude-family-opus): fable is a Claude model name (models.claude-fable-5-1) and a third-party fable leg is a Claude spend",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); CLAUDE_MODEL_MARKERS, tools/autoos_resolver.py"
+      },
+      {
+        "id": "deny-anthropic-paid",
+        "match": "anthropic/*",
+        "allow": false,
+        "reason": "the anthropic provider id is not one of the two Claude seats the leg rules allow - those are cc/* (Claude Code subscription) and antigravity/* (free sign-in), and both allow rows precede this rule. An anthropic/-prefixed leg is therefore paid-API Claude whatever the model half is spelled like. If anthropic is ever registered as a real seat, give it its own allow rule ABOVE this one, exactly like the two existing seats",
+        "source": "SB-C2 item 1 2026-09-28 (rev-sbc: spelling escape); seat list: briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ)"
+      },
+      {
         "id": "allow-opencode-zen-client-bound",
         "match": "opencode-zen/*",
         "allow": true,
-        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them",
+        "reason": "Zen models are free and allowed when they run through the opencode client (client_bound opencode); through the gateway they 403 'only from within OpenCode', so gateway renders never carry them. This wildcard no longer reaches a Claude spelling: deny-claude-paid-api (*/claude-*) precedes it since SB-C",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); operator direction 2026-09-27T07:3xZ (corrects the 04:5xZ 'never in gateway combos')"
       },
       {
@@ -1986,31 +2281,10 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
-        "id": "allow-claude-code-subscription",
-        "match": "cc/*",
-        "allow": true,
-        "reason": "Claude Code subscription seat, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "allow-antigravity-signin",
-        "match": "antigravity/*",
-        "allow": true,
-        "reason": "agy free sign-in, not a paid API",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
         "id": "allow-gpt-oss",
         "match": "*/gpt-oss-*",
         "allow": true,
         "reason": "open-weight gpt-oss is not an OpenAI paid-API model",
-        "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
-      },
-      {
-        "id": "deny-claude-paid-api",
-        "match": "*/claude-*",
-        "allow": false,
-        "reason": "no Claude models through a paid API (too expensive)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
@@ -2115,6 +2389,24 @@
         "paid": false,
         "first_pass_only": true,
         "source": "L2-general 2026-09-28T08:12:44Z (REVFREE)"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/t2-worker",
+        "family": "zhipu",
+        "leg": "nebius/zai-org/GLM-5.3-Flash",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28, placement fixed by FREEKEYS-2b: the review chain's legs are every one of them `unproven` in the tracked registry (the proven verdict lives in the gitignored overlay), so a host without it had no reviewer it could prove answers a tool call. This is a free providers.nebius grant whose model row says `tool_calls: proven` (FREEKEYS-1 probe). It sits at the END of the free band, immediately before the closing anthropic row, so it is reached only when the entries ahead of it are all refused, and policy.reviewers stays ordered paid-first-then-free with Haiku last (ReviewerPolicyTests); first_pass_only because a cheap flash makes no final call."
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/t3-driver",
+        "family": "qwen",
+        "leg": "scaleway/qwen3-235b-a22b-instruct-2507",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28, placement fixed by FREEKEYS-2b: the second new cross-provider reviewer, a 235B free providers.scaleway grant with `tool_calls: proven` in the tracked registry (FREEKEYS-1 probe) - a different family and a different vendor account from the nebius entry above, so one provider's rate limit does not bench both. Last in the free band (the anthropic row still closes the list), same first_pass_only reasoning."
       },
       {
         "client": "claude",
@@ -2588,6 +2880,169 @@
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": false
+    },
+    "morph": {
+      "id": "morph",
+      "omniroute_id": "morph",
+      "model_prefix": "morph",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "credit",
+      "credit_usd": 10,
+      "trains_on_prompts": null,
+      "available": true,
+      "monthly_cap_usd": 10,
+      "monthly_warn_fraction": 0.8,
+      "monthly_cap_source": "operator 2026-09-28 Morph USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'morph' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'morph', 2 answered a tool-call trial end to end. Statuses measured: 200 x4, 400 x2. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): morph/morph-dsv4flash, morph/morph-glm52-744b."
+    },
+    "bazaarlink": {
+      "id": "bazaarlink",
+      "omniroute_id": "bazaarlink",
+      "model_prefix": "bzl",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": true,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bazaarlink' is registered and active, its catalog exposes 87 canonical model id(s) under prefix 'bzl', 1 answered a tool-call trial end to end. Statuses measured: 200 x1, 400 x5. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): bzl/deepseek/deepseek-v4-flash-0731free:free."
+    },
+    "navyai": {
+      "id": "navyai",
+      "omniroute_id": "navy",
+      "model_prefix": "navy",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": false,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'navy' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'navy', 0 answered a tool-call trial end to end. Statuses measured: 6 tried, 400 x5, 403 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "arcee": {
+      "id": "arcee",
+      "omniroute_id": "arcee-ai",
+      "model_prefix": null,
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": false,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'arcee-ai' is registered and active, its catalog exposes 0 canonical model id(s) under prefix 'arcee', 0 answered a tool-call trial end to end. Statuses measured: nothing probed - the connection exposes no model id at all, so there was nothing to try. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "bluesminds": {
+      "id": "bluesminds",
+      "omniroute_id": "bluesminds",
+      "model_prefix": "bm",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": false,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bluesminds' is registered and active, its catalog exposes 49 canonical model id(s) under prefix 'bm', 0 answered a tool-call trial end to end. Statuses measured: 400 x4, 410 x1, ERR x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "agentrouter": {
+      "id": "agentrouter",
+      "omniroute_id": "agentrouter",
+      "model_prefix": null,
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": false,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'agentrouter' is registered and active, its catalog exposes 13 canonical model id(s) under prefix 'agentrouter', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "novita_ai": {
+      "id": "novita_ai",
+      "omniroute_id": "novita",
+      "model_prefix": "novita",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": false,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'novita' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'novita', 0 answered a tool-call trial end to end. Statuses measured: 3 tried, 403 x3 - the three-consecutive-auth-failure stop fired before the shortlist ran out. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "scaleway": {
+      "id": "scaleway",
+      "omniroute_id": "scaleway",
+      "model_prefix": "scw",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": true,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'scaleway' is registered and active, its catalog exposes 6 canonical model id(s) under prefix 'scw', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 400 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): scw/gpt-oss-120b, scw/mistral-small-3.2-24b-instruct-2506, scw/qwen3-235b-a22b-instruct-2507. Reuses the already-registered models row(s) 'gpt-oss-120b' instead of writing a second row for the same model id."
+    },
+    "nebius": {
+      "id": "nebius",
+      "omniroute_id": "nebius",
+      "model_prefix": "nebius",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "free",
+      "credit_usd": 0,
+      "trains_on_prompts": null,
+      "available": true,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'nebius' is registered and active, its catalog exposes 27 canonical model id(s) under prefix 'nebius', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 404 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): nebius/zai-org/GLM-5.1, nebius/zai-org/GLM-5.2, nebius/zai-org/GLM-5.3-Flash."
+    },
+    "deepinfra": {
+      "id": "deepinfra",
+      "omniroute_id": "deepinfra",
+      "model_prefix": "deepinfra",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "credit",
+      "credit_usd": 5,
+      "trains_on_prompts": null,
+      "available": true,
+      "monthly_cap_usd": 5,
+      "monthly_warn_fraction": 0.8,
+      "monthly_cap_source": "operator 2026-09-28 DeepInfra USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'deepinfra' is registered and active, its catalog exposes 235 canonical model id(s) under prefix 'deepinfra', 6 answered a tool-call trial end to end. Statuses measured: 200 x6. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731, deepinfra/google/gemini-2.5-flash, deepinfra/google/gemini-3.1-flash-lite, deepinfra/google/gemini-3.5-flash, deepinfra/google/gemini-3.7-flash, deepinfra/inclusionAI/Ling-3.0-flash."
+    },
+    "together_ai": {
+      "id": "together_ai",
+      "omniroute_id": "together",
+      "model_prefix": "together",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "credit",
+      "credit_usd": 5,
+      "trains_on_prompts": null,
+      "available": false,
+      "monthly_cap_usd": 5,
+      "monthly_warn_fraction": 0.8,
+      "monthly_cap_source": "operator 2026-09-28 Together AI USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'together' is registered and active, its catalog exposes 277 canonical model id(s) under prefix 'together', 0 answered a tool-call trial end to end. Statuses measured: 403 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     }
   },
   "routes": {
@@ -2691,6 +3146,7 @@
     "deepseek-v4.1-flash": {
       "class": "cheap",
       "id": "deepseek-v4.1-flash",
+      "$comment": "Pinned per-model group (mapping doc Open choice 11), so every leg stays a DeepSeek V4 Flash weight - and a pinned group is allowed to have one live leg, because its job is weights-fidelity, not fallback: cross-provider redundancy for a DeepSeek card lives in the tier routes, all of which carry the Gemini free leg plus the FREEKEYS-1 grants. FREEKEYS-2 drafted the free bazaarlink copy as a second leg and FREEKEYS-2b took it back out: deepseek-v4-flash-0731 is V4, not V4.1, and the operator rule is 'DeepSeek only V4.1 Flash' (policy.leg_rules deny-deepseek), so this group renders the native head alone. The opencode-zen leg stays gated (client-bound, 402/429 probe).",
       "legs": [
         "deepseek/deepseek-flash",
         "opencode-zen/deepseek-v4.1-flash"
@@ -2724,9 +3180,11 @@
     "gemini-3.8-flash": {
       "class": "cheap",
       "id": "gemini-3.8-flash",
+      "$comment": "Pinned per-model group: both legs are the same Gemini 3.8 Flash weights, the gateway connection and the OpenRouter mirror. The OpenRouter leg stays gated (credits exhausted, operator 2026-09-25), so this combo answers on one provider today; its cross-provider redundancy is in the tier routes, which all carry the Gemini free leg plus the FREEKEYS-1 grants. Legs are ordered by what they cost (FREEKEYS-2, D-141 item 3): the free Gemini head, then the paid OpenRouter mirror, then gemini-3.5-flash on DeepInfra as the LAST leg - it is a `credit` provider with no price on file, so it stays gated and is the documented tail fallback once it is priced.",
       "legs": [
         "gemini/gemini-3.8-flash",
-        "openrouter/google/gemini-3.8-flash"
+        "openrouter/google/gemini-3.8-flash",
+        "deepinfra/google/gemini-3.5-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2748,6 +3206,10 @@
         }
       },
       "unavailable_legs": {
+        "deepinfra/google/gemini-3.5-flash": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.deepinfra is tier credit (a finite $5 vendor grant) and models.google/gemini-3.5-flash carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "available": false
+        },
         "openrouter/google/gemini-3.8-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
           "available": false
@@ -2869,14 +3331,19 @@
       }
     },
     "t1-orchestrator": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains)",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
+        "gemini/gemini-3.8-flash",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
+        "nebius/zai-org/GLM-5.3-Flash",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
         "meta_api/muse-spark-1.3-contributor",
         "opencode-zen/muse-spark-1.3-contributor-free",
         "openrouter/meta/muse-spark-1.3-contributor",
-        "gemini/gemini-3.8-flash"
+        "morph/morph-dsv4flash",
+        "deepinfra/google/gemini-3.5-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -2920,6 +3387,14 @@
         "opencode-zen/muse-spark-1.3-contributor-free": {
           "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
           "available": false
+        },
+        "morph/morph-dsv4flash": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-dsv4flash carries no real price (price_in/price_out 0 = 'no price on file'), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and registry.gateway_legs() must drop it here too - an unpriced grant renders as a free leg to the gateway and would drain the grant with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven, 1M advertised). GATE LIFTED BY: adding a real per-token price to the model row, then deleting this entry.",
+          "available": false
+        },
+        "deepinfra/google/gemini-3.5-flash": {
+          "$comment": "FREEKEYS-2 documented tail fallback, same reason as the morph leg: tier credit with no price on file, so the resolver refuses it and the combo must not carry it until a price lands (providers.deepinfra monthly_cap_usd 5). Probe-passed 2026-09-28 (FREEKEYS-1, tool_calls proven, 1M advertised).",
+          "available": false
         }
       }
     },
@@ -2951,12 +3426,15 @@
       "unavailable_legs": {}
     },
     "t1-orchestrator-free-only": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry. FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, nebius GLM-5.3-Flash, scaleway Mistral Small 3.2) FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.. Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. A free-only route takes no credit leg at all: the grants are metered money, not free. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one.",
       "class": "free",
       "id": "t1-orchestrator-free-only",
       "legs": [
         "opencode-zen/muse-spark-1.3-contributor-free",
-        "gemini/gemini-3.8-flash"
+        "gemini/gemini-3.8-flash",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
+        "nebius/zai-org/GLM-5.3-Flash",
+        "scaleway/mistral-small-3.2-24b-instruct-2506"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3061,12 +3539,15 @@
       "unavailable_legs": {}
     },
     "t2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again.",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again.",
       "class": "mid",
       "id": "t2-worker",
       "legs": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
+        "nebius/zai-org/GLM-5.2",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
@@ -3078,7 +3559,9 @@
         "deepseek/deepseek-flash",
         "opencode-zen/deepseek-v4.1-flash",
         "meta_api/muse-spark-1.3-contributor",
-        "free_ai/qwen7b"
+        "free_ai/qwen7b",
+        "morph/morph-dsv4flash",
+        "deepinfra/google/gemini-3.1-flash-lite"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3117,6 +3600,14 @@
         }
       },
       "unavailable_legs": {
+        "morph/morph-dsv4flash": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-dsv4flash carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "available": false
+        },
+        "deepinfra/google/gemini-3.1-flash-lite": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.deepinfra is tier credit (a finite $5 vendor grant) and models.google/gemini-3.1-flash-lite carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "available": false
+        },
         "cerebras/gpt-oss-120b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
           "available": false
@@ -3181,9 +3672,13 @@
     "t2-worker-free-only": {
       "class": "free",
       "id": "t2-worker-free-only",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
         "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-medium",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
+        "nebius/zai-org/GLM-5.2",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
@@ -3255,10 +3750,13 @@
       }
     },
     "t3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the head; with the dead leg gone L12 and L13 move up one.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "class": "cheap",
       "id": "t3-driver",
       "legs": [
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
+        "nebius/zai-org/GLM-5.2",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
         "mistral/mistral-code-latest",
         "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",
@@ -3270,7 +3768,9 @@
         "cheaperinference/glm-4.5-air",
         "cheaperinference/minimax-m2.7",
         "opencode-zen/deepseek-v4.1-flash",
-        "meta_api/muse-spark-1.3-contributor"
+        "meta_api/muse-spark-1.3-contributor",
+        "morph/morph-glm52-744b",
+        "deepinfra/google/gemini-3.7-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3309,6 +3809,14 @@
         }
       },
       "unavailable_legs": {
+        "morph/morph-glm52-744b": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.morph is tier credit (a finite $10 vendor grant) and models.morph-glm52-744b carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "available": false
+        },
+        "deepinfra/google/gemini-3.7-flash": {
+          "$comment": "FREEKEYS-2 documented tail fallback, NOT a live leg: providers.deepinfra is tier credit (a finite $5 vendor grant) and models.google/gemini-3.7-flash carries no real price (price_in/price_out 0 = \"no price on file\"), so tools/autoos_resolver.py credit_leg_priced() refuses it fail-closed and gateway_legs() drops it here too - an unpriced grant renders to the gateway as a free leg and would drain it with nothing in the ledger to show it. Probe-passed (FREEKEYS-1: tool_calls proven). GATE LIFTED BY: a real per-token price on the model row, then deleting this entry.",
+          "available": false
+        },
         "cerebras/qwen-3.8-27b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
           "available": false
@@ -3364,9 +3872,13 @@
     "t3-driver-free-only": {
       "class": "free",
       "id": "t3-driver-free-only",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
         "groq/qwen/qwen3.8-27b",
         "cerebras/qwen-3.8-27b",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
+        "nebius/zai-org/GLM-5.3-Flash",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
         "free_ai/qwen7b"
       ],
       "strategy": "priority",
@@ -3471,5 +3983,5 @@
       }
     }
   },
-  "version": "2026-09-27"
+  "version": "2026-09-28"
 }

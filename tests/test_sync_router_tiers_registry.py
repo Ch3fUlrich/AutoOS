@@ -216,6 +216,33 @@ class ManagedTierSelectionTests(unittest.TestCase):
         refs = sync.combos_refs(combos_path)
         self.assertEqual(set(refs), {"t2-worker"})
 
+    def test_combos_override_renders_a_gateway_namespace_by_its_provider(self):
+        """FREEKEYS-2e: combos.json holds `gateway_ref()`'s OUTPUT - `scw/*` is
+        scaleway's declared `model_prefix` - and that namespace is no provider in
+        `providers`, so the ref resolved to no transport and no env key and the
+        mirror came out `scw/... + os.environ/SCW_API_KEY`. With a registry to
+        consult, the override rewrites the ref back onto its provider; a
+        gateway-only prefix (`agy/*`) is still dropped, in either spelling."""
+        registry = {"providers": {
+            "scaleway": {"omniroute_id": "scaleway", "model_prefix": "scw"},
+            "antigravity": {"omniroute_id": "antigravity", "model_prefix": "agy"},
+        }, "routes": {}}
+        combos_path = self.dir / "combos.json"
+        combos_path.write_text(json.dumps({"combos": [{
+            "name": "t3-driver-free-only",
+            "models": ["scw/mistral-small-3.2-24b-instruct-2506",
+                       "free-ai/qwen7b",
+                       "agy/gemini-3.7-flash-medium"]}]}), encoding="utf-8")
+        sync = _load_module()
+        refs = sync.combos_refs(combos_path, registry=registry)
+        self.assertEqual(refs["t3-driver-free-only"],
+                         ["scaleway/mistral-small-3.2-24b-instruct-2506",
+                          "free-ai/qwen7b"])
+        # Without a registry there is nothing to translate by - refs as read.
+        self.assertEqual(sync.combos_refs(combos_path)["t3-driver-free-only"],
+                         ["scw/mistral-small-3.2-24b-instruct-2506",
+                          "free-ai/qwen7b"])
+
 
 class RegistrySandbox:
     """Temp copies of ai-registry.json, combos.json and config.yaml, plus a

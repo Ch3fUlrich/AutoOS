@@ -107,6 +107,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
 - R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner; CAO separate. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
+- R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)
 
 ### orch (L2)
 
@@ -135,6 +136,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-worker-08: Verify on a detached copy (`git clone --no-hardlinks`, `worktree add --detach`; `tar` only if no test reads git); never cp a worktree. (why: copies share its index; source: ci7)
 - R-worker-09: Never call Serena `activate_project` from a worktree. (why: the one shared server re-points every session; source: briefs/common.md MCP, 2026-09-26)
 - R-worker-10: Accept a detector or redactor on the real output corpus; give each new raw-data consumer its own redaction test. (why: fixtures passed; a secret leaked; source: SPAWNFIX3d, REDACTFIX3)
+- R-worker-11: A 'summarise, no tools' ask is harness compaction unless a leading <cross-session-message from=> wrapper marks a peer. (why: transcript export; source: D-146, SB-C2, CompactionRuleTests)
 
 ## CAO quickstart
 
