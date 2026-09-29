@@ -822,6 +822,60 @@ class CheckReadyTests(RepoFixture):
         self.assertIn("NOT READY", self.assert_rc(1, ("--check-ready", "2" * 40)))
 
 
+class WorkerRecordTests(RepoFixture):
+    """D-154 item 5: a spawner's worker may run the gate and hear its verdict,
+    but can never book a green record — the certificate is an orchestrator's
+    act. The spawner exports ``AUTOOS_AGENT_RUN_ID`` into every worker it
+    launches (tools/autoos-agent.py, WORKER_ENV_AUTOOS); that is what the gate
+    looks at, because it is the one fact about the calling process the spawner
+    sets and the worker's own checkout cannot un-set."""
+
+    WORKER = {"AUTOOS_AGENT_RUN_ID": "20260929T000000Z-lane-worker"}
+
+    def test_a_worker_run_reports_green_and_records_nothing(self):
+        self.suite_is_green()
+        self.set_plan({})
+        out = self.assert_rc(0, env=self.WORKER)
+        self.assertIn("NOT RECORDED", out)
+        self.assertIn("AUTOOS_AGENT_RUN_ID", out)
+        self.assertIsNone(self.store_record(), "a worker run booked a certificate")
+        self.assertEqual(self.log_lines(), [],
+                         "a worker run left a green log line too")
+        sha = self.head()
+        out = self.assert_rc(1, ("--check-ready", sha), env=self.WORKER)
+        self.assertIn("NOT READY", out)
+
+    def test_a_worker_run_still_refuses_a_red_tree(self):
+        # The refusal not to record must not swallow the verdict: the worker
+        # still sees exactly which commands are red, as an orchestrator would.
+        self.suite_is_red()
+        self.set_plan({"terms": "usb"})
+        out = self.assert_rc(1, env=self.WORKER)
+        self.assertIn("run-tests.sh", out)
+
+    def test_the_same_gate_outside_a_worker_run_records_green(self):
+        # The control half: it is the run id in the environment that withholds
+        # the certificate, not the checks this host can run. The fixture's
+        # base_env pops the host's own run id — the suite itself runs inside a
+        # spawned sandbox on this host.
+        self.suite_is_green()
+        self.set_plan({})
+        self.assert_rc(0)
+        self.assertIsNotNone(self.store_record())
+        self.assert_rc(0, ("--check-ready", self.head()))
+
+    def test_a_worker_override_is_still_never_green(self):
+        # An override is not a green record and the worker guard does not make
+        # it one: the step-over stays a step-over.
+        self.suite_is_red()
+        self.set_plan({})
+        env = dict(self.WORKER, AUTOOS_PREPUSH_OVERRIDE="docs only")
+        out = self.assert_rc(0, env=env)
+        self.assertIn("CHECKS SKIPPED", out)
+        sha = self.head()
+        self.assert_rc(1, ("--check-ready", sha))
+
+
 class MappingTests(unittest.TestCase):
     """The file -> test mapping, one test per measured red (c)."""
 

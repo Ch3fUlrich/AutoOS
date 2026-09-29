@@ -597,6 +597,18 @@ def gate(repo, base: str):
         for text in failures:
             print("  failed: %s" % text)
         return REFUSED
+    if os.environ.get(RUN_ID_ENV):
+        # D-154 item 5. The run id is the spawner's own mark on the child's
+        # environment (WORKER_ENV_AUTOOS in tools/autoos-agent.py): a gate
+        # answering under it is answering *for a worker*, and a worker getting
+        # its own push certified is the forgery this whole round exists to
+        # stop. The verdict is still the worker's — it just never books.
+        print("prepush: green — %d check(s) for %s, but NOT RECORDED: %s is set, "
+              "so this is a worker's run and only an orchestrator's gate certifies "
+              "a push (D-154). The lane can push; the orchestrator that merges it "
+              "runs the gate for the record --check-ready will ask for."
+              % (len(results), sha[:12], RUN_ID_ENV))
+        return 0
     try:
         write_store_record(green_record(sha, tree, results))
     except OSError as exc:
