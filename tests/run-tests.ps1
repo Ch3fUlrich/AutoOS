@@ -6774,14 +6774,16 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
             Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
             Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
         }
-        # PROVFIX3 finding 1 re-pins the window: t1 falls through to its gemini
-        # leg (131,072), so that is what every surface may promise — and the
-        # effort still rides along, because the leg that answers FIRST is the
-        # 1M/xhigh contributor (finding 8: the ladder follows the served head).
+        # PROVFIX3 finding 1 re-pins the window: a route promises what its
+        # smallest SERVED leg takes. FREEKEYS-2/2c (D-141) put the free band
+        # (scaleway/nebius, 128k advertised) ahead of gemini in t1-orchestrator,
+        # so 128,000 is the honest promise now. Finding 8 still holds and now
+        # bites for real: the head is gemini, whose ladder tops out at "high",
+        # so the surface default "xhigh" is DROPPED, never forwarded.
         $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
         Assert-Equal $t1.Count 1
-        Assert-Equal $t1[0].max_tokens 131072
-        Assert-Equal $t1[0].reasoning_effort 'xhigh'
+        Assert-Equal $t1[0].max_tokens 128000
+        Assert-Equal $t1[0].reasoning_effort $null
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })

@@ -269,13 +269,11 @@
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
           "name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
-            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
         "t1-orchestrator-paid": {
@@ -293,7 +291,7 @@
         "t1-orchestrator-free-only": {
           "modelID": "t1-orchestrator-free-only",
           "name": "t1 orchestrator-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -303,7 +301,7 @@
         "t2-worker": {
           "modelID": "t2-worker",
           "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -323,7 +321,7 @@
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
           "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -343,7 +341,7 @@
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "t3-driver-clean": {
           "modelID": "t3-driver-clean",
@@ -358,7 +356,7 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "spark-1.3-contributor": {
           "modelID": "spark-1.3-contributor",
@@ -438,13 +436,11 @@
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
           "name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
-            { "id": "minimal", "settings": { "reasoningEffort": "minimal" } },
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
         "t1-orchestrator-paid": {
@@ -462,7 +458,7 @@
         "t1-orchestrator-free-only": {
           "modelID": "t1-orchestrator-free-only",
           "name": "t1 orchestrator-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -472,7 +468,7 @@
         "t2-worker": {
           "modelID": "t2-worker",
           "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -487,7 +483,7 @@
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
           "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -497,7 +493,7 @@
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "t3-driver-paid": {
           "modelID": "t3-driver-paid",
@@ -507,7 +503,7 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "t4-rag": {
           "modelID": "t4-rag",

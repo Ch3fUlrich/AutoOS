@@ -721,17 +721,19 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # ladder the renderers already project - catalog/ide-models.json's
         # effort_ladder and, from it, opencode.jsonc's per-effort `variants`
         # (the #minimal/#low/#medium/#high/#xhigh pickers).
+        # FREEKEYS-2 (D-141) moved the free band ahead of the contributor leg,
+        # so t1-orchestrator's SERVED head is gemini and its picker follows that
+        # head (finding 8) - the contributor ladder is pinned on the routes the
+        # contributor actually heads.
         ladder = real_registry()["models"]["muse-spark-1.3-contributor"]["effort_ladder"]
         self.assertEqual(ladder, ["minimal", "low", "medium", "high", "xhigh"])
         by_id = {m["id"]: m for m in real_ide_models()["models"]}
-        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
-                         "spark-1.3-contributor"):
+        for route_id in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             self.assertEqual(by_id[route_id]["effort_ladder"], ladder, route_id)
 
         oc = json.loads(_strip_jsonc((ROOT / "opencode.jsonc").read_text(encoding="utf-8")))
         seen = set()
-        for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
-                         "spark-1.3-contributor"):
+        for route_id in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             for provider in by_id[route_id]["surfaces"]:
                 models = oc["providers"][provider]["models"]
                 variants = [v["id"] for v in models[route_id].get("variants", [])]
@@ -972,7 +974,13 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         reg = copy.deepcopy(real_registry())
         del reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"]
         rendered = registry.render_models_doc(reg)
-        self.assertIn("131,072", row_for(rendered, "t3-driver"))
+        # FREEKEYS-2c: the numeric fallback is clamped like every other context
+        # cell (clamp_route_context narrows a numeric surface context too), and
+        # t3-driver's servable legs now head with the free band, whose smallest
+        # advertised window is the scaleway/nebius 128k. The surface promise of
+        # 131,072 no longer survives the clamp; the comma-spelled number is the
+        # fallback's signature - "128k" is the label form the deleted cell had.
+        self.assertIn("128,000", row_for(rendered, "t3-driver"))
 
     def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
         reg = copy.deepcopy(real_registry())
@@ -1341,20 +1349,22 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         self.assertIn("litellm-t1-orchestrator", ids)
 
     def test_openhands_tier_returns_when_its_leg_becomes_servable(self):
-        # Gate t3-driver-free-only's one servable leg and its declaration
-        # goes; let it serve again and the declaration comes back. Before
-        # FREEAI every leg of this route was unavailable, so it sat in the
-        # dropped set for exactly this reason.
+        # FREEKEYS-2c (D-141) put a servable free band (scaleway/nebius) ahead of
+        # free_ai in this route, so gating one leg no longer empties it: gate
+        # EVERY leg and its declaration goes; lift the gate and it comes back.
         gated = copy.deepcopy(real_registry())
-        gated["routes"]["t3-driver-free-only"]["unavailable_legs"][
-            "free_ai/qwen7b"] = {"available": False}
+        route = gated["routes"]["t3-driver-free-only"]
+        route.setdefault("unavailable_legs", {})
+        for leg in list(route["legs"]):
+            route["unavailable_legs"][leg] = {"available": False}
+        self.assertEqual(registry.gateway_legs(route, gated), [])
         gone = {t["id"] for t in registry.render_openhands(gated)["tiers"]}
         self.assertNotIn("omniroute-t3-driver-free-only", gone)
         self.assertNotIn("litellm-t3-driver-free-only", gone)
 
-        served = copy.deepcopy(real_registry())
-        served["routes"]["t3-driver-free-only"]["unavailable_legs"].pop(
-            "free_ai/qwen7b", None)
+        served = copy.deepcopy(gated)
+        for leg in list(served["routes"]["t3-driver-free-only"]["legs"]):
+            served["routes"]["t3-driver-free-only"]["unavailable_legs"].pop(leg, None)
         ids = {t["id"] for t in registry.render_openhands(served)["tiers"]}
         self.assertIn("omniroute-t3-driver-free-only", ids)
         self.assertIn("litellm-t3-driver-free-only", ids)
@@ -1549,10 +1559,17 @@ class FreeAiRenderTests(unittest.TestCase):
         self.assertNotIn("t3-driver-free-only", rendered["omitted"])
         combos = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("t3-driver-free-only", combos)
-        # groq and cerebras are unavailable, so free_ai is the only servable leg.
-        # The combo uses the omniroute_id spelling (D: model_prefix free-ai).
-        self.assertEqual(combos["t3-driver-free-only"]["models"],
-                         ["free-ai/qwen7b"])
+        # FREEKEYS-2c (D-141) gave this route a servable free band ahead of
+        # free_ai, so groq/cerebras being unavailable no longer leaves free_ai
+        # as the ONLY servable leg: the band leads, the self-hosted free_ai
+        # stays last. The combo uses the omniroute_id spelling
+        # (D: model_prefix free-ai).
+        models = combos["t3-driver-free-only"]["models"]
+        self.assertEqual(models[-1], "free-ai/qwen7b")
+        self.assertEqual(models[:3],
+                         ["scw/mistral-small-3.2-24b-instruct-2506",
+                          "nebius/zai-org/GLM-5.3-Flash",
+                          "scw/qwen3-235b-a22b-instruct-2507"])
 
     def test_free_ai_is_last_in_the_free_only_combos(self):
         combos = {c["name"]: c for c in
@@ -1788,12 +1805,31 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         entry = self._ide_entry(self._t1_gated_to_gemini(), "t1-orchestrator")
         self.assertNotIn("reasoning_effort", entry)
 
+    def _t1_headed_by_contributor(self):
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["t1-orchestrator"]
+        route.setdefault("unavailable_legs", {})
+        for leg in list(route["legs"]):
+            if leg != "meta_api/muse-spark-1.3-contributor":
+                route["unavailable_legs"][leg] = {"available": False}
+        return reg
+
     def test_a_default_the_served_head_carries_is_still_forwarded(self):
-        # Nothing is gated in the real registry: meta_api/muse-spark-1.3-
-        # contributor is the served head and does carry xhigh.
-        entry = self._ide_entry(real_registry(), "t1-orchestrator")
+        # FREEKEYS-2 (D-141) made a free leg the real head, and gemini's ladder
+        # tops out at "high" - so the positive branch needs a registry whose
+        # served head DOES carry the surface default: gate the band and
+        # meta_api/muse-spark-1.3-contributor answers with its "xhigh".
+        entry = self._ide_entry(self._t1_headed_by_contributor(), "t1-orchestrator")
         self.assertEqual(entry.get("reasoning_effort"), "xhigh")
         self.assertIn("xhigh", entry["effort_ladder"])
+
+    def test_the_real_free_head_keeps_its_own_default(self):
+        # The head the real registry serves today is gemini: no xhigh is
+        # forwarded (finding 8), and whatever default the head does carry still
+        # reaches the picker.
+        entry = self._ide_entry(real_registry(), "t1-orchestrator")
+        self.assertNotIn("reasoning_effort", entry)
+        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_openhands_max_input_tokens_is_clamped(self):
         tiers = {t["id"]: t for t in

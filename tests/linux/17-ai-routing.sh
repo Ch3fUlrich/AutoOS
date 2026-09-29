@@ -2229,8 +2229,10 @@ omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
 # The model lists are catalog/ide-models.json projected at run time (ids,
 # display names, windows, membership, order). PROVFIX3 finding 1 re-pins the
-# t1 window: a route may only promise what its smallest servable leg takes, and
-# t1 falls through to gemini (131,072).
+# t1 window: a route may only promise what its smallest servable leg takes.
+# FREEKEYS-2/2c (D-141) put the free band ahead of gemini in t1-orchestrator,
+# and the scaleway/nebius grants advertise 128,000 (gemini itself takes
+# 131,072), so the promise the catalog may now make is 128,000.
 cat = json.load(open("catalog/ide-models.json", encoding="utf-8"))["models"]
 def want(gateway):
     out = []
@@ -2244,7 +2246,7 @@ def want(gateway):
 got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
 bad = [g for g in got_models if got_models[g] != want(g)]
 t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "t1-orchestrator"]
-models = "catalog-ok" if not bad and t1 == [131072] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
+models = "catalog-ok" if not bad and t1 == [128000] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
 # Keys never land in settings.json (Zed docs: keychain/UI or env).
 # Pins come from the harness at runtime, never as literals in lib/.
 h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
