@@ -25,7 +25,10 @@ after the first marker can be trusted to sit outside a paste.
   lines are skipped — this is what saves the round-1 measured git-diff case deterministically,
   without re-reading anything unfenced. Fences follow CommonMark: the closer must be the opener's
   own character, at least as long, whitespace-only, at ≤3 spaces indent. Quoted/template rejects
-  and last-verdict-wins are kept.
+  and last-verdict-wins are kept. A blank line while the hunk counts remain is a context line that
+  lost its single leading space to a terminal's trailing-whitespace strip and consumes one from
+  both counts (VERDICTFENCE-3, measured: `'@@ -1,3 +1,3 @@\n a\n\n VERDICT: READY\n'` had graded
+  `READY`).
 - **One round-1 test inverted by rule (a)**: `test_an_unclosed_fence_does_not_hide_what_follows_it`
   asserted the rescan behavior itself (`"```text\nVERDICT: fix-first\n"` → `fix-first`); it is now
   `test_an_unclosed_fence_hides_what_follows_it` → `None`, matching pre-round-1 fail-closed.

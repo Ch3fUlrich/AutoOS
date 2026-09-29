@@ -952,6 +952,11 @@ def review_verdict(text: str) -> str | None:
                 continue
             elif raw.startswith("\\"):
                 continue  # "\ No newline at end of file" counts toward neither
+            elif raw == "":
+                # a blank context line that lost its single leading space to a
+                # trailing-whitespace strip is still hunk content
+                hunk = (old - 1, new - 1)
+                continue
             else:
                 hunk = None
         if fence is not None:

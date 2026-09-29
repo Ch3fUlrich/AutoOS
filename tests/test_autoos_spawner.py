@@ -15895,6 +15895,17 @@ class VerdictLineTests(unittest.TestCase):
         self.assertEqual(self.verdict(diff + "VERDICT: not ready\n"),
                          "not ready")
 
+    def test_a_blank_line_in_a_hunk_counts_as_stripped_context(self):
+        # VERDICTFENCE-3: a terminal/transcript trailing-whitespace strip
+        # leaves a blank context line with NO leading space. While the header's
+        # counts remain it is still hunk content and consumes one from both
+        # sides; ending the hunk on it would scan the rest of the body as
+        # reviewer text.
+        self.assertIsNone(self.verdict("@@ -1,3 +1,3 @@\n a\n\n VERDICT: READY\n"))
+        # and once the counts are consumed the next line IS reviewer text again:
+        self.assertEqual(self.verdict("@@ -1,2 +1,2 @@\n a\n\nVERDICT: fix-first\n"),
+                         "fix-first")
+
     def test_a_fence_deeper_than_markdowns_indent_is_content(self):
         # Markdown opens a fence at up to 3 spaces of indent; deeper is content,
         # and must not flip the scan in and back out of a block.
