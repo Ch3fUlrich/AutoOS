@@ -5953,6 +5953,60 @@ class ClientExit(int):
         return obj
 
 
+SCOPE_WRAPPER = "systemd-run"
+
+
+class ClientMissing(Exception):
+    """A planned launch's program resolves to nothing on PATH (WINSHIM).
+
+    Raised by `resolve_client_executable` instead of letting subprocess answer a
+    bare name with a FileNotFoundError traceback.
+    """
+
+
+def client_program_index(cmd) -> int:
+    """Which element of `cmd` names the program this argv actually starts.
+
+    0 for a client launch. A worker started inside its transient scope is the one
+    shape where the client is not argv[0]: `systemd-run` is the spawner's own
+    plumbing, started by name, and the program it launches hides behind the
+    wrapper's `--` (see `worker_scope_argv`). Resolving the wrapper rather than
+    what is after it would break the POSIX cancel channel.
+    """
+    argv = list(cmd)
+    if argv and os.path.basename(argv[0]) == SCOPE_WRAPPER and "--" in argv:
+        return argv.index("--") + 1
+    return 0
+
+
+def resolve_client_executable(cmd) -> list:
+    """`cmd` with the client's program replaced by what `shutil.which()` found.
+
+    WINSHIM (reported by Workstation-AutoOS): on Windows a client installed as a
+    `.cmd`/`.ps1` shim is on PATH — so the spawner's own which() pre-check calls it
+    installed — while `CreateProcess` appends only `.exe` and Popen of the bare
+    name raised FileNotFoundError [WinError 2]. which() honours PATHEXT, so it
+    finds the shim and Popen is handed its full path. `shell=True` is not the
+    answer: it would put argv quoting and an injection surface behind every spawn.
+    On POSIX which() returns the file execvp would have picked, so a client that
+    works today is untouched. Every launch site goes through here — `run_client`
+    (the first attempt and each fallthrough re-run) and the MCP runner's detached
+    `run` — so one rule decides what starts, and a program that is not there is
+    named, with the PATH that was searched, instead of traced back.
+    """
+    argv = list(cmd)
+    index = client_program_index(argv)
+    name = argv[index]
+    exe = shutil.which(name)
+    if exe is None:
+        raise ClientMissing(
+            "not installed: %s (PATH %s). Install it (catalog: ./setup.sh --only "
+            "<id> -y; on Windows the directory holding the .cmd/.ps1 shim has to "
+            "be on PATH); see: list" % (name, os.environ.get("PATH", "")))
+    argv[index] = exe
+    return argv
+
+
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
                run_id=None, attempt=None) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
@@ -5997,6 +6051,8 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # (measured 2026-09-24: 150 s hang vs 6 s with /dev/null).
     # leftovers (private Serena, language servers) survived a cancelled worker, measured 2026-09-25.
     register_secret_env(env)
+    # WINSHIM: Popen starts the file which() resolved, never the bare name.
+    cmd = resolve_client_executable(cmd)
     pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
     # ERRCHANNEL: on POSIX the two channels stay two pipes, so the rate-limit
     # family can be classified on stderr alone. Their bytes still land in one
@@ -6703,8 +6759,14 @@ def cmd_run(args, cfg: dict) -> int:
     # anything is cloned or started.
     if leaf_refusal is not None:
         return refuse(leaf_refusal)
-    if not shutil.which(plan["cmd"][0]):
-        return refuse("%s is not installed (catalog: ./setup.sh --only <id> -y); see: list" % plan["cmd"][0], 3)
+    try:
+        # WINSHIM: the pre-check asks the same question the launch site will, so a
+        # client that is not there is refused before anything is cloned rather than
+        # crashing on its bare name later. The plan keeps the bare name; `run_client`
+        # resolves it again, at the one point Popen reads it.
+        resolve_client_executable(plan["cmd"])
+    except ClientMissing as exc:
+        return refuse(str(exc), 3)
     ok, reason = clients.signin_state(client)
     if ok is False:
         what = "installed but not signed in" if clients.signed_out(reason) else "installed but not usable"
@@ -6867,6 +6929,7 @@ def cmd_run(args, cfg: dict) -> int:
             free_reservation = None
         attempt_start = time.time()
         run_rc = None
+        missing = None
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                                 capture=capture,
@@ -6875,6 +6938,11 @@ def cmd_run(args, cfg: dict) -> int:
                                 # attempt re-records its group in the runner-private
                                 # store `cancel` kills from.
                                 run_id=plan.get("run_id"), attempt=fallthroughs + 1)
+        except ClientMissing as exc:
+            # WINSHIM: gone between the pre-check and this attempt (a fallthrough
+            # re-run can be hours later, or the PATH moved). The spawner's own 3,
+            # named in one line — not a FileNotFoundError traceback.
+            missing = str(exc)
         finally:
             if worker_id is not None:
                 try:
@@ -6882,6 +6950,9 @@ def cmd_run(args, cfg: dict) -> int:
                 except OSError as exc:
                     print("autoos-agent: could not update worker record %s: %s"
                           % (worker_id, exc), file=sys.stderr)
+        if missing is not None:
+            rc = refuse(missing, 3)
+            break
         client_tail = getattr(run_rc, "tail", "") or ""
         # REDACTFIX item 2 (review-spfix S2): both checks classify on the
         # child's OWN text, because redaction can mask the very marker they look

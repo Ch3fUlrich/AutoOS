@@ -717,6 +717,20 @@ def run_job(path: str) -> int:
     job = _read_json(os.path.join(path, "job.json"))
     cmd = [sys.executable, AGENT] + job["argv"]
     env = agent.spawner_child_env(extra={"AUTOOS_TASK_DIR": path})
+    try:
+        # WINSHIM: the same resolution every other launch site uses, applied to
+        # the CLI command before any scope wrapper goes around it.
+        cmd = agent.resolve_client_executable(cmd)
+    except agent.ClientMissing as exc:
+        # This runner is detached: no caller is left to read a raised exception, so
+        # the reason goes into the log `result` reads and the run fails with the
+        # spawner's own missing-program code rather than a traceback.
+        message = "autoos-agent: %s" % exc
+        with io.open(os.path.join(path, "output.log"), "ab") as out:
+            out.write((message + "\n").encode("utf-8", "replace"))
+        _write_exit(path, {"rc": 3, "ended": time.time()})
+        print(message, file=sys.stderr)
+        return 3
     if agent.scope_supported():
         # derived from the run id, and identical to what `cancel` will derive;
         # job.json keeps it only so a human reading the dir sees the unit.
