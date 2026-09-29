@@ -868,15 +868,19 @@ _VERDICT_SCAN_BYTES = 2 * 1024 * 1024
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-# A fence opener, at markdown's own indentation: up to 3 spaces of leading space
-# and then three or more ` or ~. This is deliberately markdown's rule, not a
-# stricter one: a `git diff` context line ' ```' keeps the diff's own leading
-# space and so still counts as an opener here — VERDICTFENCE (b) is what saves
-# that measured case. What the bound does buy is parity: a fence indented deeper
-# than 3 spaces is CONTENT inside someone else's block, and toggling on it used
-# to flip the scan in and back out of a real fence, which exposed a CLOSED block
-# (the contract pasted back at us) as if it were unfenced.
-_FENCE_RE = re.compile(r"^ {0,3}(?:`{3,}|~{3,})")
+# A fence opener, at markdown's own indentation: up to 3 spaces of leading
+# space and then three or more ` or ~. A closing fence is the opener's OWN
+# character, at least as long, and nothing but whitespace after it (CommonMark
+# — `~~~` does not close a ``` block and ' ```' does not close ' ````').
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+
+# A unified-diff hunk header; the b/d line counts decide how far the hunk body
+# reaches. Inside that body nothing is markdown: a fence line is a fence in
+# the DIFFED FILE and a VERDICT line is that file's text, not the reviewer's
+# (VERDICTFENCE-R2 (b); it is what saves the measured git-diff case without
+# the unsafe rescan).
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 
 def _verdict_value(stripped: str) -> str | None:
@@ -909,43 +913,73 @@ def review_verdict(text: str) -> str | None:
     has to be read. The LAST verdict wins — a reviewer that changed its mind said
     so.
 
-    SB-A2 (D-103) item D tightened what counts (see `_verdict_value`) and added the
-    fenced-block protection: a reviewer that pasted the contract at us is not
-    stating a verdict. VERDICTFENCE keeps that protection for a real, CLOSED block
-    and closes the two ways it swallowed a genuine decision — an opener deeper than
-    markdown's indentation, and any opener the transcript never closes, since the
-    verdict sits after it and the run was graded failed/no-verdict over it.
+    SB-A2 (D-103) item D tightened what counts (see `_verdict_value`). VERDICTFENCE
+    R2 replaced the round-1 rescan, which the cross-family review measured forging
+    three verdicts: a fence still open at the END of the text now fails CLOSED —
+    the transcript was cut mid-block, and a paste's own fence lines make the
+    pairing ambiguous, so nothing from the first fence marker on is trusted (the
+    round-1 "re-read the tail unfenced" is exactly how `VERDICT: READY` got
+    harvested out of a crashed reviewer's paste). What makes the measured git-diff
+    case safe deterministically is (b): a hunk body, counted from its `@@` header,
+    is the diffed file's text and toggles no fence and states no verdict; fences
+    follow CommonMark (c): same character, at least as long, whitespace-only
+    closer; `>`-quotes and template lines stay rejected and the last verdict
+    outside fences and hunks still wins (d).
+
+    Follow-up (R-orch-16): verdicts should come only from reviewer-owned model
+    turns of a structured transcript, not from scraping this raw stdout — not
+    built here.
     """
     raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
-    found = None
-    in_fence = False
-    open_at = -1
+    found = None               # last verdict outside fences and hunks
+    found_before_fence = None  # ...and before the text's first fence marker
+    fence = None               # (char, length) while a block is open
+    first_marker = None
+    hunk = None                # (old, new) lines left in the active hunk body
     for i, raw in enumerate(raws):
+        if hunk is not None:
+            old, new = hunk
+            if old <= 0 and new <= 0:
+                hunk = None
+            elif raw.startswith(" "):
+                hunk = (old - 1, new - 1)
+                continue
+            elif raw.startswith("-"):
+                hunk = (old - 1, new)
+                continue
+            elif raw.startswith("+"):
+                hunk = (old, new - 1)
+                continue
+            elif raw.startswith("\\"):
+                continue  # "\ No newline at end of file" counts toward neither
+            else:
+                hunk = None
+        if fence is not None:
+            m = _FENCE_CLOSE_RE.match(raw)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if raw.startswith(("diff --git", "index ", "---", "+++")):
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
+            continue
+        m = _FENCE_OPEN_RE.match(raw)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            if first_marker is None:
+                first_marker = i
+            continue
         stripped = raw.strip()
         if not stripped:
-            continue
-        if _FENCE_RE.match(raw):
-            in_fence = not in_fence
-            if in_fence:
-                open_at = i
-            continue
-        if in_fence:
             continue
         value = _verdict_value(stripped)
         if value:
             found = value
-    if in_fence:
-        # The scan toggles on every marker, so an open fence at the end means
-        # `open_at` holds the LAST marker in the text and nothing below it is
-        # fenced as far as this scan can tell.
-        for raw in raws[open_at + 1:]:
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            value = _verdict_value(stripped)
-            if value:
-                found = value
-    return found
+            if first_marker is None:
+                found_before_fence = value
+    return found_before_fence if fence is not None else found
 
 
 def _review_requested(req: dict, argv: list) -> bool:
