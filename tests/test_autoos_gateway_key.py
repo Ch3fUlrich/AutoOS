@@ -33,6 +33,14 @@ class TestIsLocalGateway(unittest.TestCase):
         self.assertTrue(is_local_gateway("http://[::1]:20128"))
         self.assertTrue(is_local_gateway("https://localhost:20128"))
         self.assertTrue(is_local_gateway("http://localhost"))
+        # Uppercase hostnames are normalized to lowercase
+        self.assertTrue(is_local_gateway("http://LOCALHOST:20128/"))
+        self.assertTrue(is_local_gateway("http://LocalHost:20128"))
+        # Userinfo (username:password@) should be stripped - matches Python's urlparse().hostname
+        self.assertTrue(is_local_gateway("http://user:pass@127.0.0.1:8080"))
+        self.assertTrue(is_local_gateway("http://user@127.0.0.1:8080"))
+        self.assertTrue(is_local_gateway("http://user:pass@localhost:8080"))
+        self.assertTrue(is_local_gateway("http://user:pass@[::1]:8080"))
 
     def test_non_local(self):
         self.assertFalse(is_local_gateway("https://gw.example.com"))

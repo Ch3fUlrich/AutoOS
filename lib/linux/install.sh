@@ -4975,11 +4975,13 @@ is_local_gateway() {
     # Without a scheme there is no gateway host to match: non-local.
     [[ "$url" != *"://"* ]] && return 1
     local host
-    # Strip scheme and path, then the port - except a bracketed IPv6
-    # literal, whose colons are not a port separator ([::1]:20128 must
-    # stay ::1, not be cut to an empty string).
+    # Strip scheme, then userinfo (user:pass@), then path.
+    # Python's urlparse().hostname and [Uri].Host already strip userinfo.
     host="${url#*://}"
+    # Strip userinfo if present (username:password@host)
+    host="${host#*@}"
     host="${host%%/*}"
+    # Strip port - except a bracketed IPv6 literal ([::1]:20128 -> ::1)
     if [[ "$host" == \[*\]* ]]; then
         host="${host#\[}"; host="${host%%\]*}"
     else

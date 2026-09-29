@@ -5598,13 +5598,31 @@ fi
 
 if it "gwkey: loopback spellings are local, bare names are not"; then
     out="$( ( . "$ROOT/lib/linux/install.sh"
-        for u in "" "http://127.0.0.1:20128" "http://localhost:20128" "https://localhost" "http://[::1]:20128"; do
+        # Local URLs (should all return 'local')
+        for u in \
+            "" \
+            "http://127.0.0.1:20128" \
+            "http://localhost:20128" \
+            "https://localhost" \
+            "http://[::1]:20128" \
+            "http://LOCALHOST:20128/" \
+            "http://user:pass@127.0.0.1:8080" \
+            "http://user@127.0.0.1:8080" \
+            "http://user:pass@localhost:8080" \
+            "http://user:pass@[::1]:8080"; do
             if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
         done
-        for u in "not-a-url" "https://gw.example.com" "http://server:20128" "http://[::2]:20128"; do
+        # Non-local URLs (should all return 'remote')
+        for u in \
+            "not-a-url" \
+            "https://gw.example.com" \
+            "http://server:20128" \
+            "http://[::2]:20128"; do
             if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
         done ) 2>/dev/null )"
-    if [[ "$out" == "$(printf 'local\nlocal\nlocal\nlocal\nlocal\nremote\nremote\nremote\nremote')" ]]; then
+    # 10 local + 4 remote = 14 lines
+    expected="$(printf 'local\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nremote\nremote\nremote\nremote')"
+    if [[ "$out" == "$expected" ]]; then
         pass
     else
         fail "loopback classification wrong: [$out]"

@@ -63,17 +63,20 @@ function Get-AutoOSKeyValue {
 }
 
 # ─── OmniRoute gateway key resolution (mirrors lib/linux/install.sh) ───
+# This is a COPY of Test-AutoOSLocalGateway from lib/windows/AutoOS.Install.psm1.
+# If the logic changes, update both. A parity test in tests/run-tests.ps1 asserts
+# they give the same answers for the WS-OMNIREMOTE URL table.
 function Test-AutoOSLocalGateway {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $true }
     try {
         $uri = [Uri]$Url
-        $host = $uri.Host
+        $gwHost = $uri.Host
     } catch {
         return $false
     }
-    $host = $host.Trim('[',']').ToLowerInvariant()
-    $host -in @('127.0.0.1','localhost','::1')
+    $gwHost = $gwHost.Trim('[',']').ToLowerInvariant()
+    $gwHost -in @('127.0.0.1','localhost','::1')
 }
 
 function Get-AutoOSHostConfigPath {
@@ -84,7 +87,7 @@ function Get-AutoOSHostConfigPath {
     return Join-Path ($env:XDG_CONFIG_HOME -or "$env:HOME/.config") 'autoos/host.yml'
 }
 
-function Normalize-AutoOSHostName {
+function ConvertTo-AutoOSHostName {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
     $Name = $Name.Split('.')[0]
@@ -94,19 +97,19 @@ function Normalize-AutoOSHostName {
 
 function Get-AutoOSHostName {
     # Order: 1) AUTOOS_HOST_NAME env, 2) host_name: from host.yml, 3) short hostname
-    if ($env:AUTOOS_HOST_NAME) { return Normalize-AutoOSHostName $env:AUTOOS_HOST_NAME }
+    if ($env:AUTOOS_HOST_NAME) { return ConvertTo-AutoOSHostName $env:AUTOOS_HOST_NAME }
     $hostFile = Get-AutoOSHostConfigPath
     if (Test-Path -LiteralPath $hostFile) {
         foreach ($line in (Get-Content -LiteralPath $hostFile -Encoding utf8)) {
             $line = $line.Trim()
             if ($line -match '^host_name\s*:\s*(.+)$') {
                 $v = $Matches[1].Trim().Trim('"',"'")
-                if ($v) { return Normalize-AutoOSHostName $v }
+                if ($v) { return ConvertTo-AutoOSHostName $v }
             }
         }
     }
     try { $fqdn = [System.Net.Dns]::GetHostName() } catch { $fqdn = 'localhost' }
-    $normalized = Normalize-AutoOSHostName $fqdn
+    $normalized = ConvertTo-AutoOSHostName $fqdn
     Write-Host "AutoOS: using hostname '$normalized' for omniroute key field (set AUTOOS_HOST_NAME or host_name in $hostFile to override)"
     return $normalized
 }

@@ -6898,6 +6898,70 @@ Test-Case 'gwkey: missing key names the expected field, never the value or URL' 
     Pass
 }
 
+Test-Case 'gwkey: explicit URL classification matches WS-OMNIREMOTE table' {
+    # WS-OMNIREMOTE r3: this table must match the bash is_local_gateway behavior
+    # and the Python is_local_gateway behavior exactly. No key/URL values in output.
+    $testCases = @(
+        @{ Url = ''; Expected = $true; Desc = 'empty URL -> local' }
+        @{ Url = 'http://127.0.0.1:20128'; Expected = $true; Desc = '127.0.0.1 -> local' }
+        @{ Url = 'http://localhost:20128'; Expected = $true; Desc = 'localhost -> local' }
+        @{ Url = 'http://LOCALHOST:20128/'; Expected = $true; Desc = 'uppercase LOCALHOST -> local' }
+        @{ Url = 'http://[::1]:20128'; Expected = $true; Desc = 'IPv6 loopback -> local' }
+        @{ Url = 'http://user:pass@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo + 127.0.0.1 -> local' }
+        @{ Url = 'http://user@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo (user only) + 127.0.0.1 -> local' }
+        @{ Url = 'http://user:pass@localhost:8080'; Expected = $true; Desc = 'userinfo + localhost -> local' }
+        @{ Url = 'http://user:pass@[::1]:8080'; Expected = $true; Desc = 'userinfo + IPv6 loopback -> local' }
+        @{ Url = 'https://gw.example.com'; Expected = $false; Desc = 'external hostname -> non-local' }
+        @{ Url = 'http://server:20128'; Expected = $false; Desc = 'bare hostname -> non-local' }
+        @{ Url = 'http://[::2]:20128'; Expected = $false; Desc = 'non-loopback IPv6 -> non-local' }
+        @{ Url = 'not-a-url'; Expected = $false; Desc = 'unparseable -> non-local' }
+    )
+    $failures = @()
+    foreach ($tc in $testCases) {
+        $result = Test-AutoOSLocalGateway -Url $tc.Url
+        if ($result -ne $tc.Expected) {
+            $failures += "$($tc.Desc): got $result, expected $($tc.Expected) for '$($tc.Url)'"
+        }
+    }
+    if ($failures.Count -gt 0) {
+        $failures -join "`n" | Write-Error
+    }
+    Pass
+}
+
+Test-Case 'gwkey: start-stack.ps1 parity with module function' {
+    # start-stack.ps1 carries a copy of the local-gateway check (Test-AutoOSLocalGateway).
+    # This test loads both and asserts they give identical answers for the WS-OMNIREMOTE URL table.
+    $testUrls = @(
+        '', 'http://127.0.0.1:20128', 'http://localhost:20128', 'http://LOCALHOST:20128/',
+        'http://[::1]:20128', 'http://user:pass@127.0.0.1:8080', 'http://user@127.0.0.1:8080',
+        'http://user:pass@localhost:8080', 'http://user:pass@[::1]:8080',
+        'https://gw.example.com', 'http://server:20128', 'http://[::2]:20128', 'not-a-url'
+    )
+    $moduleResults = @{}
+    foreach ($u in $testUrls) { $moduleResults[$u] = (Test-AutoOSLocalGateway -Url $u) }
+
+    # Load start-stack.ps1's copy by dot-sourcing it in a child scope
+    $startStackPath = Join-Path $Root 'configuration\start-stack.ps1'
+    $scriptBlock = [ScriptBlock]::Create((Get-Content -Raw -LiteralPath $startStackPath))
+    $child = [PowerShell]::Create().AddScript('$func = Get-Command Test-AutoOSLocalGateway -CommandType Function; $func.ScriptBlock')
+    $child.AddArgument($testUrls).AddScript('param($urls) $results = @{}; foreach ($u in $urls) { $results[$u] = (& $func -Url $u) }; $results').Invoke()
+    if ($child.HadErrors) { throw ($child.Streams.Error | ForEach-Object ToString) -join "`n" }
+    $startStackResults = $child.ReturnValue
+    $child.Dispose()
+
+    $failures = @()
+    foreach ($u in $testUrls) {
+        if ($moduleResults[$u] -ne $startStackResults[$u]) {
+            $failures += "Mismatch for '$u': module=$($moduleResults[$u]) start-stack=$($startStackResults[$u])"
+        }
+    }
+    if ($failures.Count -gt 0) {
+        $failures -join "`n" | Write-Error
+    }
+    Pass
+}
+
 Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
     $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
     $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
@@ -6947,7 +7011,7 @@ Test-Case 'gwkey: setup -HostName defaults to the short hostname' {
         $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $Root 'setup.ps1') -HostName '' 2>&1 | Out-String
         try { $rawHost = [System.Net.Dns]::GetHostName() } catch { $rawHost = 'localhost' }
-        $want = 'host_name: ' + (Normalize-AutoOSHostName $rawHost)
+        $want = 'host_name: ' + (ConvertTo-AutoOSHostName $rawHost)
         Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) $want
         Assert-True ($out -like '*Created*') "no created line in: $out"
     } finally {

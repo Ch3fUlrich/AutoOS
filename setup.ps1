@@ -194,7 +194,7 @@ if ($PSBoundParameters.ContainsKey('HostName')) {
         $hostNameValue = $HostName
         if (-not $hostNameValue) {
             try { $defaultHost = [System.Net.Dns]::GetHostName() } catch { $defaultHost = 'localhost' }
-            $hostNameValue = Normalize-AutoOSHostName $defaultHost
+            $hostNameValue = ConvertTo-AutoOSHostName $defaultHost
         }
         $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
         "host_name: $hostNameValue" | Set-Content -LiteralPath $hostFile -Encoding utf8
