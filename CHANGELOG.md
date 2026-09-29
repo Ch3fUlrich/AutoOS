@@ -46,6 +46,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   last, and the Gemini-cooldown tests now cool the two new free providers too,
   because their premise is "every leg of the route is cooling".
 
+### Fixed — `cancel` takes its kill target from the run id, not from the worker (SB-A3, 2026-09-28)
+
+SB-A2 took the group out of `pgrp.json` and wrote it into `job.json` — but
+`job.json` lives in the run dir, which `run_job` exports to the worker as
+`AUTOOS_TASK_DIR`, and the worker is the same uid as the file. `cancel` then read
+`job["scope"]` and `job["group"]` verbatim, so the process being cancelled could
+still aim the killer at any `--user` unit, at another run's scope, or at any
+process group.
+
+- **`tools/autoos-agent.py`**: `worker_scope_unit(run_id)` derives the unit name
+  `autoos-worker-<run id>.scope` and raises for anything that is not a run id
+  (`is_killable_run_id` / `KILL_RUN_ID_RE`, 64-char cap); `stop_scope()`
+  re-validates the name it is handed (`scope_unit_is_worker_scope`: prefix,
+  `.scope` suffix, unit-safe charset, length) and refuses — with no `systemctl`
+  call — anything else, so the guard lives in the killer, not only at the call
+  site.
+- **`tools/autoos_agent_mcp.py`**: `cancel` never reads a scope from a file. It
+  derives it from the run id it was given and refuses a `job.json` that claims a
+  different run. The fallback group record moved out of the task dir into a
+  runner-private store, `$(state dir)/kill/<run id>.json` (dir 0700, file 0600,
+  atomic write, `kill_store_dir`/`write_kill_record`); `spawn` and `run_job`
+  write it, `cancel` reads only it, and `job.json` carries no `group` any more —
+  its `scope` field stays as information only.
+- **Residual, stated**: a same-uid worker that goes looking can still find the
+  kill store through `AUTOOS_STATE_DIR`; a file cannot be hidden from the uid that
+  owns it. The scope path — derived, no file involved — is the primary and is what
+  a host with a user manager uses.
+- **Tests** (`tests/test_autoos_spawner.py`, `CancelDerivesKillTargetTests`): a
+  rewritten `job.json` scope (`foo.service`, another run's scope) does not change
+  what `cancel` stops; `stop_scope` refuses every non-worker-scope name; a
+  malformed run id is refused at both levels; the group kill reads only the
+  private record (an edited `job.json` group kills nothing); the store is not
+  under `AUTOOS_TASK_DIR`, is not named in the worker env, and is 0700/0600.
 ### Fixed — Claude-family spelling escape, wrapper-only peer origin, orchestrator-only shared checkout, deepseek-flash priced (SB-C2, 2026-09-28)
 
 Four items from the SB-C2 brief, all red-then-green against HEAD:
@@ -119,6 +152,65 @@ Three items from the SB-C brief:
   (`cc/*`, `antigravity/*`) moved up with it so they keep matching first. Sweeping
   every leg the registry names: no committed verdict changed
   (`tests/test_autoos_resolver.py ZenClaudeLegRulesTests`).
+
+### Changed — `agent-skills` is a tombstone on Windows too; its installer no longer clones (SPEC-OMNI A7, D-066, 2026-09-28)
+
+A7 retired `agent-skills` on Linux and macOS and left Windows live — its entry
+cloned a second repository and its installer did the MCP wiring. This lane
+finishes the retirement on Windows. The native Windows twins
+(`agent-skill-links`, `omnigraph-client`) are deliberately *not* added (D-066:
+the Windows path is frozen to fixes), so the four `mcp-*` components are the
+only successors the catalog names there. What `Install-AutoOSAgentSkills`
+additionally did on Windows (the project-scope `omnigraph`/`autoos-agent` pins,
+the Antigravity MCP merge, the user-scope skill links) now has no catalog
+caller: it is reachable only from tests, and its Windows successor is the parked
+w1 lane. Known, accepted under D-066. Leftovers deliberately kept (a frozen
+path gets fixes only): the unreachable `agent-skills` probe in
+`AutoOS.Detect.psm1` and the function itself as a test fixture.
+
+- **`catalog/windows.json`**: `agent-skills` is `"tombstone": true` with the
+  note *its work moved to the mcp-\* components* and `replaced_by` naming the
+  four ids that took it (`mcp-graphify`, `mcp-serena`, `mcp-playwright`,
+  `mcp-context7` — the only successors this platform ships; naming
+  `agent-skill-links`/`omnigraph-client` would promise work Windows does not
+  have). `postInstall`, `prompt`, `requires` and `profiles` go with the live
+  row.
+- **`lib/windows/AutoOS.Install.psm1`**: `Install-AutoOSAgentSkills` no longer
+  clones `Documents\Code\agent-skills` (nor pulls it): the servers it wires are
+  declared by this checkout's own `.mcp.json`, so the project-scope pins now
+  read `$script:RepoRoot`. `Write-AutoOSOmnigraphReadiness`'s parameter is
+  renamed `-AgentSkillsDir` → `-RepoRoot` to match. The MCP wiring, the
+  `omnigraph`/`autoos-agent` project pins, the Antigravity config merge and the
+  repo/user skill links are unchanged, as is the retargeting of links into the
+  retired clone (a machine that ran the old installer keeps its checkout — this
+  never deletes it). The function is now reachable only from tests: no catalog
+  entry carries it as `postInstall`.
+- **Tests**: `tests/linux/18-mcp-wiring.sh`'s tombstone case becomes
+  per-platform (Windows expects the four-successor set) and validates
+  `catalog/windows.json`; a new case proves the Windows installer names no clone
+  URL, runs no `git clone`/`pull` and writes nothing into the retired path.
+  `tests/run-tests.ps1` gains the matching pwsh cases (`agent-skills is never
+  cloned`, asserted on the installer body and the whole module; and the Windows
+  catalog entry carries the flag, the note and exactly the four successors with
+  no installer hooks).
+- **`docs/catalog.md`**: the `replaced_by` example now shows both shapes and says
+  why Windows names four.
+- **Open, recorded rather than hidden**: with the row retired, the
+  `omnigraph_url` prompt in `catalog/windows.json` is owned by no component, so
+  a Windows run never asks it and `Set-AutoOSAntigravityMcp` falls back to
+  `localhost:8080`. Fixing that belongs to the parked w1 lane (which adds the
+  Windows `omnigraph-client` twin), not to this frozen-path lane.
+
+Verified: `bash tests/run-tests.sh --filter catalog` 69 passed / 0 failed;
+`AUTOOS_TEST_PARTS=18 bash tests/run-tests.sh --filter agent-skills` 21 passed /
+0 failed, and the schema case validates `catalog/windows.json`. pwsh 7.6 on this
+Linux host ran too: `-Filter agent-skills` 23 passed / 2 failed and
+`-Filter catalog,tombstone` 319 passed / 2 failed — all four failures reproduce
+at the branch point, so none is new (two backup-record cases, the Linux-only
+`powershell`-on-PATH `--CheckCatalog` case, and an unrelated usb case). The real
+gate is still one `powershell -File tests\run-tests.ps1` on a Windows
+workstation, where the Windows PowerShell 5.1 code paths these cases cover
+actually run.
 
 ### Fixed — every spawned tier is isolated, in the CLI and through MCP (KEYDENY3g, 2026-09-28)
 
