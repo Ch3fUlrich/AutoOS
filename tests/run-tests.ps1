@@ -6793,7 +6793,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
         Assert-Equal $t1.Count 1
         Assert-Equal $t1[0].max_tokens 128000
-        Assert-Equal $t1[0].reasoning_effort $null
+        Assert-Equal ($null -eq $t1[0].PSObject.Properties['reasoning_effort']) $true 'xhigh must be dropped for gemini, not forwarded'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
