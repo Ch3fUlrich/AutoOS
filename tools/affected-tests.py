@@ -640,7 +640,16 @@ REGISTRY_PATH = re.compile(r"(registry|route|router|combo)", re.IGNORECASE)
 OMNIR_ROUTE_DIR = "configuration/omniroute/"
 APPLY_TERM = "apply"
 LINUX_PART = re.compile(r"^tests/linux/([0-9]{2})-[^/]+\.sh$")
-PYTEST_DIR = "tests/"
+#: Every directory family this repository keeps pytest files in. `discover()` reads
+#: the first alone — its corpus is the three suites, and a case-level corpus is the
+#: wrong shape for the gate, which needs whole files (see `pytest_files_naming`).
+#: A skill keeps its own tests beside itself, which is how a gate reading only
+#: `tests/` would wave a changed `trust_worktree.py` through unrun — the FREEKEYS2
+#: miss one directory over.
+PYTEST_GLOBS = ("tests/test_*.py",
+                ".agents/skills/*/tests/**/test_*.py",
+                "infra/**/test_*.py",
+                "scripts/**/test_*.py")
 
 _DISCOVER_CACHE = {}
 
@@ -653,6 +662,23 @@ def discover_cached(root: Path = ROOT):
     return _DISCOVER_CACHE[key]
 
 
+def pytest_files_naming(root: Path, name: str):
+    """Every pytest file whose text names ``name`` — a tool's basename, `.py` and all.
+
+    `affected()` attributes a mention to the single case that made it, which is what
+    a ``--filter`` term needs. The gate needs the whole *file*, and the ordinary way
+    to name a tool is a module-level constant — a fact of the file, present in every
+    case and in none of them. Over-inclusion costs seconds; a miss costs a CI red.
+    """
+    root = Path(root)
+    out = set()
+    for pattern in PYTEST_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if name in _read(path):
+                out.add(path.relative_to(root).as_posix())
+    return out
+
+
 def map_changed_files(files, root: Path = ROOT, ids=()):
     """``{"pytest": [...], "parts": [...], "terms": "...", "ids": [...]}``.
 
@@ -663,11 +689,16 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
     A `tools/X.py` change is answered by every test that *names* it — which is how
     a test reaches a tool, whether it imports it by path or spells it in a
     subprocess command line — using the same strict-at-the-end matching as the ids.
+    A case-level corpus cannot see a module-level constant, nor a skill's tests that
+    live outside `tests/`, so every changed `.py` is answered a second way — by the
+    pytest files whose text names it — and a changed test file is always run, in
+    whichever directory holds it.
     Over-inclusion is allowed and a miss is not: a lane that ran too much loses a
     minute, a lane that ran too little loses CI.
     """
     pytest = {SKILL_RULES_TEST}
     parts, terms, tool_files, registry = set(), [], [], False
+    py_names = set()
     for raw in files:
         path = str(raw).replace("\\", "/")
         if REGISTRY_PATH.search(path):
@@ -680,8 +711,15 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
         if path.startswith("tools/") and path.endswith(".py"):
             tool_files.append(path)
         name = path.rsplit("/", 1)[-1]
-        if path.startswith(PYTEST_DIR) and name.startswith("test_") and name.endswith(".py"):
+        if name.startswith("test_") and name.endswith(".py"):
+            # A changed test file runs whatever directory holds it: the file that
+            # asserts the change is the change's covering test, and where the
+            # author put it is not a fact the gate gets to disagree with.
             pytest.add(path)
+        elif name.endswith(".py"):
+            py_names.add(name)
+    for name in sorted(py_names):
+        pytest.update(pytest_files_naming(root, name))
     if registry:
         pytest.update(REGISTRY_TESTS)
         parts.add(REGISTRY_PART)

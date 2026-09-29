@@ -514,6 +514,41 @@ class MappingTests(unittest.TestCase):
         plan = self.plan_for(["tools/autoos-agent.py"])
         self.assertIn("tests/test_autoos_spawner.py", plan["pytest"], plan)
 
+    def test_a_tools_change_pulls_the_test_whose_module_constant_names_it(self):
+        # The corpus attributes a mention to one *case*, because that is what a
+        # --filter term is derived from. A test file that builds the tool's path in
+        # a module-level constant names it in every case and in none of them, so
+        # the gate would push the tool's own suite unrun.
+        plan = self.plan_for(["tools/affected-tests.py"])
+        self.assertIn("tests/test_affected_tests.py", plan["pytest"], plan)
+
+    def test_a_skill_code_change_maps_to_the_skill_own_tests(self):
+        # The FREEKEYS2 miss one directory over: a skill's code is covered by
+        # pytest files under .agents/skills/<name>/tests/, which `discover()` does
+        # not scan, so a gate that only read `tests/` would push the change unseen.
+        plan = self.plan_for(
+            [".agents/skills/unattended-orchestration/trust_worktree.py"])
+        self.assertIn(
+            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
+            plan["pytest"], plan)
+
+    def test_a_changed_test_file_is_run_whatever_directory_it_lives_in(self):
+        plan = self.plan_for(
+            [".agents/skills/unattended-orchestration/tests/test_trust_worktree.py"])
+        self.assertIn(
+            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
+            plan["pytest"], plan)
+
+    def test_a_skill_code_change_does_not_drag_in_another_skill_s_tests(self):
+        # Over-inclusion is allowed, but not across the whole tree: the tests that
+        # answer a skill are its own, not every skill's.
+        plan = self.plan_for(
+            [".agents/skills/unattended-orchestration/trust_worktree.py"])
+        strays = [p for p in plan["pytest"]
+                  if p.startswith(".agents/skills/")
+                  and not p.startswith(".agents/skills/unattended-orchestration/")]
+        self.assertEqual(strays, [], plan)
+
     def test_a_registry_change_maps_to_the_render_and_tier_tests_and_part_17(self):
         # FREEKEYS2: the registry changed; shard e ran none of the 17 render tests.
         plan = self.plan_for(["catalog/ai-registry.json"])

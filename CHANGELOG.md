@@ -30,7 +30,12 @@ diff and refuses the push.
   `--format plan` for the gate). The mapping rules are the three reds — skills, `CHANGELOG.md` and
   `docs/**` always pull `tests/test_skill_rules.py`; registry/route/combo files pull the render
   and sync tests *plus* the bash `render`/`apply` filters; `tools/X.py` pulls the tests that name
-  it; a changed `tests/linux/NN-*.sh` pulls that part. A bash part is never run unfiltered
+  it; a changed `tests/linux/NN-*.sh` pulls that part. Two gaps found while running it against
+  this very change: the id corpus attributes a mention to one *case* (so a test file that builds
+  the tool's path in a module-level constant named it in every case and in none), and it reads
+  only `tests/` (so a skill's own tests under `.agents/skills/<name>/tests/` were invisible).
+  Every changed `.py` is now answered a second way, by the pytest files whose text names it, and a
+  changed test file is run whichever directory holds it. A bash part is never run unfiltered
   (R-host-08).
 - **`autoos-agent.py ready`** now reads that log (D-110): reviews and a pushed sha prove the lane
   was looked at and shipped, only the record proves it was run — which is what catches a lane that
