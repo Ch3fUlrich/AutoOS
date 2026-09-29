@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — `review_verdict` let one stray fence swallow a reviewer's verdict (VERDICTFENCE, 2026-09-29)
+
+Measured on run `20260929-061040-review-familyfence-a8a66-22ed12`: the reviewer ran `git diff` and
+the transcript carried its output. One context line of that hunk was ' ```' — a markdown fence
+*sitting in the diffed file*, prefixed by the diff's own leading space. The scan tested the
+**stripped** line's first characters, took it for a fence opener, never found a closer, and so
+skipped every later line including the reviewer's own `VERDICT: READY` 450 lines down
+(transcript line 1436 vs 1894). The run graded `failed/no-verdict` — the deliverable existed and
+was read as absent.
+
+- **`tools/autoos_agent_mcp.py`**: `_FENCE_RE` is now markdown's own rule — up to 3 spaces of
+  indent, then three or more ` or ~ — matched against the raw line after the ANSI strip. The
+  per-line verdict test moved out to `_verdict_value()` so the two scans share one definition of a
+  verdict instead of restating it.
+- **An unclosed fence no longer hides what follows it**: the scan remembers the line of the last
+  opener that was never closed and re-reads everything after it unfenced. The toggling is strictly
+  alternating, so that opener is the last fence marker in the text and the tail below it is
+  unfenced as far as this scan can tell.
+- **Kept**: a `VERDICT` line inside a real, **closed** fenced block is still the contract pasted
+  back at us and stays ignored, as do `>`-quoted lines and template lines carrying `<` or `|`; the
+  last valid verdict still wins.
+
+Tests first in `tests/test_autoos_spawner.py` (`VerdictLineTests`): the measured git-diff shape,
+a closed block staying ignored, an unclosed opener not hiding `fix-first`, and a fence deeper than
+markdown's indentation reading as content (that one inverted the parity of a *real* block, which is
+how a closed block used to leak its verdict).
+
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
 
 L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,

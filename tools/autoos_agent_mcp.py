@@ -868,6 +868,38 @@ _VERDICT_SCAN_BYTES = 2 * 1024 * 1024
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# A fence opener, at markdown's own indentation: up to 3 spaces of leading space
+# and then three or more ` or ~. This is deliberately markdown's rule, not a
+# stricter one: a `git diff` context line ' ```' keeps the diff's own leading
+# space and so still counts as an opener here — VERDICTFENCE (b) is what saves
+# that measured case. What the bound does buy is parity: a fence indented deeper
+# than 3 spaces is CONTENT inside someone else's block, and toggling on it used
+# to flip the scan in and back out of a real fence, which exposed a CLOSED block
+# (the contract pasted back at us) as if it were unfenced.
+_FENCE_RE = re.compile(r"^ {0,3}(?:`{3,}|~{3,})")
+
+
+def _verdict_value(stripped: str) -> str | None:
+    """The verdict word a single transcript line states, or None.
+
+    SB-A2 (D-103) item D, the per-line half: a `>`-quoted line is someone else's
+    text, a line carrying `<` or `|` is template syntax (the brief echoed back),
+    and a value that is not the bare word is a reviewer *talking* — `VERDICT:
+    ready, but the ref snapshot is never read` must not grade as ready. One
+    trailing punctuation mark is tolerated: `VERDICT: fix-first.` means fix-first.
+    """
+    if stripped.startswith(">") or "<" in stripped or "|" in stripped:
+        return None
+    m = _VERDICT_LINE_RE.match(stripped)
+    if not m:
+        return None
+    value = m.group(1).strip().strip("*_` ").strip()
+    if not value:
+        return None
+    if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+        return value
+    return None
+
 
 def review_verdict(text: str) -> str | None:
     """The verdict a reviewer stated in its own transcript, or None.
@@ -877,35 +909,42 @@ def review_verdict(text: str) -> str | None:
     has to be read. The LAST verdict wins — a reviewer that changed its mind said
     so.
 
-    SB-A2 (D-103) item D tightened what counts. Rejected: a value that is not the
-    bare word (the same escape SPAWNFIX3c closed for REPORT headings — `VERDICT:
-    <ready|fix-first|NOT READY>` is the brief quoted back, and any line carrying
-    `<` or `|` is template syntax, not a decision); a line inside a fenced code
-    block (the reviewer pasted the contract at us); and a `>`-quoted line (someone
-    else's text). A single trailing punctuation mark is tolerated — a reviewer that
-    writes `VERDICT: fix-first.` means fix-first.
+    SB-A2 (D-103) item D tightened what counts (see `_verdict_value`) and added the
+    fenced-block protection: a reviewer that pasted the contract at us is not
+    stating a verdict. VERDICTFENCE keeps that protection for a real, CLOSED block
+    and closes the two ways it swallowed a genuine decision — an opener deeper than
+    markdown's indentation, and any opener the transcript never closes, since the
+    verdict sits after it and the run was graded failed/no-verdict over it.
     """
+    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
     found = None
     in_fence = False
-    for line in (text or "").splitlines():
-        stripped = _ANSI_RE.sub("", line).strip()
+    open_at = -1
+    for i, raw in enumerate(raws):
+        stripped = raw.strip()
         if not stripped:
             continue
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if _FENCE_RE.match(raw):
             in_fence = not in_fence
+            if in_fence:
+                open_at = i
             continue
-        if in_fence or stripped.startswith(">"):
+        if in_fence:
             continue
-        if "<" in stripped or "|" in stripped:
-            continue
-        m = _VERDICT_LINE_RE.match(stripped)
-        if not m:
-            continue
-        value = m.group(1).strip().strip("*_` ").strip()
-        if not value:
-            continue
-        if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+        value = _verdict_value(stripped)
+        if value:
             found = value
+    if in_fence:
+        # The scan toggles on every marker, so an open fence at the end means
+        # `open_at` holds the LAST marker in the text and nothing below it is
+        # fenced as far as this scan can tell.
+        for raw in raws[open_at + 1:]:
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            value = _verdict_value(stripped)
+            if value:
+                found = value
     return found
 
 

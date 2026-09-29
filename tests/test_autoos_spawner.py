@@ -15807,6 +15807,49 @@ class VerdictLineTests(unittest.TestCase):
                 "and then it died.\n")
         self.assertIsNone(self.verdict(text))
 
+    # VERDICTFENCE: the fence scan measured two bugs — a ` ```' that is not a
+    # fence at all, and an unclosed fence that swallows the deliverable.
+    DIFF_FENCE = (
+        "diff --git a/docs/AGENTS.md b/docs/AGENTS.md\n"
+        "@@ -10,6 +10,7 @@\n"
+        " before\n"
+        " ```\n"
+        "+fence inside the diffed file\n"
+        " after\n")
+
+    def test_a_fence_line_inside_a_git_diff_does_not_hide_the_verdict(self):
+        # Measured (run 20260929-061040-review-familyfence-a8a66-22ed12): the
+        # reviewer ran `git diff`, one context line of that diff was ' ```' — a
+        # fence inside the DIFFED file, prefixed by the diff's own space — the
+        # scan took it for an opener, found no closer, and so skipped the
+        # reviewer's own verdict 450 lines later. Graded failed/no-verdict.
+        filler = "Thinking about the diff and the ref snapshot.\n" * 450
+        self.assertEqual(self.verdict(self.DIFF_FENCE + filler + "VERDICT: READY\n"),
+                         "READY")
+
+    def test_a_verdict_inside_a_closed_fence_stays_ignored(self):
+        # The protection that must survive: a real, CLOSED block is the
+        # contract pasted back at us, not a decision.
+        text = ("checked the diff\n"
+                "```\n"
+                "VERDICT: ready\n"
+                "```\n"
+                "and then it died with no verdict.\n")
+        self.assertIsNone(self.verdict(text))
+
+    def test_an_unclosed_fence_does_not_hide_what_follows_it(self):
+        # An opener with no closer is either not a fence or a transcript cut
+        # short mid-block; the verdict is the deliverable either way.
+        self.assertEqual(self.verdict("```text\nVERDICT: fix-first\n"), "fix-first")
+
+    def test_a_fence_deeper_than_markdowns_indent_is_content(self):
+        # Markdown opens a fence at up to 3 spaces of indent; deeper is content,
+        # and must not flip the scan in and back out of a block.
+        text = ("    ```\n"
+                "VERDICT: ready\n"
+                "    ```\n")
+        self.assertEqual(self.verdict(text), "ready")
+
     def test_the_last_valid_line_wins(self):
         text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"
         self.assertEqual(self.verdict(text), "fix-first")
