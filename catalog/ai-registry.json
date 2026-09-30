@@ -740,7 +740,7 @@
       "tool_calls": "unproven"
     },
     "openai/gpt-oss-120b": {
-      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-120B (free tier). GPT-OSS is publicly documented as a reasoning model with a low/medium/high effort control; context/output are t2-worker's declared numbers.",
+      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-120B (free tier). GPT-OSS is publicly documented as a reasoning model with a low/medium/high effort control; context/output are t2-worker's declared numbers. FREEWIRE 2026-09-30 (free-probe evidence): tool_calls promoted to 'proven' after ack 200 and one get_weather tool call ok (204 ms) for groq/openai/gpt-oss-120b through the gateway. The row is shared with openrouter/openai/gpt-oss-120b, which stays route-gated in t2-worker.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -757,10 +757,10 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "proven"
     },
     "openai/gpt-oss-20b": {
-      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-20B (free tier). Added for its free-tier rate limits (brief R4, 2026-09-27) -- the limits key must resolve via resolve_leg, so the model entry exists even though no route leg uses it yet. Non-limit fields mirror the 120b sibling (same openai-oss family, reasoning, low/medium/high ladder): unsourced defaults, not a measured context/output guarantee (D20) -- price_in/price_out 0.0 follows the existing 'vendor price not sourced' convention (see openrouter sibling entries); do not use for cost math until priced.",
+      "$comment": "groq's vendor-prefixed spelling of GPT-OSS-20B (free tier). Added for its free-tier rate limits (brief R4, 2026-09-27) -- the limits key must resolve via resolve_leg, so the model entry exists even though no route leg uses it yet. Non-limit fields mirror the 120b sibling (same openai-oss family, reasoning, low/medium/high ladder): unsourced defaults, not a measured context/output guarantee (D20) -- price_in/price_out 0.0 follows the existing 'vendor price not sourced' convention (see openrouter sibling entries); do not use for cost math until priced. FREEWIRE 2026-09-30 (free-probe evidence): tool_calls promoted to 'proven' after ack 200 and one get_weather tool call ok (301 ms) for groq/openai/gpt-oss-20b through the gateway.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -777,7 +777,7 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "proven"
     },
     "openrouter-dots3-note": {
       "$comment": "Same conservative default as openrouter-nemotron-ultra.",
@@ -1178,7 +1178,7 @@
       "tool_calls": "proven"
     },
     "qwen/qwen3.8-27b": {
-      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
+      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. FREEWIRE 2026-09-30 (free-probe evidence): groq's own copy is now probed too (ack 200 + one get_weather tool call ok, 420 ms), so the model default tool_calls is promoted to 'proven'. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -1191,7 +1191,7 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "proven"
     },
     "qwen/qwen3.8-flash": {
       "$comment": "openrouter's leg for the SPEED directive (operator 2026-09-26T15:44Z/15:49Z, common.md 'Model mix' UPDATE): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid (providers.openrouter.tier), trains_on_prompts false inherited from providers.openrouter (no model-level override needed - the provider itself is already paid + non-training). Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
@@ -1546,6 +1546,90 @@
       "price_out": 3.19e-6,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
       "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos."
+    },
+    "Qwen/Qwen3.8-27B": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false).",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "Qwen/Qwen3.8-27B",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven"
+    },
+    "cohere/north-mini-code:free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/cohere/north-mini-code:free answered ack 200 and one get_weather tool call ok (809 ms); gateway /v1/models row context_length 256000, output 64000. tier 'free' is a MODEL-level override so the leg can stay in a *-free-only route and is honestly priced ($0 at the vendor), while providers.openrouter.tier stays paid. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
+      "context_advertised": 256000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 128000
+      },
+      "effort_ladder": [],
+      "family": "cohere",
+      "id": "cohere/north-mini-code:free",
+      "output_max": 64000,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tier": "free",
+      "tool_calls": "proven"
+    },
+    "nvidia/nemotron-3-super-120b-a12b:free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/nvidia/nemotron-3-super-120b-a12b:free answered ack 200 and one get_weather tool call ok (801 ms); gateway /v1/models row context_length 262144, output 235929. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "effort_ladder": [],
+      "family": "nvidia",
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "output_max": 235929,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tier": "free",
+      "tool_calls": "proven"
+    },
+    "poolside/laguna-s-2.1:free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/poolside/laguna-s-2.1:free answered ack 200 and one get_weather tool call ok (1961 ms); gateway /v1/models row context_length 262144, output 32768. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "effort_ladder": [],
+      "family": "poolside",
+      "id": "poolside/laguna-s-2.1:free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tier": "free",
+      "tool_calls": "proven"
+    },
+    "qwen/qwen3.8-27b:free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/qwen/qwen3.8-27b:free answered ack 200 and one get_weather tool call ok (5842 ms); gateway /v1/models row context_length 262144, output 235929. Distinct from models.'qwen/qwen3.8-27b' (groq's lowercase spelling, output_max 16384) - the :free suffix is part of the vendor id. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen/qwen3.8-27b:free",
+      "output_max": 235929,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tier": "free",
+      "tool_calls": "proven"
     }
   },
   "policy": {
@@ -2237,10 +2321,24 @@
         "source": "operator via routing-00 2026-09-28T10:0xZ; Server 719cee9"
       },
       {
+        "id": "allow-groq-qwen3.8-27b",
+        "match": "groq/qwen/qwen3.8-27b",
+        "allow": true,
+        "reason": "FREEWIRE: the single get_weather tool call was answered (420 ms), so this one groq leg is re-opened above deny-groq. free-probe's caveat stands: one tool round is NOT deny-groq's multi-turn agent workload (400 'messages.N role:assistant' x335, 413 x78), so re-probe a real multi-turn agent shape before lifting the blanket deny-groq for the rest.",
+        "source": "L1-backlog/ws-free-probe-20260930 2026-09-30; wired by L1-backlog/ws-freewire-20260930 2026-09-30"
+      },
+      {
+        "id": "allow-groq-gpt-oss",
+        "match": "groq/openai/gpt-oss-*",
+        "allow": true,
+        "reason": "FREEWIRE: groq/openai/gpt-oss-120b and -20b each answered one get_weather tool call (204/301 ms), so these two groq legs are re-opened above deny-groq. Same single-turn caveat as allow-groq-qwen3.8-27b.",
+        "source": "L1-backlog/ws-free-probe-20260930 2026-09-30; wired by L1-backlog/ws-freewire-20260930 2026-09-30"
+      },
+      {
         "id": "deny-groq",
         "match": "groq/*",
         "allow": false,
-        "reason": "groq failed every agent call through the gateway (400 'messages.N role:assistant' x335, 413 too large x78); off for agent routes until that 400 is measured fixed",
+        "reason": "groq failed every agent call through the gateway (400 'messages.N role:assistant' x335, 413 too large x78); off for agent routes until that 400 is measured fixed. NOTE (FREEWIRE): the three allow-groq-* rows above re-open exactly groq/qwen/qwen3.8-27b and groq/openai/gpt-oss-{120b,20b} for one single-tool round; this blanket deny still governs every other groq/* leg.",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
@@ -2326,6 +2424,13 @@
         "allow": true,
         "reason": "OpenRouter BYOK gpt-oss-120b (L0 BYOK answer option 2; serves once the operator sets BYOK keys Prioritized)",
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z); L0 BYOK answer 2026-09-27T03:39Z"
+      },
+      {
+        "id": "allow-openrouter-free",
+        "match": "openrouter/*:free",
+        "allow": true,
+        "reason": "FREEWIRE: the ':free' OpenRouter ids are $0 at the vendor; free-probe measured ack 200 + one get_weather tool call ok on 4/7 of them (qwen3.8-27b:free, nemotron-3-super-120b-a12b:free, cohere/north-mini-code:free, poolside/laguna-s-2.1:free). The model rows carry tier:free so a *-free-only route may hold them. Sits above deny-openrouter, which still denies every paid openrouter leg (its paid allows stay above this row and their legs stay route-gated).",
+        "source": "L1-backlog/ws-free-probe-20260930 2026-09-30; wired by L1-backlog/ws-freewire-20260930 2026-09-30"
       },
       {
         "id": "deny-openrouter",
@@ -2776,7 +2881,7 @@
       "trains_on_prompts": true
     },
     "google_ai_studio": {
-      "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one.",
+      "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one. FREEWIRE 2026-09-30 (measured): the gateway log for 2026-09-30 held 8088 'gemini' cooling-down lines (8218 for all providers = 98.4%), 7187 of them lastErrorCode=429 with 7136 'Model gemini-3.8-flash rate_limited', and a live probe at 2026-09-30T21:13Z returned a 429 'model_cooldown' (reset_seconds 51). Every gemini/* leg was removed from every route (the gemini-3.8-flash combo now heads on vertex/gemini-3.8-flash). This provider is marked unavailable so the dead gemini/* door cannot be re-opened by a stray leg; the google_ai_studio API key stays unwired. Re-probe after the until.",
       "api_base": null,
       "id": "google_ai_studio",
       "litellm_env": "GEMINI_API_KEY",
@@ -2784,7 +2889,9 @@
       "omniroute_id": "gemini",
       "provider_data": null,
       "tier": "free",
-      "trains_on_prompts": true
+      "trains_on_prompts": true,
+      "available": false,
+      "unavailable_until": "2026-10-07T00:00:00Z"
     },
     "groq": {
       "api_base": null,
@@ -2822,7 +2929,7 @@
       }
     },
     "hugging_face": {
-      "$comment": "Unverified default: no combo references this provider.",
+      "$comment": "Unverified default tier: free, trains_on_prompts false. FREEWIRE 2026-09-30 (free-probe evidence): three legs on this provider answered (huggingface/zai-org/GLM-5.2, huggingface/Qwen/Qwen3.8-27B, and huggingface/deepseek-ai/DeepSeek-V4-Flash-0731); GLM-5.2 and Qwen3.8-27B are now referenced by routes (hf-glm-5.2, hf-qwen3.8-27B and the free bands of t2-worker/t3-driver and their free-only twins). The DeepSeek-V4-Flash-0731 leg is V4 weights, not V4.1, so it stays referenced by no route (operator rule 'DeepSeek only V4.1 Flash'). The gateway connection id is 'huggingface' (omniroute_id), the registry key stays 'hugging_face'.",
       "api_base": null,
       "id": "hugging_face",
       "litellm_env": "HUGGINGFACE_API_KEY",
@@ -2926,7 +3033,8 @@
         "KNOWN EXCEPTION (provider-level trains_on_prompts cannot express this): the meta/muse-spark-1.3-contributor leg reached through this provider trains by contract; combos.json's own $comment documents the 2026-09-21 operator downgrade this caused - 't1-orchestrator-clean ... no longer means trains-nothing - it means paid-only'. Every other leg reached through openrouter (deepseek, mistral, google twins) does not train.",
         "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
         "SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 15:44Z/15:49Z recovery rationale above is withdrawn - OpenRouter is BYOK with no shared credit, so no funded-credit leg exists; Qwen-via-OpenRouter legs are superseded and referenced by no route, no deepseek-v4-pro entry exists, and cheaperinference/deepseek-v4-flash carries route-level unavailable_legs entries (DeepSeek is V4.1-Flash-only). Every OpenRouter leg (openrouter/deepseek/deepseek-v4.1-flash, openrouter/meta/muse-spark-1.3-contributor, and since 2026-09-27 the BYOK openrouter/openai/gpt-oss-120b) is gated by its own routes.*.unavailable_legs entry - see tools/registry.py _leg_is_unavailable, which flags a leg down when either its route-level unavailable_legs entry or its provider-level available:false says so, so both gates are independently enforced. Re-probe before trusting any flagged leg again.",
-        "DSMAX (operator 2026-09-27T15:05:54Z via L0): no OpenRouter credit - a re-probe hit 401 'insufficient credits' even for BYOK, so this provider is off entirely (available: false, below, not only per-leg). This also covers openrouter/meta/muse-spark-1.3-contributor: Muse is available as the free Zen leg through the opencode client (client_bound opencode) only, never by spending OpenRouter credit. The three allow-openrouter-* leg_rules stay in place so the intent is visible; this provider-level gate is the guard that actually keeps every openrouter leg out of the renders."
+        "DSMAX (operator 2026-09-27T15:05:54Z via L0): no OpenRouter credit - a re-probe hit 401 'insufficient credits' even for BYOK, so this provider is off entirely (available: false, below, not only per-leg). This also covers openrouter/meta/muse-spark-1.3-contributor: Muse is available as the free Zen leg through the opencode client (client_bound opencode) only, never by spending OpenRouter credit. The three allow-openrouter-* leg_rules stay in place so the intent is visible; this provider-level gate is the guard that actually keeps every openrouter leg out of the renders.",
+        "FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930): available flipped back to true because the ':free' OpenRouter ids are $0 at the vendor and free-probe measured four of them answering through the gateway (ack 200 + one get_weather tool call ok). The DSMAX guard MOVES from this provider-level flag to the route level for the two legs it protected: openrouter/meta/muse-spark-1.3-contributor (t1-orchestrator, t1-orchestrator-clean, spark-1.3-contributor) and openrouter/deepseek/deepseek-v4.1-flash (t2-orchestrator, t2-worker) now carry routes.<id>.unavailable_legs entries, and policy.allow-openrouter-free sits above deny-openrouter for the :free legs only. openrouter/openai/gpt-oss-120b and openrouter/google/gemini-3.8-flash keep their route-level gates; every paid openrouter leg is still excluded by deny-openrouter."
       ],
       "api_base": null,
       "id": "openrouter",
@@ -2936,7 +3044,7 @@
       "provider_data": null,
       "tier": "paid",
       "trains_on_prompts": false,
-      "available": false
+      "available": true
     },
     "samba": {
       "$comment": [
@@ -3280,9 +3388,8 @@
     "gemini-3.8-flash": {
       "class": "cheap",
       "id": "gemini-3.8-flash",
-      "$comment": "Pinned per-model group: both legs are the same Gemini 3.8 Flash weights, the gateway connection and the OpenRouter mirror. The OpenRouter leg stays gated (credits exhausted, operator 2026-09-25), so this combo answers on one provider today; its cross-provider redundancy is in the tier routes, which all carry the Gemini free leg plus the FREEKEYS-1 grants. Legs are ordered by what they cost (FREEKEYS-2, D-141 item 3): the free Gemini head, then the paid OpenRouter mirror, then gemini-3.5-flash on DeepInfra as the LAST leg - it is a `credit` provider with no price on file, so it stays gated and is the documented tail fallback once it is priced.",
+      "$comment": "FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash free head was REMOVED from every route (2026-09-30 measured 8088 gemini cooling-down lines / 7187 of them lastErrorCode=429, and a live 429 model_cooldown; providers.google_ai_studio is now unavailable). This pinned per-model group is repointed to vertex/gemini-3.8-flash, the 1M credit door that free-probe proved with a tool call at 2026-09-30T21:13Z. The OpenRouter mirror and the DeepInfra gemini-3.5-flash tail stay gated (credits/price), so the combo renders vertex alone.",
       "legs": [
-        "gemini/gemini-3.8-flash",
         "vertex/gemini-3.8-flash",
         "openrouter/google/gemini-3.8-flash",
         "deepinfra/google/gemini-3.5-flash"
@@ -3297,7 +3404,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "gemini-3.8-flash — gemini free → vertex → paid",
+          "display_name": "gemini-3.8-flash — vertex 3.8 Flash (1M credit)",
           "openhands_profile": {
             "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
@@ -3314,6 +3421,153 @@
         "openrouter/google/gemini-3.8-flash": {
           "$comment": "Operator decision 2026-09-25 (docs/plans/2026-09-25-routing-v2-plan.md, 'Operator steps': OpenRouter credits are exhausted and not topped up). Kept in the registry unchanged - same provider/model/leg data, same order - so it still mirrors today's files for the spec section 3.2 phase-1 equality gate; marked available: false so a caller does not route onto a dead leg.",
           "available": false
+        }
+      }
+    },
+    "groq-qwen3.8-27b": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence L1-backlog/ws-free-probe-20260930, commit 6e978dd: ack 200 + one get_weather tool call ok, 420 ms): pinned single-provider free combo for groq/qwen/qwen3.8-27b. opencode/zed only (no openhands_profile, the cheaperinference/kimi-k3 precedent for a pinned route).",
+      "class": "free",
+      "id": "groq-qwen3.8-27b",
+      "legs": [
+        "groq/qwen/qwen3.8-27b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "Qwen3.8-27B via Groq (free)",
+          "output": 16384
+        }
+      }
+    },
+    "hf-glm-5.2": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1132 ms): pinned single-provider free combo for huggingface/zai-org/GLM-5.2. The declared 256k is clamped by the shared models.'zai-org/GLM-5.2' row (context_advertised 128000, the nebius measurement), so the combo renders 128k. opencode/zed only.",
+      "class": "free",
+      "id": "hf-glm-5.2",
+      "legs": [
+        "huggingface/zai-org/GLM-5.2"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "GLM-5.2 via HuggingFace (free)",
+          "output": 32768
+        }
+      }
+    },
+    "hf-qwen3.8-27b": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1276 ms): pinned single-provider free combo for huggingface/Qwen/Qwen3.8-27B (gateway /v1/models context_length 128000, output 32768). opencode/zed only.",
+      "class": "free",
+      "id": "hf-qwen3.8-27b",
+      "legs": [
+        "huggingface/Qwen/Qwen3.8-27B"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "Qwen3.8-27B via HuggingFace (free)",
+          "output": 32768
+        }
+      }
+    },
+    "or-laguna-s-2.1-free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1961 ms): pinned single-provider free combo for openrouter/poolside/laguna-s-2.1:free (gateway /v1/models context_length 262144, output 32768). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "class": "free",
+      "id": "or-laguna-s-2.1-free",
+      "legs": [
+        "openrouter/poolside/laguna-s-2.1:free"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 262144,
+          "context_declared": "256k",
+          "display_name": "Laguna-S-2.1 via OpenRouter :free",
+          "output": 32768
+        }
+      }
+    },
+    "or-nemotron-3-super-free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 801 ms): pinned single-provider free combo for openrouter/nvidia/nemotron-3-super-120b-a12b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "class": "free",
+      "id": "or-nemotron-3-super-free",
+      "legs": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 262144,
+          "context_declared": "256k",
+          "display_name": "Nemotron-3-Super-120B via OpenRouter :free",
+          "output": 235929
+        }
+      }
+    },
+    "or-north-mini-code-free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 809 ms): pinned single-provider free combo for openrouter/cohere/north-mini-code:free (gateway /v1/models context_length 256000, output 64000). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "class": "free",
+      "id": "or-north-mini-code-free",
+      "legs": [
+        "openrouter/cohere/north-mini-code:free"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 256000,
+          "context_declared": "256k",
+          "display_name": "North-Mini-Code via OpenRouter :free",
+          "output": 64000
+        }
+      }
+    },
+    "or-qwen3.8-27b-free": {
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 5842 ms): pinned single-provider free combo for openrouter/qwen/qwen3.8-27b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "class": "free",
+      "id": "or-qwen3.8-27b-free",
+      "legs": [
+        "openrouter/qwen/qwen3.8-27b:free"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 262144,
+          "context_declared": "256k",
+          "display_name": "Qwen3.8-27B via OpenRouter :free",
+          "output": 235929
         }
       }
     },
@@ -3428,6 +3682,10 @@
         "opencode-zen/muse-spark-1.3-contributor-free": {
           "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
           "available": false
+        },
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "FREEWIRE 2026-09-30: DSMAX guard moved from providers.openrouter.available (now true) to the route level - no OpenRouter credit, so the paid muse-spark contributor leg through OpenRouter stays gated here too.",
+          "available": false
         }
       }
     },
@@ -3436,7 +3694,6 @@
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
-        "gemini/gemini-3.8-flash",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "nebius/zai-org/GLM-5.3-Flash",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
@@ -3456,7 +3713,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
+          "display_name": "t1 orchestrator-128k — free band → meta_api paid (no gemini)",
           "effort_default": "xhigh",
           "openhands_profile": {
             "gateway": "litellm",
@@ -3475,7 +3732,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
+          "display_name": "t1 orchestrator-128k — free band → meta_api paid (no gemini)",
           "effort_default": "xhigh",
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -3488,6 +3745,10 @@
       "unavailable_legs": {
         "opencode-zen/muse-spark-1.3-contributor-free": {
           "$comment": "client-bound (operator 2026-09-27): Zen answers only the opencode client - 403 x49 through the gateway (L0 ONE-ROUTER call_logs); the leg serves via the opencode client, never a gateway combo",
+          "available": false
+        },
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "FREEWIRE 2026-09-30: the DSMAX provider-level gate (providers.openrouter.available:false) moved to the route level so providers.openrouter can serve its ':free' ids. No OpenRouter credit: the paid muse-spark contributor leg through OpenRouter stays gated. LIFTED BY: an operator decision to fund OpenRouter credit.",
           "available": false
         },
         "morph/morph-dsv4flash": {
@@ -3525,7 +3786,12 @@
           "output": 32768
         }
       },
-      "unavailable_legs": {}
+      "unavailable_legs": {
+        "openrouter/meta/muse-spark-1.3-contributor": {
+          "$comment": "FREEWIRE 2026-09-30: the DSMAX guard moved from providers.openrouter.available (now true, so its ':free' ids serve) to the route level. This -clean route deliberately carries the OpenRouter contributor leg (CLEAN_ROUTE_EXEMPTIONS); with no OpenRouter credit it stays gated, so the route still renders no combo - unchanged from before.",
+          "available": false
+        }
+      }
     },
     "t1-orchestrator-free-only": {
       "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry. FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, nebius GLM-5.3-Flash, scaleway Mistral Small 3.2) FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.. Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. A free-only route takes no credit leg at all: the grants are metered money, not free. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one.",
@@ -3533,8 +3799,10 @@
       "id": "t1-orchestrator-free-only",
       "legs": [
         "opencode-zen/muse-spark-1.3-contributor-free",
-        "gemini/gemini-3.8-flash",
         "scaleway/qwen3-235b-a22b-instruct-2507",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
         "nebius/zai-org/GLM-5.3-Flash",
         "scaleway/mistral-small-3.2-24b-instruct-2506"
       ],
@@ -3640,22 +3908,34 @@
           "output": 32768
         }
       },
-      "unavailable_legs": {}
+      "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "FREEWIRE 2026-09-30: DSMAX guard moved from providers.openrouter.available (now true, so its ':free' ids serve) to the route level. No OpenRouter credit, so this paid BYOK leg stays gated here.",
+          "available": false
+        }
+      }
     },
     "t2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again.",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids).",
       "class": "mid",
       "id": "t2-worker",
       "legs": [
-        "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/qwen/qwen3.8-27b:free",
         "ovhcloud/gpt-oss-120b",
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
-        "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
         "openrouter/openai/gpt-oss-120b",
@@ -3735,8 +4015,8 @@
           "$comment": "L0 2026-09-27T03:39Z: unpinned OpenRouter BYOK leg; OmniRoute 3.8.51 has no per-leg provider pin. Serves only after the operator sets BYOK keys Prioritized + shared capacity off (operator list 2b); then drop this entry and re-probe with tools/probe-toolcalls.py (it skips legs listed here); put it back if the probe fails.",
           "available": false
         },
-        "groq/openai/gpt-oss-120b": {
-          "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "FREEWIRE 2026-09-30: the DSMAX guard moved from providers.openrouter.available (now true, so its ':free' ids serve) to the route level - no OpenRouter credit, so this paid BYOK leg stays gated.",
           "available": false
         }
       }
@@ -3770,6 +4050,10 @@
         }
       },
       "unavailable_legs": {
+        "openrouter/deepseek/deepseek-v4.1-flash": {
+          "$comment": "FREEWIRE 2026-09-30: the DSMAX guard moved from providers.openrouter.available (now true, so its ':free' ids serve) to the route level. No OpenRouter credit, so this paid BYOK leg stays gated - and a -clean route must never carry an ungated paid openrouter leg.",
+          "available": false
+        },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
@@ -3781,12 +4065,19 @@
       "id": "t2-worker-free-only",
       "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
-        "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-medium",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
         "scaleway/qwen3-235b-a22b-instruct-2507",
-        "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
         "groq/openai/gpt-oss-120b",
+        "scaleway/mistral-small-3.2-24b-instruct-2506",
+        "openrouter/qwen/qwen3.8-27b:free",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
         "free_ai/qwen7b"
@@ -3831,10 +4122,6 @@
         "cerebras/gpt-oss-120b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
           "available": false
-        },
-        "groq/openai/gpt-oss-120b": {
-          "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
-          "available": false
         }
       }
     },
@@ -3864,11 +4151,19 @@
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
         "scaleway/qwen3-235b-a22b-instruct-2507",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/qwen/qwen3.8-27b:free",
         "ovhcloud/gpt-oss-120b",
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
         "mistral/mistral-code-latest",
-        "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",
         "cheaperinference/glm-5.2",
         "deepseek/deepseek-flash",
@@ -3931,10 +4226,6 @@
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
           "available": false
         },
-        "groq/qwen/qwen3.8-27b": {
-          "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
-          "available": false
-        },
         "cheaperinference/glm-4.5-air": {
           "$comment": "Operator 2026-09-27T12:55Z: cheaperinference came back with a small balance for cheap efficient models only - kimi-k3, glm-5.2 and minimax-m2.7 are allowed (policy.leg_rules), the trailing deny-cheaperinference gates this leg. Route-gated here so rule 9 passes.",
           "available": false
@@ -3984,11 +4275,17 @@
       "id": "t3-driver-free-only",
       "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it.",
       "legs": [
+        "huggingface/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "groq/qwen/qwen3.8-27b",
-        "cerebras/qwen-3.8-27b",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "openrouter/poolside/laguna-s-2.1:free",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.3-Flash",
         "scaleway/qwen3-235b-a22b-instruct-2507",
+        "openrouter/cohere/north-mini-code:free",
+        "openrouter/qwen/qwen3.8-27b:free",
+        "cerebras/qwen-3.8-27b",
         "free_ai/qwen7b"
       ],
       "strategy": "priority",
@@ -4030,10 +4327,6 @@
       "unavailable_legs": {
         "cerebras/qwen-3.8-27b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
-          "available": false
-        },
-        "groq/qwen/qwen3.8-27b": {
-          "$comment": "deny-groq (OR2 2026-09-27): 400 'messages.N role:assistant' x335 + 413 x78 on agent calls (L0 ONE-ROUTER call_logs)",
           "available": false
         }
       }

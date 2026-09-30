@@ -3,14 +3,10 @@
   "models": [
     {
       "id": "t1-orchestrator",
-      "name": "t1 orchestrator-128k — 128k ctx (meta_api 1M head, gemini fallback)",
+      "name": "t1 orchestrator-128k — free band → meta_api paid (no gemini)",
       "context": 128000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
+      "reasoning_effort": "xhigh",
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -52,11 +48,6 @@
       "name": "t1 orchestrator-128k — zero spend (free legs only)",
       "context": 128000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -287,7 +278,7 @@
     },
     {
       "id": "gemini-3.8-flash",
-      "name": "gemini-3.8-flash — gemini free → vertex → paid",
+      "name": "gemini-3.8-flash — vertex 3.8 Flash (1M credit)",
       "context": 1048576,
       "output": 32768,
       "effort_ladder": [
@@ -318,6 +309,90 @@
           "opencode",
           "zed",
           "openhands"
+        ]
+      }
+    },
+    {
+      "id": "hf-glm-5.2",
+      "name": "GLM-5.2 via HuggingFace (free)",
+      "context": 128000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "hf-qwen3.8-27b",
+      "name": "Qwen3.8-27B via HuggingFace (free)",
+      "context": 128000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-nemotron-3-super-free",
+      "name": "Nemotron-3-Super-120B via OpenRouter :free",
+      "context": 262144,
+      "output": 235929,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-qwen3.8-27b-free",
+      "name": "Qwen3.8-27B via OpenRouter :free",
+      "context": 262144,
+      "output": 235929,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-north-mini-code-free",
+      "name": "North-Mini-Code via OpenRouter :free",
+      "context": 256000,
+      "output": 64000,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-laguna-s-2.1-free",
+      "name": "Laguna-S-2.1 via OpenRouter :free",
+      "context": 262144,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "groq-qwen3.8-27b",
+      "name": "Qwen3.8-27B via Groq (free)",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
         ]
       }
     },

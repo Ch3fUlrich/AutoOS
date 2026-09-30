@@ -108,8 +108,31 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash",
         "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "groq-qwen3.8-27b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "groq/qwen/qwen3.8-27b"
+      ]
+    },
+    {
+      "name": "hf-glm-5.2",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "huggingface/zai-org/GLM-5.2"
+      ]
+    },
+    {
+      "name": "hf-qwen3.8-27b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "huggingface/Qwen/Qwen3.8-27B"
       ]
     },
     {
@@ -118,6 +141,38 @@
       "context": "1M",
       "models": [
         "antigravity/claude-opus-4-6-thinking"
+      ]
+    },
+    {
+      "name": "or-laguna-s-2.1-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/poolside/laguna-s-2.1:free"
+      ]
+    },
+    {
+      "name": "or-nemotron-3-super-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      ]
+    },
+    {
+      "name": "or-north-mini-code-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/cohere/north-mini-code:free"
+      ]
+    },
+    {
+      "name": "or-qwen3.8-27b-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/qwen/qwen3.8-27b:free"
       ]
     },
     {
@@ -133,7 +188,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "gemini/gemini-3.8-flash",
         "scw/qwen3-235b-a22b-instruct-2507",
         "nebius/zai-org/GLM-5.3-Flash",
         "scw/mistral-small-3.2-24b-instruct-2506",
@@ -146,8 +200,10 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "gemini/gemini-3.8-flash",
         "scw/qwen3-235b-a22b-instruct-2507",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
         "nebius/zai-org/GLM-5.3-Flash",
         "scw/mistral-small-3.2-24b-instruct-2506"
       ]
@@ -175,11 +231,19 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-high",
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/qwen/qwen3.8-27b:free",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
@@ -201,11 +265,19 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "gemini/gemini-3.8-flash",
         "antigravity/gemini-3.7-flash-medium",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
         "scw/qwen3-235b-a22b-instruct-2507",
-        "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
+        "groq/openai/gpt-oss-120b",
+        "scw/mistral-small-3.2-24b-instruct-2506",
+        "openrouter/qwen/qwen3.8-27b:free",
         "free-ai/qwen7b"
       ]
     },
@@ -217,6 +289,15 @@
         "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
         "scw/qwen3-235b-a22b-instruct-2507",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "huggingface/zai-org/GLM-5.2",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/qwen/qwen3.8-27b:free",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
@@ -238,9 +319,16 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "huggingface/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/qwen/qwen3.8-27b",
+        "huggingface/Qwen/Qwen3.8-27B",
+        "openrouter/poolside/laguna-s-2.1:free",
         "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.3-Flash",
         "scw/qwen3-235b-a22b-instruct-2507",
+        "openrouter/cohere/north-mini-code:free",
+        "openrouter/qwen/qwen3.8-27b:free",
         "free-ai/qwen7b"
       ]
     },

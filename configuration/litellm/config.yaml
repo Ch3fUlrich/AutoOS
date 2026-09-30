@@ -48,11 +48,6 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker
   - model_name: t2-worker
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t2-worker
-    litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t2-worker
@@ -63,6 +58,42 @@ model_list:
     litellm_params:
       model: nebius/zai-org/GLM-5.2
       api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: huggingface/Qwen/Qwen3.8-27B
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker
     litellm_params:
       model: ovhcloud/gpt-oss-120b
@@ -107,21 +138,52 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker-free-only
   - model_name: t2-worker-free-only
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: huggingface/Qwen/Qwen3.8-27B
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
+      model: nebius/zai-org/GLM-5.2
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
       model: scaleway/mistral-small-3.2-24b-instruct-2506
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
-      model: nebius/zai-org/GLM-5.2
-      api_key: os.environ/NEBIUS_API_KEY
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
       model: openai/qwen7b
@@ -159,6 +221,42 @@ model_list:
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: huggingface/Qwen/Qwen3.8-27B
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: ovhcloud/gpt-oss-120b
@@ -201,6 +299,26 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver-free-only
   - model_name: t3-driver-free-only
     litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: huggingface/Qwen/Qwen3.8-27B
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
       model: scaleway/mistral-small-3.2-24b-instruct-2506
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t3-driver-free-only
@@ -211,6 +329,14 @@ model_list:
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
       model: openai/qwen7b
@@ -248,11 +374,6 @@ model_list:
   # AUTOOS-MANAGED-START t1-orchestrator
   - model_name: t1-orchestrator
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t1-orchestrator
-    litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t1-orchestrator
@@ -278,13 +399,20 @@ model_list:
   # AUTOOS-MANAGED-START t1-orchestrator-free-only
   - model_name: t1-orchestrator-free-only
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t1-orchestrator-free-only
-    litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  - model_name: t1-orchestrator-free-only
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
   - model_name: t1-orchestrator-free-only
     litellm_params:
       model: nebius/zai-org/GLM-5.3-Flash
@@ -339,13 +467,62 @@ model_list:
   # AUTOOS-MANAGED-START gemini-3.8-flash
   - model_name: gemini-3.8-flash
     litellm_params:
-      model: gemini/gemini-3.8-flash
-      api_key: os.environ/GEMINI_API_KEY
-  - model_name: gemini-3.8-flash
-    litellm_params:
       model: vertex/gemini-3.8-flash
       api_key: os.environ/VERTEX_API_KEY
   # AUTOOS-MANAGED-END gemini-3.8-flash
+
+  # ── FREEWIRE 2026-09-30: pinned single-provider free aliases ───────────────
+  # Probe-passed free legs (L1-backlog/ws-free-probe-20260930) that get their
+  # own omniroute combo; their providers carry a LiteLLM transport/key, so each
+  # is a managed tier here too. Legs are filled by tools/sync-router-tiers.py.
+  # AUTOOS-MANAGED-START groq-qwen3.8-27b
+  - model_name: groq-qwen3.8-27b
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  # AUTOOS-MANAGED-END groq-qwen3.8-27b
+
+  # AUTOOS-MANAGED-START hf-glm-5.2
+  - model_name: hf-glm-5.2
+    litellm_params:
+      model: huggingface/zai-org/GLM-5.2
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  # AUTOOS-MANAGED-END hf-glm-5.2
+
+  # AUTOOS-MANAGED-START hf-qwen3.8-27b
+  - model_name: hf-qwen3.8-27b
+    litellm_params:
+      model: huggingface/Qwen/Qwen3.8-27B
+      api_key: os.environ/HUGGINGFACE_API_KEY
+  # AUTOOS-MANAGED-END hf-qwen3.8-27b
+
+  # AUTOOS-MANAGED-START or-laguna-s-2.1-free
+  - model_name: or-laguna-s-2.1-free
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-laguna-s-2.1-free
+
+  # AUTOOS-MANAGED-START or-nemotron-3-super-free
+  - model_name: or-nemotron-3-super-free
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-nemotron-3-super-free
+
+  # AUTOOS-MANAGED-START or-north-mini-code-free
+  - model_name: or-north-mini-code-free
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-north-mini-code-free
+
+  # AUTOOS-MANAGED-START or-qwen3.8-27b-free
+  - model_name: or-qwen3.8-27b-free
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-qwen3.8-27b-free
 
   # ── cheaperinference pinned single-model aliases ───────────────────────────
 
