@@ -125,6 +125,50 @@ candidate on that same task and pick the winner per layer.
 State plainly: **running this comparison is phase 1 of the rollout**; this spec does not claim it
 has already happened, and does not pre-decide which candidate wins.
 
+**Phase-1 record (2026-09-29, OS-30 — probes run by the operator, per `harness-launch-permission`):**
+the endpoint half of §3 is measured; the harness half is blocked on a probe defect, not on any
+model verdict.
+
+- `deepseek/deepseek-flash` — **endpoint pass, end to end**: `/v1/messages` 200 with
+  `type: message`/`role: assistant`, a correct tool_use block (`get_weather`, "Paris"),
+  `stop_reason: tool_use`, `model` echo `deepseek-flash`, the tool-result round trip returned
+  200 containing the fed value, and `count_tokens` 200. This answers
+  `Q: FALLBACK | messages-endpoint` (§10) as (a).
+- `scaleway/qwen3-235b-a22b-instruct-2507` — **not yet measured as spelled**: that id is not the
+  gateway's wire spelling (`providers.scaleway.model_prefix = 'scw'`,
+  `catalog/ai-registry.json:2987`; FREEKEYS-1 measured this leg 200 with a tool-call round trip
+  as `scw/qwen3-235b-a22b-instruct-2507`) → HTTP 400 on `/v1/messages`, while `count_tokens`
+  returned 200 (that endpoint does not validate the model id). Re-run with
+  `--leg scw/qwen3-235b-a22b-instruct-2507`.
+- **Harness legs (both) — blocked at launch, no verdict**: exit 1 at wall 0.0, no tool calls,
+  `stderr: "Failed to connect to bus: No medium found"`. Root cause: the probe's allowlisted
+  child env omitted `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, so the §5
+  `systemd-run --user --scope` guard could not reach the user session bus and `claude` never
+  launched. Fixed in this lane's probe (the two path-only vars now pass through, and endpoint
+  error bodies are captured); the operator re-runs from a shell with a user session bus
+  (`export XDG_RUNTIME_DIR=/run/user/$(id -u)`; `loginctl enable-linger` if no session exists).
+  No fidelity/aliasing data exists yet — `harness-fidelity` (§10) stays open.
+
+**Phase-1 record, second run (2026-09-30, OS-30 re-run — probes run by the operator with the key
+export, D-158):** the harness half is measured on the deepseek leg; the qwen leg failed probe-side.
+
+- `deepseek/deepseek-flash` — **FULL PASS, harness leg included**: harness exit 0, wall 6.0 s,
+  `/v1/messages` 200 `shape_ok`, tool_use round trip, **hooks fired 3, the Edit tool produced the
+  correct change, and the Skill tool was used**. First harness-fidelity data: the Claude Code
+  harness keeps tool-call fidelity, hooks and skill loading on a gateway leg (§10 below).
+- `scw/qwen3-235b-a22b-instruct-2507` — **probe-side 400, not a model failure**: the gateway caps
+  `max_completion_tokens` at 16384 for that model id and the harness's own default request exceeded
+  it (harness exit 1, no tool calls). Fixed in this lane's probe: `--max-output-tokens` caps the
+  harness request via `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (endpoint legs ask `max_tokens: 300` and are
+  unaffected). A qwen re-run with `--max-output-tokens 16384` is an optional operator step —
+  robustness data, not a gate.
+- **Decision (delegated by routing-00, 2026-09-30): deepseek-sufficient for the phase-1 gate.**
+  Rationale: the fidelity question is answered by a full-pass leg; a second leg adds robustness
+  data, not a gate; the qwen failure is probe configuration. The opencode candidate is known-good
+  from production but was not re-measured on this exact task; small-model aliasing
+  (`model-alias-small`, §10) stays open.
+
+
 ## 4. L3 is unchanged
 
 L3 leaf workers already run non-Claude models by default — the routing-v2 plan lists the live
@@ -236,12 +280,15 @@ human sees and steers the fallback run.
 ## 10. Open questions
 
 Format follows the sibling specs' `Q:` cards (see `docs/plans/2026-09-28-fleetd-eventbus-spec.md:351-364`).
-All questions below are open (no `answer:`); each is `(inference)` unless a citation is given.
+Each is `(inference)` unless a citation is given; one question below carries an `ANSWERED` line
+(messages-endpoint, closed 2026-09-29 with the OS-30 operator probe — see the §3 phase-1 record).
 
 - `Q: FALLBACK | harness-fidelity | Does the Claude Code harness keep tool-call/subagent/--bg/hooks fidelity on OmniRoute legs, or must L1/L2 fall back to opencode? | options: (a) harness-on-gateway wins (b) opencode sessions win (c) split by layer | default: (c) until §3 phase-1 measurement lands — the "all combos" cell (`docs/models-proposed.md:145`) is a routing claim, not a fidelity claim | blocks: §3 rollout choice | reversible: yes (either candidate can be re-run) |` (inference; open item (a) of §3.)
 - `Q: FALLBACK | model-alias-default | Which OmniRoute-served model stands in for the harness's default model? | options: (a) gateway combo id passed directly (b) a pinned alias in the registry (c) decided in phase 1 | default: (c) — aliasing is unverified here | blocks: §3 measurement, any gateway launch profile | reversible: yes |` (inference; open item (b) of §3, per correction 2.)
 - `Q: FALLBACK | model-alias-small | Which model stands in for the harness's haiku-class "small" model (subagent/reviewer legs)? | options: (a) a free spark/GPT-OSS-class leg (b) an explicit small-model combo (c) phase 1 | default: (c) | blocks: §3 measurement | reversible: yes |` (inference; open item (b) of §3.)
-- `Q: FALLBACK | messages-endpoint | Does OmniRoute expose the Anthropic-format `/v1/messages` endpoint the harness expects, or only OpenAI-format? | options: (a) native Anthropic-format (b) translation layer sufficient (c) verify in phase 1 | default: (c) — the endpoint shape is not documented in the router research note (correction 2) | blocks: whether harness-on-gateway is even viable (§3) | reversible: n/a (a fact to discover) |` (inference; correction 2.)
+- ANSWERED 2026-09-29 (OS-30, operator probe — live `/v1/messages`): `Q: FALLBACK | messages-endpoint` = (a) OmniRoute exposes the Anthropic-format `/v1/messages` endpoint the harness expects: HTTP 200, `type: message`/`role: assistant`, tool_use + tool-result round trip and `count_tokens` all verified on `deepseek/deepseek-flash` (§3 phase-1 record).
+- ANSWERED (fidelity half) 2026-09-30 (OS-30 re-run, single leg): `Q: FALLBACK | harness-fidelity` — the harness **keeps tool-call fidelity** on `deepseek/deepseek-flash` (Edit correct, hooks fired 3, Skill tool used, `/v1/messages` tool_use round trip passed). The harness-vs-opencode comparison on the same task was not re-measured, so the per-layer winner is still not picked; other legs remain subject to per-leg verification (§3 record, 2026-09-30).
+- `Q: FALLBACK | harness-launch-permission | A fleet agent cannot launch another Claude Code harness session on a gateway without an operator-approved permission rule (the auto-mode classifier refused both a bypass-permissions run and a narrow `--allowedTools` run, 2026-09-29). Must ORCH-B4's relaunch-with-gateway-env be operator-sanctioned by a permission rule, or run by a non-agent systemd unit? | options: (a) permission rule for the launcher (b) non-agent systemd unit launches the relaunch (c) operator launches by hand | default: (b) | blocks: B4 relaunch, phase-1 measurement | reversible: yes |` (observed, phase 1.)
 - `Q: FALLBACK | b4-trigger-source | Does B4 read "exhausted/reset" from the provider usage report or a wall-clock reset heuristic? | options: (a) measured usage (matches B4 DONE-criteria, `docs/tasks.md:53`) (b) fixed reset window (c) both | default: (a) because B4's own DONE-criteria is a mode switch from measured usage | blocks: §5 trigger condition | reversible: yes (configuration) |` (precedent cited in `docs/tasks.md:53`; the answer is B4's lane, not this spec's.)
 - `Q: FALLBACK | cross-host-until-fleetd | Until fleetd ships, how do two hosts coordinate in fallback? | options: (a) accept degraded, same-machine-only (b) interim shared bus (c) wait for fleetd before enabling cross-host | default: (a) because inventing a stopgap bus duplicates fleetd (`docs/plans/2026-09-28-fleetd-eventbus-spec.md:3`) | blocks: §6 messaging row | reversible: yes |` (inference.)
 
