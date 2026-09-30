@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 - CAO removal (2026-09-29, operator): CAO is deprecated — the batch runner is the only lane. Deleted the `cao/` package (18 modules), `tests/cao/` (21 files), `infra/mcp-servers/cao-setup/` (12 files) and `references/cao-runbook.md`; cut the `## CAO quickstart` section from the skill; dropped the `cao` block from `handoff.config.example.json`; de-CAOed the skill description, Files table, R-coord-09, `l3-routing.md`, `main-orchestrator.md`, `rule-map.md`, `trust_worktree.py`, `pytest.ini`, `repository-index/SKILL.md` and `AGENTS.md`. Gate: `tests/test_no_cao.py` (red-first, 4 passed).
+
+### Fixed — the spawned worker resolves the gateway too, not the clone's loopback (GWLOOPBACK-2, 2026-09-30)
+
+GWLOOP cured the spawner's own `gateway_up()` pre-check, but the spawned worker was still born
+broken in-container: its opencode reads the *sandbox clone's* `opencode.jsonc`, whose omniroute
+provider pins `http://127.0.0.1:20128/v1` — refused inside a container, where the gateway is the
+`omniroute` sibling — so every in-container gateway-path worker died on its first model call (0 of
+58 records; the memspec P1 review seat 1R died `ConnectionRefused`).
+
+- **The child's `OPENCODE_CONFIG_CONTENT` overlay now carries
+  `providers.omniroute.settings.baseURL`** = the address this process resolved to (`GATEWAY`,
+  rebound by the pre-check), spelled with the repo's API root (`/v1`; an override that carries its
+  own path keeps it) by the new `gateway_base_url()`, stamped into the child env by
+  `stamp_worker_gateway()` inside `worker_env()` — the one place both spawn sites build the child
+  env, after the plan merge and the key. opencode merges the content source last (v2.0.19
+  `Config.load` appends it after the discovered files; measured 2026-09-30: the same clone, same
+  env — `opencode run --standalone` fails ConnectionRefused without the stamp and reaches the
+  gateway with it), so the clone's file cannot pin a worker to an address its container refuses.
+  No file on disk is rewritten; on a host the stamp spells exactly what the file already says; a
+  `--free` overlay (no provider block) and a document without the provider are left alone.
+- **Tests**: `tests/test_gateway_selection.py` `GatewayBaseUrlTests` (5 cases, red first: the
+  container/host shapes, the call-time default, trailing slash, an override's own path) and
+  `tests/test_autoos_spawner.py` `WorkerGatewayOverlayTests` (9 cases, red first: the stamp, the
+  merge into a provider block, the host shape, `--free`/non-omniroute/malformed documents
+  untouched, the plan's copy kept, the checkout file byte-identical, and the whole
+  `build_plan` → `worker_env` emit path). Full spawner suite: 1140 tests, 64F+2E — the identical
+  failure set at base `2df2d5c` (1131 tests, 64F+2E), lane-only failures none.
 ### Fixed — `autoos-agent.py` resolves its gateway instead of assuming loopback (GWLOOP, 2026-09-30)
 
 `tools/autoos-agent.py` hard-coded `GATEWAY = "http://127.0.0.1:20128"`. That address is right
