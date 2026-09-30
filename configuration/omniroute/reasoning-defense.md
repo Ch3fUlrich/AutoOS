@@ -39,7 +39,7 @@ The gateway has three defense layers, applied in order at `translator/index.ts`:
 
 ### When the 400 Fires
 
-The 400 fires when the Replay Cache **misses**:
+The 400 fires when the Replay Cache **misses** or when the `toResponses` function omits the reasoning item entirely:
 
 | Scenario | Cache | Empty Injection | Result |
 |---|---|---|---|

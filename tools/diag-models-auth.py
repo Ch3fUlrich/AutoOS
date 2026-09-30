@@ -15,6 +15,6 @@ try:
         print(m)
     print(f"--- total: {len(models)} ---")
 except urllib.error.HTTPError as e:
-    print(f"HTTP {e.code}: {e.read().decode()[:500]}")
+    print(f"HTTP {e.code}")
 except Exception as e:
     print(f"Error: {e}")

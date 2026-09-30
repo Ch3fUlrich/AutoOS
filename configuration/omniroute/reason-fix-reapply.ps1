@@ -76,6 +76,28 @@ function Try-Replace($path, $find, $replace, $label) {
   return $true
 }
 
+# Normalized variant for .ts files that may have CRLF line endings.
+# Normalizes content, find, and replace to LF before matching so that
+# multi-line find strings work regardless of the file's line ending.
+function Try-Replace-Normalized($path, $find, $replace, $label) {
+  $content = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
+  $findN = $find -replace "`r`n", "`n"
+  $replaceN = $replace -replace "`r`n", "`n"
+  if ($content.IndexOf($findN) -lt 0) {
+    if ($content.IndexOf($replaceN) -ge 0) {
+      $results.Add("SKIP  $label (already patched)")
+      return $true
+    }
+    $results.Add("ERROR $label (find string not found — version changed?)")
+    return $false
+  }
+  $bak = Backup-File $path
+  $patched = $content.Replace($findN, $replaceN)
+  [System.IO.File]::WriteAllText($path, $patched, $utf8NoBom)
+  $results.Add("PATCH $label (backup: $(Split-Path $bak -Leaf))")
+  return $true
+}
+
 # ── 1. Compiled .js chunk patches (runtime fix) ──────────────────────
 
 $chunksDir = Join-Path $PackageDir 'dist/.build/next/server/chunks'
@@ -111,13 +133,11 @@ $tsToResp = Join-Path $PackageDir 'open-sse/translator/request/openai-responses/
 Write-Host "`n=== .ts source patches (source consistency) ==="
 
 # 2a. translator/index.ts — add deepseek to requiresReasoningContentPresence
+#     Each patch is idempotent: Try-Replace-Normalized checks for the find
+#     string, and if absent, checks for the replace string (already patched).
 if (Test-Path $tsIndex) {
-  $c = [System.IO.File]::ReadAllText($tsIndex)
-  if ($c.IndexOf('AutoOS patch 2026-09-30') -ge 0) {
-    $results.Add("SKIP  index.ts (already patched)")
-  } else {
-    $find = 'return normalizedProvider === "xiaomi-mimo" || /(^|\/)mimo/i.test(normalizedModel);'
-    $replace = @'
+  $findIdx = 'return normalizedProvider === "xiaomi-mimo" || /(^|\/)mimo/i.test(normalizedModel);'
+  $replaceIdx = @'
 return (
     normalizedProvider === "xiaomi-mimo" ||
     /(^|\/)mimo/i.test(normalizedModel) ||
@@ -125,38 +145,40 @@ return (
     /(^|\/)deepseek/i.test(normalizedModel)
   );
 '@
-    $ok = Try-Replace $tsIndex $find $replace "index.ts requiresReasoningContentPresence"
-    if ($ok) {
-      # Add comment line before the function's closing comment
-      $c2 = [System.IO.File]::ReadAllText($tsIndex)
-      $findComment = ' * isInternalReasoningPlaceholder(), so it never re-poisons cache or history.'
-      $replaceComment = @"
+  Try-Replace-Normalized $tsIndex $findIdx $replaceIdx "index.ts requiresReasoningContentPresence" | Out-Null
+
+  # Add patch marker comment (separate idempotent step)
+  $c = [System.IO.File]::ReadAllText($tsIndex) -replace "`r`n", "`n"
+  $findComment = ' * isInternalReasoningPlaceholder(), so it never re-poisons cache or history.'
+  $replaceComment = @'
  * isInternalReasoningPlaceholder(), so it never re-poisons cache or history.
  * AutoOS patch 2026-09-30: added deepseek (see configuration/omniroute/reason-fix-README.md).
-"@
-      if ($c2.IndexOf($findComment) -ge 0 -and $c2.IndexOf('AutoOS patch 2026-09-30') -lt 0) {
-        $c2 = $c2.Replace($findComment, $replaceComment)
-        [System.IO.File]::WriteAllText($tsIndex, $c2, $utf8NoBom)
-      }
-    }
+'@
+  if ($c.IndexOf($replaceComment) -ge 0) {
+    $results.Add("SKIP  index.ts patch marker (already present)")
+  } elseif ($c.IndexOf($findComment) -ge 0) {
+    $bak = Backup-File $tsIndex
+    $c = $c.Replace($findComment, $replaceComment)
+    [System.IO.File]::WriteAllText($tsIndex, $c, $utf8NoBom)
+    $results.Add("PATCH index.ts patch marker (backup: $(Split-Path $bak -Leaf))")
+  } else {
+    $results.Add("SKIP  index.ts patch marker (anchor not found — non-fatal)")
   }
 }
+else { $results.Add("ERROR index.ts (file not found)") }
 
-# 2b. toResponses.ts — import, helper, else-if branch
+# 2b. toResponses.ts — import, helper, reasoningIsPlaceholder var, else-if branch
+#     Four patches, each idempotent via Try-Replace-Normalized. No top-level
+#     marker check — each patch checks its own find/replace independently.
 if (Test-Path $tsToResp) {
-  $c = [System.IO.File]::ReadAllText($tsToResp)
-  if ($c.IndexOf('AutoOS patch 2026-09-30') -ge 0) {
-    $results.Add("SKIP  toResponses.ts (already patched)")
-  } else {
-    # Patch 1: import
-    $find1 = 'import { isInternalReasoningPlaceholder } from "../../../utils/reasoningPlaceholder.ts";'
-    $replace1 = 'import { isInternalReasoningPlaceholder, NON_ANTHROPIC_THINKING_PLACEHOLDER } from "../../../utils/reasoningPlaceholder.ts";'
-    Try-Replace $tsToResp $find1 $replace1 "toResponses.ts import" | Out-Null
+  # Patch 1: import — add NON_ANTHROPIC_THINKING_PLACEHOLDER to import
+  $find1 = 'import { isInternalReasoningPlaceholder } from "../../../utils/reasoningPlaceholder.ts";'
+  $replace1 = 'import { isInternalReasoningPlaceholder, NON_ANTHROPIC_THINKING_PLACEHOLDER } from "../../../utils/reasoningPlaceholder.ts";'
+  Try-Replace-Normalized $tsToResp $find1 $replace1 "toResponses.ts import" | Out-Null
 
-    # Patch 2: helper function (insert before openaiToOpenAIResponsesRequest)
-    $c = [System.IO.File]::ReadAllText($tsToResp)
-    $find2 = 'export function openaiToOpenAIResponsesRequest('
-    $helperFn = @'
+  # Patch 2: helper function — insert before openaiToOpenAIResponsesRequest
+  $find2 = 'export function openaiToOpenAIResponsesRequest('
+  $helperFn = @'
 
 // DeepSeek and other strict Responses-API upstreams reject function_call
 // input items that are not preceded by a reasoning item in thinking mode
@@ -175,35 +197,26 @@ function responsesProviderRequiresReasoningPresence(provider: unknown, model: un
 }
 
 '@
-    if ($c.IndexOf($find2) -ge 0) {
-      $c = $c.Replace($find2, $helperFn + $find2)
-      [System.IO.File]::WriteAllText($tsToResp, $c, $utf8NoBom)
-      $results.Add("PATCH toResponses.ts helper function")
-    }
+  $replace2 = $helperFn + $find2
+  Try-Replace-Normalized $tsToResp $find2 $replace2 "toResponses.ts helper function" | Out-Null
 
-    # Patch 3: reasoningIsPlaceholder variable + else-if branch
-    $c = [System.IO.File]::ReadAllText($tsToResp)
-    $find3 = 'const reasoning = getReadableReasoningValue(msg).trim();' + [char]10 + '      if (reasoning && !isInternalReasoningPlaceholder(reasoning)) {'
-    $replace3 = @'
+  # Patch 3: reasoningIsPlaceholder variable
+  $find3 = 'const reasoning = getReadableReasoningValue(msg).trim();' + "`n" + '      if (reasoning && !isInternalReasoningPlaceholder(reasoning)) {'
+  $replace3 = @'
 const reasoning = getReadableReasoningValue(msg).trim();
       const reasoningIsPlaceholder = isInternalReasoningPlaceholder(reasoning);
       if (reasoning && !reasoningIsPlaceholder) {
 '@
-    if ($c.IndexOf($find3) -ge 0) {
-      $c = $c.Replace($find3, $replace3)
-      [System.IO.File]::WriteAllText($tsToResp, $c, $utf8NoBom)
-      $results.Add("PATCH toResponses.ts reasoningIsPlaceholder var")
-    }
+  Try-Replace-Normalized $tsToResp $find3 $replace3 "toResponses.ts reasoningIsPlaceholder var" | Out-Null
 
-    # Patch 4: else-if branch injection
-    $c = [System.IO.File]::ReadAllText($tsToResp)
-    $find4 = @'
+  # Patch 4: else-if branch injection
+  $find4 = @'
         });
       }
 
       // Thinking blocks remain display-only here. They do not prove that the
 '@
-    $replace4 = @'
+  $replace4 = @'
         });
       } else if (
         // DeepSeek (and Xiaomi MiMo) reject function_call items with no
@@ -226,13 +239,9 @@ const reasoning = getReadableReasoningValue(msg).trim();
 
       // Thinking blocks remain display-only here. They do not prove that the
 '@
-    if ($c.IndexOf($find4) -ge 0) {
-      $c = $c.Replace($find4, $replace4)
-      [System.IO.File]::WriteAllText($tsToResp, $c, $utf8NoBom)
-      $results.Add("PATCH toResponses.ts else-if branch")
-    }
-  }
+  Try-Replace-Normalized $tsToResp $find4 $replace4 "toResponses.ts else-if branch" | Out-Null
 }
+else { $results.Add("ERROR toResponses.ts (file not found)") }
 
 # ── 3. Report ───────────────────────────────────────────────────────
 
