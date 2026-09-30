@@ -138,8 +138,18 @@ FLEET_AGENT_MODELS = {
     "orchestrator": "omniroute/deepseek-v4.1-flash",
     "suborchestrator": "omniroute/deepseek-v4.1-flash",
     "leaf-implementer": "omniroute/vertex-gemini-3.1-pro-preview",
-    "leaf-reviewer": "omniroute/vertex-claude-sonnet-4-5",
+    # Operator 2026-09-30: leaves spawn on Vertex. Probed live before pinning:
+    # `vertex/gemini-3.1-pro-preview` and `vertex/gemini-2.5-flash` answer 200,
+    # but `vertex/claude-sonnet-4-5` is 501 ("not implemented, or supported, or
+    # enabled" -- the Vertex project has no Claude entitlement) and
+    # `vertex/DeepSeek-V4-Flash` is 400 (gateway payload bug). Pointing the
+    # reviewer at a dead leg would fail every leaf review, so it defaults to a
+    # different family that is up now; free-first (NVIDIA nemotron).
+    "leaf-reviewer": "omniroute/nemotron-3-ultra-free",
 }
+# Reviewer fallback (paid, funded, 1M, always up): omniroute/deepseek-v4.1-flash.
+# If the operator enables Claude in the Vertex Model Garden, the reviewer can
+# move back to omniroute/vertex-claude-sonnet-4-5.
 DEEPSEEK_VARIANTS = ("low", "high", "max")
 # id -> (gateway modelID, context window). The gateway (7647-model catalogue
 # 2026-09-30) serves a `vertex/` provider; these four are the fleet's picks.
@@ -149,6 +159,11 @@ FLEET_VERTEX_MODELS = {
     "vertex-claude-sonnet-4-5": ("vertex/claude-sonnet-4-5", 200000),
     "vertex-deepseek-v4-flash": ("vertex/DeepSeek-V4-Flash", 1000000),
 }
+# Non-Vertex fleet aliases the agents reference (same shape, same pinning).
+FLEET_EXTRA_MODELS = {
+    "nemotron-3-ultra-free": ("nvidia/nemotron-3-ultra-550b-a55b:free", 1048576),
+}
+FLEET_ALIAS_MODELS = dict(FLEET_VERTEX_MODELS, **FLEET_EXTRA_MODELS)
 
 
 def pin_fleet_overrides(cfg, notes):
@@ -217,7 +232,7 @@ def pin_fleet_overrides(cfg, notes):
                                  % (label, "/".join(DEEPSEEK_VARIANTS)))
             # Operator 2026-09-30: expose the Vertex AI provider so leaves can
             # spawn on a fast, non-rate-limited leg.
-            for mid, (model_id, ctx) in FLEET_VERTEX_MODELS.items():
+            for mid, (model_id, ctx) in FLEET_ALIAS_MODELS.items():
                 if mid in models:
                     continue
                 models[mid] = {

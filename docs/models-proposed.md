@@ -94,14 +94,19 @@ fleet was re-pinned. The pins are enforced at render time in
 
 Earlier `vertex/*` answered `429 all vertex accounts have exhausted their
 quota (reset after ~5m)`; it serves again, so spawning subagents from Vertex is
-possible. Fleet-visible ids (all four pinned in the renderer):
+possible. **Per-leg probe 2026-09-30 (gateway `/v1/chat/completions`, one
+`ready` prompt each):**
 
-| Fleet model id | Gateway model | Window | Role |
-|---|---|---|---|
-| `vertex-gemini-3.1-pro-preview` | `vertex/gemini-3.1-pro-preview` | 1M | leaf-implementer head |
-| `vertex-claude-sonnet-4-5` | `vertex/claude-sonnet-4-5` | 200k | leaf-reviewer head |
-| `vertex-gemini-2.5-flash` | `vertex/gemini-2.5-flash` | 1M | cheap overflow |
-| `vertex-deepseek-v4-flash` | `vertex/DeepSeek-V4-Flash` | 1M | DeepSeek overflow via Vertex |
+| Gateway leg | Result | Fleet alias | Window | Fleet role |
+|---|---|---|---|---|
+| `vertex/gemini-3.1-pro-preview` | **200 OK** | `vertex-gemini-3.1-pro-preview` | 1M | leaf-implementer head |
+| `vertex/gemini-2.5-flash` | **200 OK** | `vertex-gemini-2.5-flash` | 1M | cheap overflow |
+| `vertex/claude-sonnet-4-5` | **501** "not implemented, or supported, or enabled" | `vertex-claude-sonnet-4-5` | 200k | unusable until Claude is enabled in the Vertex Model Garden |
+| `vertex/DeepSeek-V4-Flash` | **400** "Expected input to contain field: 'messages'" | `vertex-deepseek-v4-flash` | 1M | unusable — gateway payload bug, routed for a fix |
+
+The 501 is not quota: it is an account entitlement gap (Vertex serves only the
+Gemini models for this project). The 400 is a transport bug in the gateway's
+route for that model, not a client error — the request carried `messages`.
 
 Quota semantics: the 429 is per-account and resets on a ~5-minute window, so a
 Vertex leg behaves like any other chain head — the breaker hops past it, it is
@@ -111,6 +116,17 @@ L1-main (tiny probes + cost-efficient legs only). Vertex has **no
 providers), and no curated combo references `vertex/*` yet, so what is live
 today is the gateway connection plus the fleet *agent* models; combo changes
 stay PENDING-APPROVAL (OS-32).
+
+**Reviewer default moved off the dead leg** (same day): `leaf-reviewer` was
+pinned to `vertex-claude-sonnet-4-5`, which cannot serve, so every default leaf
+review would have failed. It is now `omniroute/nemotron-3-ultra-free`
+(`nvidia/nemotron-3-ultra-550b-a55b:free`, 1M, free, family NVIDIA — independent
+of both the Gemini implementer and the Qwen writers), with
+`omniroute/deepseek-v4.1-flash` as the documented paid fallback. If the
+operator enables Claude on Vertex, the reviewer can move back
+(`omniroute/vertex-claude-sonnet-4-5`). Pinned in
+`tools/render-opencode-container-config.py` (`FLEET_AGENT_MODELS` +
+`FLEET_EXTRA_MODELS`) so `ai-stack.sh init` cannot revert it.
 
 ## A. Curated combos (`combos.json` — fully managed)
 

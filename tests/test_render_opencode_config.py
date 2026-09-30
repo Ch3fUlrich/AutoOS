@@ -59,12 +59,14 @@ class TestRenderOpencodeConfig(unittest.TestCase):
         self.assertEqual([v['id'] for v in models['deepseek-v4.1-flash']['variants']],
                          ['low', 'high', 'max'])
         self.assertEqual(models['deepseek-v4.1-flash']['limit']['context'], 1048576)
-        for mid in module.FLEET_VERTEX_MODELS:
+        for mid in module.FLEET_ALIAS_MODELS:
             self.assertIn(mid, models)
         self.assertEqual(cfg['agent']['orchestrator']['model'],
                          'omniroute/deepseek-v4.1-flash')
+        # Operator 2026-09-30: vertex/claude-sonnet-4-5 answers 501 on the live
+        # gateway, so the reviewer defaults to a working other-family leg.
         self.assertEqual(cfg['agent']['leaf-reviewer']['model'],
-                         'omniroute/vertex-claude-sonnet-4-5')
+                         'omniroute/nemotron-3-ultra-free')
         self.assertEqual(cfg['agent']['suborchestrator']['mode'], 'primary')
         second = []
         module.pin_fleet_overrides(cfg, second)
