@@ -1529,6 +1529,23 @@
       "price_out": 2.6e-7,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
       "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
+    },
+    "Qwen3.8-27B": {
+      "id": "Qwen3.8-27B",
+      "family": "qwen",
+      "context_advertised": 262000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 4.7e-7,
+      "price_out": 3.19e-6,
+      "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
+      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos."
     }
   },
   "policy": {
@@ -3631,6 +3648,9 @@
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
+        "ovhcloud/Qwen3.8-27B",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b",
@@ -3840,6 +3860,9 @@
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
         "scaleway/qwen3-235b-a22b-instruct-2507",
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
+        "ovhcloud/Qwen3.8-27B",
         "mistral/mistral-code-latest",
         "groq/qwen/qwen3.8-27b",
         "samba/gpt-oss-120b",

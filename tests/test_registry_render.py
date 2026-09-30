@@ -1267,7 +1267,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
     def test_real_litellm_drops_gated_legs(self):
         rendered = registry.render_litellm_blocks(
             real_registry(), real_litellm_config())
-        self.assertNotIn("gpt-oss-120b", rendered["t2-worker"])
+        # groq/cerebras/sambanova/openrouter gpt-oss-120b legs are all
+        # unavailable and dropped; the ovhcloud credit-tier leg (added
+        # 2026-09-30, L1-backlog/ws-ovh-20260930) is available and kept.
+        self.assertNotIn("sambanova/gpt-oss-120b", rendered["t2-worker"])
+        self.assertNotIn("groq/openai/gpt-oss-120b", rendered["t2-worker"])
+        self.assertIn("ovhcloud/gpt-oss-120b", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
         # the client-bound opencode-zen leg (litellm transport openai/…) is
         # dropped, and so is the openrouter leg of the same model (DSMAX
@@ -1283,6 +1288,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertNotIn("qwen3.8-27b", rendered["t3-driver"])
         self.assertNotIn("MiniMax-M3", rendered["t3-driver"])
         self.assertIn("mistral-code-latest", rendered["t3-driver"])
+        # ovhcloud credit-tier legs (added 2026-09-30) are available;
+        # groq's lowercase qwen3.8-27b is denied and dropped, and the
+        # OVH model ID is mixed-case (Qwen3.8-27B) so the assertNotIn
+        # above still passes.
+        self.assertIn("ovhcloud/gpt-oss-120b", rendered["t3-driver"])
+        self.assertIn("ovhcloud/Qwen3.8-27B", rendered["t3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
         row = row_for(registry.render_models_doc(real_registry()), "t2-worker-clean")

@@ -65,6 +65,18 @@ model_list:
       api_key: os.environ/NEBIUS_API_KEY
   - model_name: t2-worker
     litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
   - model_name: t2-worker
@@ -147,6 +159,18 @@ model_list:
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: mistral/mistral-code-latest

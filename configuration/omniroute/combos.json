@@ -67,9 +67,11 @@
     "(operator order trial -> free -> credits -> paid). deepseek/deepseek-flash",
     "remains as the paid fallback leg in both combos (deepseek-v4.1-flash",
     "combo). Non-chat OVH ids (embeddings/tts/stt/image) inventoried only,",
-    "not wired. Registry ai-registry.json OVH entry (tier credit, credit_usd",
-    "200) is L1-beta/ws-ovh territory; if not yet committed, apply validates",
-    "against live /v1/models and re-renders after its commit."
+    "not wired. Registry ai-registry.json routes updated: ovhcloud/gpt-oss-120b,",
+    "ovhcloud/Qwen3-Coder-30B-A3B-Instruct, ovhcloud/Qwen3.8-27B added to",
+    "t2-worker and t3-driver route legs; Qwen3.8-27B model row added (was",
+    "missing from f6f5e69). litellm/config.yaml and docs/models.md synced",
+    "via sync-router-tiers.py and render models-doc."
   ],
   "retired": [
     "tier1",
