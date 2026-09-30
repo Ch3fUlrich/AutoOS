@@ -158,8 +158,8 @@
       "tool_calls": "unproven"
     },
     "claude-opus-4-6-thinking": {
-      "$comment": "Antigravity OAuth pool leg. price is sourced, not a placeholder: docs/models.md 'Claude family ... $0 marginal (seat-metered)'. Ladder is a conservative default (no measured Claude ladder here).",
-      "context_advertised": 200000,
+      "$comment": "Antigravity OAuth pool leg. price is sourced, not a placeholder: docs/models.md 'Claude family ... $0 marginal (seat-metered)'. Ladder is a conservative default (no measured Claude ladder here). OPUS1M (operator 2026-09-30): the combos.json CTXFIX comment (a5bcb69) cites the gateway's computed_context_length 1048576 for this leg; context_advertised corrected from stale 200000 to match the live catalog. context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
         "tokens": 100000
@@ -399,8 +399,8 @@
       "tool_calls": "unproven"
     },
     "gemini-3.8-flash": {
-      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only').",
-      "context_advertised": 131072,
+      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
         "tokens": 65536
@@ -3283,6 +3283,7 @@
       "$comment": "Pinned per-model group: both legs are the same Gemini 3.8 Flash weights, the gateway connection and the OpenRouter mirror. The OpenRouter leg stays gated (credits exhausted, operator 2026-09-25), so this combo answers on one provider today; its cross-provider redundancy is in the tier routes, which all carry the Gemini free leg plus the FREEKEYS-1 grants. Legs are ordered by what they cost (FREEKEYS-2, D-141 item 3): the free Gemini head, then the paid OpenRouter mirror, then gemini-3.5-flash on DeepInfra as the LAST leg - it is a `credit` provider with no price on file, so it stays gated and is the documented tail fallback once it is priced.",
       "legs": [
         "gemini/gemini-3.8-flash",
+        "vertex/gemini-3.8-flash",
         "openrouter/google/gemini-3.8-flash",
         "deepinfra/google/gemini-3.5-flash"
       ],
@@ -3294,11 +3295,11 @@
             "zed",
             "openhands"
           ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "gemini-3.8-flash — gemini free → paid",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "gemini-3.8-flash — gemini free → vertex → paid",
           "openhands_profile": {
-            "max_input_tokens": 131072,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
             "reasoning": false
           },
@@ -3331,11 +3332,11 @@
             "zed",
             "openhands"
           ],
-          "context": 200000,
-          "context_declared": "200k",
-          "display_name": "opus-4-6 — agy free → cc subscription (200k)",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "opus-4-6 — agy free → cc subscription (1M)",
           "openhands_profile": {
-            "max_input_tokens": 200000,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
             "reasoning": true
           },
@@ -3443,7 +3444,8 @@
         "opencode-zen/muse-spark-1.3-contributor-free",
         "openrouter/meta/muse-spark-1.3-contributor",
         "morph/morph-dsv4flash",
-        "deepinfra/google/gemini-3.5-flash"
+        "deepinfra/google/gemini-3.5-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3580,11 +3582,12 @@
       }
     },
     "t1-orchestrator-paid": {
-      "$comment": "Was the LiteLLM-only fallback chain with legs: [] and its chain hand-curated in configuration/litellm/config.yaml - which meant 404, because that hand group was never written (docs/plans/2026-09-25-registry-mapping.md Open choices). MUSEAPI 2026-09-27 gives it a leg: meta_api/muse-spark-1.3-contributor, so the route is registry-managed now and renders an AUTOOS-MANAGED block in config.yaml. A route with a servable leg also renders a combo (render_omniroute() requires surfaces.omniroute.context_declared for every legged route), so this one is reachable through the gateway as well - it is no longer one of the 'LiteLLM-only routes with no combos.json counterpart' in render_omniroute()'s docstring. t2-worker-paid and t3-driver-paid are still legless and hand-curated; they keep that old meaning.",
+      "$comment": "Was the LiteLLM-only fallback chain with legs: [] and its chain hand-curated in configuration/litellm/config.yaml - which meant 404, because that hand group was never written (docs/plans/2026-09-25-registry-mapping.md Open choices). MUSEAPI 2026-09-27 gives it a leg: meta_api/muse-spark-1.3-contributor, so the route is registry-managed now and renders an AUTOOS-MANAGED block in config.yaml. A route with a servable leg also renders a combo (render_omniroute() requires surfaces.omniroute.context_declared for every legged route), so this one is reachable through the gateway as well - it is no longer one of the 'LiteLLM-only routes with no combos.json counterpart' in render_omniroute()'s docstring. t2-worker-paid and t3-driver-paid are still legless and hand-curated; they keep that old meaning. DSLEG (operator 2026-09-30): deepseek/deepseek-flash appended as final leg so a 429 on meta_api falls through to a second distinct provider, not a dead end.",
       "class": "cheap",
       "id": "t1-orchestrator-paid",
       "legs": [
-        "meta_api/muse-spark-1.3-contributor"
+        "meta_api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3615,7 +3618,8 @@
       "legs": [
         "antigravity/claude-opus-4-6-thinking",
         "cc/claude-opus-4-6",
-        "openrouter/deepseek/deepseek-v4.1-flash"
+        "openrouter/deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -3625,11 +3629,11 @@
             "zed",
             "openhands"
           ],
-          "context": 200000,
-          "context_declared": "200k",
-          "display_name": "t2 orchestrator-200k — small-scope orchestration",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "t2 orchestrator-1M — small-scope orchestration",
           "openhands_profile": {
-            "max_input_tokens": 200000,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
             "reasoning": true
           },
@@ -3754,11 +3758,11 @@
             "zed",
             "openhands"
           ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "t2 smart-reasoning-128k — no training (sensitive data)",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "t2 smart-reasoning-1M — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 131072,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
             "reasoning": false
           },
@@ -3957,11 +3961,11 @@
             "zed",
             "openhands"
           ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "t3 cheap-driver-128k — no training (sensitive data)",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "t3 cheap-driver-1M — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 131072,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 16384,
             "reasoning": false
           },

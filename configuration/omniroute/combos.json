@@ -137,7 +137,8 @@
         "scw/qwen3-235b-a22b-instruct-2507",
         "nebius/zai-org/GLM-5.3-Flash",
         "scw/mistral-small-3.2-24b-instruct-2506",
-        "meta-api/muse-spark-1.3-contributor"
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -156,7 +157,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "meta-api/muse-spark-1.3-contributor"
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -164,7 +166,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "antigravity/claude-opus-4-6-thinking"
+        "antigravity/claude-opus-4-6-thinking",
+        "deepseek/deepseek-flash"
       ]
     },
     {
