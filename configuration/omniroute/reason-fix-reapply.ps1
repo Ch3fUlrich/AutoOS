@@ -79,10 +79,23 @@ function Try-Replace($path, $find, $replace, $label) {
 # Normalized variant for .ts files that may have CRLF line endings.
 # Normalizes content, find, and replace to LF before matching so that
 # multi-line find strings work regardless of the file's line ending.
-function Try-Replace-Normalized($path, $find, $replace, $label) {
+# The optional $marker parameter is for insertion-type patches where the
+# find string is a substring of the replacement (e.g. inserting text
+# before a line that remains in the output). For those patches, the marker
+# (a unique string from the replacement) is checked FIRST — if present,
+# the patch is already applied. Without this, the find string always
+# matches and the patch is re-applied, creating duplicates.
+function Try-Replace-Normalized($path, $find, $replace, $label, $marker = "") {
   $content = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
   $findN = $find -replace "`r`n", "`n"
   $replaceN = $replace -replace "`r`n", "`n"
+  if ($marker) {
+    $markerN = $marker -replace "`r`n", "`n"
+    if ($content.IndexOf($markerN) -ge 0) {
+      $results.Add("SKIP  $label (already patched)")
+      return $true
+    }
+  }
   if ($content.IndexOf($findN) -lt 0) {
     if ($content.IndexOf($replaceN) -ge 0) {
       $results.Add("SKIP  $label (already patched)")
@@ -198,7 +211,7 @@ function responsesProviderRequiresReasoningPresence(provider: unknown, model: un
 
 '@
   $replace2 = $helperFn + $find2
-  Try-Replace-Normalized $tsToResp $find2 $replace2 "toResponses.ts helper function" | Out-Null
+  Try-Replace-Normalized $tsToResp $find2 $replace2 "toResponses.ts helper function" "function responsesProviderRequiresReasoningPresence" | Out-Null
 
   # Patch 3: reasoningIsPlaceholder variable
   $find3 = 'const reasoning = getReadableReasoningValue(msg).trim();' + "`n" + '      if (reasoning && !isInternalReasoningPlaceholder(reasoning)) {'
@@ -239,7 +252,7 @@ const reasoning = getReadableReasoningValue(msg).trim();
 
       // Thinking blocks remain display-only here. They do not prove that the
 '@
-  Try-Replace-Normalized $tsToResp $find4 $replace4 "toResponses.ts else-if branch" | Out-Null
+  Try-Replace-Normalized $tsToResp $find4 $replace4 "toResponses.ts else-if branch" "responsesProviderRequiresReasoningPresence(credentialRecord._provider, model)" | Out-Null
 }
 else { $results.Add("ERROR toResponses.ts (file not found)") }
 
