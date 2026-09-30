@@ -335,5 +335,42 @@ Honoured: cwd guard in §1; the only git writes were commits on this branch.
 
 ## 8. Reviewer (different family, nonce-gated)
 
-See §8 addendum appended after review (nonce written into this file, required to be read
-back). Verdict recorded below.
+**Review gate nonce (read it back to prove the file was actually read):**
+`64dd1013a5d04ba7d6ccaaea7b88e0ef`
+
+The reviewer must quote that exact value. Review-integrity note: the predecessor lane
+(`patch-fix`) had two reviewer spawns return **fabricated** outputs, so this lane gates the
+review on the nonce above (present only in this file) and on fresh run timestamps.
+
+### Verdict
+
+**APPROVE** — family `t3-reviewer` (self-reported model `t3 cheap-driver-128k`; a different
+provider family from this lane's `deepseek-v4.1-flash`).
+
+**Accepted (review attempt 2 — clean-room, uniquely-named dirs `rev2c-*`).** It reported
+the nonce correctly and reproduced, independently:
+
+* clamp pristine check: `_0o8_5h8._.js` does not contain `scaleway`;
+  run 1 `6 patched, 0 skipped, 0 errors` (backup ts `20261001-012615`);
+  run 2 `0 patched, 6 skipped, 0 errors`.
+* deepseek pristine `_18ct13i._.js` anchor count = **1**, marker = **0**;
+  run 1 `12 patched, 0 skipped, 0 errors` (backup ts `20261001012659`);
+  run 2 `0 patched, 12 skipped, 0 errors`; after run 1 anchor = **0**, marker = **1**.
+* Windows PowerShell 5.1: run 1 `12 patched, 0 skipped, 0 errors` (backup ts
+  `20261001012838`), run 2 `0 patched, 12 skipped, 0 errors`.
+
+These match this lane's own reproducible measurements exactly.
+
+**Review-integrity note (as demanded for every claim in this lane).** The first review
+attempt also returned the correct nonce and a valid PS 5.1 run (`…011445`), but its
+"clean-room" copies were leftovers of the pre-restart attempt: `$TD\rev-clamp` and
+`$TD\rev-ds` already existed and were patched, so its clamp/deepseek run 1 showed `SKIP`
+and it claimed a pristine `_18ct13i` anchor count of 0 — contradicted by this lane's own
+measurement (`Select-String -SimpleMatch … 'e&&!(0,n.isInternalReasoningPlaceholder)(e)&&g.push('`
+→ 1 in pristine; the reviewer's first-attempt count was wrong). Attempt 1 is therefore
+**partially disregarded**; only its nonce read-back and PS 5.1 run are counted. Attempt 2,
+whose instructions forced fresh unique directories and a pristine pre-check, is the
+authoritative review and is accepted in full. Both attempts independently confirmed the
+UTF-8 BOM fix makes the deepseek script parse under Windows PowerShell 5.1.
+
+
