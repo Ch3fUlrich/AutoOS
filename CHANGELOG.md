@@ -2889,6 +2889,41 @@ ids become tombstones is a separate, catalog-only edit.
 - Docs: **`docs/catalog.md`** gained the two Fields rows and a
   *Retiring a component (tombstone)* section — the rules above, and why `note` and
   `notes` are different fields.
+### Added — the MEMSPEC P1 memory facade: five methods, one file-backed graph, `schema: 2` events (MEMSPEC P1, 2026-09-30)
+
+- **`tools/memory_facade_mcp.py`** — the typed facade MCP server (D-037): the
+  five §4 methods `recall`/`remember`/`link`/`supersede`/`context_pack`
+  (spec:62-68), the write rules on EVERY write (hub link, closed relation
+  list, ≤600-char body, secret scan — all validation before any write), and
+  the receipts spec:77-80 requires: entity id, the NEW `version_id`, author
+  session + restart generation id (D-042), source. Every successful write
+  appends the §5 `schema: 2` event envelope agreed with L2-general (fleet
+  console spec §4.3): ULID, `memory.<kind>.<created|updated|merged|
+  superseded|redirected>` plus `memory.edge.linked`, `prev_version_id` only
+  on updated|superseded, append-only, never a body or a secret; refused
+  writes and no-ops append nothing. Single design per the L1-backlog
+  arbitration: links are `{"rel","id"}` pairs (bare ids refused by name),
+  `version_id` is an int, env is one `AUTOOS_MEMORY_*` family, and store +
+  events are file-backed with defaults under the git-ignored `logs/` tree.
+- **`tools/memory_facade_engine.py`** — the swappable engine seam (D-067,
+  spec:255-260): file-backed JSON store (R0 fixture seed + canonical saved
+  shape, atomic temp-rename), int versions with a readable history
+  (spec:79), the alias ladder with order-insensitive normalisation so rung 2
+  fires (spec:66), recall ranked by text + hub distance inside the 600-token
+  budget (spec:84), `context_pack` with hub facts, open contradictions and
+  recent events inside 1.5k (spec:88-91), and the spec:73 closed relation
+  list as the minimal spec-grounded set `about`/`part_of`/`supersedes` (the
+  spec mandates a list and enumerates none — verified against spec:73/116,
+  the fleet console §4.3 and PLAN §14; `related_to` is not on it).
+- **`tests/test_memory_facade_mcp.py`** (33 tests), **`tests/test_memory_events.py`**
+  (13), the R0 fixture `tests/fixtures/memory/` (7 nodes, deliberate hub
+  distances) and both `tests/linux/33-documentation.sh` wiring blocks — red
+  first (24 + 13 failing at 1324ad8), green after 4c06a9c. The events suite
+  pins the scripted sequence created → updated → merged+redirected → edge
+  linked → superseded + `supersedes` edge, the envelope, and byte-prefix
+  append-only growth. P1 exit (spec:217) met: the five methods round-trip
+  and the events validate against §4.3.
+
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the

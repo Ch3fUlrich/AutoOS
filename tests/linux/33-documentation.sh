@@ -743,6 +743,20 @@ if it "autoos_report: BRIEF/REPORT protocol parser (unit tests)"; then
     out="$(python3 tests/test_autoos_report.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# MEMSPEC P1 (docs/plans/2026-09-28-memory-facade-spec.md §4, §11): the typed
+# memory facade MCP - five methods, write rules, write receipts. All state is a
+# temp copy of the R0 fixture; nothing real is read or written.
+if it "memory facade: five methods, write rules and receipts (unit tests)"; then
+    out="$(python3 tests/test_memory_facade_mcp.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# MEMSPEC P1 (docs/plans/2026-09-28-memory-facade-spec.md §5): every facade
+# write appends the schema: 2 envelope agreed in the fleet console spec §4.3.
+# Temp store + temp events file; nothing real is read or written.
+if it "memory facade: schema 2 write events (unit tests)"; then
+    out="$(python3 tests/test_memory_events.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-effort.py: effort-ladder probe writes the overlay (routing v2 spec 5.5, 10).
 if it "probe-effort: effort-ladder probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_effort.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
