@@ -14,10 +14,12 @@ Commits: `a9d174d` (combos.json OVH legs, cherry-pick of dropped `8384f85`),
 
 The operator registered connection `ovhcloud` (provider id `2e7f59a9`,
 active). Both `ovh/…` and `ovhcloud/…` prefixes route. L0-verified 200
-acks on 6 chat candidates. An L0-side lane (`ws-ovh`) adds the
-`catalog/ai-registry.json` OVH entries (tier `credit`, `credit_usd 200`)
-on a separate branch — that is L1-beta territory; this lane does NOT
-edit `ai-registry.json`.
+acks on 6 chat candidates. The `catalog/ai-registry.json` OVH entries
+(tier `credit`, `credit_usd 200`, 3 model rows) were added by commit
+`f6f5e69` on this branch. The registry routes for t2-worker and
+t3-driver still need a `render` (without `--check`) to incorporate
+the OVH legs — until then `render omniroute --check` reports 2 new
+"differs" (see section 5).
 
 ## 2. Probe evidence
 
@@ -111,13 +113,14 @@ operator's fallback requirement.
 
 ## 6. Cross-lane dependencies
 
-- **L1-beta/ws-ovh** (L0-side lane): adds `catalog/ai-registry.json` OVH
-  entries (tier `credit`, `credit_usd 200`, 3 model rows). Commit
-  `f6f5e69` exists on a separate branch, not yet merged. The
-  `render omniroute --check` "differs" on t2-worker and t3-driver will
-  resolve after this commit is merged and the registry has the OVH
-  routes. Until then, `apply` validates against the live `/v1/models`
-  catalog (OVH legs are known to the gateway).
+- **Registry OVH routes**: commit `f6f5e69` (OVH provider + 3 model
+  rows in `ai-registry.json`) is on this branch. The registry routes
+  for t2-worker and t3-driver still list the pre-OVH legs, so
+  `render omniroute --check` reports 2 new "differs". Running
+  `python tools/registry.py render omniroute` (without `--check`) will
+  write the OVH legs into the registry routes and resolve the differs.
+  Until then, `apply` validates against the live `/v1/models` catalog
+  (OVH legs are known to the gateway).
 - **L1-beta** (registry context_advertised): 5 pre-existing "differs"
   entries (stale context_advertised on gemini-3.8-flash, opus-4-6,
   t2-orchestrator, t2-worker-clean, t3-driver-clean) — documented by
