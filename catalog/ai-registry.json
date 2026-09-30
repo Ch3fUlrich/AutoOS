@@ -1478,6 +1478,57 @@
       "price_in": 0,
       "price_out": 0,
       "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'scw/mistral-small-3.2-24b-instruct-2506', which is why providers.scaleway.model_prefix is 'scw'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedscaleway. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+    },
+    "Meta-Llama-3_3-70B-Instruct": {
+      "id": "Meta-Llama-3_3-70B-Instruct",
+      "family": "meta",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 7.4e-7,
+      "price_out": 7.4e-7,
+      "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.74 in / $0.74 out per 1M tokens, per-token)",
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Meta-Llama-3_3-70B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Uses OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling row another provider may register)."
+    },
+    "Mistral-Small-3.2-24B-Instruct-2506": {
+      "id": "Mistral-Small-3.2-24B-Instruct-2506",
+      "family": "mistral",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 1e-7,
+      "price_out": 3.1e-7,
+      "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.10 in / $0.31 out per 1M tokens, per-token)",
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Mistral-Small-3.2-24B-Instruct-2506', which is why providers.ovhcloud.model_prefix is 'ovh'. Same model as the lowercase scaleway row 'mistral-small-3.2-24b-instruct-2506' but OVH spells it mixed-case, so resolve_leg() needs this separate row. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page. trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
+    },
+    "Qwen3-Coder-30B-A3B-Instruct": {
+      "id": "Qwen3-Coder-30B-A3B-Instruct",
+      "family": "qwen",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "proven",
+      "price_in": 7e-8,
+      "price_out": 2.6e-7,
+      "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
     }
   },
   "policy": {
@@ -3058,6 +3109,23 @@
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-28 Together AI USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'together' is registered and active, its catalog exposes 277 canonical model id(s) under prefix 'together', 0 answered a tool-call trial end to end. Statuses measured: 403 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+    },
+    "ovhcloud": {
+      "id": "ovhcloud",
+      "omniroute_id": "ovhcloud",
+      "model_prefix": "ovh",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "api_base": null,
+      "provider_data": null,
+      "tier": "credit",
+      "credit_usd": 200,
+      "trains_on_prompts": null,
+      "available": true,
+      "monthly_cap_usd": 200,
+      "monthly_warn_fraction": 0.8,
+      "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
+      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%)."
     }
   },
   "routes": {
@@ -3998,5 +4066,5 @@
       }
     }
   },
-  "version": "2026-09-28"
+  "version": "2026-09-30"
 }
