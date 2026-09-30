@@ -24,8 +24,18 @@ against emptying the contents array.
 After running `npm update`, the patch must be reapplied using the script at:
 
 ```powershell
-.\configuration\omniroute\vertex-trailing-turn-reapply.ps1
+.\tools\vertex-trailing-turn-reapply.ps1
 ```
+
+(Path corrected 2026-09-30 by lane `patch-fix`; the script previously lived at the
+mistyped `configuration/omniroute/` path and its anchors matched nothing, so a
+reapply was a silent no-op.)
+
+The script patches the `.ts` source plus the six compiled chunks that define the
+`openaiToOpenAIResponsesRequest` helper — `_08_y1bx`, `_18ct13i`, `_1j_edf1`,
+`_1luyz1c`, `_15ose6x`, `_1xkpq2s` — and is idempotent (a second run reports
+`SKIP` for every file). `tools/apply-vertex-patch.py` is the equivalent chunk-only
+patcher.
 
 ## Impact
 

@@ -14,16 +14,29 @@ The fix adds a trailing model turn strip in `openai-to-gemini.ts`'s `openaiToGem
 
 ### Files Modified
 
-1. `open-sse/translator/request/openai-to-gemini.ts`
-   - Added trailing model turn strip after `mergeConsecutiveSameRoleContents` call
-2. `dist/.build/next/server/chunks/_0o8_5h8._.js`
-   - Updated with the same trailing model turn strip
-3. `dist/.build/next/server/chunks/_0t1t5fj._.js`
-   - Updated with the same trailing model turn strip
-4. `dist/.build/next/server/chunks/_14jycqh._.js`
-   - Updated with the same trailing model turn strip
-5. `dist/.build/next/server/chunks/_18ct13i._.js`
-   - Updated with the same trailing model turn strip
+> Corrected 2026-09-30 by lane `patch-fix` (`docs/handoff/2026-09-30-lanePatchFix.md`),
+> after hashing every file against the published `omniroute@3.8.50` npm tarball.
+> The original list below named the wrong four chunks; only one of them actually
+> carries this strip.
+
+1. `open-sse/translator/request/openai-to-gemini.ts` — **patched** (tarball 36018 B →
+   live 36778 B; strip inserted after `result.contents = mergeConsecutiveSameRoleContents(...)`).
+
+Of the four compiled chunks this document originally named, **three differ from the
+tarball and one does not** — but only one of the three carries the trailing-turn strip:
+
+| chunk | tarball → live | trailing-turn strip? |
+|---|---|---|
+| `_0o8_5h8._.js` | 870668 → 871423 (+755 B) | **no** — the change is not this fix (§unattributed, lanePatchFix) |
+| `_0t1t5fj._.js` | 870668 → 871423 (+755 B) | **no** — same |
+| `_18ct13i._.js` | 1302308 → 1302588 (+280 B) | yes (strip accounts for +174 B of it) |
+| `_14jycqh._.js` | 21659 → 21659 (0) | **no — byte-identical, unpatched** |
+
+The strip is actually applied to the **six** chunks that define the
+`openaiToOpenAIResponsesRequest` helper (all six carry the `mergeConsecutiveSameRoleContents`
+call site): `_08_y1bx`, `_18ct13i`, `_1j_edf1`, `_1luyz1c` (vars `f`/`o`) and
+`_15ose6x`, `_1xkpq2s` (vars `m`/`s`). Mechanism: `tools/apply-vertex-patch.py`
+(or the repaired `tools/vertex-trailing-turn-reapply.ps1`).
 
 ## Verification
 
@@ -43,11 +56,22 @@ Full results saved to `probe-vertex-isolated-results.json`.
 
 ## Reapply Script
 
-A reapply script is provided at `tools/vertex-trailing-turn-reapply.ps1` to reapply the patch after running `npm update`. The script:
+> Corrected 2026-09-30 by lane `patch-fix`: the original script's anchors matched
+> nothing in the pristine 3.8.50 content (a post-`npm update` reapply was a no-op),
+> and it dot-sourced a non-existent UI module. It has been repaired.
 
-1. Creates backups of modified files
-2. Updates the source file and compiled chunks
-3. Is idempotent and can be run multiple times safely
+The reapply script is `tools/vertex-trailing-turn-reapply.ps1`. It:
+
+1. Backs up each modified file to `<file>.autoos-backup-<timestamp>`.
+2. Patches `open-sse/translator/request/openai-to-gemini.ts` and the six compiled
+   chunks listed above.
+3. Is idempotent — a second run reports every file `SKIP` and exits 0.
+
+`tools/apply-vertex-patch.py` is the equivalent chunk-only patcher (the same `old`/`new`
+anchor pairs). Proof on a pristine tarball copy (throwaway dir): run 1 =
+`Done: 13 patched, 0 skipped, 0 errors`; run 2 =
+`Done: 0 patched, 13 skipped, 0 errors`. The patched `.ts` is byte-identical to the
+live file (SHA256 `B913F3CA…12B4`).
 
 ## Cross-Family Reviews
 

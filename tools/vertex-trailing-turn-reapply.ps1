@@ -1,187 +1,174 @@
-# encoding: utf-8
-# requires -Version 7.4
-
+#Requires -Version 5.1
 <#
+.SYNOPSIS
+  Idempotent reapply of the Vertex/Gemini trailing-model-turn strip fix.
+
 .DESCRIPTION
-    Reapplies the trailing model turn strip fix to OmniRoute's Vertex/Gemini executor.
+  OmniRoute v3.8.50 rejects a Gemini/Vertex request whose contents end on a
+  role:"model" turn ("Requests ending with a model turn are not supported." 400).
+  The fix strips a trailing model turn inside the openai-to-gemini base
+  translator, at the mergeConsecutiveSameRoleContents call site.
 
-    This is a config-first fix: the patch is applied to the global OmniRoute package
-    at C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute, and a reapply
-    script is provided under configuration/omniroute/ to reapply it after npm update.
+  Two layers are patched:
+    1. open-sse/translator/request/openai-to-gemini.ts
+       (source-tree consistency; the compiled worker does not load it).
+    2. the compiled Turbopack chunks that carry the mergeConsecutiveSameRoleContents
+       call site -- these are what the running gateway executes:
+         _08_y1bx._.js, _18ct13i._.js, _1j_edf1._.js, _1luyz1c._.js  (vars f / o)
+         _15ose6x._.js, _1xkpq2s._.js                                (vars m / s)
 
-    The fix adds a trailing model turn strip in openai-to-gemini.ts's openaiToGeminiBase
-    function, after the mergeConsecutiveSameRoleContents call (line 569). The strip
-    guards against emptying the contents array.
+  `npm update omniroute` replaces the package and reverts every patch; re-run this
+  script afterwards.
 
-    The patch also updates the compiled chunks in dist/.build/next/server/chunks/.
+  Each file is backed up to <file>.autoos-backup-<timestamp> before its first
+  modification. The script is idempotent: a second run reports SKIP for every file
+  and exits 0.
 
-    This script is idempotent and can be run multiple times safely.
+  All 13 anchors below were verified to match exactly once in the pristine
+  omniroute@3.8.50 npm tarball. The equivalently-anchored chunk-only companion is
+  tools/apply-vertex-patch.py.
 
 .PARAMETER Path
-    Path to the OmniRoute package directory (default: C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute).
-
-.PARAMETER Backup
-    Create a backup of each modified file with a .autoos-backup-<timestamp> suffix.
-    Defaults to $true.
-
-.PARAMETER Force
-    Force overwrite of existing files without prompting. Defaults to $false.
-
+  Root of the omniroute package. Defaults to the npm-global install.
+.PARAMETER NoBackup
+  Do not write .autoos-backup-<timestamp> copies (the file content is still changed).
 .EXAMPLE
-    PS> .\vertex-trailing-turn-reapply.ps1 -Path "C:\path\to\omniroute"
-
+  pwsh -File vertex-trailing-turn-reapply.ps1
+.EXAMPLE
+  pwsh -File vertex-trailing-turn-reapply.ps1 -Path C:\omniroute-dev\node_modules\omniroute
 .NOTES
-    File: vertex-trailing-turn-reapply.ps1
-    Author: AutoOS Agent
-    Date: 2026-09-30
+  AutoOS lane F1-vertex | 2026-09-30 | omniroute v3.8.50
 #>
-
-[CmdletBinding(
-    DefaultParameterSetName = 'Default',
-    ConfirmImpact = 'High'
-)]
-param (
-    [Parameter(Mandatory = $false, Position = 0)]
-    [string]
-    $Path = "C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute",
-
-    [Parameter(Mandatory = $false)]
-    [switch]
-    $Backup = $true,
-
-    [Parameter(Mandatory = $false)]
-    [switch]
-    $Force
+[CmdletBinding()]
+param(
+  [string]$Path = (Join-Path $env:APPDATA 'npm\node_modules\omniroute'),
+  [switch]$NoBackup
 )
 
-# Load AutoOS UI helpers
-. $PSScriptRoot\..\..\lib\windows\AutoOS.Ui.psm1
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-# Validate paths
-if (-not (Test-Path -Path $Path -PathType Container)) {
-    Write-AutoOSError -Message "OmniRoute package directory not found at $Path" -Id 'PATH_NOT_FOUND' -Category ResourceUnavailable
-    exit 1
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+if (-not (Test-Path -LiteralPath (Join-Path $Path 'package.json'))) {
+  Write-Host "ERROR: omniroute package not found at: $Path"
+  Write-Host "Pass -Path <path> to override."
+  exit 1
 }
 
-$SourceRoot = Join-Path -Path $Path -ChildPath 'open-sse'
-$DistRoot = Join-Path -Path $Path -ChildPath 'dist\.build\next\server\chunks'
+$results = [System.Collections.Generic.List[string]]::new()
 
-if (-not (Test-Path -Path $SourceRoot -PathType Container)) {
-    Write-AutoOSError -Message "OmniRoute source directory not found at $SourceRoot" -Id 'SOURCE_NOT_FOUND' -Category ResourceUnavailable
-    exit 1
+function Backup-File([string]$p) {
+  if ($NoBackup) { return '<no-backup>' }
+  $bak = "$p.autoos-backup-$stamp"
+  Copy-Item -LiteralPath $p -Destination $bak -Force
+  return (Split-Path -Leaf $bak)
 }
 
-if (-not (Test-Path -Path $DistRoot -PathType Container)) {
-    Write-AutoOSError -Message "OmniRoute dist directory not found at $DistRoot" -Id 'DIST_NOT_FOUND' -Category ResourceUnavailable
-    exit 1
+function Try-Replace([string]$p, [string]$find, [string]$replace, [string]$label) {
+  $content = [System.IO.File]::ReadAllText($p)
+  if ($content.IndexOf($replace, [System.StringComparison]::Ordinal) -ge 0) {
+    $results.Add("SKIP  $label (already patched)")
+    return
+  }
+  $count = ([regex]::Matches($content, [regex]::Escape($find))).Count
+  if ($count -eq 0) {
+    $results.Add("ERROR $label (anchor not found - package version changed?)")
+    return
+  }
+  if ($count -gt 1) {
+    $results.Add("ERROR $label ($count anchor matches, expected 1)")
+    return
+  }
+  $bak = Backup-File $p
+  [System.IO.File]::WriteAllText($p, $content.Replace($find, $replace), $utf8NoBom)
+  $results.Add("PATCH $label (backup: $bak)")
 }
 
-# Backup files if requested
-if ($Backup) {
-    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $backupFiles = @(
-        Join-Path -Path $SourceRoot -ChildPath 'translator\request\openai-to-gemini.ts',
-        Join-Path -Path $DistRoot -ChildPath '_0o8_5h8._.js',
-        Join-Path -Path $DistRoot -ChildPath '_0t1t5fj._.js',
-        Join-Path -Path $DistRoot -ChildPath '_14jycqh._.js',
-        Join-Path -Path $DistRoot -ChildPath '_18ct13i._.js'
-    )
-    
-    foreach ($file in $backupFiles) {
-        if (Test-Path -Path $file -PathType Leaf) {
-            $backupPath = "$file.autoos-backup-$timestamp"
-            Copy-Item -Path $file -Destination $backupPath -Force
-            Write-AutoOSInfo -Message "Created backup of $file at $backupPath" -Id 'BACKUP_CREATED'
-        }
-    }
-}
-
-# Patch openai-to-gemini.ts
-$targetFile = Join-Path -Path $SourceRoot -ChildPath 'translator\request\openai-to-gemini.ts'
-
-if (-not (Test-Path -Path $targetFile -PathType Leaf)) {
-    Write-AutoOSError -Message "Target file not found at $targetFile" -Id 'TARGET_NOT_FOUND' -Category ResourceUnavailable
-    exit 1
-}
-
-# Read the file content
-$content = Get-Content -Path $targetFile -Raw
-
-# Find the mergeConsecutiveSameRoleContents call
-$mergePattern = 'mergeConsecutiveSameRoleContents\s*\(\s*tb\.messages\s*\)'
-$mergeMatch = [regex]::Match($content, $mergePattern)
-
-if (-not $mergeMatch.Success) {
-    Write-AutoOSError -Message "mergeConsecutiveSameRoleContents call not found in $targetFile" -Id 'MERGE_NOT_FOUND' -Category ObjectNotFound
-    exit 1
-}
-
-# Calculate the insertion point (after the merge call)
-$insertionPoint = $mergeMatch.Index + $mergeMatch.Length
-
-# Insert the trailing model turn strip
-$stripCode = @'
-
-    // Strip trailing model turns from Gemini contents
-    if (tb.contents.length > 0) {
-        const lastContent = tb.contents[tb.contents.length - 1];
-        if (lastContent.role === 'model') {
-            tb.contents.pop();
-        }
-    }
-'@
-
-$newContent = $content.Substring(0, $insertionPoint) + $stripCode + $content.Substring($insertionPoint)
-
-# Write the patched content
-if ($Force -or (Confirm-AutoOSAction -Message "Apply patch to $targetFile?" -Id 'PATCH_CONFIRM')) {
-    Set-Content -Path $targetFile -Value $newContent -Force
-    Write-AutoOSInfo -Message "Successfully patched $targetFile" -Id 'PATCH_APPLIED'
-}
-
-# Patch the compiled chunks
-$chunkFiles = @(
-    Join-Path -Path $DistRoot -ChildPath '_0o8_5h8._.js',
-    Join-Path -Path $DistRoot -ChildPath '_0t1t5fj._.js',
-    Join-Path -Path $DistRoot -ChildPath '_14jycqh._.js',
-    Join-Path -Path $DistRoot -ChildPath '_18ct13i._.js'
+# --- 1. Compiled chunks (runtime fix) --------------------------------
+# old -> new, byte-identical to tools/apply-vertex-patch.py.
+$chunkPatches = @(
+  @('_08_y1bx._.js', 'mergeConsecutiveSameRoleContents)(f.contents),f},null)',
+    'mergeConsecutiveSameRoleContents)(f.contents),f.contents.length>1&&"model"===f.contents[f.contents.length-1].role&&f.contents.pop(),f},null)'),
+  @('_08_y1bx._.js', 'mergeConsecutiveSameRoleContents)(o.contents??[]);let _=t.tools',
+    'mergeConsecutiveSameRoleContents)(o.contents??[]);if(o.contents.length>1&&"model"===o.contents[o.contents.length-1].role)o.contents.pop();let _=t.tools'),
+  @('_18ct13i._.js', 'mergeConsecutiveSameRoleContents)(f.contents),f},null)',
+    'mergeConsecutiveSameRoleContents)(f.contents),f.contents.length>1&&"model"===f.contents[f.contents.length-1].role&&f.contents.pop(),f},null)'),
+  @('_18ct13i._.js', 'mergeConsecutiveSameRoleContents)(o.contents??[]);let _=t.tools',
+    'mergeConsecutiveSameRoleContents)(o.contents??[]);if(o.contents.length>1&&"model"===o.contents[o.contents.length-1].role)o.contents.pop();let _=t.tools'),
+  @('_1j_edf1._.js', 'mergeConsecutiveSameRoleContents)(f.contents),f},null)',
+    'mergeConsecutiveSameRoleContents)(f.contents),f.contents.length>1&&"model"===f.contents[f.contents.length-1].role&&f.contents.pop(),f},null)'),
+  @('_1j_edf1._.js', 'mergeConsecutiveSameRoleContents)(o.contents??[]);let _=t.tools',
+    'mergeConsecutiveSameRoleContents)(o.contents??[]);if(o.contents.length>1&&"model"===o.contents[o.contents.length-1].role)o.contents.pop();let _=t.tools'),
+  @('_1luyz1c._.js', 'mergeConsecutiveSameRoleContents)(f.contents),f},null)',
+    'mergeConsecutiveSameRoleContents)(f.contents),f.contents.length>1&&"model"===f.contents[f.contents.length-1].role&&f.contents.pop(),f},null)'),
+  @('_1luyz1c._.js', 'mergeConsecutiveSameRoleContents)(o.contents??[]);let _=t.tools',
+    'mergeConsecutiveSameRoleContents)(o.contents??[]);if(o.contents.length>1&&"model"===o.contents[o.contents.length-1].role)o.contents.pop();let _=t.tools'),
+  @('_15ose6x._.js', 'mergeConsecutiveSameRoleContents)(m.contents),m},null)',
+    'mergeConsecutiveSameRoleContents)(m.contents),m.contents.length>1&&"model"===m.contents[m.contents.length-1].role&&m.contents.pop(),m},null)'),
+  @('_15ose6x._.js', 'mergeConsecutiveSameRoleContents)(s.contents??[]);let A=t.tools',
+    'mergeConsecutiveSameRoleContents)(s.contents??[]);if(s.contents.length>1&&"model"===s.contents[s.contents.length-1].role)s.contents.pop();let A=t.tools'),
+  @('_1xkpq2s._.js', 'mergeConsecutiveSameRoleContents)(m.contents),m},null)',
+    'mergeConsecutiveSameRoleContents)(m.contents),m.contents.length>1&&"model"===m.contents[m.contents.length-1].role&&m.contents.pop(),m},null)'),
+  @('_1xkpq2s._.js', 'mergeConsecutiveSameRoleContents)(s.contents??[]);let A=t.tools',
+    'mergeConsecutiveSameRoleContents)(s.contents??[]);if(s.contents.length>1&&"model"===s.contents[s.contents.length-1].role)s.contents.pop();let A=t.tools')
 )
 
-foreach ($chunkFile in $chunkFiles) {
-    if (Test-Path -Path $chunkFile -PathType Leaf) {
-        $chunkContent = Get-Content -Path $chunkFile -Raw
-        
-        # Find the mergeConsecutiveSameRoleContents pattern in the chunk
-        $chunkMergePattern = 'mergeConsecutiveSameRoleContents\s*\(\s*e\.messages\s*\)'
-        $chunkMergeMatch = [regex]::Match($chunkContent, $chunkMergePattern)
-        
-        if ($chunkMergeMatch.Success) {
-            # Calculate the insertion point (after the merge call)
-            $chunkInsertionPoint = $chunkMergeMatch.Index + $chunkMergeMatch.Length
-            
-            # Insert the trailing model turn strip
-            $chunkStripCode = @'
-
-            // Strip trailing model turns from Gemini contents
-            if (e.contents.length > 0) {
-                const lastContent = e.contents[e.contents.length - 1];
-                if (lastContent.role === 'model') {
-                    e.contents.pop();
-                }
-            }
-'@
-            
-            $newChunkContent = $chunkContent.Substring(0, $chunkInsertionPoint) + $chunkStripCode + $chunkContent.Substring($chunkInsertionPoint)
-            
-            # Write the patched content
-            if ($Force -or (Confirm-AutoOSAction -Message "Apply patch to $chunkFile?" -Id 'CHUNK_PATCH_CONFIRM')) {
-                Set-Content -Path $chunkFile -Value $newChunkContent -Force
-                Write-AutoOSInfo -Message "Successfully patched $chunkFile" -Id 'CHUNK_PATCH_APPLIED'
-            }
-        } else {
-            Write-AutoOSWarning -Message "mergeConsecutiveSameRoleContents call not found in $chunkFile" -Id 'CHUNK_MERGE_NOT_FOUND'
-        }
-    }
+$chunksDir = Join-Path $Path 'dist/.build/next/server/chunks'
+Write-Host ''
+Write-Host '=== Compiled chunk patches (runtime fix) ==='
+foreach ($patch in $chunkPatches) {
+  $file = $patch[0]; $find = $patch[1]; $replace = $patch[2]
+  $p = Join-Path $chunksDir $file
+  if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+    $results.Add("ERROR chunk $file (file not found)")
+    continue
+  }
+  Try-Replace $p $find $replace "chunk $file"
 }
 
-Write-AutoOSInfo -Message "Vertex/Gemini trailing model turn strip patch applied successfully" -Id 'PATCH_COMPLETE'
+# --- 2. .ts source (source-tree consistency) -------------------------
+$tsPath = Join-Path $Path 'open-sse/translator/request/openai-to-gemini.ts'
+$tsFind = 'result.contents = mergeConsecutiveSameRoleContents(result.contents ?? []);'
+
+# The em dash is injected as a codepoint so this script stays pure ASCII and is
+# read identically by Windows PowerShell 5.1 and PowerShell 7 on any code page.
+$tsBlock = @'
+  // Strip trailing model turn <EMDASH> Vertex AI rejects requests ending with a model
+  // turn ("Requests ending with a model turn are not supported." 400). The
+  // existing stripTrailingAssistantForProvider in contextManager.ts only handles
+  // plain-text trailing assistant messages (no tool_calls), and even that runs on
+  // tb.messages before Gemini translation. The Antigravity executor handles this
+  // correctly via stripTrailingAntigravityAssistantTurn; this mirrors that for the
+  // standard Vertex/Gemini executor path. Guard: never strip contents down to empty.
+  if (result.contents.length > 1) {
+    const lastContent = result.contents[result.contents.length - 1];
+    if (lastContent.role === "model") {
+      result.contents.pop();
+    }
+  }
+'@
+$tsBlock = ($tsBlock -replace "`r`n", "`n").Replace('<EMDASH>', [string][char]0x2014)
+
+Write-Host ''
+Write-Host '=== Source patch (.ts consistency) ==='
+if (Test-Path -LiteralPath $tsPath -PathType Leaf) {
+  Try-Replace $tsPath $tsFind ($tsFind + "`n`n" + $tsBlock) 'openai-to-gemini.ts source'
+}
+else {
+  $results.Add('ERROR openai-to-gemini.ts (file not found)')
+}
+
+# --- 3. Summary ------------------------------------------------------
+Write-Host ''
+Write-Host '=== Result ==='
+foreach ($r in $results) { Write-Host "  $r" }
+
+$patched = @($results | Where-Object { $_ -like 'PATCH*' }).Count
+$skipped = @($results | Where-Object { $_ -like 'SKIP*' }).Count
+$errors = @($results | Where-Object { $_ -like 'ERROR*' }).Count
+Write-Host ''
+Write-Host "Done: $patched patched, $skipped skipped, $errors errors"
+if ($errors -gt 0) { exit 1 }
+exit 0
