@@ -189,7 +189,10 @@ class WriteTests(SandboxCase):
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
-        self.assertEqual(t1["limit"], {"context": 131072, "output": 40000})
+        # FREEWIRE 2026-09-30: t2-worker-clean's committed context is 1048576
+        # (CTXFIX 2026-09-30 set the -clean twins to deepseek's 1M window); the
+        # drift here only changes output.
+        self.assertEqual(t1["limit"], {"context": 1048576, "output": 40000})
         self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
@@ -270,23 +273,18 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # A6a review, re-pinned by PROVFIX3 finding 8, re-pinned again by DSBACK
-        # 2026-09-28: the ladder comes from the leg that ANSWERS, not from
-        # legs[0] as declared. t1-orchestrator-free-only's served head is
-        # gemini-3.8-flash (low/medium/high), so its variants are those three
-        # rungs. While providers.deepseek was off (402, 2026-09-27T16:4xZ) the
-        # served head of t2-worker-clean was mistral-small-latest — no ladder —
-        # so it carried no variants; DSBACK topped the balance up and the head
-        # is deepseek/deepseek-flash (none/low/high/max) again, so the picker
-        # offers its three real rungs ("none" is deliberately not a picker
-        # entry: it means "send no reasoning param", not "send reasoning_effort
-        # =none" — see tools/registry.py and tools/probe-effort.py). t3-driver
-        # (head mistral-code-latest, empty ladder) still has none.
-        free = oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]
+        # FREEWIRE 2026-09-30: t1-orchestrator-free-only's served head is now the
+        # free scaleway grant (no declared ladder), so it carries no variants.
+        # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
+        # ladder is low/medium/high) and is the low/medium/high case now.
+        free = oc["providers"]["omniroute"]["models"]["gemini-3.8-flash"]
         self.assertEqual([v["id"] for v in free["variants"]],
                          ["low", "medium", "high"])
         for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
+        self.assertNotIn(
+            "variants",
+            oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"])
         clean = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
         self.assertEqual([v["id"] for v in clean["variants"]],
                          ["low", "high", "max"])
@@ -598,14 +596,17 @@ class RegistrySourcedTests(unittest.TestCase):
         # raises ValueError (load_from_registry wraps it as ConfigError). Which
         # route the tool reports first is registry order, and that moved when
         # MUSEAPI/PROVFIX3 changed the heads — so what is pinned here is that the
-        # error names a route, the model and the bad rung.
+        # error names a route, the model and the bad rung. FREEWIRE 2026-09-30:
+        # the first route serving the gemini-3.8-flash model is now the
+        # gemini-3.8-flash combo itself, whose id contains a dot, so the route
+        # charset includes '.', not only [a-z0-9-].
         doc = self.box.registry()
         doc["models"]["gemini-3.8-flash"]["effort_ladder"] = ["low", 99, "high"]
         self.box.save_registry(doc)
         result = self.box.run()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertRegex(result.stderr,
-                         r"routes\.[a-z0-9-]+: non-string rung 99 "
+                         r"routes\.[\w.-]+: non-string rung 99 "
                          r"in model gemini-3\.8-flash effort_ladder")
 
 

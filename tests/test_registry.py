@@ -1087,24 +1087,27 @@ class LegRulesTests(unittest.TestCase):
     def test_denied_serving_leg_fails_check_naming_the_rule(self):
         """A leg matching a deny rule with no unavailable_legs gate is flagged."""
         reg = mutated()
-        # groq/qwen/qwen3.8-27b resolves (provider groq, model qwen/qwen3.8-27b)
-        # and would be denied by groq/* rule
-        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        # openrouter/google/gemini-3.8-flash resolves (provider openrouter,
+        # model google/gemini-3.8-flash) and is denied by the deny-openrouter
+        # rule (no allow matches the plain, non-:free id). FREEWIRE 2026-09-30
+        # replaced groq/qwen/qwen3.8-27b as this fixture: that leg is now allowed
+        # by allow-groq-qwen3.8-27b, so it can no longer exercise a deny.
+        reg["routes"]["t2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p for p in problems),
             problems)
 
     def test_denied_leg_gated_via_unavailable_legs_passes(self):
         """A leg matching a deny rule that is already in unavailable_legs is not
         flagged — the operator has already acknowledged it."""
         reg = mutated()
-        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
         reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
-            "groq/qwen/qwen3.8-27b"] = {"available": False}
+            "openrouter/google/gemini-3.8-flash"] = {"available": False}
         problems = registry.check_registry(reg)
         self.assertFalse(
-            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p for p in problems),
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p for p in problems),
             problems)
 
     def test_allowed_leg_passes_after_deny_rule(self):
@@ -1131,7 +1134,14 @@ class LegRulesTests(unittest.TestCase):
     def test_rule_order_pins_the_budget_decisions(self):
         """The committed rules decide each measured case (first match wins)."""
         cases = {
-            "groq/openai/gpt-oss-120b": False,          # deny-groq before allow-gpt-oss
+            # FREEWIRE 2026-09-30: allow-groq-gpt-oss / allow-groq-qwen3.8-27b
+            # now sit ABOVE deny-groq, so these three measured legs are allowed
+            # (single get_weather tool call each). Every other groq/* leg is
+            # still denied.
+            "groq/openai/gpt-oss-120b": True,
+            "groq/openai/gpt-oss-20b": True,
+            "groq/qwen/qwen3.8-27b": True,
+            "groq/llama-3.3-70b-versatile": False,   # no allow rule, deny-groq
             "samba/gpt-oss-120b": True,
             # operator 2026-09-27T07:3xZ: zen allowed as opencode-client-bound (was denied);
             # the zen rule still sits before the deepseek deny, so zen deepseek is allowed
@@ -1140,6 +1150,9 @@ class LegRulesTests(unittest.TestCase):
             "openrouter/deepseek/deepseek-v4.1-flash": True,
             "openrouter/meta/muse-spark-1.3-contributor-xhigh": True,
             "openrouter/openai/gpt-oss-120b": True,
+            # FREEWIRE 2026-09-30: the $0 :free ids are allowed above deny-openrouter
+            "openrouter/qwen/qwen3.8-27b:free": True,
+            "openrouter/nvidia/nemotron-3-super-120b-a12b:free": True,
             "openrouter/google/gemini-3.8-flash": False,
             "deepseek/deepseek-flash": True,
             "cheaperinference/deepseek-v4-flash": False,
@@ -1213,8 +1226,17 @@ class LegRulesTests(unittest.TestCase):
             if (before or {}).get("id") != (after or {}).get("id") or \
                     (before or {}).get("allow") != (after or {}).get("allow"):
                 changed[leg] = ((before or {}).get("id"), (after or {}).get("id"))
-        self.assertEqual(changed, {}, "rules whose verdict changed for a leg in "
-                                     "the registry: %s" % sorted(changed.items()))
+        # FREEWIRE 2026-09-30: ONE expected change, and it is not a deny escape.
+        # The sweep synthesises provider-spelling x model-id pairs, so the new
+        # allow-groq-qwen3.8-27b (pattern groq/qwen/qwen3.8-27b, matched
+        # case-insensitively) also covers the UNRELATED huggingface model row
+        # 'Qwen/Qwen3.8-27B' spelled under the groq prefix - a combination no
+        # route carries and no real leg uses. It is an allow-vs-deny flip on a
+        # non-served spelling, never a deny a real leg escapes by re-casing.
+        expected = {"groq/Qwen/Qwen3.8-27B": ("deny-groq", "allow-groq-qwen3.8-27b")}
+        self.assertEqual(changed, expected,
+                         "unexpected leg verdict changes: %s"
+                         % sorted(set(changed.items()) - set(expected.items())))
         self.assertGreater(len(legs), 1000, "the sweep must cover the registry")
 
     def test_providers_key_spelling_matches_the_omniroute_id_rule(self):
@@ -1236,29 +1258,30 @@ class LegRulesTests(unittest.TestCase):
 
     def test_providers_key_spelling_is_flagged_when_serving(self):
         """A denied leg is only tolerated while the route gates it by the same
-        exact string; a providers-key spelling with no gate is still a problem.
-        Use groq (available) since cheaperinference is now provider-off."""
+        exact string; a spelling with no gate is still a problem. Uses
+        openrouter/google/gemini-3.8-flash (denied by deny-openrouter, provider
+        now available after FREEWIRE) - groq's example legs are allowed now."""
         reg = mutated()
-        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("leg_rules" in p and "groq/qwen/qwen3.8-27b" in p
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p
                 for p in problems), problems)
 
     def test_available_true_entry_does_not_gate_a_denied_leg(self):
         """Only available:false gates (the renders' _leg_is_unavailable)."""
         reg = mutated()
-        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
+        reg["routes"]["t2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
         reg["routes"]["t2-worker"].setdefault("unavailable_legs", {})[
-            "groq/qwen/qwen3.8-27b"] = {"available": True}
+            "openrouter/google/gemini-3.8-flash"] = {"available": True}
         problems = registry.check_registry(reg)
-        self.assertTrue(any("groq/qwen/qwen3.8-27b" in p for p in problems), problems)
+        self.assertTrue(any("openrouter/google/gemini-3.8-flash" in p for p in problems), problems)
 
     def test_problem_names_rule_id_and_reason(self):
         reg = mutated()
-        reg["routes"]["t2-worker"]["legs"].append("groq/qwen/qwen3.8-27b")
-        rule = registry.leg_rule_for("groq/qwen/qwen3.8-27b", reg)
-        hits = [p for p in registry.check_registry(reg) if "groq/qwen/qwen3.8-27b" in p]
+        reg["routes"]["t2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        rule = registry.leg_rule_for("openrouter/google/gemini-3.8-flash", reg)
+        hits = [p for p in registry.check_registry(reg) if "openrouter/google/gemini-3.8-flash" in p]
         self.assertEqual(len(hits), 1, hits)
         self.assertIn(rule["id"], hits[0])
         self.assertIn(rule["reason"], hits[0])
@@ -2165,10 +2188,29 @@ class DeepSeekBackTests(unittest.TestCase):
             self.assertIsInstance(entry, dict, rid)
             self.assertIs(entry["available"], False, rid)
 
-    def test_openrouter_stays_unavailable(self):
-        # DSBACK is a DeepSeek-credit event; OpenRouter's own blanket flag is
-        # not ours to lift.
-        self.assertIs(self.reg["providers"]["openrouter"]["available"], False)
+    def test_openrouter_serves_only_its_free_ids(self):
+        # FREEWIRE 2026-09-30 (free-probe, L1-backlog/ws-free-probe-20260930):
+        # the DSMAX provider-level blanket flag was lifted so the $0 ':free'
+        # ids can serve, and the guard MOVED to the route level. Providers.
+        # openrouter.available is therefore True now, but every paid BYOK leg
+        # the registry routes is still gated by routes.<id>.unavailable_legs,
+        # and policy.deny-openrouter still denies anything a stray allow does
+        # not name.
+        reg = self.reg
+        self.assertIs(reg["providers"]["openrouter"]["available"], True)
+        for rid, leg in (("t2-worker", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("t2-orchestrator", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("t2-worker-clean", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("t1-orchestrator", "openrouter/meta/muse-spark-1.3-contributor"),
+                         ("t1-orchestrator-clean", "openrouter/meta/muse-spark-1.3-contributor"),
+                         ("spark-1.3-contributor", "openrouter/meta/muse-spark-1.3-contributor"),
+                         ("gemini-3.8-flash", "openrouter/google/gemini-3.8-flash")):
+            entry = reg["routes"][rid].get("unavailable_legs", {}).get(leg)
+            self.assertIsInstance(entry, dict, (rid, leg))
+            self.assertIs(entry["available"], False, (rid, leg))
+        # and the ':free' legs are allowed
+        self.assertFalse(registry.leg_denied(
+            "openrouter/qwen/qwen3.8-27b:free", reg))
 
     def test_deepseek_legs_are_no_longer_gated_by_the_provider(self):
         reg = self.reg
@@ -3247,9 +3289,16 @@ NEW_FREE_LEGS = {
 
 
 def leg_tier(reg: dict, leg: str) -> str:
-    """`free` / `credit` / `paid` for a leg, from its provider's own `tier`."""
-    provider_id, _ = registry.resolve_leg(leg, reg)
-    return (reg["providers"][provider_id] or {}).get("tier") or "paid"
+    """`free` / `credit` / `paid` for a leg: the EFFECTIVE tier, read exactly
+    as tools/registry.py's private_safe() reads it - the model-level `tier`
+    override when present, else the provider's own `tier`. FREEWIRE 2026-09-30
+    added openrouter `:free` legs whose provider tier is `paid` but whose model
+    row overrides it to `free`; a provider-only read counted those $0 legs as
+    paid and broke the free-band ordering checks."""
+    provider_id, model_id = registry.resolve_leg(leg, reg)
+    model = reg["models"].get(model_id) or {}
+    return (model.get("tier") or (reg["providers"][provider_id] or {}).get("tier")
+            or "paid")
 
 
 def usable_legs(reg: dict, route_id: str) -> list:

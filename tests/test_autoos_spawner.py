@@ -8635,6 +8635,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
                     "exceeded for metric: generate_content_free_tier_requests, "
                     "limit: 20, model: gemini-3.8-flash "
                     "Please retry in 59.250991496s.")
+    # FREEWIRE 2026-09-30: the gemini head left t2-worker (and providers.
+    # google_ai_studio is now unavailable), so the t2-worker attribution tests
+    # below name a model t2-worker still serves from exactly ONE provider -
+    # scaleway's mistral-small grant.
+    SCW_COOLDOWN = ("Error: [429] All credentials for model "
+                    "mistral-small-3.2-24b-instruct-2506 are cooling down "
+                    "(reset after 37s)")
+    SCW_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
+                 "exceeded for metric: generate_content_free_tier_requests, "
+                 "limit: 20, model: mistral-small-3.2-24b-instruct-2506 "
+                 "Please retry in 59.250991496s.")
 
     def setUp(self):
         self.agent = load_agent()
@@ -8701,39 +8712,43 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # --- 3: the provider benched is the provider that served ------------------
 
     def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
-        # 'gemini' is google_ai_studio's omniroute_id and how the route declares
-        # the leg; 'opencode-zen' is zen's. A raw prefix lookup finds neither.
+        # 'vertex' is vertex_ai's omniroute_id and how a route declares the leg;
+        # 'opencode-zen' is zen's. A raw prefix lookup finds neither. FREEWIRE
+        # 2026-09-30: the gemini/google_ai_studio example was replaced because
+        # google_ai_studio is now provider-unavailable (so its leg attributes to
+        # no live provider at all).
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
-                self.registry, ["gemini/gemini-3.8-flash"]),
-            "google_ai_studio")
+                self.registry, ["vertex/gemini-3.8-flash"]),
+            "vertex_ai")
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
                 self.registry, ["opencode-zen/deepseek-v4.1-flash"]),
             "zen")
 
-    def test_a_t2_worker_gemini_cooldown_benches_google_ai_studio(self):
-        # The measured wrong answer was antigravity (the next live leg of
-        # t2-worker); mistral is what a t2-worker-clean stop benched.
+    def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
+        # FREEWIRE 2026-09-30: the model t2-worker names from one provider is now
+        # scaleway's mistral-small grant (the gemini head was removed). The
+        # measured wrong answer was antigravity (the next live leg of t2-worker).
         recorded = self.agent.record_reset_stop(
-            self.GEMINI_COOLDOWN, "t2-worker", self.registry,
+            self.SCW_COOLDOWN, "t2-worker", self.registry,
             now=self.NOW, path=self.state_path)
-        self.assertEqual(recorded, ("google_ai_studio", "2026-09-28T12:00:37Z"))
-        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"],
+        self.assertEqual(recorded, ("scaleway", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["scaleway"],
                          "the cooldown benches the provider that served the model "
                          "the line names, and nobody else")
         self.assertNotIn("antigravity", self.state()["providers"])
-        self.assertNotIn("mistral", self.state()["providers"])
+        self.assertNotIn("google_ai_studio", self.state()["providers"])
 
-    def test_a_t2_worker_free_only_gemini_cooldown_benches_google_ai_studio(self):
+    def test_a_t2_worker_free_only_model_named_cooldown_benches_its_provider(self):
         self.assertEqual(
-            self.agent.record_reset_stop(self.GOOGLE_RETRY, "t2-worker-free-only",
+            self.agent.record_reset_stop(self.SCW_RETRY, "t2-worker-free-only",
                                          self.registry, now=self.NOW,
                                          path=self.state_path),
-            ("google_ai_studio", "2026-09-28T12:00:59Z"))
-        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"])
+            ("scaleway", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["scaleway"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # t2-worker-clean has no gemini leg; naming a model the route does not
@@ -8832,14 +8847,15 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
-        # this file in and skips the leg.
-        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "t2-worker",
+        # this file in and skips the leg. FREEWIRE 2026-09-30: the recorded line
+        # names scaleway's mistral-small leg (the gemini head left t2-worker).
+        self.agent.record_reset_stop(self.SCW_COOLDOWN, "t2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=1))
-        cooled = merged["providers"]["google_ai_studio"]
+        cooled = merged["providers"]["scaleway"]
         self.assertIs(cooled["available"], False)
         self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
         self.assertTrue(self.agent.unavailable_now(cooled,
@@ -8848,7 +8864,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=60))
         self.assertFalse(
-            self.agent.unavailable_now(expired["providers"]["google_ai_studio"],
+            self.agent.unavailable_now(expired["providers"]["scaleway"],
                                        self.NOW + datetime.timedelta(seconds=60)),
             "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
 

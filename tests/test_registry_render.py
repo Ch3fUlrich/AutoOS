@@ -189,16 +189,21 @@ class RenderMatchesTodayTests(unittest.TestCase):
         combos_by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertNotIn("opencode-zen/deepseek-v4.1-flash",
                          combos_by_name["t2-worker-clean"]["models"])
-        self.assertNotIn("groq/openai/gpt-oss-120b",
-                         combos_by_name["t2-worker"]["models"])
-        # the OpenRouter BYOK gpt-oss-120b leg is gated again (measured 401,
+        # FREEWIRE 2026-09-30: allow-groq-gpt-oss re-opened this leg on a
+        # single-tool-call probe, so it IS served now (deny-groq used to gate it).
+        self.assertIn("groq/openai/gpt-oss-120b",
+                      combos_by_name["t2-worker"]["models"])
+        # the OpenRouter BYOK gpt-oss-120b leg is gated (measured 401,
         # credits exhausted 2026-09-27), so it does not reach the combo.
         self.assertNotIn("openrouter/openai/gpt-oss-120b",
                          combos_by_name["t2-worker"]["models"])
-        # DSMAX 2026-09-27: the whole openrouter provider is off
-        # (providers.openrouter.available: false), so its deepseek leg is
-        # gated out of the combo too.
+        # FREEWIRE 2026-09-30: the DSMAX provider-level gate moved to the route
+        # level (providers.openrouter.available is now true for its ':free'
+        # ids); the paid openrouter deepseek leg stays route-gated.
         self.assertNotIn("openrouter/deepseek/deepseek-v4.1-flash",
+                         combos_by_name["t2-worker"]["models"])
+        # FREEWIRE: the gemini/gemini-3.8-flash head was removed from every combo.
+        self.assertNotIn("gemini/gemini-3.8-flash",
                          combos_by_name["t2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
@@ -258,7 +263,9 @@ class GatewayRefTests(unittest.TestCase):
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("mistral/mistral-code-latest",
                       by_name["t3-driver"]["models"])
-        self.assertIn("gemini/gemini-3.8-flash", by_name["t2-worker"]["models"])
+        # FREEWIRE 2026-09-30: the gemini head was removed; groq (no prefix)
+        # keeps its registry spelling in the render.
+        self.assertIn("groq/qwen/qwen3.8-27b", by_name["t2-worker"]["models"])
         self.assertIn("deepseek/deepseek-flash",
                       by_name["t2-worker-clean"]["models"])
 
@@ -427,12 +434,15 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # real registry leg) but antigravity has no LiteLLM transport or key
         # (tools/sync-router-tiers.py GATEWAY_ONLY) - today's config.yaml
         # never mirrors it, and the render must match: this leg's model name
-        # absent, its sibling gemini-3.8-flash leg present.
+        # absent, a real sibling leg present. (FREEWIRE 2026-09-30: the sibling
+        # was gemini-3.8-flash until the gemini head was removed; use the
+        # scaleway grant that is still mirrored.)
         legs = real_registry()["routes"]["t2-worker"]["legs"]
         self.assertIn("antigravity/gemini-3.7-flash-high", legs)
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         self.assertNotIn("gemini-3.7-flash-high", rendered["t2-worker"])
-        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
+        self.assertIn("scaleway/mistral-small-3.2-24b-instruct-2506",
+                      rendered["t2-worker"])
 
 
 class StaleLitellmBlockIsDriftTests(unittest.TestCase):
@@ -1267,25 +1277,29 @@ class GatewayLegsFilterTests(unittest.TestCase):
     def test_real_litellm_drops_gated_legs(self):
         rendered = registry.render_litellm_blocks(
             real_registry(), real_litellm_config())
-        # groq/cerebras/sambanova/openrouter gpt-oss-120b legs are all
-        # unavailable and dropped; the ovhcloud credit-tier leg (added
-        # 2026-09-30, L1-backlog/ws-ovh-20260930) is available and kept.
+        # sambanova/openrouter gpt-oss-120b legs are unavailable and dropped;
+        # the ovhcloud credit-tier leg (added 2026-09-30,
+        # L1-backlog/ws-ovh-20260930) is available and kept.
         self.assertNotIn("sambanova/gpt-oss-120b", rendered["t2-worker"])
-        self.assertNotIn("groq/openai/gpt-oss-120b", rendered["t2-worker"])
+        # FREEWIRE 2026-09-30: allow-groq-gpt-oss re-opened this leg on a
+        # single-tool-call probe, so the render now mirrors it.
+        self.assertIn("groq/openai/gpt-oss-120b", rendered["t2-worker"])
         self.assertIn("ovhcloud/gpt-oss-120b", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
         # the client-bound opencode-zen leg (litellm transport openai/…) is
-        # dropped, and so is the openrouter leg of the same model (DSMAX
-        # provider-off 2026-09-27, and DSBACK did not lift it). The deepseek
-        # DIRECT leg is back in since DSBACK 2026-09-28 topped the balance up —
-        # pinned here as present, so a future flip that drops it again names it.
+        # dropped, and so is the openrouter leg of the same model (DSMAX moved
+        # to the route level in FREEWIRE 2026-09-30). The deepseek DIRECT leg is
+        # back in since DSBACK 2026-09-28 topped the balance up — pinned here as
+        # present, so a future flip that drops it again names it.
         self.assertIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
         self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
-        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
-        # t3-driver: groq denied; samba/sambanova/cerebras provider-dead;
-        # opencode-zen client-bound.
-        self.assertNotIn("qwen3.8-27b", rendered["t3-driver"])
+        # FREEWIRE 2026-09-30: the gemini head was removed from every route.
+        self.assertNotIn("gemini-3.8-flash", rendered["t2-worker"])
+        # t3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
+        # client-bound. FREEWIRE re-opened the groq qwen3.8-27b and openrouter
+        # ':free' qwen3.8-27b legs, so the lowercase spelling is now present.
+        self.assertIn("qwen3.8-27b", rendered["t3-driver"])
         self.assertNotIn("MiniMax-M3", rendered["t3-driver"])
         self.assertIn("mistral-code-latest", rendered["t3-driver"])
         # ovhcloud credit-tier legs (added 2026-09-30) are available;
@@ -1586,10 +1600,15 @@ class FreeAiRenderTests(unittest.TestCase):
         # (D: model_prefix free-ai).
         models = combos["t3-driver-free-only"]["models"]
         self.assertEqual(models[-1], "free-ai/qwen7b")
-        self.assertEqual(models[:3],
-                         ["scw/mistral-small-3.2-24b-instruct-2506",
-                          "nebius/zai-org/GLM-5.3-Flash",
-                          "scw/qwen3-235b-a22b-instruct-2507"])
+        # FREEWIRE 2026-09-30: the probe-passed free band now leads (huggingface,
+        # openrouter ':free', groq) and the scaleway/nebius grants follow; the
+        # self-hosted free_ai stays last.
+        self.assertEqual(models[:5],
+                         ["huggingface/zai-org/GLM-5.2",
+                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                          "groq/qwen/qwen3.8-27b",
+                          "huggingface/Qwen/Qwen3.8-27B",
+                          "openrouter/poolside/laguna-s-2.1:free"])
 
     def test_free_ai_is_last_in_the_free_only_combos(self):
         combos = {c["name"]: c for c in
@@ -1801,13 +1820,18 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
     the served head rejects is dropped rather than forwarded (combos.json's old
     rule: "a combo NEVER forwards an effort its head leg rejects")."""
 
-    def _t1_gated_to_gemini(self):
+    def _t1_gated_to_vertex_gemini(self):
+        # FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed from
+        # every route, so the single-served-leg fixture now uses the vertex leg
+        # that shares the same gemini-3.8-flash model row (ladder low/medium/high,
+        # no xhigh).
         reg = copy.deepcopy(real_registry())
         route = reg["routes"]["t1-orchestrator"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
-            if leg != "gemini/gemini-3.8-flash":
+            if leg != "vertex/gemini-3.8-flash":
                 route["unavailable_legs"][leg] = {"available": False}
+        reg["routes"]["t1-orchestrator"]["legs"] = ["vertex/gemini-3.8-flash"]
         return reg
 
     def _ide_entry(self, reg, route_id):
@@ -1818,11 +1842,11 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertLessEqual(entry["context"], 131_072)
 
     def test_effort_ladder_comes_from_the_first_servable_leg(self):
-        entry = self._ide_entry(self._t1_gated_to_gemini(), "t1-orchestrator")
+        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_an_effort_default_the_served_head_rejects_is_dropped(self):
-        entry = self._ide_entry(self._t1_gated_to_gemini(), "t1-orchestrator")
+        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
         self.assertNotIn("reasoning_effort", entry)
 
     def _t1_headed_by_contributor(self):
@@ -1844,12 +1868,14 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertIn("xhigh", entry["effort_ladder"])
 
     def test_the_real_free_head_keeps_its_own_default(self):
-        # The head the real registry serves today is gemini: no xhigh is
-        # forwarded (finding 8), and whatever default the head does carry still
-        # reaches the picker.
+        # FREEWIRE 2026-09-30: with the gemini head removed, the head the real
+        # registry serves is the scaleway grant scaleway/qwen3-235b-a22b-instruct-2507,
+        # whose model row carries NO declared effort ladder. render_ide()'s rule
+        # for a served head with no ladder is to forward the surface default
+        # (the `not head_ladder` branch), so t1's "xhigh" still reaches the
+        # picker even though the head declares no rungs.
         entry = self._ide_entry(real_registry(), "t1-orchestrator")
-        self.assertNotIn("reasoning_effort", entry)
-        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
+        self.assertEqual(entry.get("reasoning_effort"), "xhigh")
 
     def test_openhands_max_input_tokens_is_clamped(self):
         tiers = {t["id"]: t for t in
