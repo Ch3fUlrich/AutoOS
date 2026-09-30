@@ -117,7 +117,7 @@ services:
     build:
       context: .
       dockerfile: opencode.Dockerfile
-    image: autoos/opencode:2.0.16-autoos1
+    image: autoos/opencode:2.0.19-autoos1
     container_name: autoos-opencode
     restart: unless-stopped
     user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"
@@ -149,7 +149,9 @@ services:
       - host.docker.internal:host-gateway
     ports:
       - "${AUTOOS_STACK_BIND:-0.0.0.0}:4096:4096"
-    mem_limit: ${OPENCODE_MEM_LIMIT:-1536m}
+    # mem_limit removed 2026-09-29 (operator): the 1536m cap was OOM-killing
+    # PID 1 (opencode serve) repeatedly and every restart cut every in-flight
+    # run across the fleet. pids_limit stays as the cheap runaway guard.
     pids_limit: 1024
     healthcheck:
       # The UI answers 200 without the password; /api/* is what is guarded.

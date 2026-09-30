@@ -32,5 +32,43 @@ class TestRenderOpencodeConfig(unittest.TestCase):
         # Should have a warning note about malformed URL
         self.assertTrue(any('ignored malformed URL' in n for n in notes), "Expected a malformed URL warning")
 
+    def test_fleet_pins_apply_and_are_idempotent(self):
+        """Operator 2026-09-30: deepseek effort ladder, vertex models and the
+        fleet agent models survive `init`; a second render adds nothing."""
+        cfg = {
+            'agent': {
+                'orchestrator': {'mode': 'primary', 'model': 'meta/muse-spark-1.3-contributor'},
+                'suborchestrator': {'mode': 'subagent', 'model': 'meta/muse-spark-1.3-contributor'},
+                'leaf-implementer': {'mode': 'subagent', 'model': 'meta/muse-spark-1.3-contributor'},
+                'leaf-reviewer': {'mode': 'subagent', 'model': 'deepseek/deepseek-v4-flash'},
+            },
+            'providers': {
+                'omniroute': {
+                    'models': {
+                        'deepseek-v4.1-flash': {
+                            'modelID': 'deepseek-v4.1-flash',
+                            'limit': {'context': 131072, 'output': 32768},
+                        }
+                    }
+                }
+            },
+        }
+        notes = []
+        module.pin_fleet_overrides(cfg, notes)
+        models = cfg['providers']['omniroute']['models']
+        self.assertEqual([v['id'] for v in models['deepseek-v4.1-flash']['variants']],
+                         ['low', 'high', 'max'])
+        self.assertEqual(models['deepseek-v4.1-flash']['limit']['context'], 1048576)
+        for mid in module.FLEET_VERTEX_MODELS:
+            self.assertIn(mid, models)
+        self.assertEqual(cfg['agent']['orchestrator']['model'],
+                         'omniroute/deepseek-v4.1-flash')
+        self.assertEqual(cfg['agent']['leaf-reviewer']['model'],
+                         'omniroute/vertex-claude-sonnet-4-5')
+        self.assertEqual(cfg['agent']['suborchestrator']['mode'], 'primary')
+        second = []
+        module.pin_fleet_overrides(cfg, second)
+        self.assertEqual(second, [], "second render must be a no-op")
+
 if __name__ == '__main__':
     unittest.main()
