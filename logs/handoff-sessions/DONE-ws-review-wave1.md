@@ -3,7 +3,7 @@
 **Date:** 2026-09-30
 **Lane:** L1 review (t2 smart-reasoning-128k orchestrator)
 **Base:** d08f7f2 (main == origin/main at branch cut)
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-review`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-review`
 **Branch:** `L1-backlog/ws-review-20260930`
 
 ---
@@ -52,7 +52,7 @@ run sequentially (one at a time) for rate-limit hygiene.
   missing shim, documented deferral of apply.ps1 fix).
 - **Blocking defect:** `docs/handoff/2026-09-30-laneP0-admission.md:4`
   contains hardcoded username path
-  `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute` — violates
+  `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute` — violates
   AGENTS.md Hard Rule 1. Both reviewers independently identified the same
   file:line. The defect is in a doc file, not in the launcher scripts (scripts
   correctly use `$env:APPDATA`).
@@ -71,7 +71,7 @@ No refusals were issued by any reviewer.
 
 ## Recommended follow-ups (for a follow-up lane — not fixed here)
 
-1. **P0 blocking (High):** Redact hardcoded username `mauls` from
+1. **P0 blocking (High):** Redact hardcoded username `<user>` from
    `docs/handoff/2026-09-30-laneP0-admission.md:4`. Replace with
    environment-relative path. L1-beta lane fix.
 2. **P0 deferred shim (Medium):** Mirror `start-stack.ps1` shim fix to

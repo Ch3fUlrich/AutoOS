@@ -136,9 +136,9 @@ defect. Recommend L1-alpha approve pending L1-beta's registry update.
 
 - **P0-R1-FAIL** (blocking): `docs/handoff/2026-09-30-laneP0-admission.md:4`
   contains the hardcoded username path
-  `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`.
+  `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`.
   This violates **AGENTS.md Hard Rule 1** ("Never commit a secret... no
-  usernames... not in a comment, not in an example"). The username `mauls` is
+  usernames... not in a comment, not in an example"). The username `<user>` is
   a real system username embedded in a tracked file. This is in a DOC file,
   not in the launcher scripts — the scripts themselves correctly use
   `$env:APPDATA` (environment-relative).
@@ -171,7 +171,7 @@ defect. Recommend L1-alpha approve pending L1-beta's registry update.
 
 - **P0-R2-FAIL** (blocking): Same defect as P0-R1-FAIL.
   `docs/handoff/2026-09-30-laneP0-admission.md:4` contains the hardcoded
-  username path `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`.
+  username path `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`.
   Violates AGENTS.md Hard Rule 1. Both reviewers independently identified the
   same file:line.
 
@@ -206,7 +206,7 @@ identified the same file and line.
 ## Recommended follow-up actions
 
 1. **P0 blocking defect (High priority):** Redact the hardcoded username
-   `mauls` from `docs/handoff/2026-09-30-laneP0-admission.md:4`. Replace the
+   `<user>` from `docs/handoff/2026-09-30-laneP0-admission.md:4`. Replace the
    absolute path with an environment-relative form (e.g.
    `$env:APPDATA\npm\node_modules\omniroute`). This is an L1-beta lane fix.
    The repository is public and has leaked credentials once before (history
