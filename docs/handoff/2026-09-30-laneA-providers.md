@@ -1,4 +1,4 @@
-# Handoff: 20 Missing Operator-Listed Providers (Lane A Rescue)
+# Handoff: 19 Missing + 1 Reconciled Operator-Listed Providers (Lane A Rescue)
 
 **Date:** 2026-09-30  
 **Branch:** `L1-backlog/ws-providers-rescue-20260930`  
@@ -9,7 +9,9 @@
 
 Add the 20 operator-listed providers that were missing from `catalog/ai-registry.json`,
 probe each through the OmniRoute gateway, and register every one as `available: false`
-with a measured `$comment` — none could serve a chat completion.
+with a measured `$comment` — none could serve a chat completion.  19 remain on this
+branch; the 20th (ovhcloud) was reconciled to the sister ws-ovh lane (f6f5e69, credited
+tier / 200 USD) and its stub dropped here (L0 decision D1).
 
 ## Context
 
@@ -20,7 +22,7 @@ This rescue branch starts from `d08f7f2` (clean HEAD) and redoes the work correc
 
 ## Provider key renames
 
-Two of the 20 provider names collided with existing `clients` section IDs
+Two of the 19 remaining provider names collided with existing `clients` section IDs
 (`_check_unique_ids` checks across providers + models + clients + routes):
 
 | Intended key | Renamed to | omniroute_id | Reason |
@@ -28,7 +30,7 @@ Two of the 20 provider names collided with existing `clients` section IDs
 | `opencode` | `opencode_gateway` | `opencode` | `clients.opencode` exists (the app) |
 | `qoder` | `qoder_ai` | `qoder` | `clients.qoder` exists (the app) |
 
-All other 18 keys are unchanged from the operator listing.
+All other 17 keys are unchanged from the operator listing.
 
 ## meta/meta_api base URL investigation
 
@@ -59,7 +61,7 @@ does NOT mean chat completions work — it only lists the catalog. My base at
 
 ## Per-provider coverage table
 
-All 20 probed through the OmniRoute gateway at `localhost:20128` on 2026-09-30.
+All 20 probed through the OmniRoute gateway at `localhost:20128` on 2026-09-30 (19 registered here + ovhcloud reconciled to ws-ovh).
 Probe method: `GET /v1/models` (read-only catalog) + `POST /v1/chat/completions`
 (chat trial, max_tokens 16). None answered a chat completion.
 
@@ -78,7 +80,7 @@ Probe method: `GET /v1/models` (read-only catalog) + `POST /v1/chat/completions`
 | 11 | g4f | g4f-pollinations | g4f | not in 32 active | 0 | nothing to probe | false |
 | 12 | kilo_gateway | kilo-gateway | kg | not in 32 active | 0 | nothing to probe | false |
 | 13 | ainative | ainative | null | not in 32 active | 0 | nothing to probe | false |
-| 14 | ovhcloud | ovhcloud | null | not in 32 active | 0 | nothing to probe | false |
+| 14 | ovhcloud | ovhcloud | null | not in 32 active | 0 | nothing to probe | reconciled to ws-ovh f6f5e69 (credited tier, 200 USD) — stub removed |
 | 15 | felo | felo-web | felo | noauth (not in 32 list) | 5 | 400 "thread creation failed" x3 | false |
 | 16 | uncloseai | uncloseai | unc | noauth (not in 32 list) | 3 | 502 x3 | false |
 | 17 | opencode_gateway | opencode | null | connected (active) | 121 | 400 "not available in active live catalog" x3 | false |
@@ -104,22 +106,22 @@ Probe method: `GET /v1/models` (read-only catalog) + `POST /v1/chat/completions`
 
 Five new tests in `ThirdPartyClaudeLegTests` (`tests/test_registry.py`):
 
-1. `test_each_of_the_20_missing_providers_is_registered` — all 20 keys exist in `providers`
-2. `test_each_of_the_20_missing_providers_is_available_false` — `available` is exactly `False`
-3. `test_each_of_the_20_missing_providers_has_a_measured_comment` — `$comment` has date + "available is false"
-4. `test_the_20_missing_providers_register_no_claude_model` — no Claude legs served (D-102)
-5. `test_the_20_missing_providers_appear_in_no_route_legs` — no route carries a leg from any of the 20
+1. `test_each_of_the_19_missing_providers_is_registered` — all 19 keys exist in `providers`
+2. `test_each_of_the_19_missing_providers_is_available_false` — `available` is exactly `False`
+3. `test_each_of_the_19_missing_providers_has_a_measured_comment` — `$comment` has date + "available is false"
+4. `test_the_19_missing_providers_register_no_claude_model` — no Claude legs served (D-102)
+5. `test_the_19_missing_providers_appear_in_no_route_legs` — no route carries a leg from any of the 19
 
-A 6th test (`test_the_20_missing_providers_carry_no_model_rows`) was removed after
+A 6th test (`test_the_19_missing_providers_carry_no_model_rows`) was removed after
 cross-family review found it a no-op (read a `provider` field no model object has);
 its intent is covered by test 5.
 
 Full suite: **305 passed, 33 subtests passed** (300 original + 5 new).
-Registry CLI check: `ok: registry 2026-09-28, 25 routes, 71 models, 53 providers`.
+Registry CLI check: `ok: registry 2026-09-28, 25 routes, 71 models, 52 providers` (was 53 before ovhcloud stub removal).
 
 ## Files changed
 
-- `catalog/ai-registry.json`: +20 provider entries (53 total, was 33)
+- `catalog/ai-registry.json`: +19 provider entries (52 total, was 33); ovhcloud reconciled to ws-ovh lane f6f5e69 (credit entry lands at L1 merge)
 - `tests/test_registry.py`: +5 tests in `ThirdPartyClaudeLegTests` (305 total, was 300)
 
 ## NOT touched (per brief constraints)
@@ -138,7 +140,7 @@ Registry CLI check: `ok: registry 2026-09-28, 25 routes, 71 models, 53 providers
 git-ignored `api-keys.yml`, value never printed); `GET /v1/models` once (5295 models, 68
 prefixes) + one chat ack per provider, >=3.5 s apart. Suite re-run: `305 passed, 33 subtests`.
 
-## Spot-check table (7 of 20 + together_ai, spanning all 4 categories)
+## Spot-check table (7 of 19 + together_ai, spanning all 4 categories)
 
 | Provider (reg key) | Category | Gateway models (my count) | Chat probe (verbatim) | reg `available:false` matches? |
 |---|---|---|---|---|
@@ -167,7 +169,7 @@ All 47 operator-listed providers map to a registry key — **no gaps**. Renames/
 | `qoder_pat` | `qoder_ai` | renamed (collision with clients.qoder) |
 
 6 registry providers are NOT in the operator 47-list (pre-existing base): `antigravity`,
-`cc`, `cxa`, `meta_api`, `omniroute`, `samba`. Registry total: 53 providers.
+`cc`, `cxa`, `meta_api`, `omniroute`, `samba`. Registry total: 52 providers (53 after ws-ovh merges its credit entry).
 
 ## OVH reconciliation (L0-flagged)
 
@@ -185,24 +187,29 @@ updated to `ovhcloud: 200`, version bumped to 2026-09-30. Connection already act
 pricing, correct prefix `ovh` (this branch's stub used prefix `null`/`ovhcloud` and
 found nothing). This branch's stub is a stale, inconsistent placeholder.
 
-**What the rescue branch must change:** drop its `ovhcloud` stub so the ws-ovh lane's
-entry lands without conflict (both branches add a `providers.ovhcloud` key → merge conflict
-otherwise; L1 must take ws-ovh's version).
+**What the rescue branch changed (D1, IMPLEMENTED 2026-09-30):** dropped its `ovhcloud`
+stub so the ws-ovh lane's entry lands without conflict (both branches added a
+`providers.ovhcloud` key → merge conflict otherwise; L1 takes ws-ovh's version at merge).
 
-**Minimal patch (PROPOSED, not implemented):**
-1. `catalog/ai-registry.json`: remove the `providers.ovhcloud` block (~16 lines, the
-   free/0/false stub). Result: 52 providers on this branch; final main = 53 after ws-ovh
-   merges its credit entry.
-2. `tests/test_registry.py`: remove `"ovhcloud"` from the 20-element list in the two
-   affected tests (→ 19-list); net tests 305 (the assertions are list-membership, so
-   removing one element keeps them green).
+**Minimal patch (IMPLEMENTED):**
+1. `catalog/ai-registry.json`: removed the `providers.ovhcloud` block (14 lines, the
+   free/0/false stub added by a8fa659). Result: 52 providers on this branch; final
+   main = 53 after ws-ovh merges its credit entry.
+2. `tests/test_registry.py`: removed `"ovhcloud"` from the 20-element list (→ 19-list,
+   renamed `MISSING_20`→`MISSING_19`, test names `..._20_missing...`→`..._19_missing...`,
+   comment/docstring/error-message 20→19); net tests 305 (assertions are list-membership,
+   so removing one element keeps them green — the red was confirmed first: "ovhcloud
+   missing from providers", failures=1 errors=2, then the fix).
 3. `docs/handoff/2026-09-30-laneA-providers.md`: coverage table row 14 → "reconciled to
-   ws-ovh lane (credit tier, see OVH reconciliation)".
+   ws-ovh f6f5e69 (credited tier, 200 USD) — stub removed"; "20 missing" wording →
+   19 + 1 reconciled throughout.
 
-**Why proposed, not implemented:** it changes the test contract ("20 missing" → "19"),
-which needs cross-family review (R-orch-13), and merge order is the L1's call (R-coord-01).
-The ws-ovh lane already carries the correct entry + its own test update; duplicating its
-~70-line registry diff onto this branch would be redundant work and risks divergence.
+**Why now implemented:** L0 decision D1 approved the reconcile; cross-family review
+(R-orch-13) recorded with a reviewer from a 3rd model family (distinct from the two
+earlier t3-reviewer approvals). Merge order remains the L1's call (R-coord-01). The
+ws-ovh lane carries the correct entry + its own test update; this branch does NOT
+duplicate ws-ovh's ~70-line registry diff — it drops the stub so the merge is
+conflict-free.
 
 ## Minor findings (not blocking)
 

@@ -3241,20 +3241,6 @@
       "available": false,
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ainative' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ainative', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
-    "ovhcloud": {
-      "id": "ovhcloud",
-      "omniroute_id": "ovhcloud",
-      "model_prefix": null,
-      "litellm_env": null,
-      "litellm_prefix": null,
-      "api_base": null,
-      "provider_data": null,
-      "tier": "free",
-      "credit_usd": 0,
-      "trains_on_prompts": null,
-      "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ovhcloud' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ovhcloud', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
-    },
     "felo": {
       "id": "felo",
       "omniroute_id": "felo-web",
