@@ -57,4 +57,4 @@ Note: `tools/vertex-trailing-turn-reapply.ps1` was a placeholder and has been re
 
 ## Notes
 
-The fix is required for all Vertex/Gemini routes in OmniRoute. The reapply script must be run after `npm update` to maintain the fix. The worktree is left clean with all changes committed.
+The fix is required for all Vertex/Gemini routes in OmniRoute. The reapply script must be run after `npm update` to maintain the fix. The worktree is left clean with all changes committed (probe-vertex results relocation to logs/ completed in the finish pass).
