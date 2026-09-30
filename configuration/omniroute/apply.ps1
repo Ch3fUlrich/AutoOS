@@ -474,6 +474,13 @@ if ($LiveIds.Count -eq 0) {
 #    dead promo on EVERY request. At 2 it is skipped for resetTimeoutMs (30s)
 #    after two failures, then retried - at most two cheap round-trips, and
 #    every other failing free leg hops fast too.
+# 3. Fast failover (CTXFIX 2026-09-30): the breaker IS the fast-skip mechanism,
+#    not maxWaitMs. degradationThreshold=1 hops on the first degradation signal
+#    (a 429 counts), failureThreshold=2 opens the breaker after two hard
+#    failures - at most two cheap round-trips before the leg is skipped for
+#    resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
+#    not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
+#    chain hops immediately. No value change needed for this lane.
 $MaxWaitMs = 180000
 $Breaker = @{ failureThreshold = 2; degradationThreshold = 1; resetTimeoutMs = 30000 }
 Write-Host 'Resilience:'

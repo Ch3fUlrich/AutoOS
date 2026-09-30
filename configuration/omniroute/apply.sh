@@ -1041,6 +1041,13 @@ echo "Resilience:"
 # zen free promo stays FIRST (free when it works), but a 403 is a permanent
 # error, so at 12 the gateway retried the dead promo on every request. At 2 it
 # is skipped for resetTimeoutMs (30s) after two failures, then retried again.
+# Fast failover (CTXFIX 2026-09-30): the breaker IS the fast-skip mechanism,
+# not maxWaitMs. degradationThreshold=1 hops on the first degradation signal
+# (a 429 counts), failureThreshold=2 opens the breaker after two hard
+# failures - at most two cheap round-trips before the leg is skipped for
+# resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
+# not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
+# chain hops immediately. No value change needed for this lane.
 # Through the CLI, not curl + the client key: /api/resilience is a management
 # route and answers the client key with 403 "Invalid management token"
 # (measured 2026-09-24); the local CLI sends the machine loopback token.

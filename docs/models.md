@@ -79,7 +79,9 @@ one role where window size is the requirement. `combos.json` carries
 compaction threshold conservative — do not read it as "models above 128k are excluded".
 On `t1-orchestrator` it is more than conservative since PROVFIX3: the render clamps a
 route's declared window to the smallest leg it can actually fall to, and T1FREE put a
-131072-token `gemini-3.8-flash` fallback in that route (see the context rule below).
+free `gemini-3.8-flash` fallback in that route (1048576 live; the registry's 131072 is
+stale — the 128k clamp now comes from the scaleway/nebius legs, not this fallback; see
+the context rule below).
 
 ### Notes per route
 
@@ -108,9 +110,11 @@ generated table above already shows it):
   variant (`antigravity/gemini-3.7-flash-medium`, ack 1.6s) — a different quota
   bucket, not a downgrade of the `-high` leg above.
 - **`t2-orchestrator`**: for small-scope orchestration only; `t1-orchestrator`
-  stays the 1M owner. The trailing `openrouter/deepseek/deepseek-v4.1-flash` tail
-  leg is currently unavailable (OpenRouter credits exhausted — see the generated
-  table above).
+  stays the long-horizon owner. CTXFIX 2026-09-30: context updated 200k→1M
+  (gateway `computed_context_length` 1048576 for the single
+  `antigravity/claude-opus-4-6-thinking` leg). The trailing
+  `openrouter/deepseek/deepseek-v4.1-flash` tail leg is currently unavailable
+  (OpenRouter credits exhausted — see the generated table above).
 - **`t3-driver-clean`**: no qwen free legs by design — paid review duty only, not
   a downgrade path.
 - **`t3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
@@ -119,9 +123,12 @@ generated table above already shows it):
   `openrouter/gemini-3.8-flash` spelling 400s ("not available in the active live
   catalog"), so only the google-scoped twin (`openrouter/google/gemini-3.8-flash`)
   ever shipped; as of 2026-09-25 that twin is also unavailable (OpenRouter credits
-  exhausted), leaving the free `gemini/gemini-3.8-flash` head as this route's only
-  currently-usable leg. No 3.7 legs in this pinned route or the native gemini head
-  — version mixing is a defect here.
+  exhausted). VTXLEG 2026-09-30: `vertex/gemini-3.8-flash` added as the second
+  leg — a Vertex AI free-tier leg (separate quota pool from the `gemini/` AI
+  Studio free head) at 1048576 context, so the combo now declares 1M (was 128k,
+  a stale registry clamp; the gateway already had this leg live before this
+  combos.json update). No 3.7 legs in this pinned route or the native gemini
+  head — version mixing is a defect here.
 - **`deepseek-v4.1-flash`**: BACK ON since 2026-09-28T07:4xZ (DSBACK: the
   operator topped the balance up and the router's `GET /user/balance` measured
   `is_available=true` at 19.99 USD, so `providers.deepseek` is
@@ -147,7 +154,10 @@ generated table above already shows it):
   are no longer only a caller-side choice.
 - **`opus-4-6`**: pinned on purpose — `t1-orchestrator` never carries Opus, it is
   the meta_api contributor head with a free gemini fallback; Opus is addressable
-  directly rather than smuggled into the orchestrator chain.
+  directly rather than smuggled into the orchestrator chain. CTXFIX 2026-09-30:
+  context updated 200k→1M (the gateway's `computed_context_length` for
+  `antigravity/claude-opus-4-6-thinking` is 1048576; the registry's
+  `context_advertised` of 200000 is stale — L1-beta to update).
   `antigravity/claude-opus-4-6-thinking` acks in 3.4s (OAuth free);
   `cc/claude-opus-4-6` is the subscription overflow leg (429-quota-1h at probe
   time).
@@ -168,11 +178,12 @@ degrades along its own chain, cheapest leg first, exactly:
   the direct Meta ladder has no `max` rung (the vendor rejects it; OpenRouter
   advertises `max` on its own twin). When it last ran it was ack-proven
   2026-09-22 incl. the `#low` / `#medium` / `#high` effort variants.
-- `gemini-3.8-flash`: **gemini free (until throttled) → openrouter paid twin**.
-  The head rides the Google AI Studio free pool; the Google-scoped OpenRouter
-  twin (the bare spelling 400s — probe-falsified) is now off (DSMAX
-  2026-09-27), so the free head is this route's only usable leg. Ack-proven
-  2026-09-22.
+- `gemini-3.8-flash`: **gemini free (until throttled) → vertex free → openrouter
+  paid twin**. The head rides the Google AI Studio free pool; VTXLEG 2026-09-30
+  added `vertex/gemini-3.8-flash` as a second free leg (Vertex AI, separate quota
+  pool, 1048576 context); the Google-scoped OpenRouter twin (the bare spelling
+  400s — probe-falsified) is now off (DSMAX 2026-09-27). Ack-proven 2026-09-22;
+  the vertex leg was already live on the gateway before this combos.json update.
 - `deepseek-v4.1-flash`: **back on** — DSBACK 2026-09-28T07:4xZ (operator
   top-up, router balance 19.99 USD measured `is_available=true`). It failed
   closed 2026-09-27T16:4xZ (deepseek 402) and the combo stayed omitted until
@@ -304,7 +315,7 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 | Tier id | Role label | Capability requirement |
 |---|---|---|
-| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` leg answers big requests, but D-141 (FREEKEYS-2/2c) heads the route with the free band — scaleway/nebius grants at 128k, then a 131072 free `gemini` fallback — and a route may only promise what its smallest served leg keeps, so the declared window is 128k. When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
+| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` leg answers big requests, but D-141 (FREEKEYS-2/2c) heads the route with the free band — scaleway/nebius grants at 128k, then a free `gemini` fallback (1048576 live; registry stale at 131072) — a route may only promise what its smallest served leg keeps, so the declared window is 128k (the scaleway/nebius legs clamp it, not the gemini fallback). When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
 | `t2-worker` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `t1-orchestrator`. |
 | `t3-driver` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
 | `t4-rag` | **rag-grounded-128k** | Retrieval-grounded QA over supplied documents (quotes/citations, not reasoning or codegen). |
@@ -362,8 +373,10 @@ available --search qoder`: free, alias `if`) — it needs an interactive
 promise every leg it can fall to has to keep, so the render clamps it to the smallest
 advertised window among the route's servable legs (`clamp_route_context()` in
 `tools/registry.py` — PROVFIX3). `t1-orchestrator` was curated to 1M-context models only,
-which is why it declared 1M; T1FREE added a free `gemini-3.8-flash` leg (131072) to keep
-the default tier answering while credit is out, so its honest promise is 128k now. Pick
+which is why it declared 1M; T1FREE added a free `gemini-3.8-flash` leg (1048576 live;
+the registry's 131072 is stale) to keep the default tier answering while credit is out.
+The route also carries scaleway/nebius legs at 128000, so its honest promise is 128k
+regardless of the gemini leg's real window. Pick
 `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, meta_api direct) when the window
 itself is the requirement. `t2-worker` has **no
 context gate**: 128k is a conservative display/compaction default, not a
@@ -651,7 +664,7 @@ flowchart TB
         T1Z["1 · meta_api muse-spark-1.3-contributor\nPAID Meta Model API direct · 1M · trains by contract"]
         T1A["2 · zen muse-spark-1.3-contributor-free\nFREE promo · 1M · trains by contract · UNAVAILABLE (client-bound)"]
         T1B["3 · openrouter meta/muse-spark-1.3-contributor\nPAID $0.10/$0.20 per 1M · 1M · trains · UNAVAILABLE (DSMAX)"]
-        T1G["4 · gemini gemini-3.8-flash\nFREE AI Studio · 131072 · the leg that caps the route's promise at 128k"]
+        T1G["4 · gemini gemini-3.8-flash\nFREE AI Studio · 1M (1048576 live; registry stale 131072)\nscaleway/nebius at 128k now clamps the route, not this leg"]
         T1Z --> T1A --> T1B --> T1G
     end
 
@@ -702,12 +715,12 @@ flowchart TB
 
     subgraph freeonly["*-free-only · zero spend, never degrade to paid"]
         direction TB
-        F1["t1-orchestrator-free-only:\nzen spark-free (UNAVAILABLE, client-bound) → gemini gemini-3.8-flash (131072)"]
+        F1["t1-orchestrator-free-only:\nzen spark-free (UNAVAILABLE, client-bound) → gemini gemini-3.8-flash (1M; registry stale 131072)"]
         F2["t2-worker-free-only:\ngemini → agy gemini → groq (UNAVAILABLE) → cerebras (UNAVAILABLE) → sambanova → free-ai qwen7b"]
         F3["t3-driver-free-only:\ngroq qwen (UNAVAILABLE) → cerebras qwen (UNAVAILABLE) → free-ai qwen7b"]
     end
 
-    subgraph t2o["t2-orchestrator · small-scope orchestration · 200k"]
+    subgraph t2o["t2-orchestrator · small-scope orchestration · 1M (CTXFIX 2026-09-30)"]
         direction TB
         T2O["agy opus-4-6-thinking\nFREE OAuth · ack 3.4s"]
         T2O2["cc opus-4-6\nsubscription overflow"]
@@ -722,7 +735,7 @@ flowchart TB
 
     subgraph single["Pinned single-model routes"]
         SP["spark-1.3-contributor:\nmeta_api paid direct → zen (client-bound)\n→ openrouter paid · SERVED since MUSEAPI"]
-        OP["opus-4-6 (200k):\nagy opus-4-6-thinking → cc opus-4-6\nt1 is a separate route"]
+        OP["opus-4-6 (1M; CTXFIX 2026-09-30):\nagy opus-4-6-thinking → cc opus-4-6\nt1 is a separate route"]
     end
 
     subgraph fb["Fallback client path — user picks litellm/*"]

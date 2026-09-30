@@ -36,7 +36,26 @@
     "(provenance on models.deepseek-flash $comment).",
     "AGYCANON 2026-09-30: antigravity's model_prefix retired to null - the",
     "live /v1/models lists canonical antigravity/* ids again (19 rows, zero",
-    "agy/*; both spellings route), so these legs render canonically again."
+    "agy/*; both spellings route), so these legs render canonically again.",
+    "VTXLEG 2026-09-30: vertex/gemini-3.8-flash added as the second leg of",
+    "the gemini-3.8-flash combo (priority: gemini free head, vertex second).",
+    "Both legs advertise 1048576 in the live /v1/models catalog, so the combo",
+    "context is now 1M (was 128k, stale registry clamp). The registry route",
+    "lacks the vertex leg - L1-beta to add it to routes.gemini-3.8-flash.legs.",
+    "CTXFIX 2026-09-30: context fields on five combos updated to the real",
+    "/v1/models window their serving legs can use (measured live on :20128):",
+    "opus-4-6 200k->1M, t2-orchestrator 200k->1M (both",
+    "antigravity/claude-opus-4-6-thinking, gateway computed_context_length",
+    "1048576), t2-worker-clean 128k->1M, t3-driver-clean 128k->1M (both",
+    "deepseek/deepseek-flash at 1048576). Combos keeping 128k are honest",
+    "clamps: t1-orchestrator/t2-worker/t3-driver and their free-only twins",
+    "fall to scw/nebius/free-ai legs at 128000; t4-rag falls to",
+    "cohere/command-r-plus-08-2024 at 128000. Registry context_advertised is",
+    "stale for gemini-3.8-flash (131072, live 1048576), command-a-03-2025",
+    "(131072, live 288000), claude-opus-4-6-thinking (200000, gateway",
+    "1048576) - L1-beta to update; until then",
+    "test_render_matches_committed_combos_semantically fails on the five",
+    "changed rows, an expected cross-lane dependency, not a regression."
   ],
   "retired": [
     "tier1",
@@ -71,15 +90,16 @@
     {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash"
+        "gemini/gemini-3.8-flash",
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
       "name": "opus-4-6",
       "strategy": "priority",
-      "context": "200k",
+      "context": "1M",
       "models": [
         "antigravity/claude-opus-4-6-thinking"
       ]
@@ -126,7 +146,7 @@
     {
       "name": "t2-orchestrator",
       "strategy": "priority",
-      "context": "200k",
+      "context": "1M",
       "models": [
         "antigravity/claude-opus-4-6-thinking"
       ]
@@ -149,7 +169,7 @@
     {
       "name": "t2-worker-clean",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
         "deepseek/deepseek-flash"
       ]
@@ -183,7 +203,7 @@
     {
       "name": "t3-driver-clean",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
         "deepseek/deepseek-flash"
       ]
