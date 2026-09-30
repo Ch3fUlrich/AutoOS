@@ -123,8 +123,9 @@ artifacts.
 ### Key finding 1: stale combos — gateway served gpt-oss-120b
 
 `t2-worker` (combo #6) and `t3-driver` (combo #9) both served `gpt-oss-120b`
-in the re-run. However, `groq/openai/gpt-oss-120b` is **not a leg** in the
-repo's `combos.json` for either combo:
+in the re-run. However, no `gpt-oss-120b` variant is a leg in the repo's
+`combos.json` for either combo (at `d08f7f2`, this lane's base — verified with
+`git show d08f7f2:configuration/omniroute/combos.json`):
 
 - Repo `t2-worker` legs: gemini-3.8-flash → agy-gemini-high → scw-qwen3 →
   scw-mistral-small → nebius-GLM-5.2 → **deepseek-flash** → muse-spark → qwen7b
@@ -133,30 +134,57 @@ repo's `combos.json` for either combo:
   mistral-code-latest → **deepseek-flash** → muse-spark
   (6 legs, no gpt-oss-120b)
 
-This means the **live gateway has older combo definitions** than the repo's
-`combos.json`. The repo's combos were updated by commit `d08f7f2` (this lane's
-base) but those changes were **never re-applied to the live gateway**. The
-live gateway still has the pre-`d08f7f2` combo legs (matching the §A table in
-`docs/models-proposed.md`), which include `groq/openai/gpt-oss-120b` as a leg
-in t2-worker and t3-driver. Since all legs before gpt-oss-120b fail (401/429/
-502), the gateway correctly falls through to the working gpt-oss-120b leg —
-but this is the **stale** combo, not the one in the repo.
+**Git trace (measured):** `gpt-oss-120b` legs were removed from `combos.json`
+by commits `c126e5f` (OR1a, "gateway renders serve only available legs") and
+`979b8c3` (OR1e, "apply prunes managed combos omitted as unservable") on
+~2026-09-27. These commits are **before** `d08f7f2` (2026-09-30, this lane's
+base), which only changed deepseek context (128k→1M) and the agy→antigravity
+rename — it did NOT remove gpt-oss-120b. At commit `86901fc` (~2026-09-24),
+`t2-worker` had `groq/openai/gpt-oss-120b`, `cerebras/gpt-oss-120b`,
+`sambanova/gpt-oss-120b`, and `t3-driver` had `samba/gpt-oss-120b`. The live
+gateway still serves these removed legs → the gateway is stale to ~2026-09-24.
 
-**Implication:** The repo's `combos.json` and the live gateway are out of sync.
-Any analysis of combo behavior must account for the gateway's actual (stale)
-leg definitions, not the repo's. This is a known issue — see
-`docs/models-proposed.md` §A for the gateway's actual combo legs and the
-gateway findings doc for the full stale-combo trace.
+**Heterogeneous staleness (inferred from cross-family review, see §9):**
+The gateway's apply process updates combos individually, not atomically.
+`t2-worker-free-only` served `qwen7b` — but `free-ai/qwen7b` was only added to
+combos.json in `ad23e99` (T2FREE, ~2026-09-27, after `86901fc`). At `86901fc`,
+`t2-worker-free-only` had gpt-oss-120b legs, not qwen7b. So the live
+`t2-worker-free-only` is from **after** `ad23e99` (newer), while the live
+`t2-worker` is from **before** `c126e5f` (older, still has gpt-oss-120b).
+The gateway has a **mix of apply-era states**, not a single uniform snapshot.
+This is consistent with the gateway findings doc §2 ("apply leaves dead live
+combos untouched").
+
+**Provider ambiguity:** the served `model_served` field reports bare
+`gpt-oss-120b` (provider prefix stripped). At `86901fc`, t2-worker's
+gpt-oss-120b was `groq/openai/gpt-oss-120b` (probed ok in §3, 609 ms) while
+t3-driver's was `samba/gpt-oss-120b` (not probed — may or may not work
+independently). Without `omniroute combo list --json` ground truth, the
+provider attribution is inferred, not measured.
+
+**Implication:** The repo's `combos.json` and the live gateway are out of sync
+by ~6 days (Sep 24 → Sep 30). Any analysis of combo behavior must account for
+the gateway's actual leg definitions. The live legs should be verified with
+`omniroute combo list --json` or `tools/audit-router.py` — this lane inferred
+them from git history and `docs/models-proposed.md` §A, which is an unreliable
+proxy (§A disagrees with combos.json on `t1-orchestrator` leg count: 2 vs 5).
 
 ### Key finding 2: t2-worker-free-only served qwen7b
 
-`t2-worker-free-only` returned `qwen7b` (leg 6 of 6), not `GLM-5.2` (leg 5).
-This means GLM-5.2 was temporarily down during the combo test, and the
-gateway correctly fell through to the next working leg (qwen7b). This is
-**direct evidence of the priority-chain fallback working as designed** —
-when a leg fails, the gateway tries the next one in order. qwen7b has no
-tool-call support (measured in §3), so this combo is ok for ack but
-unusable for agentic work.
+`t2-worker-free-only` returned `qwen7b` (leg 6 of 6 in the repo's definition),
+not `GLM-5.2` (leg 5). This means GLM-5.2 was temporarily down during the combo
+test, and the gateway correctly fell through to the next working leg (qwen7b).
+This is **direct evidence of the priority-chain fallback working as designed**.
+
+qwen7b has no tool-call support (measured in §3, "expected exactly one
+tool_call, got 0"), so this combo is ok for ack but **unusable for agentic
+work** per the single-tool-call probe. **Caveat (from cross-family review,
+§9):** the Qwen/GLM reviewer ran on this same `t2-worker-free-only` combo and
+made extensive tool calls (read, grep, shell, git show) successfully — direct
+counter-evidence that the tool-fail may be prompt-shape-dependent rather than
+a hard limitation. The qwen7b tool-fail deserves a second probe with a
+different tool-call shape before "unusable for agentic work" is stated as
+conclusive.
 
 ### Key finding 3: t3-driver-free-only hung
 
@@ -210,9 +238,11 @@ Context window: 1 048 576 (1M). Ack: 1 047 ms. Tool-call: 2 843 ms.
 > **Stale-combo caveat:** The structural analysis below is based on the repo's
 > `combos.json` leg order. The **measured** combo results in §4 reflect the live
 > gateway's actual (stale) legs, which differ from the repo — e.g. t2-worker and
-> t3-driver served `gpt-oss-120b` (not a repo leg) because the live gateway still
-> has the pre-`d08f7f2` combo definitions. The proposal below targets the repo's
-> `combos.json` (what should be applied), not the live gateway's current state.
+> t3-driver served `gpt-oss-120b` (not a repo leg) because the live gateway is
+> stale to ~2026-09-24 (gpt-oss-120b removed in `c126e5f`/`979b8c3`, Sep 27 —
+> see §4 Key finding 1 for the full git trace). The proposal below targets the
+> repo's `combos.json` (what should be applied), not the live gateway's current
+> state.
 
 **`t2-worker`** (deepseek = leg 6): Legs 1–4 all fail (429/401). **Leg 5 (`nebius/zai-org/GLM-5.2`)
 succeeds** (297 ms) → gateway stops here. Deepseek (leg 6) **never fires** unless GLM-5.2
@@ -298,3 +328,71 @@ at 14:53–14:58Z had 0 backoffs — no 429/503/`chat_admission_busy` encountere
 | `docs/models-proposed.md` | §E updated with 2026-09-30 sweep leg results |
 | `logs/handoff-sessions/DONE-ws-sweep.md` | NEW — DONE note |
 | `logs/probe-sweep-20260930.jsonl` | git-ignored — 38 records (15 legs + 23 combo records across two runs) |
+
+## 9. Cross-family review (measured 2026-09-30T17:00Z)
+
+Three t3-reviewer subagents reviewed this evidence doc, each on a different
+model family. Read-only scope; no edits by reviewers.
+
+| # | Reviewer model | Family | Verdict | Session |
+|---|---|---|---|---|
+| 1 | `omniroute/deepseek-v4.1-flash` | DeepSeek | APPROVED-WITH-NOTES | ses_f0d2ae02affeHgMyKYPZkhPEZN |
+| 2 | `omniroute/gemini-2.5-flash` | Gemini | REJECTED (invalid — see below) | ses_f0d2ae028ffe3mZGupoOz0T0wq |
+| 3 | `omniroute/t2-worker-free-only` | Qwen/GLM | APPROVED-WITH-NOTES | ses_f0d2ae025ffeWqTg2tICWUTPBr |
+
+**Writer:** t2-worker (this session, `L1-backlog/ws-sweep-20260930`).
+
+### Gemini rejection — invalid
+
+The Gemini reviewer (gemini-2.5-flash) rejected, but it reviewed the **wrong
+file** — it read `docs/handoff/2026-09-30-omniroute-gateway-findings.md` (the
+gateway findings doc) instead of `docs/handoff/2026-09-30-laneSweep-t2-models.md`
+(the evidence doc under review). Its rejection cites "Missing Leg × result
+matrix" and "stale-combo finding not documented" — both of which ARE in the
+correct file. The rejection is a model-follows-wrong-path artifact, not a
+substantive verdict on the evidence doc. Recorded for completeness; not
+counted as a valid rejection.
+
+### Fixes applied based on reviewer feedback (DeepSeek + Qwen/GLM)
+
+Both valid reviewers (APPROVED-WITH-NOTES) independently identified the same
+substantive issue: the §4 stale-combo **explanation** was factually wrong.
+Fixes applied before this commit:
+
+1. **Stale-combo attribution corrected.** The original text attributed the
+   gpt-oss-120b divergence to "pre-`d08f7f2`" and "matching §A." Both reviewers
+   proved this wrong: `d08f7f2` only changed deepseek context + agy rename, NOT
+   gpt-oss-120b removal. The removal was in `c126e5f`/`979b8c3` (Sep 27, OR1a/
+   OR1e). The live gateway is stale to ~Sep 24 (commit `86901fc`), not one
+   commit. **Fixed in §4 Key finding 1 and §5 caveat.**
+
+2. **Heterogeneous staleness documented.** The Qwen/GLM reviewer showed the
+   gateway has a **mix** of apply-era states: t2-worker-free-only served qwen7b
+   (added in `ad23e99`, Sep 27) → newer; t2-worker served gpt-oss-120b (removed
+   in `c126e5f`, Sep 27) → older. The original text assumed a single uniform
+   "pre-d08f7f2" snapshot. **Fixed in §4 Key finding 1.**
+
+3. **Provider ambiguity noted.** The served `gpt-oss-120b` doesn't distinguish
+   groq vs samba. At `86901fc`, t2-worker had `groq/openai/gpt-oss-120b` (probed
+   ok, §3) and t3-driver had `samba/gpt-oss-120b` (not probed). **Noted in §4.**
+
+4. **qwen7b tool-fail caveat added.** The Qwen/GLM reviewer ran on
+   t2-worker-free-only (served qwen7b) and made extensive tool calls
+   successfully — direct counter-evidence that the §3 tool-fail may be
+   prompt-shape-dependent. **Caveat added to §4 Key finding 2.**
+
+5. **§A as unreliable proxy noted.** §A disagrees with combos.json on
+   t1-orchestrator leg count (2 vs 5). The measured 502 at 125 s matches the
+   5-leg layout, not §A's 2-leg layout. **Noted in §4 Key finding 1.**
+
+### Outstanding items (not blocking DONE — noted for operator follow-up)
+
+| # | Item | Source | Priority |
+|---|---|---|---|
+| 1 | Run `omniroute combo list --json` or `tools/audit-router.py` for live gateway ground truth | DeepSeek §2c, Qwen §B1 | high — resolves all stale-combo inferences |
+| 2 | probe-sweep.py combo-timeout bug (no socket timeout on combo path; t3-driver-free-only hung >2 h) | Qwen §B3 | medium — add 60 s timeout to combo HTTP request |
+| 3 | t1-orchestrator-free-only is fully dead (all 4 free legs fail) with no §5 mitigation | Qwen §B4 | medium — needs a free fallback leg, distinct from the paid deepseek proposal |
+| 4 | Antigravity provider-credential regression (all agy legs 401) not escalated as a finding | DeepSeek §5 | medium — affects opus-4-6 combo + every agy leg |
+| 5 | qwen7b tool-fail deserves a second probe with a different tool-call shape | Qwen §B2 | low — the self-referential counter-evidence is strong |
+| 6 | §A "Combos with NO deepseek leg" table should note it's scoped to t1/t2/t3 family (omits gemini-3.8-flash, opus-4-6, spark-1.3-contributor, t4-rag) | DeepSeek §3 minor | low |
+| 7 | §6 env var: doc says `OMNIROUTE_API_KEY` but repo's client key is `AUTOOS_OMNIROUTE_KEY` | DeepSeek §4 minor | low — confirm which var the launcher sets |
