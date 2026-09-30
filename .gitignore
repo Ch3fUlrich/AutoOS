@@ -86,3 +86,10 @@ desktop.ini
 # pipeline and not reviewed as installers. Keep local until one is promoted
 # into the catalog with tests.
 additional_Features/
+
+# Node/npm scratch (omniroute patch verification — not part of AutoOS)
+node_modules/
+/package.json
+/package-lock.json
+/tools/test-reason-fix.mjs
+/tools/start-isolated-gateway.ps1
