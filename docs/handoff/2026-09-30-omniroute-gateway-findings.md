@@ -148,3 +148,112 @@ Status legend: **[fixed in-session]** / **[open — operator decision]** / **[op
   A logged-in / credit-bearing Zen account is a different tier (per-account
   quota, not free) and is still flagged "avoid for proxying". Recommendation:
   keep the `opencode`/`opencode-zen` connections out of agent routing.
+
+## 8. Storage Key Incident — 2026-09-30
+
+- **What:** The gateway's user config file `~/.omniroute/.env` was rewritten with a 3-character STORAGE_ENCRYPTION_KEY plus `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=4`. The short key does not match the database. From the next gateway restart (13:39:12Z), every credential decrypt failed — 524 "Auth tag validation failed" lines across all 29 providers, surfacing as mass 401s / "authentication expired." The original key was never recovered; recovery = set/keep a file key, restart, then rotate every connection's credential (`omniroute providers rotate <conn> --from-env <VAR> --yes --skip-test`; script pattern: `logs/rotate-tmp.ps1`; 28 rotated; `providers test-all` green afterwards). DB content was intact throughout. Most plausibly a fix lane persisted the admission knob into that file (lane reports claimed the file was untouched; the file content+mtime falsify that). Full write-up: `docs/handoff/2026-09-30-storage-key-incident.md`.
+- **Evidence:**
+  - Log Line Counts: 524 "Auth tag validation failed" lines across all 29 providers, starting at the next gateway restart (2026-09-30 13:39:12Z).
+  - File Modification Time: `~/.omniroute/.env` mtime 2026-09-30 15:35:29 local.
+  - File Content: 3-char `STORAGE_ENCRYPTION_KEY` (value not quoted — secret) + `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=4` (the admission knob a fix lane was persisting).
+  - DB Content: Intact throughout (verified via `providers test-all` green after recovery).
+  - Recovery: 28 connections rotated; `providers test-all` green.
+- **Impact:** All 29 providers experienced authentication failures; consumers saw mass 401s / "authentication expired" (indistinguishable from "all api keys destroyed").
+- **Recovery Procedure:**
+  1. Set/Keep a file key in `~/.omniroute/.env` (the original was never recovered — do NOT copy from the npm package `.env` template, which ships EMPTY; see finding #11).
+  2. Restart the gateway (use the correct launcher — see finding #9: `%APPDATA%\npm\omniroute.cmd`, not bare `omniroute`).
+  3. Rotate each connection's credential: `omniroute providers rotate <conn> --from-env <VAR> --yes --skip-test` (script: `logs/rotate-tmp.ps1`; 28 rotated).
+  4. Test: `omniroute providers test-all` → green.
+- **Prevention Rules:**
+  1. Never write the gateway data-dir key/config files (`~/.omniroute`); operator-only. (Now skill rule R-coord-14.)
+- **Status:** [fixed in-session]
+
+## 9. Gateway Process Death + Restart Machinery
+
+- **What:** The gateway process died ~12:49:56Z with no shutdown log and stale .pid files under ~/.omniroute/{server,supervisor}. The launcher resolves the npm .ps1 shim incorrectly.
+- **Evidence:**
+  - `configuration/start-stack.ps1` line 111 `Start-Process -FilePath 'omniroute'` resolves the npm .ps1 shim → "%1 is not a valid Win32 application". The working form is `Start-Process '%APPDATA%\npm\omniroute.cmd' -ArgumentList '--no-open','--port','20128'`.
+  - Fixed launcher saved in commit d88ed3b (branch L1-backlog/ws-p0-admission-fix-20260930).
+  - `configuration/omniroute/apply.ps1` carries the same bare-`omniroute` pattern as a follow-up (open).
+- **Impact:** The gateway process failed to restart automatically, leading to extended downtime.
+- **Recovery Procedure:**
+  1. Correct the launcher script to use the correct path to the gateway executable (`%APPDATA%\npm\omniroute.cmd`, not bare `omniroute`).
+  2. Restart the gateway process manually if necessary.
+- **Prevention Rules:**
+  1. Ensure the launcher script uses the correct path to the gateway executable.
+  2. Fix `apply.ps1`'s bare-`omniroute` pattern (open follow-up).
+- **Status:** [fixed in-session] (launcher); [open — operator decision] (apply.ps1 follow-up)
+
+## 10. Apply Skips Existing Connections
+
+- **What:** `configuration/omniroute/apply.ps1` intentionally skips already-registered connections (lines ~322-340).
+- **Evidence:**
+  - `configuration/omniroute/apply.ps1` lines ~322-340
+- **Impact:** Credentials refresh must use `providers rotate`, not apply.
+- **Prevention Rules:**
+  1. Document the behavior and ensure it is understood by all users.
+- **Status:** [open — operator decision]
+
+## 11. Template Shadowing
+
+- **What:** The npm package ships `.env` as a 170 KB commented template with an EMPTY STORAGE_ENCRYPTION_KEY; the user file in `~/.omniroute` wins.
+- **Evidence:**
+  - Package `.env` template and user `~/.omniroute/.env` file.
+- **Impact:** Never treat the package file as the key source; never "restore" by copying from it.
+- **Prevention Rules:**
+  1. Document the behavior and ensure it is understood by all users.
+- **Status:** [open — operator decision]
+
+## 12. Admission Gate
+
+- **What:** `chat_admission_busy` killed three lanes; root cause `chatBodyAdmission.ts` heavy-slot=1 default; fixed via `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT` 1→4 (commit c41de4a) + launcher persistence (d88ed3b).
+- **Evidence:**
+  - Commit c41de4a and d88ed3b.
+- **Impact:** The admission gate was causing lanes to fail.
+- **Recovery Procedure:**
+  1. Increase the `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT` setting to 4.
+  2. Persist the launcher with the correct settings.
+- **Prevention Rules:**
+  1. Monitor the admission gate settings and adjust as necessary.
+- **Status:** [fixed in-session]
+
+## 13. Free-Model Rate Limits
+
+- **What:** `opencode/muse-spark-1.3-contributor-free` rate-limits under orchestrator spawn bursts; stagger spawns + back off; a standby direct free model verified today: `opencode/nemotron-3-ultra-free`.
+- **Evidence:**
+  - Observed rate-limiting issues with `opencode/muse-spark-1.3-contributor-free`.
+  - Verified `opencode/nemotron-3-ultra-free` as a standby model.
+- **Impact:** Rate-limiting issues can cause delays and failures in model inference.
+- **Recovery Procedure:**
+  1. Stagger model spawns to avoid rate-limiting issues.
+  2. Use a standby model like `opencode/nemotron-3-ultra-free` when necessary.
+- **Prevention Rules:**
+  1. Monitor rate-limiting issues and adjust model usage accordingly.
+- **Status:** [open — operator decision]
+
+## 14. Open Fixes
+
+- **What:** Deepseek `reasoning_text` 400 (`The reasoning_text in the thinking mode must be passed back to the API`).
+- **Evidence:**
+  - Observed 400 errors with Deepseek `reasoning_text`.
+- **Impact:** The error prevents the use of Deepseek in thinking mode.
+- **Status:** [open — hardening idea]
+
+- **What:** Vertex leg 400 `Requests ending with a model turn are not supported` on agentic shapes during gemini-leg cooldowns.
+- **Evidence:**
+  - Observed 400 errors with Vertex leg during cooldowns.
+- **Impact:** The error prevents the use of Vertex leg during cooldowns.
+- **Status:** [open — hardening idea]
+
+- **What:** Scaleway qwen leg 400 `payload validation: max_completion_tokens is limited to 16384 for qwen3-235b-a22b-instruct-2507` (gateway should clamp per-model output).
+- **Evidence:**
+  - Observed 400 errors with Scaleway qwen leg.
+- **Impact:** The findings are documented and the operator has been informed.
+- **Status:** [open — hardening idea]
+
+- **What:** Operator wants fast failover away from rate-limited legs.
+- **Evidence:**
+  - Operator request for fast failover.
+- **Impact:** Rate-limited legs can cause delays and failures in model inference.
+- **Status:** [open — operator decision]
+
