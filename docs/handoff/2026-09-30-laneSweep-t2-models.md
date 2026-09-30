@@ -35,7 +35,7 @@ All results are **measured** (command + UTC timestamp), not inferred.
 
 ## 3. Leg sweep results (measured 2026-09-30T14:33–14:40Z)
 
-15 candidate legs probed. Gateway key from env `AUTOOS_OMNIROUTE_KEY` (present, length 35).
+15 candidate legs probed. Gateway key from env `AUTOOS_OMNIROUTE_KEY` (present).
 
 | # | Leg | Ack | Tool | Ack ms | Tool ms | Ctx | Error |
 |---|---|---|---|---|---|---|---|
@@ -71,9 +71,9 @@ support), 10/15 failed.
 
 | HTTP | Count | Legs | Meaning |
 |---|---|---|---|
-| 401 | 5 | agy/gemini-high, agy/gemini-medium, scw/qwen3, scw/mistral-small, morph×2 | No credentials configured for these providers |
+| 401 | 6 | agy/gemini-high, agy/gemini-medium, scw/qwen3, scw/mistral-small, morph-dsv4flash, morph-glm52-744b | No credentials configured for these providers |
 | 402 | 1 | cerebras/gpt-oss-120b | Payment required (wallet exhausted) |
-| 429 | 1 | gemini/gemini-3.8-flash | Rate limit (96 s backoff, still failed after retry) |
+| 429 | 1 | gemini/gemini-3.8-flash | Rate limit (79 s backoff, still failed after retry; 96 s total ack latency includes retry sleeps) |
 | 502 | 1 | meta-api/muse-spark-1.3-contributor | Gateway upstream error |
 | 504 | 1 | nebius/zai-org/GLM-5.3-Flash | Timeout (125 s) |
 | tool-fail | 1 | free-ai/qwen7b | Ack OK but no tool-call support |
@@ -95,31 +95,32 @@ free-only` was not tested (script crashed, exit 255).
 | `t2-orchestrator` | FAIL | 2 047 | (none) | transport: URLError |
 | `t2-worker` | FAIL | 2 045 | (none) | transport: URLError |
 | `t2-worker-clean` | **ok** | 13 391 | `deepseek-flash` | — (slow: gateway under load) |
-| `t2-worker-free-only` | **ok** | 1 937 | `qwen7b` | — (GLM-5.2 was down → fell through to qwen7b) |
+| `t2-worker-free-only` | **ok** | 1 937 | `qwen7b` | — (GLM-5.2 down → fell through to qwen7b; qwen7b has no tool support — ok for ack, unusable for agentic work) |
 | `t3-driver` | FAIL | 17 842 | (none) | transport: ConnectionResetError |
 | `t3-driver-clean` | FAIL | 2 047 | (none) | transport: URLError |
 | `t3-driver-free-only` | — | — | — | **not tested** (script crashed) |
 
 **3/10 tested combos ok** (deepseek-v4.1-flash, t2-worker-clean, t2-worker-free-only).
-7/10 failed — 2 with HTTP errors (502, ConnectionResetError after 117–124 s),
-5 with gateway-unreachable transport errors (URLError, ~2 s timeout).
+7/10 failed — 1× HTTP 502 (t1-orchestrator), 2× ConnectionResetError (t1-orchestrator-
+free-only, t3-driver), 4× URLError (t1-orchestrator-paid, t2-orchestrator, t2-worker,
+t3-driver-clean).
 
 ### Gateway instability note
 
 The sweep ran 11 combos sequentially. The first two (deepseek-v4.1-flash at
 0.8 s and t1-orchestrator at 124 s) completed normally. The third
 (t1-orchestrator-free-only) ran 117 s and ended with ConnectionResetError —
-the gateway connection was reset mid-request. The next four combos all failed
-with URLError at ~2 s (gateway unreachable). The gateway partially recovered
-(t2-worker-clean ok at 13.4 s, t2-worker-free-only ok at 1.9 s), then
-failed again (t3-driver ConnectionResetError at 17.8 s, t3-driver-clean
-URLError at 2 s). The script crashed before testing t3-driver-free-only.
+the gateway connection was reset mid-request. The next three combos
+(t1-orchestrator-paid, t2-orchestrator, t2-worker) failed with URLError at
+~2 s (gateway unreachable). The gateway partially recovered (t2-worker-clean
+ok at 13.4 s, t2-worker-free-only ok at 1.9 s), then failed again (t3-driver
+ConnectionResetError at 17.8 s, t3-driver-clean URLError at 2 s). The script
+crashed before testing t3-driver-free-only.
 
-This instability is consistent with the L0 gateway findings
-(`docs/handoff/2026-09-30-omniroute-gateway-findings.md`): the gateway
-process appears to restart or become unresponsive under sustained load,
-especially when upstream legs time out (GLM-5.3-Flash 504 at 125 s, gemini
-429 at 96 s).
+The combo loop in `probe-sweep.py` has no exception guard, which is why
+t3-driver-free-only was lost instead of recorded. The gateway instability
+correlates with long-running upstream leg timeouts (GLM-5.3-Flash 504 at
+125 s, gemini 429 at 96 s) exhausting the gateway's connection pool.
 
 ### Key finding: t2-worker-free-only served qwen7b
 
@@ -158,11 +159,11 @@ Context window: 1 048 576 (1M). Ack: 1 047 ms. Tool-call: 2 843 ms.
 | `t1-orchestrator` | gemini-3.8-flash → scw-qwen3 → nebius-GLM-5.3-Flash → scw-mistral-small → muse-spark | All 5 legs currently fail → 502 |
 | `t1-orchestrator-free-only` | gemini-3.8-flash → scw-qwen3 → nebius-GLM-5.3-Flash → scw-mistral-small | All 4 legs currently fail |
 | `t1-orchestrator-paid` | muse-spark | 502 |
-| `t2-orchestrator` | antigravity/claude-opus-4-6-thinking | 401 (no credentials) |
+| `t2-orchestrator` | antigravity/claude-opus-4-6-thinking | 401 (inferred — other agy legs returned 401; this leg was not probed; combo test returned URLError, see §4) |
 | `t2-worker-free-only` | gemini-3.8-flash → agy-gemini-medium → scw-qwen3 → scw-mistral-small → nebius-GLM-5.2 → qwen7b | GLM-5.2 (leg 5) works; free-only by design |
 | `t3-driver-free-only` | scw-mistral-small → nebius-GLM-5.3-Flash → scw-qwen3 → qwen7b | GLM-5.3-Flash 504 + qwen7b ack-only; fragile |
 
-### Fallback behavior per combo (measured + structural analysis)
+### Fallback behavior per combo (structural analysis from leg-sweep results; combo probes for t2-worker and t3-driver failed with transport errors)
 
 **`t2-worker`** (deepseek = leg 6): Legs 1–4 all fail (429/401). **Leg 5 (`nebius/zai-org/GLM-5.2`)
 succeeds** (297 ms) → gateway stops here. Deepseek (leg 6) **never fires** unless GLM-5.2
@@ -175,14 +176,17 @@ fires unless GLM-5.2, scw-qwen3, AND mistral-code-latest all fail simultaneously
 reordering needed.**
 
 **`t1-orchestrator`** (NO deepseek): All 5 legs fail → **combo returns 502** (measured
-124 593 ms). **Proposal: append `deepseek/deepseek-flash` as a final fallback leg** so
-the orchestrator tier degrades to a working model instead of returning 502.
+124 031 ms in the combo sweep; 124 593 ms in the first run). **Proposal: append
+`deepseek/deepseek-flash` as a final fallback leg** so the orchestrator tier
+degrades to a working model instead of returning 502.
 
 **`t1-orchestrator-paid`** (NO deepseek): Sole leg (muse-spark) returns 502. **Proposal:
 append `deepseek/deepseek-flash` as a fallback leg.**
 
-**`t2-orchestrator`** (NO deepseek): Sole leg (agy/claude-opus-4-6-thinking) returns 401.
-**Proposal: append `deepseek/deepseek-flash` as a fallback leg.**
+**`t2-orchestrator`** (NO deepseek): Sole leg (agy/claude-opus-4-6-thinking) inferred 401
+(other agy legs returned 401; this leg was not probed directly). The combo test itself
+returned URLError (gateway unreachable, §4), not 401. **Proposal: append
+`deepseek/deepseek-flash` as a fallback leg.**
 
 **Free-only combos** (`t1-orchestrator-free-only`, `t2-worker-free-only`,
 `t3-driver-free-only`): By design, no paid deepseek leg. These combos can fail entirely
@@ -195,7 +199,7 @@ their character from "zero spend" to "free-first with paid overflow."
 |---|---|---|---|
 | `t1-orchestrator` | …→ muse-spark (502) | …→ muse-spark → **deepseek/deepseek-flash** | Prevents 502 when all free + paid legs fail |
 | `t1-orchestrator-paid` | muse-spark (502) | muse-spark → **deepseek/deepseek-flash** | Same — single failing leg needs a fallback |
-| `t2-orchestrator` | agy/opus-4-6-thinking (401) | agy/opus-4-6-thinking → **deepseek/deepseek-flash** | Prevents 401 when agy credentials are absent |
+| `t2-orchestrator` | agy/opus-4-6-thinking (401, inferred) | agy/opus-4-6-thinking → **deepseek/deepseek-flash** | Prevents 401 when agy credentials are absent |
 | `t2-worker` | (unchanged) | deepseek already leg 6 of 8 | Correct — no change |
 | `t3-driver` | (unchanged) | deepseek already leg 5 of 6 | Correct — no change |
 | `-clean` twins | (unchanged) | deepseek is sole leg | Working as intended |
