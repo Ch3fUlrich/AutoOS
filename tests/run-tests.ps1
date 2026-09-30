@@ -9779,11 +9779,15 @@ Test-Case 'canvas verdict keeps the current docker path' {
 Test-Case 'omniroute launchers pin the .cmd shim, fail loudly without it, and default chat admission without clobbering' {
     # A bare Start-Process -FilePath 'omniroute' resolves to the npm .ps1 shim
     # (ExternalScript), which Start-Process cannot launch as a Win32 app: the
-    # gateway silently never starts. Both gateway launchers must pin the .cmd
+    # gateway silently never starts. Every gateway-spawn site must pin the .cmd
     # shim - resolved via PATH with an %APPDATA%\npm fallback, never a hardcoded
     # user path - and fail loudly when it is missing, and must apply the chat
-    # admission default only when the operator has not already set one.
-    foreach ($rel in @('configuration\omniroute\apply.ps1', 'configuration\start-stack.ps1')) {
+    # admission default only when the operator has not already set one. The
+    # logon resume helper (configuration\autostart\Start-AutoOSStack.ps1) carries
+    # the same bare-shim class; it was missed by the original handoff and is
+    # covered here too, so a third site cannot drift back to the bare name.
+    foreach ($rel in @('configuration\omniroute\apply.ps1', 'configuration\start-stack.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
         $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
         # (a) resolves the .cmd shim, not the bare ExternalScript name.
         Assert-True ($src -notmatch "Start-Process\s+-FilePath\s+'omniroute'") "$rel still starts the bare 'omniroute' name"
