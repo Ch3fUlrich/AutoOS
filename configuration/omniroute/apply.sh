@@ -43,6 +43,7 @@ GATEWAY="${AUTOOS_OMNIROUTE_URL:-http://127.0.0.1:20128}"
 if [[ -n "${AUTOOS_OMNIROUTE_URL:-}" ]]; then export OMNIROUTE_BASE_URL="$GATEWAY"; fi
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
+OVERRIDES_FILE="$HERE/context-overrides.json"
 DRY=0
 PROBE=0
 DRIFT=0
@@ -1326,6 +1327,78 @@ else
             echo "  ! $prune_name: $prune_kind, delete failed - run: omniroute combo delete $prune_name --yes"
         fi
     done <<<"$prune_names"
+fi
+
+# ─── Model context overrides ────────────────────────────────────────────────
+# The gateway resolves a model's context window from the registry, the
+# models.dev sync and the provider's own discovery; where none of them knows the
+# model it falls back to 128000 - and a client whose own limit is higher gets
+# rejected and compacts (the 2026-09-30 deepseek-v4.1-flash and
+# spark-1.3-contributor failures: live sessions compacted every ~5 minutes).
+# context-overrides.json lists the known-wrong resolutions; each is applied
+# through the documented management route PATCH /api/model-capability-overrides
+# {target, key: "context_length", value}. Idempotent: an override already at the
+# wanted value is reported, not rewritten. A local gateway with no manage key
+# cannot be driven from bash here (curl cannot mint the CLI's machine token),
+# so that case prints the dashboard fallback and moves on.
+echo "Overrides:"
+if [[ ! -f "$OVERRIDES_FILE" ]]; then
+    echo "  = no context-overrides.json - nothing to do"
+else
+    override_rows=""
+    if ! override_rows="$(python3 - "$OVERRIDES_FILE" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+for o in doc.get("overrides", []) if isinstance(doc, dict) else []:
+    if isinstance(o, dict) and o.get("target") and isinstance(o.get("context"), int):
+        print("%s\t%d" % (o["target"], o["context"]))
+PY
+    )"; then
+        echo "  ! $OVERRIDES_FILE is unreadable - nothing applied"
+        override_rows=""
+    fi
+    if [[ -z "$override_rows" ]]; then
+        echo "  = context-overrides.json lists none"
+    else
+        while IFS=$'\t' read -r ov_target ov_context; do
+            [[ -z "$ov_target" ]] && continue
+            if [[ $DRY -eq 1 ]]; then
+                echo "  - would ensure $ov_target context = $ov_context"
+                continue
+            fi
+            if [[ -z "$REST_KEY" ]]; then
+                echo "  ! $ov_target: no manage key for the management API - set it in the dashboard (Model Overrides)"
+                continue
+            fi
+            if ! omni_rest GET /api/model-capability-overrides; then
+                echo "  ! $ov_target: ${REST_ERROR:-the gateway did not answer}"
+                continue
+            fi
+            override_current="$(python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    doc = {}
+value = None
+for row in (doc.get("overrides") if isinstance(doc, dict) else None) or []:
+    if isinstance(row, dict) and row.get("target") == sys.argv[1] and row.get("key") == "context_length":
+        value = row.get("value")
+print("" if value is None else value)' "$ov_target" <<<"$REST_BODY")"
+            if [[ "$override_current" == "$ov_context" ]]; then
+                echo "  = $ov_target already $ov_context"
+                continue
+            fi
+            override_body="$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1], "key": "context_length", "value": int(sys.argv[2])}))' "$ov_target" "$ov_context")"
+            if ! omni_rest PATCH /api/model-capability-overrides "$override_body"; then
+                echo "  ! $ov_target override failed - ${REST_ERROR:-the gateway refused}; set it in the dashboard"
+                continue
+            fi
+            echo "  + $ov_target context -> $ov_context"
+        done <<<"$override_rows"
+    fi
 fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────

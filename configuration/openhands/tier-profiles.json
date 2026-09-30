@@ -151,8 +151,8 @@
     {
       "id": "omniroute-deepseek-v4.1-flash",
       "model": "openai/deepseek-v4.1-flash",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 393216,
       "reasoning": true
     },
     {

@@ -2411,8 +2411,10 @@ def litellm_model(ref):
     prov, model = ref.split("/", 1)
     prov = namespace.get(prov, prov)
     return "%s/%s" % (transport.get(prov, prov), model)
-known_drops = {"agy/gemini-3.7-flash-medium",
-               "agy/claude-opus-4-6-thinking"}
+# AGYCANON 2026-09-30: renders emit the canonical antigravity/* ids again (the
+# live catalog no longer lists agy/*), so the drops are spelled canonically.
+known_drops = {"antigravity/gemini-3.7-flash-medium",
+               "antigravity/claude-opus-4-6-thinking"}
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 problems = []
 free_only = sorted(n for n in combos if n.endswith("-free-only"))
@@ -2453,8 +2455,8 @@ fi
 if it "opencode repo config pins omniroute with litellm fallback"; then
     report="$(python3 - <<'PY'
 import json, re, io
-text = io.open("opencode.jsonc", encoding="utf-8").read()
-text = re.sub(r"(?m)^\s*//.*$", "", text)
+raw = io.open("opencode.jsonc", encoding="utf-8").read()
+text = re.sub(r"(?m)^\s*//.*$", "", raw)
 oc = json.loads(text)
 h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
 ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
@@ -2462,10 +2464,23 @@ p = oc["providers"]
 # The omniroute model list is the managed block rendered from
 # catalog/ide-models.json, so the expectation is derived from that file: which
 # tiers opencode may see follows provider servability and needs no re-pin when
-# a provider flips (lesson PROVPIN 2026-09-27).
+# a provider flips (lesson PROVPIN 2026-09-27). The models map ALSO carries
+# hand entries (direct-provider passthrough, kept outside the AUTOOS-MANAGED
+# region - the file's own comment and tools/sync-ide-models.py's docstring say
+# so), so only the generated region is compared: hand entries are deliberate
+# repo content, not drift.
 offered = sorted(m["id"] for m in ide
                  if "opencode" in ((m.get("surfaces") or {}).get("omniroute") or []))
-got = sorted(p["omniroute"]["models"].keys())
+lines = raw.splitlines()
+start = end = None
+for i, line in enumerate(lines):
+    if start is None and "AUTOOS-MANAGED-START omniroute" in line:
+        start = i
+    elif start is not None and "AUTOOS-MANAGED-END omniroute" in line:
+        end = i
+        break
+region = "{" + "\n".join(lines[start + 1:end]) + "}"
+got = sorted(json.loads(re.sub(r"(?m)^\s*//.*$", "", region)).keys())
 pins = sorted(
     "pin-ok" if h["mcp_servers"][name]["package"] in " ".join(spec.get("command", []))
     else "MISSING:" + name

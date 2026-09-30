@@ -48,7 +48,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `auto/smart` | mid | 131,072 | (none) |
 | `cheaperinference/glm-5.2` | cheap | 128k | ~~cheaperinference `glm-5.2`~~ (unavailable) |
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
-| `deepseek-v4.1-flash` | cheap | 128k | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `deepseek-v4.1-flash` | cheap | 1M | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 128k | gemini `gemini-3.8-flash` → ~~openrouter `google/gemini-3.8-flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.5-flash`~~ (unavailable) |
 | `opus-4-6` | frontier | 200k | antigravity `claude-opus-4-6-thinking` → ~~cc `claude-opus-4-6`~~ (unavailable) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |

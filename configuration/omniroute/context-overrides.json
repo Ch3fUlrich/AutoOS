@@ -1,0 +1,57 @@
+{
+  "$comment": [
+    "Model context overrides applied by apply.ps1 / apply.sh through the management",
+    "route PATCH /api/model-capability-overrides {target, key: \"context_length\", value}.",
+    "Needed where the gateway cannot resolve a model's real window and would fall back",
+    "to 128000: a client whose own limit is higher then gets its request rejected and",
+    "compacts - the 2026-09-30 deepseek-v4.1-flash / spark-1.3-contributor failure",
+    "(live opencode sessions compacted every ~5 minutes).",
+    "target uses the leg spelling the gateway routes; context is the model's documented",
+    "input window in tokens. Keep the list deliberate: add a row only when the gateway's",
+    "own resolution (registry / models.dev / provider discovery) is known to miss the",
+    "model - a manual row always wins over those, so a wrong row here would be silent.",
+    "Scope note: a row applies to the exact target spelling only. The gateway also",
+    "accepts namespace aliases (e.g. openai-compatible-chat/<model> for the meta-api",
+    "node connection); such live rows are harmless duplicates, not drift.",
+    "The vertex/gemini rows exist because the gateway's generic name heuristic resolves",
+    "any \"gemini\" model to 1,000,000 - 48k short of the real 1,048,576 the direct",
+    "opencode entries advertise."
+  ],
+  "overrides": [
+    {
+      "target": "deepseek/deepseek-flash",
+      "context": 1048576,
+      "$comment": "DeepSeek V4.1 Flash (MODEL deepseek-flash): 1M context per the vendor Models & Pricing page; registry models.deepseek-flash context_advertised 1048576. Measured 2026-09-30: without this the gateway served 128k and the live session compacted in a loop."
+    },
+    {
+      "target": "meta-api/muse-spark-1.3-contributor",
+      "context": 1048576,
+      "$comment": "Meta Model API contributor tier: 1,048,576 in (registry models.muse-spark-1.3-contributor). The spark-1.3-contributor / t1-orchestrator-paid routes declare 1M. Measured 2026-09-30: without this the gateway served 128k."
+    },
+    {
+      "target": "vertex/gemini-3-flash-preview",
+      "context": 1048576,
+      "$comment": "Gemini 3 Flash (Vertex): 1M window. Serves the opencode hand entry vertex-flash (limit 1048576)."
+    },
+    {
+      "target": "vertex/gemini-3.1-flash-lite",
+      "context": 1048576,
+      "$comment": "Gemini 3.1 Flash-Lite (Vertex): 1M window. Serves the opencode hand entry vertex-flash-lite."
+    },
+    {
+      "target": "vertex/gemini-3.1-pro-preview",
+      "context": 1048576,
+      "$comment": "Gemini 3.1 Pro (Vertex): 1M window. Serves the opencode hand entry vertex-pro."
+    },
+    {
+      "target": "vertex/gemini-3.8-flash",
+      "context": 1048576,
+      "$comment": "Gemini 3.8 Flash (Vertex, enabled in the operator's project 2026-09-30): 1M window. Serves the opencode hand entry vertex-3.8-flash."
+    },
+    {
+      "target": "vertex/gemini-2.5-flash",
+      "context": 1048576,
+      "$comment": "Gemini 2.5 Flash (Vertex): 1M window. Serves the opencode hand entry gemini-2.5-flash."
+    }
+  ]
+}

@@ -265,6 +265,35 @@
       // registry, then run `python3 tools/sync-ide-models.py`. Lines between the markers are
       // regenerated; hand entries above START / below END are kept.
       "models": {
+        // Direct provider passthrough (hand entries, kept outside the managed
+        // region). Live on the gateway since 2026-09-30: `vertex` connection
+        // registered from the vertex_ai key; ids match `omniroute models vertex`.
+        // Spawn agents with model "omniroute/vertex-flash" etc.
+        "vertex-flash": {
+          "modelID": "vertex/gemini-3-flash-preview",
+          "name": "vertex-flash — direct Gemini 3 Flash (Vertex AI, no combo)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "vertex-flash-lite": {
+          "modelID": "vertex/gemini-3.1-flash-lite",
+          "name": "vertex-flash-lite — cheapest direct Gemini (Vertex AI)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "vertex-pro": {
+          "modelID": "vertex/gemini-3.1-pro-preview",
+          "name": "vertex-pro - direct Gemini 3.1 Pro (Vertex AI)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "vertex-3.8-flash": {
+          "modelID": "vertex/gemini-3.8-flash",
+          "name": "vertex-3.8-flash - direct Gemini 3.8 Flash (Vertex AI, no combo)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "gemini-2.5-flash": {
+          "modelID": "gemini/gemini-2.5-flash",
+          "name": "gemini-2.5-flash - AI Studio direct (1M ctx, no combo)",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
         // AUTOOS-MANAGED-START omniroute
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
@@ -398,7 +427,7 @@
         "deepseek-v4.1-flash": {
           "modelID": "deepseek-v4.1-flash",
           "name": "deepseek-v4.1-flash — paid cheapest-first",
-          "limit": { "context": 131072, "output": 32768 },
+          "limit": { "context": 1048576, "output": 393216 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "high", "settings": { "reasoningEffort": "high" } },

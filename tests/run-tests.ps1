@@ -7403,14 +7403,27 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     # so the expectation is derived from that file: which tiers opencode may see
     # follows provider servability and needs no re-pin when a provider flips
     # (lesson PROVPIN 2026-09-27). The default model and gateway URL above stay
-    # pinned - human-chosen client settings.
+    # pinned - human-chosen client settings. The models map ALSO carries hand
+    # entries (direct-provider passthrough, kept outside the AUTOOS-MANAGED
+    # region - the file's own comment and tools/sync-ide-models.py's docstring
+    # say so), so this compares the generated region only; hand entries are
+    # deliberate repo content, not drift.
     $ideModels = @(Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
     $offered = @($ideModels | Where-Object {
         $surf = $_.PSObject.Properties['surfaces']
         $omni = if ($surf) { $surf.Value.PSObject.Properties['omniroute'] } else { $null }
         [bool]($omni -and (@($omni.Value) -contains 'opencode'))
     } | ForEach-Object { $_.id } | Sort-Object) -join ','
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') $offered
+    $lines = $raw -split "`r?`n"
+    $managedStart = -1; $managedEnd = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($managedStart -lt 0 -and $lines[$i] -match 'AUTOOS-MANAGED-START omniroute') { $managedStart = $i }
+        elseif ($managedStart -ge 0 -and $lines[$i] -match 'AUTOOS-MANAGED-END omniroute') { $managedEnd = $i; break }
+    }
+    Assert-True ($managedStart -ge 0 -and $managedEnd -gt $managedStart) 'the omniroute managed region is missing'
+    $managedText = '{' + (($lines[($managedStart + 1)..($managedEnd - 1)]) -join "`n") + '}'
+    $managed = $managedText -replace '(?m)^\s*//.*$', '' | ConvertFrom-Json
+    Assert-Equal (@($managed.PSObject.Properties.Name | Sort-Object) -join ',') $offered
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -8754,8 +8767,10 @@ print('%s|%s|%s' % (
         't2-worker' = '128k'
         't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
-        # DSBACK 2026-09-28: servable again (routes.deepseek-v4.1-flash declares 128k).
-        'deepseek-v4.1-flash' = '128k'
+        # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
+        # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
+        # out, so the 128k clamp was stale data (models.deepseek-flash).
+        'deepseek-v4.1-flash' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"

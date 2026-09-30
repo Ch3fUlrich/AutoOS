@@ -9,8 +9,9 @@
     "of t2-worker/t3-driver after their free legs. It trains on prompts by",
     "contract, so it is in no *-clean route and a privacy=sensitive card never",
     "reaches it. NOTE: unlike free-ai, 'meta-api' is not a built-in gateway",
-    "connection - the first apply against a live gateway creates it (key 'meta'",
-    "in api-keys.yml); nothing here has called the live gateway.",
+    "connection - the first apply against a live gateway registers it as a provider",
+    "NODE (prefix meta-api, endpoint https://api.meta.ai/v1) plus an",
+    "openai-compatible-chat connection bound to it; wired live 2026-09-30.",
     "T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only keep",
     "a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek",
     "credit is out (L0: every tier keeps a free leg). cheaperinference legs",
@@ -28,7 +29,14 @@
     "deepseek/deepseek-flash head, so neither is marked unavailable;",
     "mistral/mistral-code-latest (measured 200, 125 rpm) stays t3-driver's",
     "head. The numbers live on providers.mistral.limits, read by",
-    "tools/registry.py plan_dead_reasons() - never restated here."
+    "tools/registry.py plan_dead_reasons() - never restated here.",
+    "DS1M 2026-09-30: deepseek-v4.1-flash declares 1M - the vendor Models &",
+    "Pricing page states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in",
+    "/ 384K out, so the 128k clamp was stale data, not a small model",
+    "(provenance on models.deepseek-flash $comment).",
+    "AGYCANON 2026-09-30: antigravity's model_prefix retired to null - the",
+    "live /v1/models lists canonical antigravity/* ids again (19 rows, zero",
+    "agy/*; both spellings route), so these legs render canonically again."
   ],
   "retired": [
     "tier1",
@@ -55,7 +63,7 @@
     {
       "name": "deepseek-v4.1-flash",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
         "deepseek/deepseek-flash"
       ]
@@ -73,7 +81,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "agy/claude-opus-4-6-thinking"
+        "antigravity/claude-opus-4-6-thinking"
       ]
     },
     {
@@ -120,7 +128,7 @@
       "strategy": "priority",
       "context": "200k",
       "models": [
-        "agy/claude-opus-4-6-thinking"
+        "antigravity/claude-opus-4-6-thinking"
       ]
     },
     {
@@ -129,7 +137,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "agy/gemini-3.7-flash-high",
+        "antigravity/gemini-3.7-flash-high",
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",
@@ -152,7 +160,7 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "agy/gemini-3.7-flash-medium",
+        "antigravity/gemini-3.7-flash-medium",
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
         "nebius/zai-org/GLM-5.2",

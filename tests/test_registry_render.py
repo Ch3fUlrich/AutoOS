@@ -224,21 +224,30 @@ class RenderMatchesTodayTests(unittest.TestCase):
 
 
 class GatewayRefTests(unittest.TestCase):
-    """AGYID: the live OmniRoute catalog names the antigravity provider's models
-    agy/* (measured /v1/models 2026-09-27, never antigravity/*), so an omniroute
-    render must translate a registry leg through the provider's model_prefix.
-    The registry itself keeps its own antigravity/* spelling - resolve_leg and
-    every consumer of it are untouched."""
+    """AGYID/AGYCANON: the live OmniRoute catalog flipped antigravity's ids back
+    to canonical antigravity/* (re-measured /v1/models 2026-09-30: 19
+    antigravity/* rows, zero agy/*), so providers.antigravity.model_prefix is
+    null and an omniroute render emits the registry spelling unchanged - the
+    exact ids apply's validation checks. The model_prefix mechanism itself
+    stays live for providers that genuinely diverge (scaleway -> scw)."""
 
-    def test_render_omniroute_uses_the_provider_model_prefix(self):
+    def test_render_omniroute_renders_antigravity_by_its_canonical_id(self):
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("agy/gemini-3.7-flash-high",
+        self.assertIn("antigravity/gemini-3.7-flash-high",
                       by_name["t2-worker"]["models"])
-        self.assertNotIn("antigravity/gemini-3.7-flash-high",
+        self.assertNotIn("agy/gemini-3.7-flash-high",
                          by_name["t2-worker"]["models"])
-        self.assertIn("agy/claude-opus-4-6-thinking",
+        self.assertIn("antigravity/claude-opus-4-6-thinking",
                       by_name["opus-4-6"]["models"])
+
+    def test_render_omniroute_still_applies_a_declared_model_prefix(self):
+        # The mechanism AGYID added (and this AGYCANON change must not break):
+        # scaleway's free grant renders under its declared scw prefix.
+        rendered = registry.render_omniroute(real_registry())
+        by_name = {c["name"]: c for c in rendered["combos"]}
+        self.assertIn("scw/mistral-small-3.2-24b-instruct-2506",
+                      by_name["t3-driver"]["models"])
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         # Providers without a model_prefix keep their registry spelling in
