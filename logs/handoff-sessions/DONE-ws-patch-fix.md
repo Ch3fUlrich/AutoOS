@@ -25,7 +25,9 @@ gateway restarted; no push/merge/rebase/checkout.
 - `docs/handoff/2026-09-30-lanePatchFix.md` — new evidence doc for all four discrepancies.
 - `logs/handoff-sessions/DONE-ws-patch-fix.md` — this file.
 
-**Commit:** `(this commit)` on `L1-backlog/ws-f1-vertex-20260930`.
+**Commit:** `6f93452` (this lane's main commit: repaired script, corrected docs, evidence
+doc, this file), followed by one docs-only follow-up commit on
+`L1-backlog/ws-f1-vertex-20260930` that adds this line.
 
 ## The four discrepancies — disposition
 
