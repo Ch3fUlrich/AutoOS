@@ -3414,6 +3414,108 @@ class SessionTagTests(unittest.TestCase):
             self.assertIn("session-tag: lane/one\n", r.stdout, client)
 
 
+class WorkerGatewayOverlayTests(unittest.TestCase):
+    """GWLOOPBACK-2: the worker's own overlay names the gateway this process
+    resolved to.
+
+    The isolated worker's opencode reads the sandbox clone's `opencode.jsonc`,
+    whose omniroute provider pins `http://127.0.0.1:20128/v1` - refused
+    in-container, so every in-container gateway-path worker died on its first
+    model call (0 of 58 records; the memspec P1 review seat 1R). opencode
+    merges `OPENCODE_CONFIG_CONTENT` last (v2.0.19 `Config.load` appends the
+    content source after the discovered files; measured 2026-09-30 - the same
+    clone, same env: `opencode run --standalone` fails ConnectionRefused
+    without the stamp and reaches the gateway with it). The stamp is the
+    child's copy: no file on disk is rewritten, and a host resolves loopback,
+    so a host-side spawn's provider block is what it was."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def _plan(self, overlay):
+        return {"cwd": "/tmp/sandbox", "env": {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(overlay)}}
+
+    def _env_overlay(self, env):
+        return json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    def _stamped(self, plan):
+        with mock.patch.object(self.cli, "GATEWAY", self.cli.GATEWAY_DOCKER):
+            return self.cli.worker_env(plan, None, base={})
+
+    def test_worker_env_stamps_the_resolved_gateway_into_the_overlay(self):
+        plan = self._plan({"providers": {"omniroute": {}}})
+        prov = self._env_overlay(self._stamped(plan))["providers"]["omniroute"]
+        self.assertEqual(prov["settings"]["baseURL"], "http://omniroute:20128/v1")
+
+    def test_the_stamp_merges_into_the_provider_block_never_replaces_it(self):
+        plan = self._plan({"providers": {"omniroute": {
+            "headers": {"X-AutoOS-Run-Id": "r"}}}})
+        overlay = self._env_overlay(self._stamped(plan))
+        self.assertEqual(overlay["providers"]["omniroute"]["headers"],
+                         {"X-AutoOS-Run-Id": "r"})
+
+    def test_the_host_resolution_spells_what_the_file_already_says(self):
+        plan = self._plan({"providers": {"omniroute": {}}})
+        with mock.patch.object(self.cli, "GATEWAY", self.cli.GATEWAY_FALLBACK):
+            env = self.cli.worker_env(plan, None, base={})
+        self.assertEqual(
+            self._env_overlay(env)["providers"]["omniroute"]["settings"]["baseURL"],
+            "http://127.0.0.1:20128/v1")
+
+    def test_a_free_overlay_has_no_gateway_provider_to_stamp(self):
+        # --free runs carry only a model (free_overlay) and never probe the
+        # gateway; nothing may appear in their document.
+        doc = {"model": "opencode/muse-spark-1.3-contributor-free"}
+        self.assertEqual(self._env_overlay(self._stamped(self._plan(doc))), doc)
+
+    def test_a_document_without_the_omniroute_provider_is_left_alone(self):
+        doc = {"providers": {"openrouter": {"settings": {"baseURL": "http://x/v1"}}}}
+        self.assertEqual(self._env_overlay(self._stamped(self._plan(doc))), doc)
+
+    def test_a_malformed_overlay_is_passed_through_untouched(self):
+        env = self.cli.worker_env(
+            {"cwd": "/tmp/sandbox", "env": {"OPENCODE_CONFIG_CONTENT": "{not json"}},
+            None, base={})
+        self.assertEqual(env["OPENCODE_CONFIG_CONTENT"], "{not json")
+
+    def test_the_plan_keeps_the_overlay_build_plan_made(self):
+        # The stamp is the child's copy; the plan (pricing, the record) keeps
+        # what build_plan emitted.
+        plan = self._plan({"providers": {"omniroute": {}}})
+        before = plan["env"]["OPENCODE_CONFIG_CONTENT"]
+        self._stamped(plan)
+        self.assertEqual(plan["env"]["OPENCODE_CONFIG_CONTENT"], before)
+
+    def test_the_checkout_config_is_never_rewritten(self):
+        text = ('{"providers": {"omniroute": {"settings": '
+                '{"baseURL": "http://127.0.0.1:20128/v1"}}}}\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "opencode.jsonc"
+            cfg.write_text(text)
+            env = self._stamped({"cwd": tmp, "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
+                {"providers": {"omniroute": {}}})}})
+            self.assertIn("omniroute:20128", env["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(cfg.read_text(), text)
+
+    def test_the_planned_overlay_reaches_the_child_stamped(self):
+        # The whole emit path, not the helper: build_plan emits the overlay
+        # and worker_env hands the child the stamped copy of it.
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            title="T")
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        plan = self.cli.build_plan(args, cfg)
+        prov = self._env_overlay(self._stamped(plan))["providers"]["omniroute"]
+        self.assertEqual(prov["settings"]["baseURL"], "http://omniroute:20128/v1")
+        self.assertIn("x-omniroute-session-id", prov["headers"])
+
+
 class HeadlessRefusalTests(unittest.TestCase):
     """Measured 2026-09-25 (run 20260925-215048-85ba11): agy auto-denied a tool
     headless mode cannot prompt for, printed a refusal and still exited 0. A

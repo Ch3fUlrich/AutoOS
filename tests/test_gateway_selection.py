@@ -11,6 +11,13 @@ tried alone, else the docker DNS name with loopback as the fallback, and
 `gateway_up()` is the pre-check that walks those candidates and rebinds
 `GATEWAY` to the one that answers.
 
+GWLOOPBACK-2 builds the spawned worker's side on top of that: `gateway_base_url()`
+spells the resolved address the way the repo's provider block spells it (its API
+root is `/v1`), for the `OPENCODE_CONFIG_CONTENT` overlay a worker's opencode
+merges last - the sandbox clone's own `opencode.jsonc` pins loopback, which is
+refused in-container, so without the stamp every gateway-path worker dies on its
+first model call.
+
 No test here contacts a gateway: candidates are pure strings, every probe is
 injected, and the import test below asserts `urlopen` is not called while the
 module loads - the suite's rule is that the gateway is never contacted.
@@ -110,6 +117,37 @@ class GatewayConstTests(unittest.TestCase):
         self.assertEqual(const_with(dict(base)), agent.GATEWAY_DOCKER)
         override = dict(base, AUTOOS_OMNIROUTE_URL="http://gw.override:20128/")
         self.assertEqual(const_with(override), "http://gw.override:20128")
+
+
+class GatewayBaseUrlTests(unittest.TestCase):
+    """GWLOOPBACK-2: the URL a worker's provider block is handed - the address
+    this process resolved to (`GATEWAY` after the pre-check rebound it),
+    spelled with the API root the repo's provider spells."""
+
+    def test_the_container_answer_carries_the_repo_api_root(self):
+        self.assertEqual(agent.gateway_base_url(agent.GATEWAY_DOCKER),
+                         "http://omniroute:20128/v1")
+
+    def test_the_host_fallback_keeps_loopback(self):
+        # On a host the stamp spells what the file already says, so a host
+        # worker's provider block is exactly what it was.
+        self.assertEqual(agent.gateway_base_url(agent.GATEWAY_FALLBACK),
+                         "http://127.0.0.1:20128/v1")
+
+    def test_the_default_reads_the_rebound_gateway_at_call_time(self):
+        # gateway_up() rebinds GATEWAY after the import-time guess; a caller
+        # that passes nothing must get the post-probe address, not a copy of
+        # the guess.
+        with mock.patch.object(agent, "GATEWAY", "http://rebound:20128"):
+            self.assertEqual(agent.gateway_base_url(), "http://rebound:20128/v1")
+
+    def test_a_trailing_slash_never_doubles_the_api_root(self):
+        self.assertEqual(agent.gateway_base_url("http://gw.override:20128/"),
+                         "http://gw.override:20128/v1")
+
+    def test_an_override_with_its_own_path_keeps_it(self):
+        self.assertEqual(agent.gateway_base_url("http://gw.override:20128/openai/v1"),
+                         "http://gw.override:20128/openai/v1")
 
 
 class GatewayAnswersTests(unittest.TestCase):

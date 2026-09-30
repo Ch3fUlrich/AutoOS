@@ -246,6 +246,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 if os.name != "nt":
@@ -312,6 +313,23 @@ def resolve_gateway(env=None) -> str:
 
 
 GATEWAY = resolve_gateway()
+
+
+def gateway_base_url(gateway: str | None = None) -> str:
+    """The gateway address as a provider's API root, for a worker's config.
+
+    GWLOOPBACK-2 (2026-09-30): `GATEWAY` carries the scheme://host:port the
+    `gateway_up()` pre-check answered on, and the repo's provider block spells
+    its API root as `/v1` - the child's overlay must carry the same shape. An
+    override that already carries a path keeps it (a reverse-proxied gateway
+    can live under one). `GATEWAY` is read at call time, so a caller gets the
+    rebound address, never the import-time guess.
+    """
+    parts = urllib.parse.urlsplit((gateway or GATEWAY).rstrip("/"))
+    path = parts.path if parts.path not in ("", "/") else "/v1"
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
 DEFAULT_FREE_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # run_client re-emits a child's output as it arrives and keeps this much of it
 # so cmd_run can spot a headless refusal that still exited 0 (bug 2).
@@ -781,6 +799,50 @@ def _drop_extra_git_config(env: dict) -> None:
                 break
 
 
+def stamp_worker_gateway(env: dict) -> bool:
+    """Point a worker's opencode provider at the gateway this process bound.
+
+    GWLOOPBACK-2 (2026-09-30): `gateway_up()` cured the spawner's own
+    pre-check, but the isolated worker's opencode reads the SANDBOX CLONE's
+    repo config, whose omniroute provider pins `http://127.0.0.1:20128/v1` -
+    refused in-container, so every in-container gateway-path worker died on
+    its first model call (0 of 58 records; the memspec P1 review seat 1R died
+    ConnectionRefused). opencode merges `OPENCODE_CONFIG_CONTENT` last
+    (v2.0.19 `Config.load` appends the content source after the discovered
+    files; measured 2026-09-30: same clone, same env - `opencode run
+    --standalone` fails ConnectionRefused without the stamp and reaches the
+    gateway with it), and the overlay already carries the provider's session
+    headers, so the resolved address is written there too.
+
+    Only a document that already configures the omniroute provider is
+    touched: a `--free` overlay carries only a model, and a run whose model
+    does not go through the gateway has no provider block to steer. The
+    plan's copy is left alone - the child's env is the stamped one - no file
+    on disk is rewritten, and a host resolves loopback, so a host-side
+    spawn's provider block is exactly what it was.
+
+    Returns True when a document was stamped; a malformed or unrelated
+    overlay passes through untouched.
+    """
+    raw = env.get("OPENCODE_CONFIG_CONTENT")
+    if not raw:
+        return False
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return False
+    providers = doc.get("providers") if isinstance(doc, dict) else None
+    prov = providers.get("omniroute") if isinstance(providers, dict) else None
+    if not isinstance(prov, dict):
+        return False
+    settings = prov.get("settings")
+    if not isinstance(settings, dict):
+        settings = prov["settings"] = {}
+    settings["baseURL"] = gateway_base_url()
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(doc)
+    return True
+
+
 def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
     """The environment of one spawned worker: an allowlist of the caller's
     environment, the plan's own passlisted entries, the worker's single gateway
@@ -790,6 +852,11 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
     added only when this run genuinely goes through the gateway. ``base`` exists
     so the scrub is testable without touching the real environment.
+
+    A gateway-backed opencode worker's ``OPENCODE_CONFIG_CONTENT`` overlay is
+    stamped with the address `gateway_up()` bound (``stamp_worker_gateway``,
+    GWLOOPBACK-2): the sandbox clone's own `opencode.jsonc` pins loopback,
+    which its container refuses, and opencode merges the overlay last.
     """
     src = os.environ if base is None else base
     env = {n: v for n, v in src.items() if _worker_env_allowed(n)}
@@ -835,6 +902,10 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     # never let an AUTOOS_CLAUDE* in from the caller's environment — this is the
     # half that stops a plan (or a name added to the prefix later) from carrying
     # one down the tree.
+    # GWLOOPBACK-2: last, so the overlay this env actually hands the child is
+    # stamped after the plan merge (which is what produced it) and after the
+    # key. A `--free` overlay has no provider block; nothing to do.
+    stamp_worker_gateway(env)
     return strip_claude_env(env)
 
 
