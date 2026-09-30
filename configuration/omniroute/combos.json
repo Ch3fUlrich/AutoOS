@@ -207,6 +207,17 @@
         "cohere/command-a-03-2025",
         "cohere/command-r-plus-08-2024"
       ]
+    },
+    {
+      "name": "t4-researcher",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "gemini/gemini-3.8-flash",
+        "scw/qwen3-235b-a22b-instruct-2507",
+        "nebius/zai-org/GLM-5.3-Flash",
+        "free-ai/qwen7b"
+      ]
     }
   ]
 }

@@ -1311,6 +1311,7 @@ IDE_MODEL_ORDER = (
     "spark-1.3-contributor",
     "opus-4-6",
     "t4-rag",
+    "t4-researcher",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
