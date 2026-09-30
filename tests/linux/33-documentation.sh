@@ -750,6 +750,15 @@ if it "affected-tests: registry ids reach every shell, Pester and pytest case na
     out="$(python3 tests/test_affected_tests.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/prepush.py: the pre-push gate — the ancestor check, CI's plan check, the run
+# list derived from the changed files, CI's git env, the green/override records and
+# `--check-ready` (operator D-154). CI 36529545083 shard b is why this line exists: the
+# file was added and never wired, so nothing ran it until tests/test_suite_wiring.py
+# refused the un-wired file.
+if it "prepush: the gate refuses a push whose tests were never run (unit tests)"; then
+    out="$(python3 tests/test_prepush.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

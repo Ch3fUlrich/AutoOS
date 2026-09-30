@@ -263,6 +263,7 @@ import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green gate)
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
@@ -2950,15 +2951,19 @@ def ci_run_status(run_id, runner=None):
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Four gates, in this order, each naming itself when it fails: the record
+    Five gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
     for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
     finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
     certify a commit the gate never tested (SPAWNFIX3 item 6; the run id rides
     on the line as ``ci=<id>``). Without ``--ci-run`` the lane is still allowed
-    and one note says the gate was skipped. The gates live in code because the
-    hand-written claim was wrong once -- L1-main refused a `ready` line whose
-    record had no reviews (inbox 00:31:52Z).
+    and one note says the gate was skipped. The fifth is the pre-push gate's own
+    record (D-110): the reviews say the lane was looked at and the sha says it
+    shipped, but only that record says it was *run*, so a lane pushed with
+    ``git push --no-verify`` — which steps over every hook — is refused here
+    unless an orchestrator names a reason with ``--allow-unverified``. The gates
+    live in code because the hand-written claim was wrong once -- L1-main refused
+    a `ready` line whose record had no reviews (inbox 00:31:52Z).
 
     Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
     met, 2 a gate could not be read (unreadable record, git or gh failure,
@@ -3005,10 +3010,30 @@ def cmd_ready(args) -> int:
     else:
         print("note: no --ci-run given -- the lane is declared ready on the "
               "reviews and the pushed sha alone")
-    line = "%s ready %s %s reviews: %s | %s%s" % (
+    # D-110 (PREPUSH, operator D-154): the reviews and the pushed sha say the lane
+    # was looked at; only the pre-push gate's record says it was ever TESTED. A lane
+    # pushed with `git push --no-verify` steps over every hook, and this is where it
+    # is caught — the record is the one artefact that cannot be faked by luck.
+    green = prepush_mod.local_green(args.sha, repo=args.repo or os.getcwd())
+    unverified_field = ""
+    if not green:
+        waived = " ".join((getattr(args, "allow_unverified", None) or "").split())
+        if not waived:
+            print("ready: not appended -- %s has no green pre-push record (D-110). "
+                  "The gate never ran for this sha: it was pushed with "
+                  "`git push --no-verify`, or from a host that never ran "
+                  "`python3 tools/prepush.py`. Run the gate, or declare the lane "
+                  "with --allow-unverified \"<reason>\" (an orchestrator's flag, not "
+                  "the writer's)." % args.sha[:12])
+            return 1
+        unverified_field = ' unverified="%s"' % waived
+        print("note: --allow-unverified -- %s carries no green pre-push record, and "
+              "the reason written on the line is: %s" % (args.sha[:12], waived))
+    line = "%s ready %s %s reviews: %s | %s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
-        report["cross_family"]["detail"], report["final"]["detail"], ci_field)
+        report["cross_family"]["detail"], report["final"]["detail"], ci_field,
+        unverified_field)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -8661,6 +8686,12 @@ def _parser_ready(sub):
                               "the lane is still allowed and one note says so")
     ready_p.add_argument("--dry-run", action="store_true",
                          help="print the line, append nothing")
+    ready_p.add_argument("--allow-unverified", dest="allow_unverified", metavar="REASON",
+                         help="declare a sha that has no green pre-push record anyway "
+                              "(D-110). An orchestrator's flag for a lane tested on "
+                              "another host or pushed past its own hooks: the reason is "
+                              "written on the inbox line as unverified=\"<reason>\", and "
+                              "a writer clearing its own gate is not what this is for")
 
 
 def _parser_inbox(sub):

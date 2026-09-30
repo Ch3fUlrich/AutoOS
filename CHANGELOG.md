@@ -383,6 +383,188 @@ request.
   (v1 `role` is orchestrate|implement|review, v2 `kind` adds plan/research/bulk/
   debug/final), so the role default fires for `review` — v1 or v2 spelling — and for
   `--tier 3`, which is the reviewer agent.
+### Fixed — the green record is the runner's, not the worker's (PREPUSH-3, 2026-09-29)
+
+PREPUSH-2 made the record's *shape* unreadable to a forgery; the forge was still
+trivial because the file it had to match sat in `<git-dir>/autoos-prepush.log`,
+inside the checkout the worker writes in. The certificate now lives in a
+runner-private store, `<state-dir>/prepush/<sha>.json` — the sibling of the
+spawner's kill record, same `clients.state_dir()` base, same 0700 dir / 0600
+file, the path imported from `autoos_clients` rather than restated, so the two
+stores move together. One JSON record per commit (the newest wins, so a green
+after an override still readies a sha and an override after green unready it),
+written atomically by temp + rename. It binds what a green run actually implies:
+the commit sha, that commit's *tree* hash, the sorted manifest of commands the
+gate ran, each command's exit result and its parsed `N passed` count, and the
+UTC stamp. `--check-ready <sha>` recomputes the sha's tree from the repo and
+accepts only a record whose sha AND tree match what git says now, whose stamp
+parses, whose manifest and results are both non-empty, and whose every result is
+ok: the sha check is what refuses a lane that amended after a green run (the
+record is filed under the commit it ran on), and the tree check is what refuses a
+record that names a commit it never actually verified. The old log file stays as a
+human-readable annotation and readiness never reads it. Finally, a gate run that
+carries `AUTOOS_AGENT_RUN_ID` — the mark the spawner puts into every worker — runs
+the checks, prints its verdict, and writes no green record: a worker cannot
+certify its own push, only the orchestrator that merges the lane can. `ready`
+needed no change; it asks `local_green()`, which is where the store is read. The
+reader is guarded the same way as the writer, because the default state root is
+`<checkout>/logs`: a runner that was never given `AUTOOS_STATE_DIR` keeps its
+records under the very tree it certifies, so under the worker's mark a store that
+resolves inside that checkout is refused outright instead of believed — otherwise
+a hand-written JSON of exactly the gate's shape would be a self-issued certificate
+(what the spawner's env does to `AUTOOS_STATE_DIR` is not a boundary a gate may
+depend on). Measured on this lane's own sandbox: `--check-ready HEAD` answers with
+that refusal, and the refusal names its remedy.
+Tests: `LogRecordTests.test_the_record_binds_the_tree_the_commit_carries_and_the_sorted_manifest`,
+`test_the_record_stores_each_commands_result_and_parsed_counts`,
+`test_the_record_is_written_privately_and_atomically`,
+`test_the_store_lives_outside_the_checkout_the_worker_writes_in`;
+`CheckReadyTests.test_a_forged_line_in_the_worktree_log_certifies_nothing`,
+`test_a_record_that_binds_another_tree_is_not_green`,
+`test_a_record_with_a_red_result_is_not_green`,
+`test_a_green_record_does_not_carry_an_amended_commit`,
+`test_the_record_the_gate_writes_is_the_record_the_gate_reads` (round trip
+through the real gate); `WorkerRecordTests.test_a_worker_run_reports_green_and_records_nothing`,
+`test_a_worker_run_still_refuses_a_red_tree`, `test_the_same_gate_outside_a_worker_run_records_green`,
+`test_a_record_kept_in_the_workers_own_checkout_certifies_nothing`;
+and on the spawner side `ReadyCommandTests.test_a_forged_worktree_log_line_does_not_carry_ready`.
+
+### Fixed — the PREPUSH gate reads its own record shape and nothing else (PREPUSH-2, 2026-09-29)
+
+`local_green()` and `--check-ready` called *any* second field that was not `OVERRIDE` a
+green record, so one line appended to the log certified a push that never happened:
+`echo "$SHA anything-at-all" >> <git-dir>/autoos-prepush.log` and the sha was ready
+(measured on the lane's own HEAD, ee92774). The log lives in the git dir, where any
+process that can write the checkout can append to it, and `ready` is the last gate before
+main moves — a substring test was never enough. `parse_record()` is now the file's only
+reader: it accepts `green_line`'s `<sha> <utc> green: <commands>` and the override's
+`<sha> OVERRIDE <reason>`, requires the full 40-hex sha and the UTC stamp the gate stamps
+itself, and ignores every other line. `green_records()` is the one predicate both
+`local_green()` and `--check-ready` ask, so the two cannot drift apart.
+Tests: `CheckReadyTests.test_a_forged_free_text_line_is_not_green`,
+`test_only_the_two_shapes_the_gate_writes_count_as_records`,
+`test_a_malformed_line_is_ignored_and_hides_no_real_record`, and a round trip pinning the
+writer to the reader.
+
+- **The root cause of both CI 36529545083 reds is the mapping, not the two tests.** A lane
+  that adds `tests/test_x.py` was sent only `tests/test_x.py`: `SuiteWiringTests` (every
+  `tests/test_*.py` must be *run* by a harness) and `RepoLintTests` (every POSIX-only
+  pattern in one must carry a Windows guard) are tree-wide *scans*, so they name no file
+  and no case body mentions them — the lane ran the file it had written and CI went red in
+  the two lints that read it. `tools/affected-tests.py` now keeps `REPO_META_SCANS`, a
+  `(lint, scanned-paths)` table: a change to `tests/test_*.py`, a suite harness
+  (`tests/linux/*.sh`, `tests/run-tests.ps1`), a workflow, or any `.ps1`/`.psm1` selects
+  the lint that scans it. A new tree-wide lint over the suites must be added there the way
+  a new harness must be added to `test_suite_wiring.py`'s `WIRING` — an unstated scan is an
+  unselected one. Test:
+  `MappingTests.test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite`,
+  with `test_an_ordinary_change_selects_no_repo_wide_lint` holding the other side.
+- **CI1 (shard b): `tests/test_prepush.py` is wired into a harness**, with the same
+  `python3 tests/<name>.py` run shape as its neighbour `test_affected_tests.py`, in
+  `tests/linux/33-documentation.sh`. `tests/test_suite_wiring.py` refuses a unit-test file
+  no harness runs, and 60 gate cases had been sitting unexecuted since the file landed.
+- **CI2 (shard f): its bash fixtures carry a Windows guard.** Seven `#!/usr/bin/env bash`
+  and `#!/bin/sh` stubs — the `run-tests.sh` fakes and the foreign-hook fixtures — had none,
+  which is what `RepoLintTests.test_posix_guards_are_clean` is there to catch. The guard sits
+  on `RepoFixture.suite_is_green`/`suite_is_red` and `RunListTests.capture_suite`, plus the
+  four cases that write a shebang themselves, so every test that builds a suite stub skips
+  on Windows by itself instead of 30 cases each repeating the reason.
+
+### Fixed — the gate's installer fails closed and keeps its own promises (PREPUSH-2, 2026-09-29)
+
+Four defects at the edges of the gate, each with a test that names it:
+
+- **A hook whose gate is missing refused the push (NB2).** The shim
+  `trust_worktree.py` installs printed `no $root/tools/prepush.py -- nothing was
+  checked` and exited **0**, so a lane that lost the gate — rebased onto a base
+  without it, checked out an older branch — pushed exactly the untested sha D-154
+  exists to stop, while the installer's own message said the gate was installed. A
+  check that could not run is not a check that passed. It now exits 1, points at the
+  `AUTOOS_PREPUSH_OVERRIDE` that leaves a record `--check-ready` refuses, and does
+  **not** exec the chained hook: the chain is what runs *after* the gate passes, so
+  handing over would let an operator's `exit 0` push the branch anyway. Tests:
+  `HookInstallTests.test_a_gate_that_is_not_there_refuses_the_push`,
+  `.test_a_gate_that_is_not_there_does_not_hand_over_to_the_operators_hook` — both a
+  real `git push` against a bare origin and its ref list, which is also how the first
+  cut's unterminated quote was found.
+- **`2` means the gate could not run (NB3).** The docstring promised it and every
+  path returned 1: no checkout, no HEAD commit, no `tools/affected-tests.py`, a
+  mapper that died or printed no JSON. 1 is a verdict the lane can act on; the
+  absence of a verdict is not, and a caller that waits on "not ready yet" waits
+  forever on a checkout that cannot answer — `tools/autoos-agent.py`'s `ready`
+  already splits its own git failures that way. The locating helpers raise
+  `GateCouldNotRun`, `main` maps it, and the refusals read as the `REFUSED` constant.
+  Test: `CouldNotRunTests` (six paths, plus
+  `.test_a_red_check_is_still_a_refusal` holding the other side).
+- **The install dir is where git says it is (NB1).** `hooks_dir` asks
+  `git rev-parse --git-path hooks`, which is the only answer that tracks
+  `core.hooksPath`; a path built from `.git/hooks` installs a gate no push reads on a
+  host that set it. That is how `dbba511` already wrote it, so the tests pass at this
+  HEAD: they are the regression pin, and were checked by hardcoding `.git/hooks` and
+  watching both go red. Test:
+  `HookInstallTests.test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it`,
+  `.test_a_relative_core_hooksPath_is_resolved_against_the_checkout`.
+- **One home for the gate's git helper (NB6).** `_git` existed twice, in
+  `tools/prepush.py` and in the skill's `trust_worktree.py`, and the only caller is
+  `hooks_dir` — so the copy that can drift is precisely the one that decides where
+  the gate lands. The skill now imports the gate's helper, lazily and *after* the
+  `tools/prepush.py` existence check, because a repository without the gate must hear
+  "nothing installed" rather than an ImportError. Test:
+  `HookInstallTests.test_the_git_helper_has_one_home_and_lives_in_the_gate`.
+
+### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
+
+Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI
+36517453134) cited rule R-orch-17 that existed only on a newer main — it never merged main and
+never ran `tests/test_skill_rules.py`; **SBA** (CI 36493098467) had a fixture `git commit` die
+with rc 128 on the runner, because it passed at home only thanks to the dev host's global
+`user.name`/`user.email`; **FREEKEYS2** (CI 36506339556 shard e) shipped 17 red render tests
+because the worker ran the pytest files it *guessed* were relevant, not the ones its own changed
+files imply. Each is a missing run, not a missing fix — so the gate computes the run list from the
+diff and refuses the push.
+
+- **`tools/prepush.py`** (new; one home for the logic, the hook is a three-line shim onto it): the
+  fetched `origin/main` must be an ancestor of HEAD (R-coord-01), with no network; CI's own plan
+  check runs first (`tests/test_ci_shards.py`, `tests/ci-shards.py`); the rest of the run list
+  comes from the changed files; the suite runs in **CI's git env**
+  (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, inherited `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+  dropped) under `/usr/bin/python3`, so a test that leans on a host identity or a venv shim fails
+  here instead of in CI. Green appends `<sha> <utc> green: <commands>` to
+  `<git-dir>/autoos-prepush.log` (per worktree, never tracked); red exits 1 and prints the failing
+  command. A bash run that examined *nothing* is red too: `run-tests.sh` exits 0 on a filter that
+  matched no case, printing `passed 0 failed 0 skipped 0`, so the gate reads the tally as well as
+  the status — R-worker-05's "'no tests ran' exited 0 and was pushed" in this tool's own shape.
+  `AUTOOS_PREPUSH_OVERRIDE="<reason>"` steps over it loudly, for orchestrators, and is
+  logged as **never green**.
+- **`tools/affected-tests.py`** gained a file-based question: `--changed-files-from REV` (with
+  `--format plan` for the gate). The mapping rules are the three reds — skills, `CHANGELOG.md` and
+  `docs/**` always pull `tests/test_skill_rules.py`; registry/route/combo files pull the render
+  and sync tests *plus* the bash `render`/`apply` filters; `tools/X.py` pulls the tests that name
+  it; a changed `tests/linux/NN-*.sh` pulls that part. Two gaps found while running it against
+  this very change: the id corpus attributes a mention to one *case* (so a test file that builds
+  the tool's path in a module-level constant named it in every case and in none), and it reads
+  only `tests/` (so a skill's own tests under `.agents/skills/<name>/tests/` were invisible).
+  Every changed `.py` is now answered a second way, by the pytest files whose text names it, and a
+  changed test file is run whichever directory holds it. A bash part is never run unfiltered
+  (R-host-08).
+- **`autoos-agent.py ready`** now reads that log (D-110): reviews and a pushed sha prove the lane
+  was looked at and shipped, only the record proves it was run — which is what catches a lane that
+  pushed with `git push --no-verify`, a path no hook can reach. An orchestrator that means to waive
+  names a reason with `--allow-unverified "<reason>"`, and the reason rides on the line.
+- **`trust_worktree.py`** installs the hook into `git rev-parse --git-path hooks` as part of
+  approving a fresh worktree, and **chains** a pre-push hook it did not write
+  (`pre-push.autoos-chained`) rather than replacing it. It is idempotent (a second run reports
+  `skipped`) and reachable alone via `--hook-only`, because rule D-111 keeps this path away from
+  `~/.claude.json` — the hook step never reads or writes that file.
+- **Skill**: `R-coord-12` and the code-enforced list in `unattended-orchestration/SKILL.md` state
+  the rule; the gate's own docstring stays the source of truth for its order.
+- **Tests** (`tests/test_prepush.py`, 50; 8 more in `ReadyCommandTests`): each refusal shape, the
+  CI-like git env proven behaviourally (a temp global config that the gate forces to `/dev/null`,
+  so the fixture commit fails 128 — and a repo carrying its own identity still passes, so isolation
+  is not a wall), the green and override records, `--check-ready`'s exact-sha match, the hook
+  install's idempotence and chaining with `HOME` pointed at a temp dir (asserting `~/.claude.json`
+  is never created), and the file→tests mapping against the real tree for all three measured reds.
+
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
 
 L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
