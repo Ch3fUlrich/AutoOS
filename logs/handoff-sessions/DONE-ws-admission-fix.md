@@ -66,3 +66,59 @@ Base sha: `6ec0605a188586778acac6829a9263181129e949` (`origin/main` tip at workt
   or changed. The one observed shim path is written in its `%APPDATA%\npm\omniroute.cmd`
   env-var form.
 - DONE note added with `git add -f` (`logs/` is git-ignored).
+
+---
+
+# Follow-up DONE — reviewer-B finding: autostart shim (commit `1179e3f`)
+
+Two admission reviewers read this lane. **A** = `nemotron-3-ultra-free` → **PASS**;
+**B** = `longcat-2.5-preview-free` → **FAIL**, because
+`configuration/autostart/Start-AutoOSStack.ps1:47` still used the bare-`omniroute` shim with a
+non-`exit` failure shape. **That site was MISSED by the original handoff** (recorded only as
+"out of scope"). Fixed now.
+
+## Commit
+
+- `1179e3f2cf973dcdf74b9daefc42ec4297a87e1c` — fix(admission): pin omniroute.cmd shim in the
+  logon resume helper (reviewer-B finding) + test.
+  `configuration/autostart/Start-AutoOSStack.ps1` +23/-2, `tests/run-tests.ps1` +7/-3.
+  (Docs commit — this evidence + this DONE note — follows.)
+
+## What changed
+
+- Autostart gateway block now resolves `omniroute.cmd` (PATH `Get-Command` + `%APPDATA%\npm`
+  fallback, no hardcoded user path), starts `-FilePath $omnirouteCmd`, and fails loudly
+  (`exit 1`) when the shim is missing — mirroring `880ec58`. It also respect-sets
+  `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=8` (only when unset; once only), so autostart never
+  spawns the default 1+1=2. The old fall-through "not installed" branch is gone.
+- The launcher shim/admission test now also covers the autostart file (same 3 checks).
+
+## Verification numbers (quoted in `docs/handoff/2026-09-30-laneAdmissionFix.md`)
+
+- Failing-first: `-Filter shim` against pre-fix → `passed 20 failed 1 skipped 0`, EXIT=1
+  (`configuration\autostart\Start-AutoOSStack.ps1 still starts the bare 'omniroute' name`).
+- Post-fix: `-Filter shim` → `passed 29 failed 0 skipped 0`, EXIT=0.
+- Parse errors = 0 on both touched `.ps1`.
+- ScriptAnalyzer parity (same command, raw pre-fix copies): autostart pre=0/post=0;
+  run-tests pre=17/post=17 — no new finding.
+- No `-DryRun` on the no-arg autostart helper; extracted real shim block in a child with empty
+  PATH + bogus APPDATA → loud message + `MISS-EXIT=1`.
+- No gateway restart. `chat_admission_busy` / `Rate limit exceeded` observed: 0; backoffs: 0.
+
+## Review (item 7) — different-family re-review
+
+- Reviewer: `t3-reviewer` subagent, session `ses_f0bf43ef0ffeJm4L8G200OpNw9`, configured model
+  `omniroute/t3-driver` (`opencode.jsonc`) — a different model family from this writer
+  (`deepseek-v4.1-flash`), fresh independent context.
+- It read `git show 1179e3f`, `configuration/autostart/Start-AutoOSStack.ps1` in full, and the
+  `Test-Case` at `tests/run-tests.ps1:9779`; it ran
+  `pwsh -NoProfile -File tests/run-tests.ps1 -Filter shim`.
+- Verdict: **PASS** — all six points confirmed (.cmd resolution + fallback, loud `exit 1`,
+  respect-set admission default once-only, no hardcoded path/secret, test covers the autostart
+  site and passes, parse errors 0); no defect found.
+
+## Recorded, NOT fixed (item 6)
+
+Same bare-shim class for the node CLIs (unchanged): `Start-AutoOSStack.ps1:129` and
+`start-stack.ps1:263` (`opencode`), `start-litellm.ps1:91` (`litellm`). The `.sh` twin spawns
+via `nohup`, which is not this Windows `Start-Process` class.
