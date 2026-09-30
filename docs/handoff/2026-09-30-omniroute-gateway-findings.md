@@ -209,3 +209,33 @@ Status legend: **[fixed in-session]** / **[open — operator decision]** / **[op
   every DONE before accepting it; critical writer lanes are pinned to
   `omniroute/deepseek-v4.1-flash`; fabrications are recorded, never worked
   around.
+
+### Admission review verdicts — the 2-free-model mandate is complete
+
+- **What:** the run's two free-model admission reviewers returned verdicts on the
+  `ws-admission-fix` lane's gateway shim / admission fixes. **A** =
+  `nemotron-3-ultra-free` → **PASS**. **B** = `longcat-2.5-preview-free` → **FAIL**,
+  and each B finding was closed before the lane finished:
+  - `configuration/omniroute/apply.ps1` bare-`omniroute` shim → fixed in `880ec58`
+    (the Windows sibling `configuration/start-stack.ps1` in the same commit).
+  - **third site MISSED by the original handoff** —
+    `configuration/autostart/Start-AutoOSStack.ps1:47` (it also set no admission
+    knob, so a logon resume would spawn the default 1+1=2) → fixed in `1179e3f`:
+    `.cmd` shim resolution + respect-set `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT`.
+  - hard-rule redactions (real username / session-id) → `90cd698` (ws-p0) and
+    `1bb1175` (ws-gw-admission).
+- **Pattern adopted (operator directive):** reviewer → L2-fixer → re-review. Both
+  fixes carry a **PASS** from a different-family re-review (`t3-reviewer`, configured
+  model `omniroute/t3-driver`) against the `deepseek-v4.1-flash` writer — no hardcoded
+  user path, no secret, admission var set only when unset.
+- **Same bare-shim class still open** (recorded, not fixed):
+  `configuration/autostart/Start-AutoOSStack.ps1:129` and
+  `configuration/start-stack.ps1:263` (`opencode`), and
+  `configuration/litellm/start-litellm.ps1:91` (`litellm`). The two `opencode` line
+  numbers are on the `ws-admission-fix` branch tip (the omniroute fix shifts them).
+- **Suite-reliability hazard observed:** a full `pwsh tests/run-tests.ps1` run stopped
+  in the network-dependent `usb` download cases (the last passes printed include
+  `usb custom-url downloads and verifies …`) and never printed its
+  `passed N failed N skipped N` summary line (log
+  `%TEMP%\opencode\suite-admission-fix.log`) — full-suite summaries can be
+  unobtainable, so focused `-Filter` runs are the reliable gate.
