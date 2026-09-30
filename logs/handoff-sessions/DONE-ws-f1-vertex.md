@@ -36,6 +36,10 @@ Rate limit events were logged and handled with 60-120s backoff as implemented in
 
 ## Files Owned
 
+- `configuration/omniroute/vertex-failover-knobs.json` (actual failover resilience knobs)
+- `docs/handoff/2026-09-30-laneF1-vertex.md` (updated to match artifacts)
+- `logs/handoff-sessions/DONE-ws-f1-vertex.md` (this file)
+
 - `open-sse/translator/request/openai-to-gemini.ts`
 - `dist/.build/next/server/chunks/_08_y1bx._.js`
 - `dist/.build/next/server/chunks/_15ose6x._.js`
