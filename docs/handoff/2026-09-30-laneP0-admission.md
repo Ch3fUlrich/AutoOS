@@ -1,7 +1,7 @@
 # Lane P0 — admission persistence + start-stack fix (ws-omniroute-20260930)
 
 Branch: `L1-backlog/ws-p0-admission-fix-20260930` (worktree `AutoOS-ws-p0`, cut from main `d08f7f2`).
-Gateway source (unmodified): `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute` v3.8.50.
+Gateway source (unmodified): `%APPDATA%\npm\node_modules\omniroute` v3.8.50.
 Live gateway: `http://127.0.0.1:20128`. No secrets below (key/lane names only).
 
 ## 0. ROUTE HEALTH (recorded verbatim per brief)
