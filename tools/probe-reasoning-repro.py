@@ -20,6 +20,7 @@ import urllib.request
 import urllib.error
 
 GATEWAY = os.environ.get("AUTOOS_OMNIROUTE_URL", "http://127.0.0.1:20128")
+API_KEY = os.environ.get("AUTOOS_OMNIROUTE_KEY", "")
 
 def chat(model, messages, tools=None, reasoning_effort=None):
     payload = {"model": model, "messages": messages, "stream": False}
@@ -28,10 +29,13 @@ def chat(model, messages, tools=None, reasoning_effort=None):
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
     data = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
     req = urllib.request.Request(
         f"{GATEWAY}/v1/chat/completions",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
