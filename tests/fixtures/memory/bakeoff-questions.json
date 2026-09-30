@@ -1,0 +1,419 @@
+{
+  "questions": [
+    {
+      "id": "q001",
+      "question": "What is the title of the decision node with id 'decision:restore-drill'?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "decision:restore-drill"
+      },
+      "expected_answer": "decision:restore-drill",
+      "dataset_assumption": "decision:restore-drill exists in the graph seeded from R0 fixture"
+    },
+    {
+      "id": "q002",
+      "question": "Which facts does the project 'acme' hub link to directly?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "about",
+        "project": "acme"
+      },
+      "expected_answer": "project:acme",
+      "dataset_assumption": "project hub 'project:acme' exists with outgoing 'about' edges"
+    },
+    {
+      "id": "q003",
+      "question": "What is the version_id of the node 'decision:restore-drill' after one supersede cycle?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "decision:restore-drill"
+      },
+      "expected_answer": "2",
+      "dataset_assumption": "supersede was called once on this node, bumping version_id from 1 to 2"
+    },
+    {
+      "id": "q004",
+      "question": "List the compact lines returned by recall for query 'backup' in project 'acme'.",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "backup",
+        "project": "acme"
+      },
+      "expected_answer": "Lines starting with 'decision:' or 'finding:' with id, kind, title, v<n>",
+      "dataset_assumption": "fixture graph contains backup-related nodes under project acme"
+    },
+    {
+      "id": "q005",
+      "question": "What does context_pack return for project 'acme' and role 'implement'?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "implement"
+      },
+      "expected_answer": "hub_facts contains 'project:acme', tokens <= PACK_TOKENS (1500)",
+      "dataset_assumption": "project 'acme' hub and its 1-hop neighbourhood exist"
+    },
+    {
+      "id": "q006",
+      "question": "After remembering a decision with title 'Facade round trip', what id does recall find?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "round trip",
+        "project": "acme"
+      },
+      "expected_answer": "decision:facade-round-trip",
+      "dataset_assumption": "remember was called with kind='decision', title='Facade round trip', project='acme'"
+    },
+    {
+      "id": "q007",
+      "question": "What error does link return when given a relation not in the closed list?",
+      "facade_call": "link",
+      "facade_args": {
+        "a": "decision:restore-drill",
+        "rel": "enemies-with",
+        "b": "component:ledger"
+      },
+      "expected_answer": {
+        "error": "unknown relation"
+      },
+      "dataset_assumption": "relation 'enemies-with' is not in CLOSED_RELATIONS"
+    },
+    {
+      "id": "q008",
+      "question": "What status does supersede return when the old fact is already closed?",
+      "facade_call": "supersede",
+      "facade_args": {
+        "old": "decision:restore-drill",
+        "new": "decision:backup-window",
+        "reason": "already done"
+      },
+      "expected_answer": {
+        "status": "noop",
+        "note": "already superseded"
+      },
+      "dataset_assumption": "the old fact 'decision:restore-drill' already has valid_to set"
+    },
+    {
+      "id": "q009",
+      "question": "After remembering 'Small commits' twice with the same canonical id, what is the version_id?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "preference",
+        "title": "Small commits",
+        "body": "Commit per task.",
+        "project": "acme",
+        "source": "s"
+      },
+      "expected_answer": {
+        "status": "updated",
+        "version_id": 2
+      },
+      "dataset_assumption": "second remember call bumps version_id from 1 to 2"
+    },
+    {
+      "id": "q010",
+      "question": "What title does a merged fact resolve to when querying by normalised title?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "Backup policy, postgres",
+        "project": "acme"
+      },
+      "expected_answer": "decision:postgres-backup-policy",
+      "dataset_assumption": "normalised title match triggers alias ladder to survivor id"
+    },
+    {
+      "id": "q011",
+      "question": "What does context_pack.served return after a decision is remembered under 'acme'?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "review"
+      },
+      "expected_answer": [
+        "decision:facade-round-trip"
+      ],
+      "dataset_assumption": "a decision node was remembered under project 'acme' and appears in hub_facts"
+    },
+    {
+      "id": "q012",
+      "question": "What error does remember return when body exceeds 600 characters?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "lesson",
+        "title": "Long body",
+        "body": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "project": "acme",
+        "source": "s"
+      },
+      "expected_answer": {
+        "error": "body is 601 chars; at most 600 allowed (spec:74)"
+      },
+      "dataset_assumption": "body length test: 601 > MAX_BODY=600"
+    },
+    {
+      "id": "q013",
+      "question": "What does recall return when query is an existing node id?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "decision:restore-drill"
+      },
+      "expected_answer": {
+        "mode": "entity",
+        "id": "decision:restore-drill",
+        "title": "Restore drill from the nightly backup"
+      },
+      "dataset_assumption": "the node 'decision:restore-drill' exists and was not closed"
+    },
+    {
+      "id": "q014",
+      "question": "After linking 'decision:restore-drill' about 'technology:postgresql', what does a repeat link return?",
+      "facade_call": "link",
+      "facade_args": {
+        "a": "decision:restore-drill",
+        "rel": "about",
+        "b": "technology:postgresql"
+      },
+      "expected_answer": {
+        "noop": true,
+        "edge_id": "same_as_first"
+      },
+      "dataset_assumption": "link is idempotent on (a, rel, b) pair"
+    },
+    {
+      "id": "q015",
+      "question": "What does supersede return when old and new are the same entity?",
+      "facade_call": "supersede",
+      "facade_args": {
+        "old": "decision:restore-drill",
+        "new": "decision:restore-drill",
+        "reason": "self"
+      },
+      "expected_answer": {
+        "error": "supersede needs two different entities"
+      },
+      "dataset_assumption": "same entity test: old == new must be rejected"
+    },
+    {
+      "id": "q016",
+      "question": "What does remember return when a title variant triggers the similarity merge?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "decision",
+        "title": "Postgres nightly backup policy run",
+        "body": "Back up Postgres nightly.",
+        "project": "acme",
+        "source": "s"
+      },
+      "expected_answer": {
+        "merged_into": "decision:postgres-nightly-backup-policy"
+      },
+      "dataset_assumption": "similarity match with >=3 tokens triggers merge into survivor"
+    },
+    {
+      "id": "q017",
+      "question": "What does context_pack.recent_events contain after a supersede event is emitted?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "review"
+      },
+      "expected_answer": "Contains 'memory.decision.superseded' type events",
+      "dataset_assumption": "supersede was called, emitting a schema:2 event"
+    },
+    {
+      "id": "q018",
+      "question": "What error does remember return when a secret pattern is detected in the body?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "lesson",
+        "title": "Deploy token",
+        "body": "the deploy token = deadbeefcafe1234",
+        "project": "acme",
+        "source": "s"
+      },
+      "expected_answer": {
+        "error": "refused: content looks like it carries a secret"
+      },
+      "dataset_assumption": "secret scan triggers refusal on token-like content"
+    },
+    {
+      "id": "q019",
+      "question": "What does recall return for a query that matches no nodes in the graph?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "nonexistent fact",
+        "project": "acme"
+      },
+      "expected_answer": {
+        "mode": "lines",
+        "lines": [],
+        "count": 0,
+        "tokens": 0
+      },
+      "dataset_assumption": "query matches nothing; empty result is valid"
+    },
+    {
+      "id": "q020",
+      "question": "After remembering a project hub 'solo' and a decision under it, what does hub_attached return?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "decision:solo-rule",
+        "project": "solo"
+      },
+      "expected_answer": true,
+      "dataset_assumption": "decision linked to project hub via 'about' edge"
+    },
+    {
+      "id": "q021",
+      "question": "What does link return when linking an unknown entity?",
+      "facade_call": "link",
+      "facade_args": {
+        "a": "decision:restore-drill",
+        "rel": "about",
+        "b": "decision:does-not-exist"
+      },
+      "expected_answer": {
+        "error": "unknown entity"
+      },
+      "dataset_assumption": "target entity id does not exist in the graph"
+    },
+    {
+      "id": "q022",
+      "question": "What does context_pack hub_facts contain as the first element for project 'acme'?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "implement"
+      },
+      "expected_answer": "project:acme",
+      "dataset_assumption": "project hub is always the first hub_fact"
+    },
+    {
+      "id": "q023",
+      "question": "What does supersede return for a valid close of old to new with a reason?",
+      "facade_call": "supersede",
+      "facade_args": {
+        "old": "decision:restore-drill",
+        "new": "decision:backup-window",
+        "reason": "the window answers it"
+      },
+      "expected_answer": {
+        "status": "superseded",
+        "superseded_by": "decision:backup-window",
+        "valid_to": true
+      },
+      "dataset_assumption": "supersede succeeds: old fact closed, new link created"
+    },
+    {
+      "id": "q024",
+      "question": "What does remember return when an identical rewrite is a no-op?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "preference",
+        "title": "Small commits",
+        "body": "Commit per task.",
+        "project": "acme",
+        "links": [
+          {
+            "rel": "about",
+            "id": "project:acme"
+          }
+        ],
+        "source": "s"
+      },
+      "expected_answer": {
+        "status": "noop",
+        "version_id": 1
+      },
+      "dataset_assumption": "identical body and title -> no-op, version_id stays at 1"
+    },
+    {
+      "id": "q025",
+      "question": "What does recall return when query is an aliased (merged) id?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "decision:backup-policy-postgres"
+      },
+      "expected_answer": {
+        "mode": "redirect",
+        "id": "decision:backup-policy-postgres",
+        "redirects_to": "decision:postgres-backup-policy"
+      },
+      "dataset_assumption": "merged id resolves via alias ladder to survivor"
+    },
+    {
+      "id": "q026",
+      "question": "What does context_pack.open_contradictions contain after superseding a decision?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "review"
+      },
+      "expected_answer": [
+        {
+          "id": "decision:restore-drill",
+          "superseded_by": "decision:backup-window"
+        }
+      ],
+      "dataset_assumption": "supersede was called, creating an open contradiction"
+    },
+    {
+      "id": "q027",
+      "question": "What does link return when the endpoint does not reach a hub?",
+      "facade_call": "link",
+      "facade_args": {
+        "a": "decision:restore-drill",
+        "rel": "about",
+        "b": "lesson:orphan"
+      },
+      "expected_answer": {
+        "error": "refused: link target does not reach a hub"
+      },
+      "dataset_assumption": "lesson:orphan has no hub edge, so link is refused"
+    },
+    {
+      "id": "q028",
+      "question": "What does remember return when the canonical id already exists and is a merge candidate?",
+      "facade_call": "remember",
+      "facade_args": {
+        "kind": "decision",
+        "title": "Postgres backup policy",
+        "body": "Back up Postgres nightly.",
+        "project": "acme",
+        "source": "s"
+      },
+      "expected_answer": {
+        "status": "merged",
+        "merged_into": "decision:postgres-backup-policy"
+      },
+      "dataset_assumption": "normalised title match triggers merge into existing survivor"
+    },
+    {
+      "id": "q029",
+      "question": "What does recall return for a query with project filter that excludes matching nodes?",
+      "facade_call": "recall",
+      "facade_args": {
+        "query": "backup",
+        "project": "other_project"
+      },
+      "expected_answer": {
+        "mode": "lines",
+        "lines": [],
+        "count": 0,
+        "tokens": 0
+      },
+      "dataset_assumption": "project filter excludes all nodes; empty result"
+    },
+    {
+      "id": "q030",
+      "question": "What does context_pack serve after multiple writes under a project?",
+      "facade_call": "context_pack",
+      "facade_args": {
+        "project": "acme",
+        "role": "implement"
+      },
+      "expected_answer": "Served list contains ids of hub_facts with their version_ids as ints",
+      "dataset_assumption": "multiple remembers have been written; served records the provenance"
+    }
+  ]
+}
