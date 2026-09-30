@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-30  
 **Branch:** `L1-backlog/ws-fixes-20260930`  
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`  
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`  
 **Base HEAD:** `d08f7f2` (unchanged — no push/merge/rebase)  
 **Gateway:** OmniRoute v3.8.50 at `http://127.0.0.1:20128`
 
@@ -16,9 +16,18 @@ the OmniRoute gateway.
 
 The gateway strips `reasoning_content` from responses and stores it in a
 Reasoning Replay Cache keyed by `tool_call_id`. On the next turn, the cache
-re-injects the actual reasoning. **When the cache misses, the only fallback is
-the empty injection (`reasoning_content: ""`), which DeepSeek rejects — it
-requires the actual reasoning content, not an empty string.**
+re-injects the actual reasoning. **When the cache misses, the `toResponses`
+function omits the `reasoning` input item entirely (the reasoning text is empty
+or a placeholder, so the push is skipped). The subsequent `function_call` items
+have no preceding `reasoning` item, and DeepSeek's Responses API rejects the
+request.**
+
+The empty injection (`reasoning_content: ""` in the chat-completions layer) is
+a separate defense that adds the field to the upstream request — but it does
+not help when the Responses API conversion (`toResponses`) fails to emit a
+`reasoning` item in the `input[]` array. The actual fix (commit `3f6fd25`)
+patches `toResponses` to inject a placeholder reasoning item when the provider
+requires it and the message has tool calls.
 
 ### Defense Pipeline (3 layers, `translator/index.ts`)
 
@@ -67,7 +76,7 @@ step 1, so the cache hits and the actual reasoning is re-injected.
 
 ### 1. opencode Config Fix (user-owned file, backed up in-place)
 
-**File:** `C:\Users\mauls\AppData\Roaming\opencode\config.json`  
+**File:** `C:\Users\<user>\AppData\Roaming\opencode\config.json`  
 **Line 507:** `"model": "deepseek/deepseek-v4-flash"` → `"model": "omniroute/deepseek-v4.1-flash"`
 
 The `leaf-reviewer` agent referenced `deepseek/deepseek-v4-flash` which is
@@ -87,7 +96,7 @@ TTL, and operator mitigations.
 - `configuration/omniroute/reason-fix-reapply.ps1` — idempotent reapply script
 - `configuration/omniroute/reason-fix-README.md` — patch documentation
 
-**Patched in the npm package** (`C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`):
+**Patched in the npm package** (`C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`):
 
 The running gateway executes compiled JavaScript from
 `dist/.build/next/server/chunks/`, not the `.ts` source. The `toResponses`
