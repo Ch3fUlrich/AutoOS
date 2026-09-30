@@ -300,6 +300,8 @@ def main(argv=None) -> int:
         description="Sweep cheap t2 models through the OmniRoute combos.")
     ap.add_argument("--legs", action="append", default=[],
                     help="only these legs (repeatable); default: all candidates")
+    ap.add_argument("--combos-only", action="store_true",
+                    help="skip the leg sweep; only run combo routing tests")
     ap.add_argument("--dry-run", action="store_true",
                     help="list candidates; make no request")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY)
@@ -376,51 +378,52 @@ def main(argv=None) -> int:
     # body-reading classifier on 400).
     post = _toolcalls_make_post(args.gateway, key)
 
-    # --- Sweep each candidate leg ---
+    # --- Sweep each candidate leg (skip if --combos-only) ---
     results = []
-    print("# probe-sweep — %d legs, %s" % (len(candidates), _now_iso()))
-    print("# %-45s  %-7s  %-7s  %-8s  %-8s  %-8s  %s" %
-          ("leg", "ack", "tool", "ack_ms", "tool_ms", "ctx", "error"))
-    for leg, source in candidates:
-        record = {
-            "ts": _now_iso(),
-            "leg": leg,
-            "source": source,
-            "ack": None,
-            "toolcall": None,
-            "meta": models_meta.get(leg, {}),
-        }
-        # Ack
-        ack = run_ack(leg, post)
-        if is_admission_error(ack["status"], ack.get("error")):
-            admission_backoff(leg, ack["status"], ack.get("error"))
+    if not args.combos_only:
+        print("# probe-sweep — %d legs, %s" % (len(candidates), _now_iso()))
+        print("# %-45s  %-7s  %-7s  %-8s  %-8s  %-8s  %s" %
+              ("leg", "ack", "tool", "ack_ms", "tool_ms", "ctx", "error"))
+        for leg, source in candidates:
+            record = {
+                "ts": _now_iso(),
+                "leg": leg,
+                "source": source,
+                "ack": None,
+                "toolcall": None,
+                "meta": models_meta.get(leg, {}),
+            }
+            # Ack
             ack = run_ack(leg, post)
-        record["ack"] = ack
+            if is_admission_error(ack["status"], ack.get("error")):
+                admission_backoff(leg, ack["status"], ack.get("error"))
+                ack = run_ack(leg, post)
+            record["ack"] = ack
 
-        # Tool-call (skip if ack failed with a hard error)
-        if ack["ok"]:
-            tc = run_toolcall(leg, post)
-            if is_admission_error(tc["status"], tc.get("note")):
-                admission_backoff(leg, tc["status"], tc.get("note"))
+            # Tool-call (skip if ack failed with a hard error)
+            if ack["ok"]:
                 tc = run_toolcall(leg, post)
-            record["toolcall"] = tc
-        else:
-            record["toolcall"] = {"ok": False, "status": ack["status"],
-                                  "latency_ms": 0, "note": "skipped: ack failed",
-                                  "single": "skipped", "round": "skipped"}
+                if is_admission_error(tc["status"], tc.get("note")):
+                    admission_backoff(leg, tc["status"], tc.get("note"))
+                    tc = run_toolcall(leg, post)
+                record["toolcall"] = tc
+            else:
+                record["toolcall"] = {"ok": False, "status": ack["status"],
+                                      "latency_ms": 0, "note": "skipped: ack failed",
+                                      "single": "skipped", "round": "skipped"}
 
-        log_result(record)
-        results.append(record)
+            log_result(record)
+            results.append(record)
 
-        ctx = record["meta"].get("context_length") or "-"
-        ack_s = "ok" if ack["ok"] else "FAIL"
-        tc_r = record["toolcall"]
-        tc_s = "ok" if tc_r.get("ok") else "FAIL"
-        err = (ack.get("error") or tc_r.get("note") or "")[:60]
-        print("  %-45s  %-7s  %-7s  %-8d  %-8d  %-8s  %s" %
-              (leg, ack_s, tc_s, ack["latency_ms"],
-               tc_r.get("latency_ms", 0), ctx, err))
-        sys.stdout.flush()
+            ctx = record["meta"].get("context_length") or "-"
+            ack_s = "ok" if ack["ok"] else "FAIL"
+            tc_r = record["toolcall"]
+            tc_s = "ok" if tc_r.get("ok") else "FAIL"
+            err = (ack.get("error") or tc_r.get("note") or "")[:60]
+            print("  %-45s  %-7s  %-7s  %-8d  %-8d  %-8s  %s" %
+                  (leg, ack_s, tc_s, ack["latency_ms"],
+                   tc_r.get("latency_ms", 0), ctx, err))
+            sys.stdout.flush()
 
     # --- Combo routing tests ---
     combos_path = os.path.join(ROOT, "configuration", "omniroute", "combos.json")
