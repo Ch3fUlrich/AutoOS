@@ -65,6 +65,295 @@ a closed block staying ignored, an unclosed opener not hiding `fix-first`, and a
 markdown's indentation reading as content (that one inverted the parity of a *real* block, which is
 how a closed block used to leak its verdict).
 
+- FAMILYFENCE-5 (2026-09-29, cross-family review Muse — these gate D-115, so they are fixed before the final): (1) `reviewer_run_override` replaced the run's combo with the `policy.reviewers` pick AFTER the fence had answered, so an authored review card whose card `author` differs from `--review-of`'s writer planned and announced a reviewer inside the fenced family and only the post-run backstop noticed (rc 12 after the review had run) — `_fence_check_reviewer` now judges the swapped model spelling (its `policy.reviewers` family) and the swapped combo's legs, and `cmd_run`'s fence is passed into both the v1 and the v2 route walk, so the refusal is a PLAN-time `FamilyFenceRefused` / rc 12 (`FamilyFenceReviewerOverrideTests`); (2) the FAMILYFENCE-4 refusal's second "way out" told the caller to add `--not-family`, which does not clear that refusal (the writer stays unnamed and rc 2 re-fires) — it now reads "spawn the review through the same autoos-agent MCP/checkout that spawned the writer, or drop `--review-of` and name the writer's family with `--not-family`", in the CLI text and in the MCP `spawn` tool's own description; (3) `--not-family ""` silently no-oped (`fence_family_names` drops a blank before the FAMILYFENCE-3 B2 name check can call it unknown) while MCP refused the same value — a blank is a broken argument on the CLI too and is refused with rc 2 before any name beside it is judged (`fence_blank_refusal`, `not_family_values`, `FamilyFenceUnknownNameTests`); (4) the white-box N1 test that asserted a `fence=` keyword on a `build_plan` spy (mutation proves nothing else observes that argument on the free path) is replaced by a behavioural one: a fenced model sitting next in the ordered free chain after a rate-limit stop is walked past and the run serves the next un-fenced spelling (`FamilyFenceFreeChainTests.test_a_fenced_model_next_in_line_is_walked_past_on_the_real_re_plan`, kills the test when the chain-walk fence filter goes).
+- FAMILYFENCE-4 (2026-09-29): `run --review-of <id>` and `spawn(review_of=...)` whose writer family this checkout's runner-private record store cannot name (no record, no writer, or an unresolved one) now REFUSE with rc 2 — the message names the store searched and the two ways out (spawn through the MCP/checkout that spawned the writer, or `--not-family`) — instead of warning and planning onto a combo carrying that family; `family_fence` gained the `refusal` field, and the `cross-family not enforced` warning stays only for a review naming neither (`FamilyFenceUnreadableWriterTests`).
+- WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
+
+### Fixed — the CROSS-FAMILY verdict answers the question the exit code asked (FAMILYFENCE-3 N5, 2026-09-29)
+
+A qoder review fenced off its own assumed family printed
+
+    writer: qoder/Qwen3.8-Flash (qwen) source=assumed-default
+    family: writer=unresolved reviewer=unresolved CROSS-FAMILY: unknown
+    autoos-agent: no model outside family qwen left - refusing (FAMILYFENCE)   [exit 12]
+
+The sentence said *cannot tell*; the exit code said *this one collides*. Both come from
+the post-run backstop, but they read different questions: `cross_family_line` compared
+the reviewer family with the AUTHOR's family only, and printed `unknown` for an
+unproven reviewer, while `cmd_run` flipped rc to 12 on the serving family being in
+`fence["families"]` whether or not any witness attested to it. FAMILYFENCE-b's
+requirement 3 was about not CLAIMING independence from an assumption — a weaker reason
+to print `yes` — and it was read as a reason to print `unknown` about a collision the
+run was being refused for.
+
+- **`fence_collision(family, fence)`** (`tools/autoos-agent.py`) is now the one home for
+  "is the family that served a family this fence rules out?" — the author's own family
+  or any `--not-family` name, compared in `resolver.family_key` form. The verdict line
+  and the backstop read it, so they cannot drift apart again; the refusal text is
+  unchanged.
+- **The verdict set is `yes | NO | NO (assumed) | unknown`.** A collision prints `NO`,
+  marked `(assumed)` when nothing witnessed the model that hit it — the exit code acts
+  on an assumption, so the line says so and says how strongly. `yes` stays
+  witnessed-only: an unattested reviewer that collides with nothing still prints
+  `unknown`, never a claim of independence.
+- **Docs** — the module docstring, the MCP `spawn` tool description and
+  `.agents/skills/unattended-orchestration` all listed `yes|NO|unknown` and said `NO`
+  needed a witness; both now describe the four-value set.
+- **Tests** (`tests/test_autoos_spawner.py`, `CrossFamilyProvenanceTests`):
+  `test_a_proven_review_on_a_fenced_family_costs_the_run` (renamed from
+  `test_a_proven_same_family_review_costs_the_run`, which never tested a *same-family*
+  comparison — the author was `unresolved` in it, so what it actually proved is that the
+  verdict line stayed `unknown` while the exit was 12: the defect, asserted as
+  behaviour), `test_an_unattested_review_on_a_fenced_family_says_no_assumed`, and
+  `test_an_assumed_review_outside_the_fence_still_claims_nothing` for the `yes` half.
+
+### Added — a real launch carries the session id and the pin, proven unmocked (FAMILYFENCE-3 N3, 2026-09-29)
+
+Skill R-orch-19: "a mocked-Popen suite can be green while a live spawn drops a flag."
+`NativeSessionIdTests` asserts on the dry-run's *printed* argv, so a launch change (the
+scope wrapper, the env rebuild, the executable resolution) can break the real
+`Popen` and leave the printed plan unchanged. This adds a POSIX stub for `qodercli`
+and `claude` that writes its OWN received argv to a file and exits 0; the CLI runs
+itself through `run_agent` (no mock).
+
+- **Tests** (`tests/test_autoos_spawner.py`, `RealLaunchArgvTests`): the recorded
+  qoder and claude launch must both match `--session-id <uuid>` and the caller's
+  `--model`. The qoder stub writes one file into its own clone — the INCOMPLETE
+  verdict that penalises an isolated worker that changed nothing would otherwise
+  refuse the launch, masking the flag check.
+
+### Fixed — a `not_family` handed over as one bare string fences one family, not its letters (FAMILYFENCE-3 N2, 2026-09-29)
+
+`fence_family_names` iterated its argument directly, which is right for the CLI's
+`append` list and wrong for every other caller: `not_family="mimo"` — the shape a
+programmatic caller of `family_fence` (a hand-built args namespace, an importable API
+call) hands over — fenced the families `"m"`, `"i"` and `"o"`, which the registry
+carries none of, and the real family stayed unfenced while the run read as guarded.
+The MCP spawn path builds a repeated `--not-family` flag and so was already a list; the
+defect was one call below, at the fence's single home. A bare string is now one name
+there.
+
+- **Test** (`tests/test_autoos_spawner.py`, `FamilyFenceStringNameTests`): a string
+  yields one `family_key`, and `family_fence` built from one string excludes exactly
+  that family.
+- **Follow-up (same day):** 7508d2a landed that test and this entry but *not* the guard —
+  the red/green check reverted `tools/autoos-agent.py` to `HEAD` with `git restore` and the
+  fix was never re-applied before the commit, so the lane shipped a failing test. The full
+  suite caught it two items later; the guard is the same edit re-applied. Lesson recorded
+  where it belongs: `git restore --source=HEAD -- <file>` is a *destructive* way to prove a
+  test is red. Prove red on a copy of the tree, or re-read the diff into the commit message
+  before committing.
+
+### Fixed — the free fallthrough re-plan carries the fence into the leg choice (FAMILYFENCE-3 N1, 2026-09-29)
+
+`_free_fallthrough_plan` filtered the fenced families out of the chain it walks, then
+rebuilt the next attempt with `build_plan(args, cfg, sandbox=...)` — without the
+`fence=` argument the gateway fallthrough's re-plan already passes. `build_plan` answers
+the fence for whatever leg IT picks, so the re-plan was one leg away from serving the
+family the chain walk had just refused. The re-build now carries the same fence object.
+
+- **Test** (`tests/test_autoos_spawner.py`,
+  `FamilyFenceFreeChainTests.test_the_free_fallthrough_re_plan_carries_the_fence_into_build_plan`):
+  the re-plan's `build_plan` call must receive the fence, not a rebuilt or empty one.
+
+### Fixed — a `--not-family` name the registry does not carry is refused, not a silent no-op (FAMILYFENCE-3 B2, 2026-09-29)
+
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family mimo --dry-run` exited **0** and planned the run: `mimo` names no family
+the registry declares — `opencode/mimo-v2.6-flash-free` is family `xiaomi` — so the
+fence excluded nothing while the run read, to its caller and to any later judge, as a
+guarded review. A typo in a safety flag must not downgrade the flag to a comment.
+
+- **`registry_family_names`** (`tools/autoos-agent.py`): the known families are the
+  `models` rows' and `policy.reviewers` rows' `family` fields in `resolver.family_key`
+  form — the same two sources `reviewer_family` compares against, so the name check and
+  the fence cannot drift. `cmd_run` checks the names *this caller typed* (a writer
+  family read from a kill record is already the registry's own answer) right after the
+  fence is built and before any leg is chosen; an unknown name exits 2 naming it and
+  the known families (`fence_name_refusal`). An unreadable registry, or one that
+  declares no family at all, is not evidence a name is wrong — the check stands down.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceUnknownNameTests`): the live
+  `--not-family mimo` case (rc 2, names `mimo`, lists `xiaomi`, plans nothing), a stub
+  refusal that launches nothing, and the regression that a known name — any spelling of
+  it — keeps the fence's own exit 12.
+
+### Fixed — an own-account run records the route it actually ran (FAMILYFENCE-3 N4, 2026-09-29)
+
+`run --client qoder --tier 1 --model Efficient --dry-run` printed
+`route: t1-orchestrator reason=explicit-tier routing=1`, and the same lie reached the
+worker record and the run log: `t1-orchestrator` is an OmniRoute combo, and a native
+client never resolves one. `build_command` gives qoder/claude/agy the model pin (or the
+registry's `default_model`) verbatim, the `MODEL_INPUT` row for those clients carries no
+`("route",)` kind at all, and `own_account_track_entry` returns `None` for a non-gateway
+client precisely because "an own-account client never ran the gateway route it names". The
+route line was the one place still naming a route the run could not have run — so `ps`, the
+record and the log reported a gateway combo for a run that answered on the client's own model.
+
+- **`build_plan`** (`tools/autoos-agent.py`): when the client is not a gateway client, the
+  recorded combo is `native:<client>` (e.g. `native:qoder`). The rewrite happens *after*
+  `resolve_route`, on purpose: the FAMILYFENCE leg check and the PRIV3 sensitive-combo check
+  both read the card's real gateway combo, and standing them down alongside the label would
+  have opened a hole rather than closed a mislabel. `combo_legs("native:qoder", registry)`
+  answers no legs, which is the honest input to provider-benching, and the fallthrough
+  exclusion set now carries the same label the plan recorded.
+- **Tests** (`tests/test_autoos_spawner.py`, `NativeComboTests`): the live dry-run line for
+  qoder, claude and agy names `native:<client>` and not a `t…` combo, the in-process
+  `build_plan` route dict carries the native combo (with its tier and its `--model` pin
+  intact in the argv), and a gateway `--client opencode --card role=implement` keeps its real
+  resolver combo — the rewrite is for own-account clients only.
+
+### Fixed — the fence judges the model that serves, not a combo that never does (FAMILYFENCE-3 B1, 2026-09-29)
+
+A live smoke from the FAMILYFENCE-b tip refused a run it must not:
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family qwen --dry-run` exited 12 — `no model outside family qwen left` — although
+the `--free` head (`opencode/muse-spark-1.3-contributor-free`, family meta) sits outside
+that fence. `--not-family meta` announced the walk onto nemotron and *then* refused the
+same way; only `--not-family nvidia` ran. The cause was the combo-leg check
+(`fence_blocks_route`: a route is fenced when ANY leg is, because OmniRoute can fall
+through to it) applied to runs no combo ever serves: every t1/t2/t3 combo carries one
+qwen leg and one meta leg, and a `--free` run resolves no combo at all — the free chain
+head is the serving model, and it was already fenced by `fence_free_head` before the
+plan. The check ran anyway, and ran even when `--free` meant no combo served the run.
+
+- **`model_decided`** (`tools/autoos-agent.py`): when `--free` or an own-account
+  `--model` pin has already picked the serving model, the fence is judged on that model
+  (`fence_free_head` / `fence_blocks_model`) and `resolve_route_unchecked` /
+  `_resolve_route_v2` skip the combo-leg refusal *and* the fenced-route exclusion —
+  the exclusion would have left the resolver an empty route table, trading the wrong
+  rc 12 for a wrong rc 2. A gateway `--model` pin is still a combo run (OmniRoute
+  resolves it to legs), so the combo check keeps its teeth there.
+- **A combo refusal now names the way out**: the route-based refusal prints
+  `... - use --free or pin --model outside family <fams>` (`route_fence_refusal`);
+  model-based refusals (free chain spent, pin inside the fence) keep the plain line,
+  because for them there is no combo to route around.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceServingModelTests`): the
+  three live dry-run cases above (qwen and meta allowed on `--free` with the right
+  head, a fence covering the whole free chain still `EXIT_NO_OTHER_FAMILY`), the
+  own-account-pin live case, and the combo-refusal way-out line.
+
+### Added — every client records the model that really answered; qoder can be pinned (FAMILYFENCE-b / 2026-09-29)
+
+FAMILYFENCE fenced by family, and 0dc1691 prints a `CROSS-FAMILY` verdict — but for
+an own-account client the verdict rested on an *assumption*. Measured 2026-09-29: for
+`client=qoder` the runner-private record's `model` was the plan's `QODER_DEFAULT_MODEL`
+(`Qwen3.8-Flash`), `exit.json` held only a rc, `ps`/`status`/`result` showed no model,
+and `spawn` had no way to name one. qodercli 1.1.63 makes the assumption a lie: an
+unknown `--model` is **silently substituted** — it prints `falling back to default
+model "efficient"`, answers with the account's promo model (`qfmodel` / display name
+`Efficient`), and **exits 0**. A qoder review's family could be neither proven nor
+fenced, yet the verdict still read `yes`.
+
+- **Provenance is now in the writer record** (`tools/autoos-agent.py`): the resolved
+  writer gained a `source` field — `gateway-log` (the OmniRoute call log),
+  `client-reported` (the client's own transcript), `pinned` (an explicit `--model`),
+  `assumed-default` (only the plan guessed). `WRITER_PROVEN_SOURCES` is the first two:
+  an *asked-for* model is never evidence of what answered. `writer_is_proven()` gates
+  the post-run verdict, so an unproven reviewer prints
+  `family: writer=.. reviewer=unresolved CROSS-FAMILY: unknown` — requirement 3's
+  `assumed-default → unknown`, never `yes`. The `source=` string rides on the `writer:`
+  line so a human reading one run sees why it believes what it believes.
+- **qoder/claude report their own model** (`tools/autoos_clients.py`): a new
+  `MODEL_REPORT` table names where each client's truth lives. qoder's is
+  `~/.qoder/projects/*/<session>.jsonl` (an assistant `message.model` and a
+  `runtime-config` line) joined to `~/.qoder/logs/runs/*/manifest.json` (argv → the
+  session id) and `qodercli.log` (`model_config={"key":..,"display_name":..}`) — the
+  account stores an encrypted catalog, so the key→display translation is read from the
+  run log, not `~/.qoder/.models`. `reported_model()` returns `None` when it cannot
+  tell, and `None` is the honest answer that keeps `CROSS-FAMILY: unknown`. claude's
+  transcript already carries a full model id. The join is exact because both clients
+  accept a caller-supplied `--session-id`: `build_plan` mints one per attempt
+  (qodercli refuses a duplicate id) and `build_command` puts it on the argv.
+- **A pin reaches the record and the fence**: `resolved_writer`'s native branch prefers
+  `client-reported` over the `pinned`/`assumed-default` plan model, and
+  `resolve_route_unchecked` now fences `--model` for an **own-account** client too —
+  qoder never appears in a route, so a fence that only reads routes was blind to the
+  whole choice. `--model` (CLI) / `model` (MCP `spawn`) already reached argv; the
+  pinned family now feeds `family_fence` like a gateway leg's, and a name the registry
+  cannot place stays unsafe for a review role (0dc1691's rule, unchanged) while a write
+  run keeps it.
+- **Surfaced, never from job.json** (R-orch-17): the kill record is the only source.
+  `ps` gained `MODEL`/`FAMILY` columns that prefer the proven writer's model and print
+  `?` for an unproven one, plus `model_source`/`writer`/`model_proven` on every row;
+  `status`/`result` already return the record's `writer`, so `source` flows through the
+  MCP and CLI for every client. `worker_writer(run_id)` reads the record and nothing else.
+- **Tests** (`tests/test_autoos_spawner.py`): `QoderSessionEvidenceTests` (a synthetic
+  transcript home proves the join is machine-independent — a real `~/.qoder` session id
+  answering would be the AGENTS.md-forbidden "passes only on the box it was written
+  on"), `WriterProvenanceTests`, `CrossFamilyProvenanceTests` (assumed-default → unknown,
+  never yes; a proven same-family reviewer still costs rc 12), `NativeSessionIdTests`,
+  `QoderFenceTests`, `PsWriterRowTests` (a record written for another run never answers
+  this one — and the other row keeps *its* writer, so the test cannot pass by both
+  being `None`).
+- **Deviations worth naming**: no `--list-models` pre-flight refusal — that list is
+  account/network-bound and the brief asked the post-run verdict be honest, which the
+  provenance gate is; qoder stays on text output because `review_verdict()` anchors
+  `^\s*VERDICT:`; the *author's* family still fences even when its own source is
+  unproven (the conservative direction — refuse a possibly-cross review, never claim a
+  cross one).
+
+### Added — a review never silently runs on the writer's model family (FAMILYFENCE / 2026-09-29)
+
+D-115 says a review is independent because it comes from another model family. The
+spawner did not enforce that about its *own* choices: measured 2026-09-29, an
+ORCH-A1 writer resolved to NVIDIA `nemotron-3-ultra`, both requested cross-family
+reviewers (`mimo`, `muse`) hit rate limits, and SB-B's fallthrough walked the
+ordered free chain — which lists nemotron too, with no family exclusion anywhere —
+onto the writer's own model. The run exited 0 and printed the review. Nothing said
+the word "same family"; the label "cross-family" was simply inherited from the
+request.
+
+- **The fence is one object and one predicate** (`tools/autoos-agent.py`):
+  `family_fence()` settles who may not serve the run *before* any leg is picked, and
+  `fence_blocks_model()` answers it at every choice the spawner makes — the `--free`
+  chain head, an explicit `--model`, the v1 `select_combo` route, `--tier`, the v2
+  resolver's route set and every fallthrough candidate. Families are compared only in
+  `resolver.family_key` form and read only from the registry (`reviewer_family`), never
+  guessed from a model name, so the rule cannot be restated differently per site.
+  `--not-family <fam>` (repeatable) removes those families from the WHOLE plan.
+- **A review fences its writer by default**: `--review-of <run-id>` takes that run's
+  WRITER family out of the plan without being asked, reading it from the run's
+  **runner-private kill record** — never from its `job.json`, which lives in the
+  directory the worker owns and would let a writer choose who reviews it
+  (skill R-orch-17). A review with neither flag still runs, and says so on stderr:
+  `review without a known writer family - cross-family not enforced`. Its silence
+  is what got measured.
+- **Refuse rather than lie** (new `EXIT_NO_OTHER_FAMILY = 12`, documented beside
+  `EXIT_READ_ONLY_WRITE`, in the module docstring's exit-code table, and in
+  `autoos_track.py`'s failure-class comment): when every remaining model or route is
+  inside the fence the run exits 12 with
+  `no model outside family <fam> left - refusing (FAMILYFENCE)` and launches nothing.
+  `FamilyFenceRefused` is deliberately **not** a `ValueError`, because every
+  fallthrough path already catches `ValueError` as "no leg answered → exit 8", and a
+  fence relabelled as an ordinary provider exhaustion is the same lie in a different
+  code. An exhausted chain of un-fenced models still exits 8. The track record classifies
+  rc 12 as `refusal` like rc 6 — the fence refused, so the route never got the chance to
+  be unreliable (`NON_QUALITY_FAILURES` ignores it in `p_success`).
+- **`--no-fallthrough`** pins the run to the model it was planned on: a stop there is
+  the run's answer, with its own rc and no re-plan onto whatever survived. An
+  orchestrator that asked for a verdict from one named model would otherwise get one
+  from whichever model answered, and the report says nothing about which.
+- **The claim is checked after the run too**: a review prints
+  `family: writer=<fam> reviewer=<fam> CROSS-FAMILY: yes|NO|unknown` beside its
+  `writer:` line, judged on the *resolved* writer (the gateway call log, not the plan) —
+  OmniRoute can fall through to a leg inside a combo the spawner never saw. A resolved
+  same-family answer exits 12 instead of 0. A model the registry cannot place is not
+  safe for a review (unknown is never evidence of independence); a write-role run keeps it.
+- **Callers reach it** (`tools/autoos_agent_mcp.py`): `spawn` takes `not_family`
+  (a list of names, validated — a dict would reach the CLI as one flag per key),
+  `review_of` and `no_fallthrough`. `FamilyFenceMcpPlumbingTests` includes an
+  unmocked real spawn (R-orch-19) asserting `--not-family nvidia` is in the argv the
+  runner actually started the CLI with.
+- **Tests** (`tests/test_autoos_spawner.py`): `FamilyFenceFreeChainTests` (the
+  measured chain: mimo + muse rate-limited, writer family nvidia → `free_models`
+  stops at the two honest reviewers, nemotron never launched, rc 12; the forged
+  `job.json` that loses to the kill record; the unknown-family skip; exit-8
+  exhaustion preserved), `FamilyFenceRouteTests`, `NoFallthroughTests`,
+  `CrossFamilyReportTests`, `FamilyFenceRecordTests`, `FamilyFenceMcpPlumbingTests`.
+- **Deviation worth naming**: there is no `verify` card role in either card dialect
+  (v1 `role` is orchestrate|implement|review, v2 `kind` adds plan/research/bulk/
+  debug/final), so the role default fires for `review` — v1 or v2 spelling — and for
+  `--tier 3`, which is the reviewer agent.
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
 
 L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
