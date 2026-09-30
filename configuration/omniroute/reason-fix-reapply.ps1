@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Idempotent reapply of the DeepSeek reasoning-content 400 fix.
@@ -15,6 +15,12 @@
        (these are what the running gateway actually executes).
     2. .ts source files in open-sse/ (for source-tree consistency and
        future maintainers; not loaded at runtime by the compiled worker).
+
+  Six compiled chunk copies define the affected module: four carry the
+  pattern-A anchor (push target `g`) and two the pattern-B anchor (push
+  target `d`).  `_18ct13i._.js` was added to pattern A on 2026-09-30 after
+  docs/handoff/2026-09-30-lanePatchFix.md §4 showed it still carries the
+  unmigrated `$findA` anchor live and in the published tarball.
 
   Each file is backed up to <file>.autoos-backup-<timestamp> before the
   first modification.  The script is idempotent: a second run reports
@@ -123,7 +129,7 @@ $replaceA = 'var _ip=(0,n.isInternalReasoningPlaceholder)(e);if(e&&!_ip)g.push({
 $findB = 'e&&!(0,n.isInternalReasoningPlaceholder)(e)&&d.push({type:"reasoning",content:[{type:"reasoning_text",text:e}],summary:[]})'
 $replaceB = 'var _ip=(0,n.isInternalReasoningPlaceholder)(e);if(e&&!_ip)d.push({type:"reasoning",content:[{type:"reasoning_text",text:e}],summary:[]});else if((_ip||!e)&&function(){var _p=String(p&&p._provider||"").trim().toLowerCase(),_m=String(g.model||"").trim().toLowerCase();return"deepseek"===_p||/(^|\/)deepseek/i.test(_m)||"xiaomi-mimo"===_p||/(^|\/)mimo/i.test(_m)}()&&Array.isArray(t.tool_calls)&&t.tool_calls.length>0)d.push({type:"reasoning",content:[{type:"reasoning_text",text:"(prior reasoning summary unavailable)"}],summary:[]})'
 
-$patternAFiles = @('_08_y1bx._.js', '_1j_edf1._.js', '_1luyz1c._.js')
+$patternAFiles = @('_08_y1bx._.js', '_18ct13i._.js', '_1j_edf1._.js', '_1luyz1c._.js')
 $patternBFiles = @('_15ose6x._.js', '_1xkpq2s._.js')
 
 Write-Host "`n=== Compiled .js chunk patches (runtime fix) ==="

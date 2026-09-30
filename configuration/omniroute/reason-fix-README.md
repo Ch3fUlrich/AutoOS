@@ -55,13 +55,19 @@ or poisons the cache.
 ### Compiled .js chunk patches (runtime fix)
 
 The running gateway executes compiled JavaScript from
-`dist/.build/next/server/chunks/`, not the `.ts` source. Five chunk files
+`dist/.build/next/server/chunks/`, not the `.ts` source. Six chunk files
 contain the `toResponses` reasoning push logic, in two patterns:
 
 | Pattern | Files | Push target | Credential record | Model |
 |---------|-------|-------------|-------------------|-------|
-| A | `_08_y1bx._.js`, `_1j_edf1._.js`, `_1luyz1c._.js` | `g` | `A._provider` | `p.model` |
+| A | `_08_y1bx._.js`, `_18ct13i._.js`, `_1j_edf1._.js`, `_1luyz1c._.js` | `g` | `A._provider` | `p.model` |
 | B | `_15ose6x._.js`, `_1xkpq2s._.js` | `d` | `p._provider` | `g.model` |
+
+`_18ct13i._.js` was added to pattern A on 2026-09-30: it defines the same
+module with the same scope names (only an inner loop variable differs), so the
+identical `$findA`/`$replaceA` pair applies verbatim. Before that it was the one
+copy of the four that `reason-fix-reapply.ps1` left unfixed — see
+`docs/handoff/2026-09-30-lanePatchIntegrity.md`.
 
 Each file receives the same logical fix, adapted to the minified variable
 names for its pattern. The replacement transforms:
@@ -103,7 +109,7 @@ pwsh -File configuration/omniroute/reason-fix-reapply.ps1
 The script:
 1. Auto-detects the global omniroute package (`npm root -g`)
 2. Backs up each file to `<file>.autoos-backup-<timestamp>`
-3. Patches all 5 compiled `.js` chunks + 2 `.ts` source files
+3. Patches all 6 compiled `.js` chunks + 2 `.ts` source files
 4. Is idempotent — a second run reports "already patched" and exits 0
 
 Override the package directory for a local/dev install:
