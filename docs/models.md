@@ -106,6 +106,11 @@ generated table above already shows it):
   (PROVFIX3 clamped the 1M it used to promise — see the context rule below).
 - **`t2-worker`**: the `antigravity/gemini-3.7-flash-high` leg is a separate OAuth
   pool with its own quota (ack 3.6s), not the throttled native 3.7 free tier.
+  OVHLEGS 2026-09-30: three OVH credit-tier legs inserted between the free legs
+  and the paid legs (operator order: trial → free → credits → paid):
+  `ovh/gpt-oss-120b` (agentic), `ovh/Qwen3-Coder-30B-A3B-Instruct` (cheap code),
+  `ovh/Qwen3.8-27B` (fast). All three probed ACK+TOOL+RT at max_tokens=512 through
+  the gateway. `deepseek/deepseek-flash` remains the paid fallback leg.
 - **`t2-worker-free-only`**: same OAuth pool as `t2-worker`, but the `-medium`
   variant (`antigravity/gemini-3.7-flash-medium`, ack 1.6s) — a different quota
   bucket, not a downgrade of the `-high` leg above.
@@ -117,6 +122,10 @@ generated table above already shows it):
   (OpenRouter credits exhausted — see the generated table above).
 - **`t3-driver-clean`**: no qwen free legs by design — paid review duty only, not
   a downgrade path.
+- **`t3-driver`**: OVHLEGS 2026-09-30: same three OVH credit-tier legs as `t2-worker`
+  (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
+  inserted after the free legs and before the paid legs. `deepseek/deepseek-flash`
+  remains the paid fallback. Not added to `t3-driver-clean` or `t3-driver-free-only`.
 - **`t3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
   is keyed (paid) and deliberately stays out.
 - **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
