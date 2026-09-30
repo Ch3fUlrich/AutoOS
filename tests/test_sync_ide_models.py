@@ -42,6 +42,26 @@ def strip_jsonc(text):
     return re.sub(r"(?m)^\s*//.*$", "", text)
 
 
+def managed_models(text, gateway):
+    """The GENERATED part of `text`'s models map for `gateway`: the lines
+    between its AUTOOS-MANAGED-START/END markers, parsed as a JSON object.
+
+    The map also carries hand entries (direct-provider passthrough) that the
+    file's own comment and the tool's docstring keep OUTSIDE the region - they
+    are deliberate content, not drift, so membership is proven for the
+    generated entries only."""
+    lines = text.splitlines()
+    start = end = None
+    for i, line in enumerate(lines):
+        if start is None and "AUTOOS-MANAGED-START" in line and gateway in line:
+            start = i
+        elif start is not None and "AUTOOS-MANAGED-END" in line and gateway in line:
+            end = i
+            break
+    assert start is not None and end is not None, "managed region missing: " + gateway
+    return json.loads(strip_jsonc("{" + "\n".join(lines[start + 1:end]) + "}"))
+
+
 class Sandbox:
     """Temp copies of the four files plus a runner pointed at them."""
 
@@ -222,7 +242,7 @@ class WriteTests(SandboxCase):
         for gateway in ("omniroute", "litellm"):
             want = [m["id"] for m in doc["models"]
                     if "opencode" in m["surfaces"].get(gateway, [])]
-            got = list(oc["providers"][gateway]["models"])
+            got = list(managed_models(self.box.text("opencode"), gateway))
             self.assertEqual(got, want, gateway)
             for mid in want:
                 entry = oc["providers"][gateway]["models"][mid]

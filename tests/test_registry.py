@@ -190,10 +190,12 @@ class RegistryRefTests(unittest.TestCase):
 
 
 class GatewayRefTests(unittest.TestCase):
-    """AGYID: gateway_ref() is the one translation point between a registry leg
-    and the id the OmniRoute catalog actually serves. A provider that declares
-    model_prefix (antigravity -> agy) is rewritten; every other leg is returned
-    unchanged, and the registry's own spelling never moves."""
+    """AGYID/AGYCANON: gateway_ref() is the one translation point between a
+    registry leg and the id the OmniRoute catalog actually serves. A provider
+    that declares model_prefix (scaleway -> scw) is rewritten; every other leg
+    is returned unchanged, and the registry's own spelling never moves.
+    antigravity's prefix was retired to null 2026-09-30 (AGYCANON): the live
+    catalog flipped back to canonical antigravity/* ids."""
 
     @classmethod
     def setUpClass(cls):
@@ -201,8 +203,18 @@ class GatewayRefTests(unittest.TestCase):
 
     def test_model_prefix_is_applied(self):
         self.assertEqual(
+            registry.gateway_ref("scaleway/mistral-small-3.2-24b-instruct-2506",
+                                 self.reg),
+            "scw/mistral-small-3.2-24b-instruct-2506")
+
+    def test_antigravity_model_prefix_is_retired(self):
+        # AGYCANON 2026-09-30: the live catalog serves canonical antigravity/*
+        # ids again (re-measured /v1/models: 19 antigravity/* rows, zero
+        # agy/*), so the prefix is null and the leg renders unchanged.
+        self.assertIsNone(self.reg["providers"]["antigravity"]["model_prefix"])
+        self.assertEqual(
             registry.gateway_ref("antigravity/claude-opus-4-6-thinking", self.reg),
-            "agy/claude-opus-4-6-thinking")
+            "antigravity/claude-opus-4-6-thinking")
 
     def test_provider_without_model_prefix_is_unchanged(self):
         self.assertEqual(
@@ -223,7 +235,7 @@ class GatewayRefTests(unittest.TestCase):
 
     def test_provider_omni_id_is_still_antigravity(self):
         # apply.sh finds/registers the provider connection by omniroute_id
-        # (apply.sh ~90-144) - the model_prefix rename must not touch it.
+        # (apply.sh ~90-144) - the model_prefix change must not touch it.
         self.assertEqual(self.reg["providers"]["antigravity"]["omniroute_id"],
                          "antigravity")
 
@@ -2189,6 +2201,43 @@ class DeepSeekBackTests(unittest.TestCase):
         self.assertEqual(registry.check_registry(self.reg), [])
 
 
+class DeepSeekFlashContext1MTests(unittest.TestCase):
+    """DS1M (operator 2026-09-30): the vendor's own Models & Pricing page
+    (https://api-docs.deepseek.com/quick_start/pricing) states MODEL
+    `deepseek-flash`, MODEL VERSION DeepSeek-V4.1-Flash, CONTEXT LENGTH 1M,
+    MAX OUTPUT 384K — and OpenRouter's live catalog agrees
+    (`deepseek/deepseek-v4.1-flash` context_length 1048576). The registry's
+    131072/65536/32768 on the three V4.1-Flash rows is stale: it caps the
+    `deepseek-v4.1-flash` combo at 128k through clamp_route_context even
+    though every servable leg answers a 1M window.
+    """
+
+    V41_ROWS = ("deepseek-flash", "deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def test_v41_flash_rows_advertise_the_vendor_1m_window(self):
+        models = self.reg["models"]
+        for mid in self.V41_ROWS:
+            self.assertEqual(models[mid]["context_advertised"], 1048576, mid)
+
+    def test_v41_flash_rows_carry_the_vendor_384k_output(self):
+        models = self.reg["models"]
+        for mid in self.V41_ROWS:
+            self.assertEqual(models[mid]["output_max"], 393216, mid)
+
+    def test_deepseek_route_declares_and_renders_1m(self):
+        reg = self.reg
+        surface = reg["routes"]["deepseek-v4.1-flash"]["surfaces"]["omniroute"]
+        self.assertEqual(surface["context_declared"], "1M")
+        rendered = {c["name"]: c for c in
+                    registry.render_omniroute(reg)["combos"]}
+        self.assertEqual(rendered["deepseek-v4.1-flash"]["context"], "1M")
+
+
 class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
     """BRIEF DSAMEND (S1-S2, operator 2026-09-28 10:0xZ, measured on
     api.deepseek.com by routing-00): the native DeepSeek catalog is exactly
@@ -2870,7 +2919,8 @@ class CreditSpendGuardTests(unittest.TestCase):
         granted = {pid: entry["credit_usd"] for pid, entry in
                    load_registry()["providers"].items()
                    if isinstance(entry, dict) and entry.get("tier") == "credit"}
-        self.assertEqual(granted, {"morph": 10.0, "deepinfra": 5.0, "together_ai": 5.0})
+        self.assertEqual(granted, {"morph": 10.0, "deepinfra": 5.0, "together_ai": 5.0,
+                                   "vertex_ai": 250.0})
 
     def test_a_credit_tier_is_not_the_free_tier(self):
         # private_safe() and probe_common._skip_reason both branch on tier: a

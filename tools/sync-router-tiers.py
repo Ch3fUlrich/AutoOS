@@ -64,9 +64,11 @@ REGISTRY_FILE = ROOT / "catalog" / "ai-registry.json"
 # Providers LiteLLM has no transport or key for (OAuth/subscription bridges).
 # Their legs never enter a managed mirror block — see litellm_servable_refs().
 # Both spellings of a provider appear here: the registry leg ("antigravity/<m>")
-# and the already-rendered combos.json id, which render_omniroute() translates
-# through the provider's model_prefix ("agy/<m>", AGYID 2026-09-27). Missing
-# either lets a gateway-only leg leak into a managed LiteLLM block.
+# and the already-rendered combos.json id, which render_omniroute() translated
+# through the provider's model_prefix ("agy/<m>", AGYID 2026-09-27; retired by
+# AGYCANON 2026-09-30 - live combos rendered before that may still spell it, and
+# the gateway still aliases both). Missing either lets a gateway-only leg leak
+# into a managed LiteLLM block.
 GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
 
 # Filled from the registry providers by main(); Leg reads them at call time.
@@ -323,8 +325,9 @@ def combos_refs(combos_path, tiers=None, registry=None):
     the META_API_KEY lesson. Docs rule 1 calls this set out ("minus the
     legs LiteLLM cannot address"); the suite test pins the dropped set so
     nothing else ever goes missing silently. The drop runs after the rewrite and
-    names both spellings (`antigravity` and its prefix `agy`), so a gateway-only
-    leg cannot leak in either direction.
+    names both spellings (`antigravity` and its retired prefix `agy` - live
+    combos rendered before AGYCANON may still carry it), so a gateway-only leg
+    cannot leak in either direction.
 
     `tiers=None` (the default) derives the set the same way the registry
     default does: every combo name whose gateway-only-filtered model list is

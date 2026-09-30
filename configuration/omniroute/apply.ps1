@@ -207,6 +207,92 @@ function Get-AutoOSProviderMap {
     [pscustomobject]@{ Map = $map; Data = $data; Skipped = @($skipped) }
 }
 $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
+
+# --- Management REST (local gateway) -----------------------------------------
+# The management API accepts the machine loopback token the local CLI sends
+# (omniroute docs/security/CLI_TOKEN.md): HMAC-SHA256 of the machine id, keyed
+# by that id, over the salt "omniroute-cli-auth-v1", sent as the
+# x-omniroute-cli-token header. apply needs it for the two routes the CLI cannot
+# call with a body in omniroute 3.8.50: POST /api/provider-nodes (`omniroute
+# nodes add` cannot parse its own --base-url) and PATCH
+# /api/model-capability-overrides. Computed once; on any failure the dependent
+# steps say so and fall back to the dashboard instead of guessing.
+function Get-AutoOSManageToken {
+    try {
+        $guid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -ErrorAction Stop).MachineGuid
+        if (-not $guid) { return '' }
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        $hmac.Key = [Text.Encoding]::UTF8.GetBytes([string]$guid)
+        $digest = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes('omniroute-cli-auth-v1'))
+        return (-join ($digest | ForEach-Object { $_.ToString('x2') }))
+    } catch { return '' }
+}
+$ManageToken = Get-AutoOSManageToken
+
+function Invoke-AutoOSGateway {
+    param([string]$Method, [string]$Path, $Body = $null)
+    $script:GatewayError = ''
+    if ([string]::IsNullOrEmpty($ManageToken)) {
+        $script:GatewayError = 'no machine token available'
+        return $null
+    }
+    try {
+        $call = @{ Uri = "$Gateway$Path"; Method = $Method; TimeoutSec = 15
+                   Headers = @{ 'x-omniroute-cli-token' = $ManageToken } }
+        if ($null -ne $Body) {
+            $call.Body = ($Body | ConvertTo-Json -Depth 6 -Compress)
+            $call.ContentType = 'application/json'
+        }
+        return Invoke-RestMethod @call
+    } catch {
+        $script:GatewayError = $_.Exception.Message
+        return $null
+    }
+}
+
+# api_base per provider: the endpoint a provider node would carry. Read straight
+# from the registry - the map above only carries what registration needs.
+$ProviderBase = @{}
+try {
+    $regDoc = Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    foreach ($p in $regDoc.providers.PSObject.Properties) {
+        $e = $p.Value
+        if ($e.PSObject.Properties['omniroute_id'] -and $e.omniroute_id -and
+            $e.PSObject.Properties['api_base'] -and $e.api_base) {
+            $ProviderBase[[string]$e.omniroute_id] = [string]$e.api_base
+        }
+    }
+} catch { $ProviderBase = @{} }
+
+# The CLI's built-in provider ids and aliases, read once. A registry provider
+# whose omniroute_id is not among them (meta_api -> meta-api) needs a gateway
+# provider NODE before its key can bind - the same rule apply.sh carries since
+# MUSEFIX. An unreadable catalog means "everything is built-in": guessing the
+# other way would create nodes on a machine where the CLI simply did not answer.
+$BuiltinIds = $null
+function Test-AutoOSBuiltinProvider {
+    param([string]$Id)
+    if ($null -eq $BuiltinIds) {
+        $script:BuiltinIds = @()
+        if (Get-Command omniroute -ErrorAction SilentlyContinue) {
+            try {
+                $raw = (& omniroute providers available --json 2>$null | Out-String)
+                $start = $raw.IndexOf('{')
+                if ($start -ge 0) {
+                    $doc = $raw.Substring($start) | ConvertFrom-Json
+                    $ids = New-Object System.Collections.ArrayList
+                    foreach ($p in @($doc.providers)) {
+                        if ($p.id) { [void]$ids.Add([string]$p.id) }
+                        if ($p.alias) { [void]$ids.Add([string]$p.alias) }
+                    }
+                    $script:BuiltinIds = @($ids | Select-Object -Unique)
+                }
+            } catch { $script:BuiltinIds = @() }
+        }
+    }
+    if ($BuiltinIds.Count -eq 0) { return $true }
+    return ($BuiltinIds -contains $Id)
+}
 $ProviderMap = $registry.Map
 $ProviderData = $registry.Data
 $ProviderSkipped = $registry.Skipped
@@ -256,12 +342,66 @@ foreach ($keyName in $ProviderMap.Keys) {
         Write-Host "  - $providerId : no key in api-keys.yml, skipped"
         continue
     }
+    # A registry provider whose spelling the CLI has no built-in connection for
+    # (meta_api -> meta-api) registers through a gateway PROVIDER NODE: the node
+    # owns the endpoint and the prefix, the key binds to the node. apply.sh has
+    # carried this rule since MUSEFIX; the node is created over the management
+    # REST route because the CLI cannot call it with a body (`omniroute nodes
+    # add` cannot parse its own --base-url in 3.8.50).
+    $apiBase = if ($ProviderBase.ContainsKey($providerId)) { $ProviderBase[$providerId] } else { '' }
+    $needsNode = ($apiBase -ne '' -and -not (Test-AutoOSBuiltinProvider $providerId))
     if ($DryRun) {
+        if ($needsNode) {
+            Write-Host "  - $providerId : would ensure its provider node (prefix $providerId -> $apiBase) and bind the key to it"
+        }
         Write-Host "  - $providerId : would register (key from $keyName)"
         # The Catalog step below plans from this list too: a dry run has to say
         # it would refresh what it would just have registered.
         $RegisteredNow += $providerId
         continue
+    }
+    $addId = $providerId
+    $nameArgs = @()
+    if ($needsNode) {
+        if (-not $ManageToken) {
+            Write-Host "  ! $providerId is not a built-in provider - it needs a gateway provider node, and no machine token is available; register it in the dashboard"
+            continue
+        }
+        $nodesDoc = Invoke-AutoOSGateway -Method GET -Path '/api/provider-nodes'
+        $node = @($nodesDoc.nodes) | Where-Object { $_.prefix -eq $providerId } | Select-Object -First 1
+        if ($null -eq $node) {
+            $null = Invoke-AutoOSGateway -Method POST -Path '/api/provider-nodes' -Body @{
+                name = $providerId; prefix = $providerId; type = 'openai-compatible'
+                apiType = 'chat'; baseUrl = $apiBase
+            }
+            if ($script:GatewayError) {
+                Write-Host "  ! $providerId provider node could not be created ($($script:GatewayError)) - register it in the dashboard"
+                continue
+            }
+            # Read the node back rather than trusting the POST response: the
+            # prefix is the contract, the response shape is not.
+            $nodesDoc = Invoke-AutoOSGateway -Method GET -Path '/api/provider-nodes'
+            $node = @($nodesDoc.nodes) | Where-Object { $_.prefix -eq $providerId } | Select-Object -First 1
+            if ($null -eq $node) {
+                Write-Host "  ! ${providerId}: the gateway accepted the node but does not list it"
+                continue
+            }
+            Write-Host "  + ${providerId}: provider node created (prefix $providerId -> $apiBase)"
+        }
+        # A node-bound connection's provider field is the node's "<type>-<uuid>"
+        # id, which the hex-id scan above cannot see - ask the gateway itself so
+        # a re-run cannot add a duplicate.
+        $connsDoc = Invoke-AutoOSGateway -Method GET -Path '/api/providers?limit=5000'
+        $bound = @($connsDoc.connections) | Where-Object {
+            $_.provider -eq $node.id -or ($_.name -eq $providerId -and $_.provider -eq $providerId)
+        } | Select-Object -First 1
+        if ($null -ne $bound) {
+            if ($bound.isActive -eq $false) { Write-Host "  ! ${providerId}: its connection is disabled in the dashboard" }
+            else { Write-Host "  = $providerId already registered" }
+            continue
+        }
+        $addId = $node.id
+        $nameArgs = @('--name', $providerId)
     }
     $varName = 'AUTOOS_KEY_' + $keyName.ToUpperInvariant()
     # Save a pre-existing variable of the same name: apply must not clobber
@@ -269,11 +409,12 @@ foreach ($keyName in $ProviderMap.Keys) {
     $hadVar = Test-Path "Env:$varName"
     $oldVar = if ($hadVar) { (Get-Item "Env:$varName").Value } else { $null }
     Set-Item -Path "Env:$varName" -Value $Keys[$keyName]
-    $addArgs = @('providers', 'add', $providerId, '--credential-env', $varName)
+    $addArgs = @('providers', 'add', $addId, '--credential-env', $varName)
     $dataJson = Get-AutoOSProviderDataJson $providerId
     if ($null -ne $dataJson) {
         $addArgs += @('--provider-specific-data', $dataJson)
     }
+    $addArgs += $nameArgs
     $addArgs += '--yes'
     & omniroute @addArgs *> $null
     if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId registered"; $RegisteredNow += $providerId }
@@ -482,6 +623,65 @@ if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
             & omniroute combo delete $prune.Name --yes *> $null
             if ($LASTEXITCODE -eq 0) { Write-Host "  - $($prune.Name): $($prune.Kind), deleted" }
             else { Write-Host "  ! $($prune.Name): $($prune.Kind), delete failed - run: omniroute combo delete $($prune.Name) --yes" }
+        }
+    }
+}
+
+# --- Model context overrides ------------------------------------------------
+# The gateway resolves a model's context window from the registry, the
+# models.dev sync and the provider's own discovery; where none of them knows the
+# model it falls back to 128000 - and a client whose own limit is higher gets
+# rejected and compacts (the 2026-09-30 deepseek-v4.1-flash and
+# spark-1.3-contributor failures: live sessions compacted every ~5 minutes).
+# context-overrides.json lists the known-wrong resolutions; each is applied
+# through the documented management route PATCH /api/model-capability-overrides
+# {target, key: "context_length", value}. Idempotent: an override already at the
+# wanted value is reported, not rewritten.
+Write-Host 'Overrides:'
+$overridesFile = Join-Path $Here 'context-overrides.json'
+if (-not (Test-Path $overridesFile)) {
+    Write-Host '  = no context-overrides.json - nothing to do'
+} else {
+    $overrideEntries = @()
+    try {
+        $overrideDoc = Get-Content $overridesFile -Raw -Encoding utf8 | ConvertFrom-Json
+        $overrideEntries = @($overrideDoc.overrides)
+    } catch {
+        Write-Host "  ! $overridesFile is unreadable - nothing applied"
+    }
+    if ($overrideEntries.Count -eq 0 -and (Test-Path $overridesFile)) {
+        Write-Host '  = context-overrides.json lists none'
+    }
+    foreach ($o in $overrideEntries) {
+        if (-not $o.target -or -not $o.context) { continue }
+        if ($DryRun) {
+            Write-Host "  - would ensure $($o.target) context = $($o.context)"
+            continue
+        }
+        if (-not $ManageToken) {
+            Write-Host "  ! $($o.target): no machine token for the management API - set it in the dashboard (Model Overrides)"
+            continue
+        }
+        $current = $null
+        $overridesDoc = Invoke-AutoOSGateway -Method GET -Path '/api/model-capability-overrides'
+        if ($null -eq $overridesDoc -and $script:GatewayError) {
+            Write-Host "  ! $($o.target): the gateway did not answer ($($script:GatewayError))"
+            continue
+        }
+        foreach ($row in @($overridesDoc.overrides)) {
+            if ($row.target -eq $o.target -and $row.key -eq 'context_length') { $current = $row.value }
+        }
+        if ($current -eq $o.context) {
+            Write-Host "  = $($o.target) already $($o.context)"
+            continue
+        }
+        $null = Invoke-AutoOSGateway -Method PATCH -Path '/api/model-capability-overrides' -Body @{
+            target = $o.target; key = 'context_length'; value = [int64]$o.context
+        }
+        if ($script:GatewayError) {
+            Write-Host "  ! $($o.target) override failed ($($script:GatewayError)) - set it in the dashboard"
+        } else {
+            Write-Host "  + $($o.target) context -> $($o.context)"
         }
     }
 }

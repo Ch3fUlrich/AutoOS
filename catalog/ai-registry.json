@@ -267,11 +267,11 @@
       "tool_calls": "unproven"
     },
     "deepseek-flash": {
-      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. DSAMEND (routing-00 measured GET /models at 2026-09-28T10:0xZ): the native catalog is exactly ['deepseek-flash', 'deepseek-v4-pro'], so THIS is the only id ever sent to api.deepseek.com and it now owns the `direct` block (the installers and the vendored OpenHands profile take their wire model from it); the legacy 'deepseek-v4-flash' direct row was an alias, not a catalog model. DSAMEND effort ladder, measured live with max_tokens 16 and 512 on POST /chat/completions (7 + 6 calls, ~200 completion tokens, source 'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): the wire parameter IS `reasoning_effort`, and a 422 names the accepted enum as none, minimal, low, medium, high, xhigh, ultra, max - so all four rungs below are real wire values and the ladder needs no re-mapping. Two measured behaviours matter to whoever sends them: reasoning is ON by default (omitting the parameter costs reasoning tokens - 20 of 22 completion tokens at max_tokens 512), and `reasoning_effort: 'none'` (like `thinking: {'type': 'disabled'}`) is what switches it off, returning no completion_tokens_details at all. So a caller that expresses rung 'none' by SENDING NOTHING gets rung max-equivalent behaviour, not the off switch: render_ide filters 'none' out of the ide ladder and tools/autoos-agent.py apply_effort_rung emits no suffix for it, which is correct for the legs that were measured there but is NOT off for this one. low/high/max answered 200 at 18/25/18 reasoning tokens for a one-word prompt - accepted, indistinguishable at n=1, so no rung is reordered on this evidence.",
-      "context_advertised": 131072,
+      "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. DSAMEND (routing-00 measured GET /models at 2026-09-28T10:0xZ): the native catalog is exactly ['deepseek-flash', 'deepseek-v4-pro'], so THIS is the only id ever sent to api.deepseek.com and it now owns the `direct` block (the installers and the vendored OpenHands profile take their wire model from it); the legacy 'deepseek-v4-flash' direct row was an alias, not a catalog model. DSAMEND effort ladder, measured live with max_tokens 16 and 512 on POST /chat/completions (7 + 6 calls, ~200 completion tokens, source 'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): the wire parameter IS `reasoning_effort`, and a 422 names the accepted enum as none, minimal, low, medium, high, xhigh, ultra, max - so all four rungs below are real wire values and the ladder needs no re-mapping. Two measured behaviours matter to whoever sends them: reasoning is ON by default (omitting the parameter costs reasoning tokens - 20 of 22 completion tokens at max_tokens 512), and `reasoning_effort: 'none'` (like `thinking: {'type': 'disabled'}`) is what switches it off, returning no completion_tokens_details at all. So a caller that expresses rung 'none' by SENDING NOTHING gets rung max-equivalent behaviour, not the off switch: render_ide filters 'none' out of the ide ladder and tools/autoos-agent.py apply_effort_rung emits no suffix for it, which is correct for the legs that were measured there but is NOT off for this one. low/high/max answered 200 at 18/25/18 reasoning tokens for a one-word prompt - accepted, indistinguishable at n=1, so no rung is reordered on this evidence. DS1M (operator 2026-09-30): vendor Models & Pricing (https://api-docs.deepseek.com/quick_start/pricing) states MODEL deepseek-flash = VERSION DeepSeek-V4.1-Flash with CONTEXT LENGTH 1M and MAX OUTPUT 384K (393216); OpenRouter's live catalog agrees (deepseek/deepseek-v4.1-flash context_length 1048576). context_advertised/output_max corrected from the stale 131072/32768; context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
-        "tokens": 65536
+        "tokens": 524288
       },
       "direct": {
         "base_url": "https://api.deepseek.com",
@@ -287,7 +287,7 @@
       ],
       "family": "deepseek",
       "id": "deepseek-flash",
-      "output_max": 32768,
+      "output_max": 393216,
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
@@ -314,11 +314,11 @@
       "tool_calls": "unproven"
     },
     "deepseek-v4.1-flash": {
-      "$comment": "opencode-zen's bare spelling of the same real model as 'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from docs/models.md. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. Model-level tier override (PRIV2 brief, 2026-09-26): the zen provider's own tier is 'free', but this is a direct-key leg billed past the pool on the same key - tests/run-tests.sh's own combos.json policy comment: 'Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool on the same key, so they stay.'",
-      "context_advertised": 131072,
+      "$comment": "opencode-zen's bare spelling of the same real model as 'deepseek/deepseek-v4.1-flash' (openrouter's spelling); the paid zen leg (used in t2-worker-clean/t3-driver-clean). Ladder from docs/models.md. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. Model-level tier override (PRIV2 brief, 2026-09-26): the zen provider's own tier is 'free', but this is a direct-key leg billed past the pool on the same key - tests/run-tests.sh's own combos.json policy comment: 'Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool on the same key, so they stay.' DS1M (operator 2026-09-30): same weights as the native leg (V4.1-Flash, 1M/384K per the vendor page on models.deepseek-flash) - context_advertised/output_max corrected from the stale 131072/32768; context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
-        "tokens": 65536
+        "tokens": 524288
       },
       "effort_ladder": [
         "none",
@@ -328,7 +328,7 @@
       ],
       "family": "deepseek",
       "id": "deepseek-v4.1-flash",
-      "output_max": 32768,
+      "output_max": 393216,
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
@@ -337,11 +337,11 @@
       "tool_calls": "unproven"
     },
     "deepseek/deepseek-v4.1-flash": {
-      "$comment": "openrouter's vendor-prefixed spelling. Ladder from docs/models.md ('none, low, high, max only'). price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration.",
-      "context_advertised": 131072,
+      "$comment": "openrouter's vendor-prefixed spelling. Ladder from docs/models.md ('none, low, high, max only'). price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. DS1M (operator 2026-09-30): same weights as the native leg (V4.1-Flash, 1M/384K per the vendor page on models.deepseek-flash) - context_advertised/output_max corrected from the stale 131072/32768; context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
-        "tokens": 65536
+        "tokens": 524288
       },
       "effort_ladder": [
         "none",
@@ -351,7 +351,7 @@
       ],
       "family": "deepseek",
       "id": "deepseek/deepseek-v4.1-flash",
-      "output_max": 32768,
+      "output_max": 393216,
       "price_cache_read": 6e-09,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
@@ -2447,16 +2447,31 @@
       "available": false
     },
     "antigravity": {
-      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome. model_prefix 'agy' with source: the live OmniRoute catalog names this provider's models agy/*, never antigravity/* (measured /v1/models 2026-09-27 11:5xZ; L0 live apply 2026-09-27T11:44:31Z skipped the antigravity/* legs for exactly this reason). Registry legs keep the antigravity/* spelling; gateway_ref() translates only where an OmniRoute id is emitted, and omniroute_id stays 'antigravity' so apply.sh still finds the provider connection.",
+      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome. model_prefix is null (AGYCANON 2026-09-30, re-measured): the live OmniRoute catalog lists canonical antigravity/* ids again (19 rows) and zero agy/*, both spellings route, so gateway_ref() emits this provider's legs unchanged - the AGYID 2026-09-27 rewrite (L0 live apply skipped antigravity/* legs) is retired. omniroute_id stays 'antigravity' so apply.sh still finds the provider connection; the model_prefix mechanism itself remains for providers that genuinely diverge (scaleway -> scw).",
       "api_base": null,
       "id": "antigravity",
       "litellm_env": null,
       "litellm_prefix": null,
-      "model_prefix": "agy",
+      "model_prefix": null,
       "omniroute_id": "antigravity",
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": true
+    },
+    "vertex_ai": {
+      "$comment": "Google Vertex AI (direct Gemini, the operator's GCP project). Key in api-keys.yml as 'vertex_ai'; the gateway connection id is 'vertex' (apply registers it with `providers add vertex` and refreshes it with `omniroute models vertex`). The project grants gemini-3-flash-preview / gemini-3.1-flash-lite / gemini-3.1-pro-preview and gemini-3.8-flash (the last added by the operator 2026-09-30). Direct-only: no combo leg routes through vertex - the opencode direct entries (vertex-flash, vertex-flash-lite, vertex-pro, vertex-3.8-flash) address it as vertex/<model> and live as hand entries outside the generated region of opencode.jsonc. trains_on_prompts false: Google Cloud's Vertex AI terms do not use customer prompts to train models. region us-central1 matches the registered connection.",
+      "api_base": null,
+      "id": "vertex_ai",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "omniroute_id": "vertex",
+      "provider_data": { "region": "us-central1" },
+      "tier": "credit",
+      "credit_usd": 250,
+      "monthly_cap_usd": 250,
+      "monthly_cap_source": "operator-stated grant (handoff, unverified)",
+      "monthly_warn_fraction": 0.8,
+      "trains_on_prompts": false
     },
     "cc": {
       "$comment": [
@@ -2781,7 +2796,7 @@
       ]
     },
     "meta_api": {
-      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1 (Bearer). Contributor tier: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor); context 1,048,576 in / 131,072 out. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Registers as an OpenAI-compatible endpoint (litellm_prefix openai + its own api_base) exactly like free_ai, so LiteLLM never falls back to api.openai.com. KEY NAME: providers.<id> is normally the api-keys.yml name (that is what tools/mirror-litellm-env.py and apply.sh look up); Meta's key already lives under the name 'meta' (providers.meta, the direct opencode-only record), so this entry carries key_name 'meta' and the two share one vendor key rather than asking the operator for a second one. omniroute_id 'meta-api' is the gateway connection id apply registers; model_prefix 'meta-api' - the same string, as free_ai's 'free-ai' does - makes gateway_ref() emit meta-api/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor. It is NOT 'meta': that is another provider's key (the opencode-only direct record), and a combos leg prefixed with a provider name resolves its LiteLLM transport through that name, so borrowing it made tools/sync-router-tiers.py --combos render the leg with no api_base. Unlike free-ai, 'meta-api' is NOT a built-in OmniRoute connection: the first apply against a live gateway creates it, so verify the registration there before trusting a meta_api leg.",
+      "$comment": "Meta Model API direct (not via OpenRouter), OpenAI-compatible at https://api.meta.ai/v1 (Bearer). Contributor tier: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits), 100 RPM, 3M TPM, trains on prompts. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor); context 1,048,576 in / 131,072 out. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Registers as an OpenAI-compatible endpoint (litellm_prefix openai + its own api_base) exactly like free_ai, so LiteLLM never falls back to api.openai.com. KEY NAME: providers.<id> is normally the api-keys.yml name (that is what tools/mirror-litellm-env.py and apply.sh look up); Meta's key already lives under the name 'meta' (providers.meta, the direct opencode-only record), so this entry carries key_name 'meta' and the two share one vendor key rather than asking the operator for a second one. omniroute_id 'meta-api' is the gateway connection id apply registers; model_prefix 'meta-api' - the same string, as free_ai's 'free-ai' does - makes gateway_ref() emit meta-api/muse-spark-1.3-contributor in combos while the registry leg stays meta_api/muse-spark-1.3-contributor. It is NOT 'meta': that is another provider's key (the opencode-only direct record), and a combos leg prefixed with a provider name resolves its LiteLLM transport through that name, so borrowing it made tools/sync-router-tiers.py --combos render the leg with no api_base. 'meta-api' is NOT a registerable OmniRoute provider TYPE (providers add meta-api -> Invalid provider, re-measured 2026-09-30): it is wired as a COMPATIBLE NODE - a provider_nodes row (type openai-compatible, prefix 'meta-api', baseUrl https://api.meta.ai/v1, apiType chat) plus an openai-compatible-chat connection bound to that node (credential from key_name meta). WIRED LIVE 2026-09-30 (node openai-compatible-chat-d9427825-8596-4d01-8fe0-1d4b24bb9f54, connection 'meta-api'): the leg serves (spark-1.3-contributor and t1-orchestrator-paid both answer). The node must exist BEFORE apply's registration step (dashboard 'Add OpenAI Compatible' or POST /api/provider-nodes); the /v1/models catalog does not publish compatible-node models until they are added in the dashboard model drawer, so apply's catalog validation still skips this leg - the live combo persists and serves.",
       "api_base": "https://api.meta.ai/v1",
       "id": "meta_api",
       "key_name": "meta",
@@ -3146,7 +3161,7 @@
     "deepseek-v4.1-flash": {
       "class": "cheap",
       "id": "deepseek-v4.1-flash",
-      "$comment": "Pinned per-model group (mapping doc Open choice 11), so every leg stays a DeepSeek V4 Flash weight - and a pinned group is allowed to have one live leg, because its job is weights-fidelity, not fallback: cross-provider redundancy for a DeepSeek card lives in the tier routes, all of which carry the Gemini free leg plus the FREEKEYS-1 grants. FREEKEYS-2 drafted the free bazaarlink copy as a second leg and FREEKEYS-2b took it back out: deepseek-v4-flash-0731 is V4, not V4.1, and the operator rule is 'DeepSeek only V4.1 Flash' (policy.leg_rules deny-deepseek), so this group renders the native head alone. The opencode-zen leg stays gated (client-bound, 402/429 probe).",
+      "$comment": "Pinned per-model group (mapping doc Open choice 11), so every leg stays a DeepSeek V4 Flash weight - and a pinned group is allowed to have one live leg, because its job is weights-fidelity, not fallback: cross-provider redundancy for a DeepSeek card lives in the tier routes, all of which carry the Gemini free leg plus the FREEKEYS-1 grants. FREEKEYS-2 drafted the free bazaarlink copy as a second leg and FREEKEYS-2b took it back out: deepseek-v4-flash-0731 is V4, not V4.1, and the operator rule is 'DeepSeek only V4.1 Flash' (policy.leg_rules deny-deepseek), so this group renders the native head alone. The opencode-zen leg stays gated (client-bound, 402/429 probe). DS1M (operator 2026-09-30): context_declared back to 1M - every servable leg is V4.1-Flash weights at the vendor's 1M window (see models.deepseek-flash $comment), so clamp_route_context keeps the 1M promise instead of narrowing it to 128k.",
       "legs": [
         "deepseek/deepseek-flash",
         "opencode-zen/deepseek-v4.1-flash"
@@ -3159,15 +3174,15 @@
             "zed",
             "openhands"
           ],
-          "context": 131072,
-          "context_declared": "128k",
+          "context": 1048576,
+          "context_declared": "1M",
           "display_name": "deepseek-v4.1-flash — paid cheapest-first",
           "openhands_profile": {
-            "max_input_tokens": 131072,
-            "max_output_tokens": 32768,
+            "max_input_tokens": 1048576,
+            "max_output_tokens": 393216,
             "reasoning": true
           },
-          "output": 32768
+          "output": 393216
         }
       },
       "unavailable_legs": {
