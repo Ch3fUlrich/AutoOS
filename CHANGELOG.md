@@ -4,6 +4,32 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Fixed — `autoos-agent.py` resolves its gateway instead of assuming loopback (GWLOOP, 2026-09-30)
+
+`tools/autoos-agent.py` hard-coded `GATEWAY = "http://127.0.0.1:20128"`. That address is right
+on a host and refused inside the stack's containers, where the gateway is a sibling container
+the compose network reaches as `omniroute` (`configuration/docker/ai-stack/compose.yml` spells
+the in-network address `http://omniroute:20128`): from a container every gateway-backed run
+refused in the `gateway_up()` pre-check with "start it" advice for an address that could never
+answer there.
+
+- **`GATEWAY` is resolved, not hard-coded**: `gateway_candidates()` orders an explicit
+  `AUTOOS_OMNIROUTE_URL` (the override `tools/autoos_usage.py` already reads) first, then the
+  docker DNS name `http://omniroute:20128`, then `http://127.0.0.1:20128` as the fallback;
+  `resolve_gateway()` takes the first. Selection stays string-only, so importing the tool still
+  contacts nothing (the new test asserts `urlopen` is never called during import).
+- **An override is the only candidate**: a deliberately dead `AUTOOS_OMNIROUTE_URL` (the shell
+  suite sets one on purpose) fails closed exactly as before, instead of being rescued by a live
+  gateway behind another name.
+- **`gateway_up()` is the pre-check**: it walks those candidates in order and rebinds `GATEWAY`
+  to the first that answers, so the import-time guess becomes the address the rest of the
+  process talks to - the host case too, where `omniroute` does not resolve outside the compose
+  network and loopback remains the gateway.
+- **Tests**: `tests/test_gateway_selection.py` (16 cases: candidates, the const, an I/O-free
+  import, a fresh interpreter with and without the override, the health GET, and every pre-check
+  path, all probes injected), wired into `tests/linux/33-documentation.sh`;
+  `docs/web-services.md` now states the resolution order in the publish-address section.
+
 - WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
 
 ### Fixed — the round-1 unclosed-fence rescan forged verdicts; VERDICTFENCE-R2 replaces it (2026-09-29)

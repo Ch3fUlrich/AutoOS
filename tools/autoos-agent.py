@@ -222,7 +222,47 @@ from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
-GATEWAY = "http://127.0.0.1:20128"
+# gwloopback (2026-09-30): the gateway address is resolved, not hard-coded.
+# `http://127.0.0.1:20128` is right on a host and refused inside the stack's
+# containers, where the gateway is a sibling container the compose network
+# reaches as `omniroute` (configuration/docker/ai-stack/compose.yml spells the
+# in-network address "http://omniroute:20128"). An override wins outright, the
+# docker DNS name is the container answer, loopback the host fallback.
+# Resolution is string-only and takes no I/O: importing this module must not
+# contact a gateway (the suite asserts it, and a health GET per import would
+# make every import depend on the host's stack). So the const is a guess, and
+# gateway_up() further down is the pre-check that confirms it and rebinds
+# GATEWAY to the candidate that actually answers.
+GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
+GATEWAY_DOCKER = "http://omniroute:20128"
+GATEWAY_FALLBACK = "http://127.0.0.1:20128"
+
+
+def gateway_candidates(env=None) -> list:
+    """The gateway base URLs to try, in order.
+
+    An `AUTOOS_OMNIROUTE_URL` override is the operator's deliberate answer -
+    the shell suite sets one to a dead endpoint on purpose - so it is the ONLY
+    candidate: a dead override must fail closed (cmd_run still refuses, rc 3)
+    instead of being rescued by a live gateway behind another name.
+    """
+    env = os.environ if env is None else env
+    override = (env.get(GATEWAY_ENV_VAR) or "").strip().rstrip("/")
+    if override:
+        return [override]
+    return [GATEWAY_DOCKER, GATEWAY_FALLBACK]
+
+
+def resolve_gateway(env=None) -> str:
+    """The address to start from: the override, else the docker DNS name.
+
+    Pure selection - which candidate answers is gateway_up()'s job; loopback
+    is the last candidate that pre-check falls through to.
+    """
+    return gateway_candidates(env)[0]
+
+
+GATEWAY = resolve_gateway()
 DEFAULT_FREE_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # run_client re-emits a child's output as it arrives and keeps this much of it
 # so cmd_run can spot a headless refusal that still exited 0 (bug 2).
@@ -2050,12 +2090,34 @@ def client_key(root: str) -> str | None:
     return None
 
 
-def gateway_up() -> bool:
+def gateway_answers(url: str, timeout: int = 3) -> bool:
+    """True when `url` answers GET /api/health with 200; never raises."""
     try:
-        with urllib.request.urlopen(GATEWAY + "/api/health", timeout=3) as r:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/health", timeout=timeout) as r:
             return r.status == 200
     except Exception:
         return False
+
+
+def gateway_up(url: str | None = None, timeout: int = 3) -> bool:
+    """The gateway pre-check: is a gateway there, and at which address?
+
+    With an explicit `url` it probes just that address. Otherwise it walks
+    gateway_candidates() in order - override alone, docker DNS, loopback - and
+    rebinds GATEWAY to the first candidate that answers, so the import-time
+    guess above becomes the address the rest of this process talks to (the
+    host case: `omniroute` does not resolve outside the compose network, and
+    the run must still find the gateway on loopback). False when nothing
+    answers; GATEWAY is then left as it was for the caller to report.
+    """
+    global GATEWAY
+    if url is not None:
+        return gateway_answers(url, timeout)
+    for candidate in gateway_candidates():
+        if gateway_answers(candidate, timeout):
+            GATEWAY = candidate
+            return True
+    return False
 
 
 def slugify(text: str, cap: int = 40) -> str:
