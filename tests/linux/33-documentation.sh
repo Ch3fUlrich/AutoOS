@@ -599,6 +599,14 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# gwloopback (2026-09-30): how tools/autoos-agent.py picks the gateway - the
+# AUTOOS_OMNIROUTE_URL override (tried alone, never rescued), the docker DNS
+# name with loopback as fallback, the I/O-free import, and gateway_up() as the
+# pre-check that rebinds GATEWAY. Probes are injected; no gateway is contacted.
+if it "gateway selection: override, docker DNS, loopback fallback, gateway_up pre-check (unit tests)"; then
+    out="$(python3 tests/test_gateway_selection.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # RESTART spec §0/§2 (lane R1): the shared inbox reader (tools/autoos_inbox.py),
 # the `inbox` verb and the explicit verb->handler dispatch table. Fixtures are
 # temp files; nothing is spawned and no inbox outside the sandbox is read.
