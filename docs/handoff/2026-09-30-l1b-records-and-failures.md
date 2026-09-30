@@ -295,3 +295,32 @@ catalogue, registry, combo or skill file.**
    comparison was run.
 6. **No file outside this branch was read/written except by read-only `git show`/`status`.**
    Nothing was merged, pushed, staged in the main checkout, or edited in another lane's tree.
+
+---
+
+## Fixes that must not be lost (carry into the combined pass)
+
+Both items verified from this lane's branch (`L1-backlog/ws-records-20260930`, HEAD `d276f07`) with
+`git log --oneline -1 <sha>`, `git branch --contains <sha>` and `git show <sha>:<file>`. All shas
+below resolve.
+
+### C1 — `gemini-3.8-flash` `context_advertised` 131072 → 1048576 exists only on two branches
+
+- The delta is the `158818e` hunk (`git show 158818e -- catalog/ai-registry.json`):
+  `- "context_advertised": 131072,` → `+ "context_advertised": 1048576,`.
+- Present **only** on `L1-backlog/ws-ovh-finish-20260930` (commit `158818e`, tip `a975d48`) and on
+  `L1-backlog/ws-nebius-20260930` (tip `a975d48`): `git branch --contains 158818e` lists exactly
+  those two, and `git log --oneline -1 <branch>` = `a975d48` for both.
+- **Not** on `L1-backlog/ws-ovh-20260930` (`89a9024`) nor on the base `d08f7f2` — both print
+  `"context_advertised": 131072,` at `catalog/ai-registry.json:403`.
+- Anchor: `catalog/ai-registry.json:403`.
+- **Combined pass:** carry this fix, or explicitly declare it **moot** if the gemini legs are
+  removed — a decision, never silence.
+
+### C2 — the nebius removal stays unmerged until replacement legs are proven
+
+- The removal is `172a92b` ("fix(registry): remove nebius provider and every nebius leg"), head of
+  `L1-backlog/ws-nebius2-20260930` (`git branch --contains 172a92b` lists only that branch).
+- It **stays unmerged** until the free-provider wiring pass supplies proven replacement legs.
+- Then removal + render re-sync must land as **ONE wave**, keeping invariant
+  `test_every_agentic_route_has_three_usable_legs` **green**.
